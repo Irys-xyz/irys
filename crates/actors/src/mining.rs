@@ -648,14 +648,19 @@ mod tests {
             .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
 
         let hash: H256 = H256::random();
-        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        tx.send(VdfServiceMessage::VdfSeed(Seed(hash))); //5
-                                                         // reset
-        tx.send(VdfServiceMessage::VdfSeed(Seed(hash))); //6
-        tx.send(VdfServiceMessage::VdfSeed(Seed(hash))); //7
+        for _ in 0..5 {
+            // seeds 1 to 5
+            if let Err(e) = tx.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
+                panic!("error: {:?}", e);
+            };
+        }
+        // reset occurs at step 5
+        for _ in 0..2 {
+            // seeds 6 and 7
+            if let Err(e) = tx.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
+                panic!("error: {:?}", e);
+            };
+        }
 
         sleep(Duration::from_secs(1)).await;
 
