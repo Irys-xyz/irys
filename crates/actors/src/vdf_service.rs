@@ -496,7 +496,6 @@ pub fn vdf_steps_are_valid(
     Ok(())
 }
 
-#[cfg(test)]
 pub mod test_helpers {
     use super::*;
     use crate::{

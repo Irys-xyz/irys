@@ -142,7 +142,9 @@ pub fn calc_capacity(config: &Config) -> usize {
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::{services::ServiceSenders, vdf_service::vdf_steps_are_valid};
+    use irys_actors::{
+        vdf_service::test_helpers::mocked_vdf_service, vdf_service::vdf_steps_are_valid,
+    };
     use irys_types::*;
     use irys_vdf::vdf_sha_verification;
     use nodit::interval::ii;
@@ -212,22 +214,19 @@ mod tests {
 
         init_tracing();
 
-        // start service senders/receivers
-        let (service_senders, _) = ServiceSenders::new();
-
         let broadcast_mining_service = BroadcastMiningService::from_registry();
         let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let (_, mining_state_rx) = mpsc::channel::<bool>(1);
 
-        //TODO this should be spawning the vdf service?
+        let tx = mocked_vdf_service(&config).await;
+
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let vdf_service_sender = service_senders.vdf.clone();
-        let _ = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
+        let _ = tx.send(VdfServiceMessage::GetVdfStateMessage {
             response: oneshot_tx,
         });
         let vdf_steps = oneshot_rx
             .await
-            .expect("to receive VdfStepsReadGuard response from GetVdfStateMessage");
+            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -245,7 +244,7 @@ mod tests {
                     mining_state_rx,
                     shutdown_rx,
                     broadcast_mining_service,
-                    vdf_service_sender,
+                    tx,
                     atomic_global_step_number,
                 )
             }
