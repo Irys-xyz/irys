@@ -1,13 +1,18 @@
 use base58::ToBase58;
 use eyre::Result;
 use irys_types::{
-    CombinedBlockHeader, IrysTransactionHeader, IrysTransactionResponse, PeerResponse,
-    VersionRequest, H256,
+    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionHeader,
+    IrysTransactionResponse, PeerResponse, VersionRequest, H256,
 };
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 use tracing::error;
+
+enum Method {
+    GET,
+    POST,
+}
 
 /// Trait defining the interface for the API client
 #[async_trait::async_trait]
@@ -44,6 +49,12 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
         peer: SocketAddr,
         block_hash: H256,
     ) -> Result<Option<CombinedBlockHeader>>;
+
+    async fn get_block_index(
+        &self,
+        peer: SocketAddr,
+        block_index_query: BlockIndexQuery,
+    ) -> Result<Vec<BlockIndexItem>>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
@@ -62,16 +73,15 @@ impl IrysApiClient {
     async fn make_request<T: DeserializeOwned, B: Serialize>(
         &self,
         peer: SocketAddr,
-        method: &str,
+        method: Method,
         path: &str,
         body: Option<&B>,
     ) -> Result<Option<T>> {
         let url = format!("http://{}/v1{}", peer, path);
 
         let mut request = match method {
-            "GET" => self.client.get(&url),
-            "POST" => self.client.post(&url),
-            _ => return Err(eyre::eyre!("Unsupported HTTP method: {}", method)),
+            Method::GET => self.client.get(&url),
+            Method::POST => self.client.post(&url),
         };
 
         if let Some(body) = body {
@@ -116,7 +126,7 @@ impl ApiClient for IrysApiClient {
         // IMPORTANT: You have to keep the debug format here, since normal to_string of H256
         //  encodes just first 4 and last 4 bytes with a placeholder in the middle
         let path = format!("/tx/{}", tx_id.0.to_base58());
-        self.make_request(peer, "GET", &path, None::<&()>)
+        self.make_request(peer, Method::GET, &path, None::<&()>)
             .await?
             .ok_or_else(|| eyre::eyre!("Expected transaction response to have a body: {}", tx_id))
     }
@@ -128,7 +138,7 @@ impl ApiClient for IrysApiClient {
     ) -> Result<()> {
         let path = "/tx";
         let response = self
-            .make_request::<(), _>(peer, "POST", path, Some(&transaction))
+            .make_request::<(), _>(peer, Method::POST, path, Some(&transaction))
             .await;
 
         match response {
@@ -162,7 +172,7 @@ impl ApiClient for IrysApiClient {
     ) -> Result<PeerResponse> {
         let path = "/version";
         let response = self
-            .make_request::<PeerResponse, _>(peer, "POST", path, Some(&version))
+            .make_request::<PeerResponse, _>(peer, Method::POST, path, Some(&version))
             .await;
         match response {
             Ok(Some(peer_response)) => Ok(peer_response),
@@ -181,13 +191,38 @@ impl ApiClient for IrysApiClient {
     ) -> Result<Option<CombinedBlockHeader>> {
         let path = format!("/block/{}", block_hash.0.to_base58());
         let response = self
-            .make_request::<CombinedBlockHeader, _>(peer, "GET", &path, None::<&()>)
+            .make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
             .await;
         match response {
             Ok(Some(block)) => Ok(Some(block)),
             Ok(None) => Ok(None),
             Err(e) => {
                 error!("Failed to get block: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    async fn get_block_index(
+        &self,
+        peer: SocketAddr,
+        block_index_query: BlockIndexQuery,
+    ) -> Result<Vec<BlockIndexItem>> {
+        let path = "/block_index";
+
+        let response = self
+            .make_request::<Vec<BlockIndexItem>, _>(
+                peer,
+                Method::GET,
+                &path,
+                Some(&block_index_query),
+            )
+            .await;
+        match response {
+            Ok(Some(block_index)) => Ok(block_index),
+            Ok(None) => Ok(vec![]),
+            Err(e) => {
+                error!("Failed to get block index: {}", e);
                 Err(e)
             }
         }
@@ -248,6 +283,14 @@ pub mod test_utils {
             _block_hash: H256,
         ) -> eyre::Result<Option<CombinedBlockHeader>> {
             Ok(None)
+        }
+
+        async fn get_block_index(
+            &self,
+            _peer: SocketAddr,
+            _block_index_query: BlockIndexQuery,
+        ) -> eyre::Result<Vec<BlockIndexItem>> {
+            Ok(vec![])
         }
     }
 }
@@ -314,6 +357,14 @@ mod tests {
             _block_hash: H256,
         ) -> Result<Option<CombinedBlockHeader>> {
             Ok(None)
+        }
+
+        async fn get_block_index(
+            &self,
+            _peer: SocketAddr,
+            _block_index_query: BlockIndexQuery,
+        ) -> Result<Vec<BlockIndexItem>> {
+            Ok(vec![])
         }
     }
 

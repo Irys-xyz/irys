@@ -1,5 +1,6 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::cache::GossipCacheKey;
+use crate::peer_list_service::PeerListFacade;
 use crate::types::{GossipDataRequest, InternalGossipError, InvalidDataError};
 use crate::{GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
@@ -7,7 +8,6 @@ use base58::ToBase58;
 use core::net::SocketAddr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade};
-use irys_actors::peer_list_service::PeerListFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
     GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
@@ -122,6 +122,28 @@ where
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
         let tx_id = tx.id;
+
+        let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
+        self.cache
+            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
+
+        if already_seen {
+            debug!(
+                "Node {}: Transaction {} is already recorded in the cache, skipping",
+                self.gossip_client.mining_address,
+                tx_id.0.to_base58()
+            );
+            return Ok(());
+        }
+
+        if self.mempool.is_known_tx(tx_id).await? {
+            debug!(
+                "Node {}: Transaction has already been handled, skipping",
+                self.gossip_client.mining_address
+            );
+            return Ok(());
+        }
+
         match self
             .mempool
             .handle_data_transaction(tx)
@@ -130,8 +152,7 @@ where
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Transaction sent to mempool");
-                self.cache
-                    .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))
+                Ok(())
             }
             Err(error) => {
                 error!("Error when sending transaction to mempool: {:?}", error);

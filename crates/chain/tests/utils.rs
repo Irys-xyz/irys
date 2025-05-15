@@ -14,7 +14,7 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
+    block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -35,7 +35,7 @@ use actix_web::{
     test,
 };
 use awc::{body::MessageBody, http::StatusCode};
-use irys_database::{tables::IrysBlockHeaders, DataLedger};
+use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
     UnpackedChunk,

@@ -2,6 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::peer_list_service::{PeerListFacade, ScoreDecreaseReason};
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
@@ -15,7 +16,6 @@ use actix_web::{
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_service::MempoolFacade;
-use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{
     Address, GossipRequest, IrysBlockHeader, IrysTransactionHeader, PeerListItem, RethPeerInfo,

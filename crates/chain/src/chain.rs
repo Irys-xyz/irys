@@ -20,7 +20,6 @@ use irys_actors::{
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingConfig, PackingRequest},
-    peer_list_service::PeerListService,
     reth_service::{
         BlockHashType, ForkChoiceUpdateMessage, GetPeeringInfoMessage, RethServiceActor,
     },
@@ -34,7 +33,7 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
-use irys_config::StorageSubmodulesConfig;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
@@ -96,6 +95,8 @@ pub struct IrysNodeCtx {
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
     stop_guard: StopGuard,
+    pub peer_list: PeerListServiceFacade,
+    pub sync_state: SyncState,
 }
 
 impl IrysNodeCtx {
@@ -104,13 +105,14 @@ impl IrysNodeCtx {
             mempool: self.actor_addresses.mempool.clone(),
             chunk_provider: self.chunk_provider.clone(),
             ema_service,
-            peer_list: self.actor_addresses.peer_list.clone(),
+            peer_list: self.peer_list.clone(),
             db: self.db.clone(),
             config: self.config.clone(),
             reth_provider: self.reth_handle.clone(),
             reth_http_url: self.reth_handle.rpc_server_handle().http_url().unwrap(),
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
+            sync_state: self.sync_state.clone(),
         }
     }
 
@@ -137,7 +139,9 @@ impl IrysNodeCtx {
 
 use irys_actors::block_discovery::BlockDiscoveryFacadeImpl;
 use irys_actors::mempool_service::MempoolServiceFacadeImpl;
-use irys_actors::peer_list_service::PeerListServiceFacade;
+use irys_gossip_service::peer_list_service::PeerListService;
+use irys_gossip_service::peer_list_service::PeerListServiceFacade;
+use irys_gossip_service::service::SyncState;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Shared stop guard that can be cloned
@@ -563,7 +567,7 @@ impl IrysNode {
                 ctx.config.node_config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
-                ctx.actor_addresses.peer_list.clone(),
+                ctx.peer_list.clone(),
                 ctx.vdf_sender.clone(),
             )
             .await?;
@@ -811,6 +815,7 @@ impl IrysNode {
 
         let (gossip_service, gossip_tx) =
             irys_gossip_service::GossipService::new(config.node_config.miner_address());
+        let sync_state = gossip_service.sync_state.clone();
 
         // start the block tree service
         let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
@@ -854,7 +859,7 @@ impl IrysNode {
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
             &config,
-            block_index,
+            block_index.clone(),
             &irys_db,
             &service_senders,
             &storage_modules_guard,
@@ -901,6 +906,11 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
+        let latest_known_block_height = block_index
+            .read()
+            .expect("to have an access to the block index")
+            .latest_height() as usize;
+
         let gossip_service_handle = gossip_service.run(
             mempool_facade,
             block_discovery_facade,
@@ -910,6 +920,8 @@ impl IrysNode {
             irys_db.clone(),
             vdf_sender.clone(),
             gossip_listener,
+            true,
+            latest_known_block_height,
         )?;
 
         // set up the price oracle
@@ -982,7 +994,6 @@ impl IrysNode {
                 mempool: mempool_service.clone(),
                 block_index: block_index_service_actor,
                 epoch_service: epoch_service_actor,
-                peer_list: peer_list_service.clone(),
                 reth: reth_service_actor,
                 vdf: vdf_service,
             },
@@ -999,6 +1010,8 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             config: config.clone(),
             stop_guard: StopGuard::new(),
+            peer_list: peer_list_service.clone(),
+            sync_state: sync_state.clone(),
         };
 
         let mut service_arbiters = Vec::new();
@@ -1052,6 +1065,7 @@ impl IrysNode {
                     .rpc_server_handle()
                     .http_url()
                     .expect("Missing reth rpc url!"),
+                sync_state,
             },
             http_listener,
         )

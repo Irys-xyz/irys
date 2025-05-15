@@ -2,17 +2,17 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use actix::{Actor, Context, Handler};
 use base58::ToBase58;
 use core::time::Duration;
-use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GossipClient {
     pub mining_address: Address,
     client: reqwest::Client,
@@ -27,6 +27,10 @@ impl GossipClient {
             client: reqwest::Client::new(),
             timeout,
         }
+    }
+
+    pub fn internal_client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Send data to a peer

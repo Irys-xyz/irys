@@ -8,10 +8,10 @@ use irys_chain::{
     },
     IrysNodeCtx,
 };
-use irys_database::{block_header_by_hash, BlockIndexItem};
+use irys_database::block_header_by_hash;
 use irys_types::{
-    irys::IrysSigner, Address, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig,
-    NodeMode, PeerAddress, RethPeerInfo, H256,
+    irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
+    NodeConfig, NodeMode, PeerAddress, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
@@ -791,6 +791,7 @@ async fn generate_test_transaction_and_add_to_block(
         Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
             panic!("unfunded account error")
         }
+        Err(AddTxError::TxIngress(TxIngressError::Skipped)) => {}
         Err(e) => panic!("unexpected error {:?}", e),
     }
     irys_txs

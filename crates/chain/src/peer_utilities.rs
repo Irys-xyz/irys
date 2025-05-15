@@ -1,12 +1,11 @@
 use actix::Addr;
 use base58::ToBase58;
-use irys_actors::peer_list_service::PeerListServiceFacade;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
 };
-use irys_database::{BlockIndexItem, DataLedger};
+use irys_gossip_service::peer_list_service::PeerListServiceFacade;
 use irys_types::block::CombinedBlockHeader;
 
 use irys_gossip_service::service::fast_forward_vdf_steps_from_block;
@@ -16,7 +15,8 @@ pub use irys_reth_node_bridge::node::{
 
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_types::{
-    CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, PeerAddress, H256,
+    BlockIndexItem, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionResponse,
+    PeerAddress, H256,
 };
 use std::{
     collections::{HashSet, VecDeque},

@@ -7,7 +7,7 @@ use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, insert_commitment_tx,
-    tables::IngressProofs, tx_header_by_txid, DataLedger, SystemLedger,
+    tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -15,9 +15,9 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, Base64, Config, DataTransactionLedger, H256List, IngressProofsList,
-    IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData, Signature,
-    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
+    next_cumulative_diff, Base64, Config, DataLedger, DataTransactionLedger, H256List,
+    IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
+    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;

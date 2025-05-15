@@ -16,13 +16,13 @@ use irys_database::db_cache::DataRootLRUEntry;
 use irys_database::submodule::get_data_size_by_data_root;
 use irys_database::tables::DataRootLRU;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
-use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger, SystemLedger};
+use irys_database::{insert_tx_header, tx_header_by_txid, SystemLedger};
 use irys_primitives::CommitmentType;
 use irys_storage::StorageModulesReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
-    IrysTransactionHeader, H256,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, DataLedger,
+    GossipData, IrysTransactionHeader, H256,
 };
 use irys_types::{
     Address, CommitmentTransaction, Config, DataRoot, IrysBlockHeader, IrysTransactionCommon,

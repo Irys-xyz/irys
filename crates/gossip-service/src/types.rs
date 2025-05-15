@@ -1,8 +1,10 @@
 use crate::block_pool_service::BlockPoolError;
+use crate::peer_list_service::PeerListFacadeError;
+use base58::ToBase58;
 use irys_actors::mempool_service::TxIngressError;
-use irys_actors::peer_list_service::PeerListFacadeError;
 use irys_types::{BlockHash, H256};
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -28,6 +30,9 @@ impl From<PeerListFacadeError> for GossipError {
         match error {
             PeerListFacadeError::InternalError(err) => {
                 Self::Internal(InternalGossipError::Unknown(err))
+            }
+            PeerListFacadeError::ServiceError(err) => {
+                Self::Internal(InternalGossipError::Unknown(format!("{:?}", err)))
             }
         }
     }
@@ -112,8 +117,19 @@ pub enum InternalGossipError {
 
 pub type GossipResult<T> = Result<T, GossipError>;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequest {
     Block(BlockHash),
     Transaction(H256),
+}
+
+impl Debug for GossipDataRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GossipDataRequest::Block(hash) => write!(f, "block {:?}", hash.0.to_base58()),
+            GossipDataRequest::Transaction(hash) => {
+                write!(f, "transaction {:?}", hash.0.to_base58())
+            }
+        }
+    }
 }

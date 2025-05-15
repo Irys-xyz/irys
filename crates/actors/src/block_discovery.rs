@@ -10,13 +10,11 @@ use actix::prelude::*;
 use async_trait::async_trait;
 use base58::ToBase58;
 use eyre::eyre;
-use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
-};
+use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, SystemLedger};
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
-    IrysTransactionHeader,
+    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
+    IrysBlockHeader, IrysTransactionHeader,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;

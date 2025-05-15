@@ -2,13 +2,13 @@ use actix::SystemService;
 use actix::{Actor, Context};
 use base58::ToBase58;
 use eyre::{Error, Result};
-use irys_config::StorageSubmodulesConfig;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, SimpleRNG, H256,
+    DataLedger, IrysBlockHeader, SimpleRNG, H256,
 };
 use irys_types::{
     partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig,

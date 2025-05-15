@@ -1,5 +1,5 @@
+use crate::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use crate::service::fast_forward_vdf_steps_from_block;
-use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
@@ -8,7 +8,6 @@ use actix::{
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
@@ -26,11 +25,7 @@ pub enum BlockPoolError {
 
 impl From<PeerListFacadeError> for BlockPoolError {
     fn from(err: PeerListFacadeError) -> Self {
-        match err {
-            PeerListFacadeError::InternalError(error) => {
-                Self::OtherInternal(format!("Peer list error: {:?}", error))
-            }
-        }
+        Self::OtherInternal(format!("Peer list error: {:?}", err))
     }
 }
 
@@ -373,7 +368,6 @@ where
     ) -> Self::Result {
         let block_hash = msg.block_hash;
         let peer_list_addr = self.peer_list.clone();
-        let gossip_client = self.gossip_client.clone();
 
         let fut = async move {
             // Handle case where peer list address is not set
@@ -381,77 +375,9 @@ where
                 "Peer list address not set".to_string(),
             ))?;
 
-            // Get top 5 active peers
-            let peers = peer_list_addr.top_active_peers(Some(5), None).await?;
-
-            if peers.is_empty() {
-                return Err(BlockPoolError::OtherInternal(
-                    "No active peers available to fetch block".to_string(),
-                ));
-            }
-
-            // Try up to 5 peers to get the block
-            let mut last_error = None;
-
-            for (address, peer_item) in peers {
-                for attempt in 1..=5 {
-                    debug!(
-                        "Attempting to fetch block {} from peer {} (attempt {}/5)",
-                        block_hash.0.to_base58(),
-                        address,
-                        attempt
-                    );
-
-                    match gossip_client
-                        .get_data_request(&peer_item, GossipDataRequest::Block(block_hash))
-                        .await
-                    {
-                        Ok(true) => {
-                            tracing::info!(
-                                "Successfully requested block {} from peer {}",
-                                block_hash.0.to_base58(),
-                                address
-                            );
-
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            // Peer doesn't have this block, try another peer
-                            debug!(
-                                "Peer {} doesn't have block {}",
-                                address,
-                                block_hash.0.to_base58()
-                            );
-                            continue;
-                        }
-                        Err(err) => {
-                            last_error = Some(err);
-                            tracing::warn!(
-                                "Failed to fetch block {} from peer {} (attempt {}/5): {}",
-                                block_hash.0.to_base58(),
-                                address,
-                                attempt,
-                                last_error.as_ref().unwrap()
-                            );
-
-                            // Short delay before retrying
-                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt))
-                                .await;
-
-                            // Continue trying with the same peer if not the last attempt
-                            if attempt < 5 {
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-
-            Err(BlockPoolError::OtherInternal(format!(
-                "Failed to fetch block {} after trying 5 peers: {:?}",
-                block_hash.0.to_base58(),
-                last_error
-            )))
+            Ok(peer_list_addr
+                .request_block_from_the_network(block_hash)
+                .await?)
         };
 
         Box::pin(fut.into_actor(self))
