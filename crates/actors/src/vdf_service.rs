@@ -586,7 +586,6 @@ mod tests {
     use crate::vdf_service::test_helpers::mocked_vdf_service;
     use irys_storage::ii;
     use irys_types::{H256List, NodeConfig, H256};
-    use reth::core::node_config;
 
     use super::*;
 

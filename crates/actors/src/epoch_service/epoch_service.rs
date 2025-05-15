@@ -8,10 +8,10 @@ use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    DataLedger, IrysBlockHeader, SimpleRNG, H256,
+    IrysBlockHeader, SimpleRNG, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig,
+    partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig, DataLedger,
     PartitionChunkOffset,
 };
 use irys_types::{Config, H256List};
