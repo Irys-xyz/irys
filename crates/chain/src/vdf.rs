@@ -56,6 +56,25 @@ pub fn run_vdf(
             continue;
         }
 
+        // check for VDF fast forward step
+        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
+            // if the step number is ahead of local nodes vdf steps
+            if global_step_number < proposed_ff_to_mining_seed.global_step {
+                debug!(
+                    "Fastforward Step {:?} with Seed {:?}",
+                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
+                );
+                hash = proposed_ff_to_mining_seed.seed.0;
+                global_step_number = proposed_ff_to_mining_seed.global_step;
+            } else {
+                debug!(
+                    "Fastforward Step {} is not ahead of {}",
+                    proposed_ff_to_mining_seed.global_step, global_step_number
+                );
+            }
+            continue;
+        }
+
         let now = Instant::now();
 
         let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
@@ -96,23 +115,6 @@ pub fn run_vdf(
                 global_step_number, reset_seed
             );
             hash = apply_reset_seed(hash, reset_seed);
-        }
-
-        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
-            // if the step number is ahead of local nodes vdf steps
-            if global_step_number < proposed_ff_to_mining_seed.global_step {
-                debug!(
-                    "Fastforward Step {:?} with Seed {:?}",
-                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
-                );
-                hash = proposed_ff_to_mining_seed.seed.0;
-                global_step_number = proposed_ff_to_mining_seed.global_step;
-            } else {
-                debug!(
-                    "Fastforward Step {} is not ahead of {}",
-                    proposed_ff_to_mining_seed.global_step, global_step_number
-                );
-            }
         }
     }
     debug!(?global_step_number, "VDF thread stopped");
