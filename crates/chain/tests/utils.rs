@@ -5,8 +5,8 @@ use irys_actors::{
     block_tree_service::get_canonical_chain,
     block_validation,
     mempool_service::{TxIngressError, TxIngressMessage},
-    SetTestBlocksRemainingMessage,
     vdf_service::VdfStepsReadGuard,
+    SetTestBlocksRemainingMessage,
 };
 use irys_api_server::create_listener;
 use irys_chain::{IrysNode, IrysNodeCtx};
