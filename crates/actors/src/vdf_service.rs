@@ -572,8 +572,8 @@ pub mod test_helpers {
             rx,
             vdf_mining_state_sender,
             &config,
-        )
-        .await;
+        );
+
         tx
     }
 }
