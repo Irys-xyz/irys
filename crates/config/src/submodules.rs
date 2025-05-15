@@ -21,6 +21,7 @@ use tracing::{debug, info};
 /// During storage initialization - if `is_using_hardcoded_paths` is false -
 /// symlinks will be created within the `storage_modules` directory,
 /// linking the folder to each path in the config sequentially.
+/// Otherwise, the paths in the config will be used as-is.
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StorageSubmodulesConfig {
