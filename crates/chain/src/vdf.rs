@@ -39,7 +39,7 @@ pub fn run_vdf(
 
     loop {
         if shutdown_listener.try_recv().is_ok() {
-            // Shutdown signal received
+            tracing::info!("VDF loop shutdown signal received");
             break;
         };
 
@@ -255,7 +255,11 @@ mod tests {
 
         let step_num = vdf_steps.read().global_step;
 
-        assert!(step_num > 4, "Should have more than 4 seeds");
+        assert!(
+            step_num > 4,
+            "Should have more than 4 seeds, only have {}",
+            step_num
+        );
 
         // get last 4 steps
         let steps = vdf_steps

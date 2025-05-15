@@ -260,7 +260,9 @@ impl Inner {
             }
             VdfServiceMessage::GetVdfStateMessage { response } => {
                 let guard = VdfStepsReadGuard::new(self.vdf_state.clone());
-                let _ = response.send(guard);
+                if let Err(e) = response.send(guard) {
+                    tracing::error!("response.send(guard) error: {:?}", e);
+                };
             }
             VdfServiceMessage::StopMiningMessage => {
                 let sender = self
