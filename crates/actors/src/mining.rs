@@ -369,11 +369,10 @@ mod tests {
     use super::*;
     use crate::{
         block_producer::{BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage},
-        block_tree_service::{BlockState, BlockTreeCache, BlockTreeReadGuard, ChainState},
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
         packing::PackingActor,
-        vdf_service::{VdfService, VdfServiceMessage, VdfState, VdfStepsReadGuard},
+        vdf_service::{test_helpers::mocked_vdf_service, VdfServiceMessage},
     };
     use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
@@ -389,16 +388,11 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
         NodeConfig,
     };
-    use reth::tasks::{TaskExecutor, TaskManager};
     use std::any::Any;
-    use std::collections::VecDeque;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
-    use tokio::{
-        sync::mpsc::{unbounded_channel, UnboundedSender},
-        time::sleep,
-    };
+    use tokio::time::sleep;
 
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
@@ -417,34 +411,6 @@ mod tests {
             let inner_result = None::<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>;
             Box::new(Some(inner_result)) as Box<dyn Any>
         }))
-    }
-
-    //FIXME: this is duplicated from ema service and should be somewhere central that does not duplicate code!
-    pub(crate) fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
-        let mut block_hash = H256::random();
-        let mut iter = blocks.iter_mut();
-        let genesis_block = &mut (iter.next().unwrap()).0;
-        genesis_block.block_hash = block_hash;
-        genesis_block.cumulative_diff = 0.into();
-
-        let mut block_tree_cache = BlockTreeCache::new(&genesis_block);
-        block_tree_cache.mark_tip(&block_hash).unwrap();
-        for (block, state) in iter {
-            block.previous_block_hash = block_hash;
-            block.cumulative_diff = block.height.into();
-            block_hash = H256::random();
-            block.block_hash = block_hash;
-            block_tree_cache
-                .add_common(
-                    block.block_hash.clone(),
-                    block,
-                    Arc::new(Vec::new()),
-                    state.clone(),
-                )
-                .unwrap();
-        }
-        let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
-        BlockTreeReadGuard::new(block_tree_cache)
     }
 
     #[test_log::test(actix_rt::test)]
@@ -545,42 +511,7 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new();
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        //setup mock blocks and tree
-        let height_chain_max = 15;
-        let max_confirmed_height = height_chain_max / 2;
-        let mut blocks = (0..=height_chain_max)
-            .map(|height| {
-                let block = IrysBlockHeader {
-                    height,
-                    ..IrysBlockHeader::new_mock_header()
-                };
-
-                // Determine chain state based on block height
-                let state = if block.height <= max_confirmed_height {
-                    ChainState::Onchain
-                } else {
-                    ChainState::NotOnchain(BlockState::ValidationScheduled)
-                };
-
-                (block, state)
-            })
-            .collect::<Vec<_>>();
-        let block_tree_guard = genesis_tree(&mut blocks);
-        // Spawn VDF service
-        // this is so we can send it new VDF steps as part of this test
-        let task_manager = TaskManager::new(tokio::runtime::Handle::current());
-        let task_executor = task_manager.executor();
-        let (tx, rx) = unbounded_channel();
-        let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-
-        let _handle = VdfService::spawn_service(
-            &task_executor,
-            block_tree_guard.clone(),
-            rx,
-            vdf_mining_state_sender,
-            &config,
-        )
-        .await;
+        let tx = mocked_vdf_service(&config).await;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let _ = tx.send(VdfServiceMessage::GetVdfStateMessage {
@@ -706,42 +637,7 @@ mod tests {
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
-        //setup mock blocks and tree
-        let height_chain_max = 15;
-        let max_confirmed_height = height_chain_max / 2;
-        let mut blocks = (0..=height_chain_max)
-            .map(|height| {
-                let block = IrysBlockHeader {
-                    height,
-                    ..IrysBlockHeader::new_mock_header()
-                };
-
-                // Determine chain state based on block height
-                let state = if block.height <= max_confirmed_height {
-                    ChainState::Onchain
-                } else {
-                    ChainState::NotOnchain(BlockState::ValidationScheduled)
-                };
-
-                (block, state)
-            })
-            .collect::<Vec<_>>();
-        let block_tree_guard = genesis_tree(&mut blocks);
-        // Spawn VDF service
-        // this is so we can send it new VDF steps as part of this test
-        let task_manager = TaskManager::new(tokio::runtime::Handle::current());
-        let task_executor = task_manager.executor();
-        let (tx, rx) = unbounded_channel();
-        let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-
-        let _handle = VdfService::spawn_service(
-            &task_executor,
-            block_tree_guard.clone(),
-            rx,
-            vdf_mining_state_sender,
-            &config,
-        )
-        .await;
+        let tx = mocked_vdf_service(&config).await;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let _ = tx.send(VdfServiceMessage::GetVdfStateMessage {
