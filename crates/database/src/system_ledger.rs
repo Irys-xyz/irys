@@ -1,12 +1,11 @@
-use std::ops::{Index, IndexMut};
-
-use irys_config::StorageSubmodulesConfig;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_primitives::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, Compact, Config, H256List, IrysBlockHeader,
     SystemTransactionLedger, H256,
 };
 use serde::{Deserialize, Serialize};
+use std::ops::{Index, IndexMut};
 
 /// Names for each of the system ledgers as well as their `ledger_id` discriminant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]

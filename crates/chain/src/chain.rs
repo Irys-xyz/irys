@@ -33,7 +33,7 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
-use irys_config::StorageSubmodulesConfig;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };

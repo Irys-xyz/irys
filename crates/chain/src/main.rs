@@ -14,7 +14,7 @@ async fn main() -> eyre::Result<()> {
     color_eyre::install().expect("color eyre could not be installed");
 
     // load the config
-    let config = std::env::var("CONFIG")
+    let config_path = std::env::var("CONFIG")
         .map(|s| s.parse::<PathBuf>().expect("file path to be valid"))
         .unwrap_or_else(|_| {
             std::env::current_dir()
@@ -22,9 +22,9 @@ async fn main() -> eyre::Result<()> {
                 .join("config.toml")
         });
 
-    let mut config = std::fs::read_to_string(&config)
+    let mut config = std::fs::read_to_string(&config_path)
         .map(|config_file| {
-            debug!("Loading config from {:?}", &config);
+            debug!("Loading config from {:?}", &config_path);
             toml::from_str::<NodeConfig>(&config_file).expect("invalid config file")
         })
         .unwrap_or_else(|err| {
