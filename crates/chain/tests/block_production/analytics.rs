@@ -72,7 +72,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     let http_url = format!(
         "http://127.0.0.1:{}",
-        node.node_ctx.config.node_config.http.port
+        node.node_ctx.config.node_config.http.bind_port
     );
 
     // server should be running
@@ -124,7 +124,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .on_http(
                     format!(
                         "http://127.0.0.1:{}/v1/execution-rpc",
-                        node.node_ctx.config.node_config.http.port
+                        node.node_ctx.config.node_config.http.bind_port
                     )
                     .parse()
                     .unwrap(),

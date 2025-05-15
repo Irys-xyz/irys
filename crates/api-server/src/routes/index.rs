@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
-    pub peer_count: u32,
+    pub peer_count: usize,
     pub chain_id: u64,
     pub height: u64,
     pub block_hash: H256,
     pub block_index_height: u64,
     pub blocks: u64,
+    pub is_syncing: bool,
 }
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
@@ -28,12 +29,13 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
 
     let node_info = NodeInfo {
         version: "0.0.1".into(),
-        peer_count: 0,
+        peer_count: state.peer_list.peer_count().await.unwrap_or(0),
         chain_id: state.config.consensus.chain_id,
         height: *height,
         block_hash: *block_hash,
         block_index_height,
         blocks: blocks as u64,
+        is_syncing: state.sync_state.is_syncing(),
     };
 
     HttpResponse::Ok()

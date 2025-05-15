@@ -1,20 +1,18 @@
+use crate::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use crate::service::fast_forward_vdf_steps_from_block;
-use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::{
-    Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised,
-    SystemService, WrapFuture,
+    Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
+    WrapFuture,
 };
 use base58::ToBase58;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
 use irys_types::{Address, BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
 
@@ -27,20 +25,16 @@ pub enum BlockPoolError {
 
 impl From<PeerListFacadeError> for BlockPoolError {
     fn from(err: PeerListFacadeError) -> Self {
-        match err {
-            PeerListFacadeError::InternalError(error) => {
-                Self::OtherInternal(format!("Peer list error: {:?}", error))
-            }
-        }
+        Self::OtherInternal(format!("Peer list error: {:?}", err))
     }
 }
 
 #[derive(Debug)]
 pub struct BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     /// Database provider for accessing transaction headers and related data.
     pub db: Option<DatabaseProvider>,
@@ -49,7 +43,7 @@ where
     pub orphaned_blocks_by_parent: HashMap<BlockHash, IrysBlockHeader>,
     pub block_hash_to_parent_hash: HashMap<BlockHash, BlockHash>,
 
-    pub block_producer_addr: Option<Addr<B>>,
+    pub block_producer: Option<B>,
     pub peer_list: Option<PeerListFacade<A, R>>,
     pub gossip_client: GossipClient,
     pub vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
@@ -57,9 +51,9 @@ where
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     fn default() -> Self {
         Self {
@@ -67,7 +61,7 @@ where
             irys_api_client: A::default(),
             orphaned_blocks_by_parent: HashMap::new(),
             block_hash_to_parent_hash: HashMap::new(),
-            block_producer_addr: None,
+            block_producer: None,
             peer_list: None,
             gossip_client: GossipClient::new(Duration::from_secs(5), Address::default()),
             vdf_sender: None,
@@ -77,9 +71,9 @@ where
 
 impl<A, R, B> Actor for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Context = actix::Context<Self>;
 
@@ -90,31 +84,31 @@ where
 
 impl<A, R, B> Supervised for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
 }
 
 impl<A, R, B> SystemService for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
 }
 
 impl<A, R, B> BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     pub fn new_with_client(
         db: DatabaseProvider,
         irys_api_client: A,
         peer_list: PeerListFacade<A, R>,
-        block_producer_addr: Addr<B>,
+        block_producer_addr: B,
         gossip_client: GossipClient,
         vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
     ) -> Self {
@@ -124,7 +118,7 @@ where
             orphaned_blocks_by_parent: HashMap::new(),
             block_hash_to_parent_hash: HashMap::new(),
             peer_list: Some(peer_list),
-            block_producer_addr: Some(block_producer_addr),
+            block_producer: Some(block_producer_addr),
             gossip_client,
             vdf_sender,
         }
@@ -140,7 +134,7 @@ where
         let current_block_hash = block_header.block_hash;
         let vdf_limiter_info = block_header.vdf_limiter_info.clone();
         let self_addr = ctx.address();
-        let block_producer_addr = self.block_producer_addr.clone();
+        let block_producer = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
 
@@ -180,7 +174,7 @@ where
                         current_block_hash.0.to_base58()
                     );
 
-                    block_producer_addr
+                    block_producer
                         .as_ref()
                         .ok_or_else(|| {
                             let error_message =
@@ -188,14 +182,8 @@ where
                             error!(error_message);
                             BlockPoolError::OtherInternal(error_message)
                         })?
-                        .send(BlockDiscoveredMessage(Arc::new(block_header.clone())))
+                        .handle_block(block_header.clone())
                         .await
-                        .map_err(|mailbox_error| {
-                            let error_message =
-                                format!("Can't send block to block producer: {:?}", mailbox_error);
-                            error!(error_message);
-                            BlockPoolError::OtherInternal(error_message)
-                        })?
                         .map_err(|block_error| {
                             error!("{:?}", block_error);
                             BlockPoolError::BlockError(block_error)
@@ -258,9 +246,9 @@ pub struct ProcessBlock {
 
 impl<A, R, B> Handler<ProcessBlock> for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
@@ -277,9 +265,9 @@ pub struct AddBlockToPoolAndTryToFetchParent {
 
 impl<A, R, B> Handler<AddBlockToPoolAndTryToFetchParent> for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
@@ -345,9 +333,9 @@ struct RemoveBlockFromPool {
 
 impl<A, R, B> Handler<RemoveBlockFromPool> for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Result = ();
 
@@ -367,9 +355,9 @@ struct RequestBlockFromTheNetwork {
 
 impl<A, R, B> Handler<RequestBlockFromTheNetwork> for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
@@ -380,7 +368,6 @@ where
     ) -> Self::Result {
         let block_hash = msg.block_hash;
         let peer_list_addr = self.peer_list.clone();
-        let gossip_client = self.gossip_client.clone();
 
         let fut = async move {
             // Handle case where peer list address is not set
@@ -388,77 +375,9 @@ where
                 "Peer list address not set".to_string(),
             ))?;
 
-            // Get top 5 active peers
-            let peers = peer_list_addr.top_active_peers(Some(5), None).await?;
-
-            if peers.is_empty() {
-                return Err(BlockPoolError::OtherInternal(
-                    "No active peers available to fetch block".to_string(),
-                ));
-            }
-
-            // Try up to 5 peers to get the block
-            let mut last_error = None;
-
-            for (address, peer_item) in peers {
-                for attempt in 1..=5 {
-                    debug!(
-                        "Attempting to fetch block {} from peer {} (attempt {}/5)",
-                        block_hash.0.to_base58(),
-                        address,
-                        attempt
-                    );
-
-                    match gossip_client
-                        .get_data_request(&peer_item, GossipDataRequest::Block(block_hash))
-                        .await
-                    {
-                        Ok(true) => {
-                            tracing::info!(
-                                "Successfully requested block {} from peer {}",
-                                block_hash.0.to_base58(),
-                                address
-                            );
-
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            // Peer doesn't have this block, try another peer
-                            debug!(
-                                "Peer {} doesn't have block {}",
-                                address,
-                                block_hash.0.to_base58()
-                            );
-                            continue;
-                        }
-                        Err(err) => {
-                            last_error = Some(err);
-                            tracing::warn!(
-                                "Failed to fetch block {} from peer {} (attempt {}/5): {}",
-                                block_hash.0.to_base58(),
-                                address,
-                                attempt,
-                                last_error.as_ref().unwrap()
-                            );
-
-                            // Short delay before retrying
-                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt))
-                                .await;
-
-                            // Continue trying with the same peer if not the last attempt
-                            if attempt < 5 {
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-
-            Err(BlockPoolError::OtherInternal(format!(
-                "Failed to fetch block {} after trying 5 peers: {:?}",
-                block_hash.0.to_base58(),
-                last_error
-            )))
+            Ok(peer_list_addr
+                .request_block_from_the_network(block_hash)
+                .await?)
         };
 
         Box::pin(fut.into_actor(self))
@@ -474,9 +393,9 @@ pub struct GetBlockByHash {
 
 impl<A, R, B> Handler<GetBlockByHash> for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Result = Result<Option<IrysBlockHeader>, BlockPoolError>;
 
@@ -508,9 +427,9 @@ pub struct BlockExists {
 
 impl<A, R, B> Handler<BlockExists> for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Result = Result<bool, BlockPoolError>;
 
@@ -541,9 +460,9 @@ struct ProcessOrphanedAncestor {
 
 impl<A, R, B> Handler<ProcessOrphanedAncestor> for BlockPoolService<A, R, B>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    B: BlockDiscoveryFacade,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 

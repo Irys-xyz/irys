@@ -10,11 +10,12 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::ema_service::EmaServiceMessage;
-use irys_actors::peer_list_service::PeerListServiceFacade;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
 };
+use irys_gossip_service::peer_list_service::PeerListServiceFacade;
+use irys_gossip_service::service::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
@@ -41,6 +42,7 @@ pub struct ApiState {
     pub reth_http_url: String,
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
+    pub sync_state: SyncState,
 }
 
 impl ApiState {
@@ -94,7 +96,7 @@ pub fn routes() -> impl HttpServiceFactory {
 }
 
 pub async fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
-    let port = app_state.config.node_config.http.port;
+    let port = app_state.config.node_config.http.bind_port;
     info!(?port, "Starting API server");
 
     HttpServer::new(move || {

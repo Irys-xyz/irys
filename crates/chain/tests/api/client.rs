@@ -4,7 +4,8 @@ use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    AcceptedResponse, IrysTransactionResponse, PeerResponse, ProtocolVersion, VersionRequest,
+    AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, PeerResponse, ProtocolVersion,
+    VersionRequest,
 };
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
@@ -45,6 +46,23 @@ async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: So
     );
     assert_eq!(response_data.peers, expected_version_response.peers);
     assert_eq!(response_data.message, expected_version_response.message);
+}
+
+async fn check_get_block_index_endpoint(
+    api_client: &IrysApiClient,
+    api_address: SocketAddr,
+    _ctx: &IrysNodeTest<IrysNodeCtx>,
+) {
+    api_client
+        .get_block_index(
+            api_address,
+            BlockIndexQuery {
+                height: 0,
+                limit: 100,
+            },
+        )
+        .await
+        .expect("valid get block index response");
 }
 
 async fn check_transaction_endpoints(
@@ -125,13 +143,14 @@ async fn heavy_api_client_all_endpoints_should_work() {
 
     let api_address = SocketAddr::new(
         IpAddr::from_str("127.0.0.1").unwrap(),
-        ctx.node_ctx.config.node_config.http.port,
+        ctx.node_ctx.config.node_config.http.bind_port,
     );
     let api_client = IrysApiClient::new();
 
     check_post_version_endpoint(&api_client, api_address).await;
     check_transaction_endpoints(&api_client, api_address, &ctx).await;
     check_get_block_endpoint(&api_client, api_address, &ctx).await;
+    check_get_block_index_endpoint(&api_client, api_address, &ctx).await;
 
     ctx.node_ctx.stop().await;
 }

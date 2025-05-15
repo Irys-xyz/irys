@@ -11,8 +11,7 @@ use crate::{
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
-use irys_database::BlockIndexItem;
-use irys_types::{Address, IrysTransactionHeader, Signature, H256};
+use irys_types::{Address, BlockIndexItem, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
@@ -22,7 +21,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     let address = format!(
         "http://127.0.0.1:{}",
-        ctx.node_ctx.config.node_config.http.port
+        ctx.node_ctx.config.node_config.http.bind_port
     );
 
     // FIXME: Test to be updated with future endpoint work

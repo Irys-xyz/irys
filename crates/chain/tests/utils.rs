@@ -5,6 +5,7 @@ use irys_actors::{
     block_tree_service::get_canonical_chain,
     block_validation,
     mempool_service::{TxIngressError, TxIngressMessage},
+    SetTestBlocksRemainingMessage,
     vdf_service::VdfStepsReadGuard,
 };
 use irys_api_server::create_listener;
@@ -17,7 +18,7 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
+    block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset};
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -37,7 +38,7 @@ use actix_web::{
     test,
 };
 use awc::{body::MessageBody, http::StatusCode};
-use irys_database::{tables::IrysBlockHeaders, DataLedger};
+use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
     UnpackedChunk,
@@ -285,10 +286,18 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
+        self.node_ctx
+            .actor_addresses
+            .block_producer
+            .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
         self.node_ctx.actor_addresses.set_mining(true)?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
+        self.node_ctx
+            .actor_addresses
+            .block_producer
+            .do_send(SetTestBlocksRemainingMessage(None));
         self.node_ctx.actor_addresses.set_mining(false)
     }
 

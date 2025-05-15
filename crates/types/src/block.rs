@@ -2,8 +2,6 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
-use std::fmt;
-
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
@@ -11,11 +9,14 @@ use crate::{
     Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
     Proof, H256, U256,
 };
+use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::{Index, IndexMut};
 
 pub type BlockHash = H256;
 
@@ -350,6 +351,24 @@ impl DataTransactionLedger {
     }
 }
 
+impl Index<DataLedger> for Vec<DataTransactionLedger> {
+    type Output = DataTransactionLedger;
+
+    fn index(&self, ledger: DataLedger) -> &Self::Output {
+        self.iter()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No transaction ledger found for given ledger type")
+    }
+}
+
+impl IndexMut<DataLedger> for Vec<DataTransactionLedger> {
+    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
+        self.iter_mut()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No transaction ledger found for given ledger type")
+    }
+}
+
 #[derive(
     Default,
     Clone,
@@ -461,6 +480,175 @@ pub struct CombinedBlockHeader {
     #[serde(flatten)]
     pub irys: IrysBlockHeader,
     pub execution: ExecutionHeader,
+}
+
+/// Names for each of the ledgers as well as their `ledger_id` discriminant
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum DataLedger {
+    /// The permanent publish ledger
+    Publish = 0,
+    /// An expiring term ledger used for submitting to the publish ledger
+    Submit = 1,
+    // Add more term ledgers as they exist
+}
+
+impl Default for DataLedger {
+    fn default() -> Self {
+        Self::Publish
+    }
+}
+
+impl DataLedger {
+    /// An array of all the Ledger numbers in order
+    pub const ALL: [Self; 2] = [Self::Publish, Self::Submit];
+
+    /// Make it possible to iterate over all the data ledgers in order
+    pub fn iter() -> impl Iterator<Item = Self> {
+        Self::ALL.iter().copied()
+    }
+    /// get the associated numeric ID
+    pub const fn get_id(&self) -> u32 {
+        *self as u32
+    }
+
+    fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Publish),
+            1 => Some(Self::Submit),
+            _ => None,
+        }
+    }
+}
+
+impl From<DataLedger> for u32 {
+    fn from(ledger: DataLedger) -> Self {
+        ledger as Self
+    }
+}
+
+impl TryFrom<u32> for DataLedger {
+    type Error = eyre::Report;
+
+    fn try_from(value: u32) -> eyre::Result<Self> {
+        Self::from_u32(value).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
+    }
+}
+
+impl TryFrom<&str> for DataLedger {
+    type Error = eyre::Report;
+
+    fn try_from(value: &str) -> eyre::Result<Self> {
+        let x = value.parse()?;
+        Self::from_u32(x).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BlockIndexQuery {
+    pub height: usize,
+    pub limit: usize,
+}
+
+/// Core metadata of the [`BlockIndex`] this struct tracks the ledger size and
+/// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
+/// for a ledger at a particular byte offset in the ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse, Serialize, Deserialize)]
+pub struct BlockIndexItem {
+    /// The hash of the block
+    pub block_hash: H256, // 32 bytes
+    /// The number of ledgers this block tracks
+    pub num_ledgers: u8, // 1 byte
+    /// The metadata about each of the blocks ledgers
+    pub ledgers: Vec<LedgerIndexItem>, // Vec of 40 byte items
+}
+
+/// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
+/// and and the `tx_root` of the ledger in that block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LedgerIndexItem {
+    /// Size in bytes of the ledger
+    pub max_chunk_offset: u64, // 8 bytes
+    /// The merkle root of the TX that apply to this ledger in the current block
+    pub tx_root: H256, // 32 bytes
+}
+
+impl LedgerIndexItem {
+    fn to_bytes(&self) -> [u8; 40] {
+        // Fixed size of 40 bytes
+        let mut bytes = [0u8; 40];
+        bytes[0..8].copy_from_slice(&self.max_chunk_offset.to_le_bytes()); // First 8 bytes
+        bytes[8..40].copy_from_slice(self.tx_root.as_bytes()); // Next 32 bytes
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut item = Self::default();
+
+        // Read ledger size (first 8 bytes)
+        let mut size_bytes = [0u8; 8];
+        size_bytes.copy_from_slice(&bytes[0..8]);
+        item.max_chunk_offset = u64::from_le_bytes(size_bytes);
+
+        // Read tx root (next 32 bytes)
+        item.tx_root = H256::from_slice(&bytes[8..40]);
+
+        item
+    }
+}
+
+impl Index<DataLedger> for Vec<LedgerIndexItem> {
+    type Output = LedgerIndexItem;
+
+    fn index(&self, ledger: DataLedger) -> &Self::Output {
+        &self[ledger as usize]
+    }
+}
+
+impl IndexMut<DataLedger> for Vec<LedgerIndexItem> {
+    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
+        &mut self[ledger as usize]
+    }
+}
+
+impl BlockIndexItem {
+    // Serialize the BlockIndexItem to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(33 + self.ledgers.len() * 40);
+
+        // Write fixed fields
+        bytes.extend_from_slice(self.block_hash.as_bytes()); // 32 bytes
+        bytes.push(self.num_ledgers); // 1 byte
+
+        // Write each ledger item
+        for ledger_index_item in &self.ledgers {
+            bytes.extend_from_slice(&ledger_index_item.to_bytes()); // 40 bytes each
+        }
+
+        bytes
+    }
+
+    // Deserialize bytes to BlockIndexItem
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let mut item = Self::default();
+
+        // Read fixed fields
+        item.block_hash = H256::from_slice(&bytes[0..32]);
+        item.num_ledgers = bytes[32];
+
+        // Read ledger items
+        let num_ledgers = item.num_ledgers as usize;
+        item.ledgers = Vec::with_capacity(num_ledgers);
+
+        for i in 0..num_ledgers {
+            let start = 33 + (i * 40);
+            let ledger_bytes = &bytes[start..start + 40];
+            item.ledgers.push(LedgerIndexItem::from_bytes(ledger_bytes));
+        }
+
+        item
+    }
 }
 
 #[cfg(test)]

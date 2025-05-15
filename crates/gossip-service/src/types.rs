@@ -1,8 +1,10 @@
 use crate::block_pool_service::BlockPoolError;
+use crate::peer_list_service::PeerListFacadeError;
+use base58::ToBase58;
 use irys_actors::mempool_service::TxIngressError;
-use irys_actors::peer_list_service::PeerListFacadeError;
 use irys_types::{BlockHash, H256};
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,6 +21,8 @@ pub enum GossipError {
     InvalidData(InvalidDataError),
     #[error("Block pool error: {0:?}")]
     BlockPool(BlockPoolError),
+    #[error("Transaction has already been handled")]
+    TransactionIsAlreadyHandled,
 }
 
 impl From<PeerListFacadeError> for GossipError {
@@ -26,6 +30,42 @@ impl From<PeerListFacadeError> for GossipError {
         match error {
             PeerListFacadeError::InternalError(err) => {
                 Self::Internal(InternalGossipError::Unknown(err))
+            }
+            PeerListFacadeError::ServiceError(err) => {
+                Self::Internal(InternalGossipError::Unknown(format!("{:?}", err)))
+            }
+        }
+    }
+}
+
+impl From<TxIngressError> for GossipError {
+    fn from(value: TxIngressError) -> Self {
+        match value {
+            // ==== Not really errors
+            TxIngressError::Skipped => {
+                // Not an invalid transaction - just skipped
+                GossipError::TransactionIsAlreadyHandled
+            }
+            // ==== External errors
+            TxIngressError::InvalidSignature => {
+                // Invalid signature, decrease source reputation
+                GossipError::InvalidData(InvalidDataError::TransactionSignature)
+            }
+            TxIngressError::Unfunded => {
+                // Unfunded transaction, decrease source reputation
+                GossipError::InvalidData(InvalidDataError::TransactionUnfunded)
+            }
+            TxIngressError::InvalidAnchor => {
+                // Invalid anchor, decrease source reputation
+                GossipError::InvalidData(InvalidDataError::TransactionAnchor)
+            }
+            // ==== Internal errors - shouldn't be communicated to outside
+            TxIngressError::DatabaseError => GossipError::Internal(InternalGossipError::Database),
+            TxIngressError::ServiceUninitialized => {
+                GossipError::Internal(InternalGossipError::ServiceUninitialized)
+            }
+            TxIngressError::Other(error) => {
+                GossipError::Internal(InternalGossipError::Unknown(error))
             }
         }
     }
@@ -75,32 +115,21 @@ pub enum InternalGossipError {
     AlreadyShutdown(String),
 }
 
-pub(crate) fn tx_ingress_error_to_gossip_error(error: TxIngressError) -> Option<GossipError> {
-    match error {
-        TxIngressError::Skipped => None,
-        TxIngressError::InvalidSignature => Some(GossipError::InvalidData(
-            InvalidDataError::TransactionSignature,
-        )),
-        TxIngressError::Unfunded => Some(GossipError::InvalidData(
-            InvalidDataError::TransactionUnfunded,
-        )),
-        TxIngressError::InvalidAnchor => Some(GossipError::InvalidData(
-            InvalidDataError::TransactionAnchor,
-        )),
-        TxIngressError::DatabaseError => Some(GossipError::Internal(InternalGossipError::Database)),
-        TxIngressError::ServiceUninitialized => Some(GossipError::Internal(
-            InternalGossipError::ServiceUninitialized,
-        )),
-        TxIngressError::Other(error) => {
-            Some(GossipError::Internal(InternalGossipError::Unknown(error)))
-        }
-    }
-}
-
 pub type GossipResult<T> = Result<T, GossipError>;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequest {
     Block(BlockHash),
     Transaction(H256),
+}
+
+impl Debug for GossipDataRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GossipDataRequest::Block(hash) => write!(f, "block {:?}", hash.0.to_base58()),
+            GossipDataRequest::Transaction(hash) => {
+                write!(f, "transaction {:?}", hash.0.to_base58())
+            }
+        }
+    }
 }

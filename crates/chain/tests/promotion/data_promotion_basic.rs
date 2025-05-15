@@ -11,9 +11,8 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_database::DataLedger;
-use irys_types::NodeConfig;
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
+use irys_types::{DataLedger, NodeConfig};
 use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -71,9 +70,10 @@ async fn heavy_data_promotion_test() {
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
         mempool: node.node_ctx.actor_addresses.mempool.clone(),
-        peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
+        peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),
+        sync_state: node.node_ctx.sync_state.clone(),
     };
 
     // Initialize the app

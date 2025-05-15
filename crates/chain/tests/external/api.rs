@@ -29,7 +29,7 @@ async fn external_api() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
 
     let mut testnet_config = NodeConfig::testnet();
-    testnet_config.http.port = 8080; // external test, should never be run concurrently
+    testnet_config.http.bind_port = 8080; // external test, should never be run concurrently
 
     let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
     let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
@@ -71,7 +71,7 @@ async fn external_api() -> eyre::Result<()> {
 
     let http_url = format!(
         "http://127.0.0.1:{}",
-        node.node_ctx.config.node_config.http.port
+        node.node_ctx.config.node_config.http.bind_port
     );
 
     // server should be running

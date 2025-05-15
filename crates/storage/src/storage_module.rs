@@ -40,15 +40,12 @@ use atomic_write_file::AtomicWriteFile;
 use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{ensure, eyre, Context, OptionExt, Result};
-use irys_database::{
-    submodule::{
-        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
-        get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
-        set_data_size_for_data_root, tables::RelativeStartOffsets,
-    },
-    DataLedger,
+use irys_database::submodule::{
+    add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+    add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
+    clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
+    get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
+    set_data_size_for_data_root, tables::RelativeStartOffsets,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
@@ -56,7 +53,7 @@ use irys_types::{
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
-    DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
+    DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
     PartitionChunkRange, ProofDeserialize, RelativeChunkOffset, TxChunkOffset, TxPath,
     UnpackedChunk, H256,
 };
@@ -69,7 +66,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 use tracing::{debug, error, info};
 
@@ -182,6 +179,26 @@ pub enum ChunkType {
 pub struct StorageModules(pub StorageModuleVec);
 
 pub type StorageModuleVec = Vec<Arc<StorageModule>>;
+
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+#[derive(Debug, Clone)]
+pub struct StorageModulesReadGuard {
+    storage_module_data: Arc<RwLock<Vec<Arc<StorageModule>>>>,
+}
+
+impl StorageModulesReadGuard {
+    /// Creates a new `ReadGuard` for StorageModules list
+    pub const fn new(storage_module_data: Arc<RwLock<Vec<Arc<StorageModule>>>>) -> Self {
+        Self {
+            storage_module_data,
+        }
+    }
+
+    /// Accessor method to get a read guard for the StorageModules list
+    pub fn read(&self) -> RwLockReadGuard<'_, Vec<Arc<StorageModule>>> {
+        self.storage_module_data.read().unwrap()
+    }
+}
 
 impl StorageModules {
     pub fn inner(self) -> StorageModuleVec {
@@ -1222,11 +1239,12 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
 
 /// Retrieves all the storage modules overlapped by a range in a given ledger
 pub fn get_overlapped_storage_modules(
-    storage_modules: &[Arc<StorageModule>],
+    storage_modules_guard: &StorageModulesReadGuard,
     ledger: DataLedger,
     tx_chunk_range: &LedgerChunkRange,
 ) -> Vec<Arc<StorageModule>> {
-    storage_modules
+    storage_modules_guard
+        .read()
         .iter()
         .filter(|module| {
             module
@@ -1244,11 +1262,12 @@ pub fn get_overlapped_storage_modules(
 /// For a given ledger and ledger offset this function attempts to find
 /// a storage module that overlaps the offset
 pub fn get_storage_module_at_offset(
-    storage_modules: &[Arc<StorageModule>],
+    storage_modules_guard: &StorageModulesReadGuard,
     ledger: DataLedger,
     chunk_offset: LedgerChunkOffset,
 ) -> Option<Arc<StorageModule>> {
-    storage_modules
+    storage_modules_guard
+        .read()
         .iter()
         .find(|module| {
             module

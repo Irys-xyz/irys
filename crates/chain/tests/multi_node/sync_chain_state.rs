@@ -8,10 +8,10 @@ use irys_chain::{
     },
     IrysNodeCtx,
 };
-use irys_database::{block_header_by_hash, BlockIndexItem};
+use irys_database::block_header_by_hash;
 use irys_types::{
-    irys::IrysSigner, Address, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig,
-    NodeMode, PeerAddress, RethPeerInfo, H256,
+    irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
+    NodeConfig, NodeMode, PeerAddress, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
@@ -52,14 +52,14 @@ async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
         gossip: format!(
             "{}:{}",
             genesis.node_ctx.config.node_config.gossip.bind_ip,
-            genesis.node_ctx.config.node_config.gossip.port
+            genesis.node_ctx.config.node_config.gossip.bind_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
         api: format!(
             "{}:{}",
             genesis.node_ctx.config.node_config.http.bind_ip,
-            genesis.node_ctx.config.node_config.http.port
+            genesis.node_ctx.config.node_config.http.bind_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
@@ -148,14 +148,14 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
         gossip: format!(
             "{}:{}",
             genesis.node_ctx.config.node_config.gossip.bind_ip,
-            genesis.node_ctx.config.node_config.gossip.port
+            genesis.node_ctx.config.node_config.gossip.bind_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
         api: format!(
             "{}:{}",
             genesis.node_ctx.config.node_config.http.bind_ip,
-            genesis.node_ctx.config.node_config.http.port
+            genesis.node_ctx.config.node_config.http.bind_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
@@ -405,7 +405,7 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     .await;
 
     let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.http.port),
+        &local_test_url(&testnet_config_genesis.http.bind_port),
         0,
         required_blocks_height
             .try_into()
@@ -552,7 +552,7 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
 
     // TODO WE could possibly add a check here to see if genesis really did mine the block and the index height has increased...
     let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.http.port),
+        &local_test_url(&testnet_config_genesis.http.bind_port),
         0,
         (required_blocks_height + 1 + additional_blocks_for_gossip_test)
             .try_into()
@@ -635,11 +635,15 @@ fn init_configs() -> (
 ) {
     let mut testnet_config_genesis = NodeConfig {
         http: HttpConfig {
-            port: 8078,
+            public_ip: "127.0.0.1".to_string(),
+            public_port: 8078,
+            bind_port: 8078,
             bind_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            port: 8079,
+            public_port: 8079,
+            public_ip: "127.0.0.1".to_string(),
+            bind_port: 8079,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -653,11 +657,16 @@ fn init_configs() -> (
     let mut testnet_config_peer1 = NodeConfig {
         http: HttpConfig {
             // Use random port
-            port: 0,
+            bind_port: 0,
+            // The same as bind port
+            public_port: 0,
             bind_ip: "127.0.0.1".to_string(),
+            public_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            port: 8083,
+            public_port: 8083,
+            public_ip: "127.0.0.1".to_string(),
+            bind_port: 8083,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -670,11 +679,15 @@ fn init_configs() -> (
     };
     let mut testnet_config_peer2 = NodeConfig {
         http: HttpConfig {
-            port: 0,
+            bind_port: 0,
+            public_port: 0,
             bind_ip: "127.0.0.1".to_string(),
+            public_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            port: 8085,
+            public_port: 8085,
+            public_ip: "127.0.0.1".to_string(),
+            bind_port: 8085,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -778,6 +791,7 @@ async fn generate_test_transaction_and_add_to_block(
         Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
             panic!("unfunded account error")
         }
+        Err(AddTxError::TxIngress(TxIngressError::Skipped)) => {}
         Err(e) => panic!("unexpected error {:?}", e),
     }
     irys_txs
@@ -793,7 +807,7 @@ async fn poll_until_fetch_at_block_index_height(
     let mut attempts = 0;
     let mut result_peer = None;
     let max_attempts = max_attempts * 10;
-    let url = local_test_url(&node_ctx.config.node_config.http.port);
+    let url = local_test_url(&node_ctx.config.node_config.http.bind_port);
     loop {
         let mut response = info_endpoint_request(&url).await;
 
@@ -818,7 +832,7 @@ async fn poll_until_fetch_at_block_index_height(
         } else {
             result_peer = Some(
                 block_index_endpoint_request(
-                    &local_test_url(&node_ctx.config.node_config.http.port),
+                    &local_test_url(&node_ctx.config.node_config.http.bind_port),
                     0,
                     required_blocks_height,
                 )
@@ -841,7 +855,7 @@ async fn poll_peer_list(
         sleep(Duration::from_millis(100)).await;
 
         let mut peer_results_genesis = peer_list_endpoint_request(&local_test_url(
-            &ctx_node.node_ctx.config.node_config.http.port,
+            &ctx_node.node_ctx.config.node_config.http.bind_port,
         ))
         .await;
 

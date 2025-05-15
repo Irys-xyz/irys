@@ -1,6 +1,5 @@
 use actix::Addr;
 
-use crate::peer_list_service::PeerListServiceFacade;
 use crate::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::BlockIndexService,
@@ -23,7 +22,6 @@ pub struct ActorAddresses {
     pub mempool: Addr<MempoolService>,
     pub block_index: Addr<BlockIndexService>,
     pub epoch_service: Addr<EpochServiceActor>,
-    pub peer_list: PeerListServiceFacade,
     pub reth: Addr<RethServiceActor>,
 }
 

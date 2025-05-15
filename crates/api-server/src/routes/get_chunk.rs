@@ -5,8 +5,7 @@ use actix_web::{
     HttpResponse,
 };
 
-use irys_database::DataLedger;
-use irys_types::{ChunkFormat, H256};
+use irys_types::{ChunkFormat, DataLedger, H256};
 use serde::Deserialize;
 
 #[derive(Deserialize)]

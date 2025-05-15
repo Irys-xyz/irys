@@ -54,6 +54,18 @@ impl GossipCache {
         Ok(blocks.contains_key(block_hash))
     }
 
+    pub fn seen_transaction_from_any_peer(
+        &self,
+        transaction_id: &IrysTransactionId,
+    ) -> GossipResult<bool> {
+        let txs = self
+            .transactions
+            .read()
+            .map_err(|error| GossipError::Cache(error.to_string()))?;
+
+        Ok(txs.contains_key(transaction_id))
+    }
+
     pub fn seen_block_from_peer(
         &self,
         block_hash: &BlockHash,

@@ -1,22 +1,23 @@
-use crate::util::{FakeGossipServer, MockRethServiceActor};
-use actix::{Actor, Handler, Message};
+use crate::block_pool_service::{BlockPoolService, ProcessBlock};
+use crate::peer_list_service::{AddPeer, PeerListServiceWithClient};
+use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
+use crate::GossipClient;
+use actix::Actor;
+use async_trait::async_trait;
 use base58::ToBase58;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
+use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_api_client::ApiClient;
 use irys_database::reth_db::Database;
 use irys_database::{block_header_by_hash, insert_block_header};
-use irys_gossip_service::block_pool_service::{BlockPoolService, ProcessBlock};
-use irys_gossip_service::GossipClient;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    AcceptedResponse, Address, BlockHash, CombinedBlockHeader, Config, DatabaseProvider,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress,
-    PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
+    AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
+    Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
+    NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::debug;
 
@@ -66,40 +67,37 @@ impl ApiClient for MockApiClient {
     ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
         Ok(self.block_response.clone())
     }
-}
 
-struct BlockDiscoveryMockActor {
-    messages: Vec<BlockDiscoveredMessage>,
-    db: DatabaseProvider,
-}
-
-impl Actor for BlockDiscoveryMockActor {
-    type Context = actix::Context<Self>;
-}
-
-impl Handler<BlockDiscoveredMessage> for BlockDiscoveryMockActor {
-    type Result = eyre::Result<()>;
-
-    fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Self::Context) -> Self::Result {
-        self.messages.push(msg.clone());
-        self.db.update_eyre(|tx| insert_block_header(tx, &msg.0))?;
-        Ok(())
+    async fn get_block_index(
+        &self,
+        _peer: SocketAddr,
+        _block_index_query: BlockIndexQuery,
+    ) -> eyre::Result<Vec<BlockIndexItem>> {
+        Ok(vec![])
     }
 }
 
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "Vec<BlockDiscoveredMessage>")]
-struct GetBlockDiscoveryMessages;
+#[derive(Clone)]
+struct BlockDiscoveryStub {
+    received_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    db: DatabaseProvider,
+}
 
-impl Handler<GetBlockDiscoveryMessages> for BlockDiscoveryMockActor {
-    type Result = Vec<BlockDiscoveredMessage>;
+impl BlockDiscoveryStub {
+    fn get_blocks(&self) -> Vec<IrysBlockHeader> {
+        self.received_blocks.read().unwrap().clone()
+    }
+}
 
-    fn handle(
-        &mut self,
-        _msg: GetBlockDiscoveryMessages,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
-        self.messages.clone()
+#[async_trait]
+impl BlockDiscoveryFacade for BlockDiscoveryStub {
+    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
+        self.db.update_eyre(|tx| insert_block_header(tx, &block))?;
+        self.received_blocks
+            .write()
+            .expect("to unlock blocks")
+            .push(block);
+        Ok(())
     }
 }
 
@@ -118,11 +116,10 @@ async fn should_process_block() {
     let mock_client = MockApiClient {
         block_response: None,
     };
-    let mock_block_discovery_actor = BlockDiscoveryMockActor {
-        messages: vec![],
+    let block_discovery_stub = BlockDiscoveryStub {
+        received_blocks: Arc::new(RwLock::new(vec![])),
         db: db.clone(),
     };
-    let block_discovery_addr = mock_block_discovery_actor.start();
     let reth_service = MockRethServiceActor {};
     let reth_addr = reth_service.start();
     let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
@@ -138,7 +135,7 @@ async fn should_process_block() {
         db.clone(),
         mock_client,
         peer_addr.into(),
-        block_discovery_addr.clone(),
+        block_discovery_stub.clone(),
         GossipClient::new(Duration::from_secs(5), Address::default()),
         Some(vdf_tx),
     );
@@ -190,17 +187,11 @@ async fn should_process_block() {
     .expect("can't send block")
     .expect("can't process block");
 
-    let block_messages = block_discovery_addr
-        .send(GetBlockDiscoveryMessages)
-        .await
-        .expect("to get block messages");
-    let block_header_in_discovery = block_messages
+    let block_header_in_discovery = block_discovery_stub
+        .get_blocks()
         .get(0)
-        .expect("to get block message")
-        .0
-        .as_ref()
+        .expect("to have a block")
         .clone();
-    assert_eq!(block_messages.len(), 1);
     assert_eq!(block_header_in_discovery, test_header);
 }
 
@@ -264,11 +255,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Setup MockApiClient to return block2 when queried
     let mock_client = MockApiClient::default();
 
-    let mock_block_discovery_actor = BlockDiscoveryMockActor {
-        messages: vec![],
+    let block_discovery_stub = BlockDiscoveryStub {
+        received_blocks: Arc::new(RwLock::new(vec![])),
         db: db.clone(),
     };
-    let block_discovery_addr = mock_block_discovery_actor.start();
     let reth_service = MockRethServiceActor {};
     let reth_addr = reth_service.start();
     let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
@@ -302,7 +292,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         db.clone(),
         mock_client,
         peer_addr.into(),
-        block_discovery_addr.clone(),
+        block_discovery_stub.clone(),
         GossipClient::new(Duration::from_secs(5), Address::default()),
         Some(vdf_tx),
     );
@@ -311,7 +301,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
     let block_for_server = block2.clone();
     let addr_for_server = addr.clone();
-    gossip_server.set_on_block_data_request(Box::new(move |block_hash| {
+    gossip_server.set_on_block_data_request(move |block_hash| {
         let block = block_for_server.clone();
         let addr = addr_for_server.clone();
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
@@ -323,7 +313,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
                 .expect("to process block");
         });
         true
-    }));
+    });
 
     // Insert block1 into the database
     {
@@ -358,27 +348,12 @@ async fn should_process_block_with_intermediate_block_in_api() {
     .expect("can't send block")
     .expect("can't process block");
 
-    // Verify both block2 and block3 are sent to the block discovery service
-    let block_messages = block_discovery_addr
-        .send(GetBlockDiscoveryMessages)
-        .await
-        .expect("to get block messages");
-
-    // We should have received 2 blocks: block2 and block3
-    assert_eq!(block_messages.len(), 2);
-
     // The blocks should be received in order of processing: first block2, then block3
-    let discovered_block2 = block_messages
-        .get(0)
-        .expect("to get block2 message")
-        .0
-        .as_ref()
-        .clone();
-    let discovered_block3 = block_messages
+    let discovered_block2 = block_discovery_stub.get_blocks().get(0).unwrap().clone();
+    let discovered_block3 = block_discovery_stub
+        .get_blocks()
         .get(1)
         .expect("to get block3 message")
-        .0
-        .as_ref()
         .clone();
 
     assert_eq!(discovered_block2, block2);

@@ -20,8 +20,6 @@ actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
 
-thiserror = { workspace = true }
-
 tokio.workspace = true
 reth-db.workspace = true
 irys-primitives.workspace = true
@@ -37,10 +35,10 @@ base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
-reqwest = { version = "0.11", features = ["json"] }
 irys-reward-curve.workspace = true
 rayon.workspace = true
 sha2.workspace = true
+async-trait = "0.1.83"
 # serde.workspace = true
 
 [dev-dependencies]

@@ -5,7 +5,7 @@ use irys_actors::epoch_service::{
 };
 
 use irys_config::StorageSubmodulesConfig;
-use irys_types::{partition::PartitionAssignment, IrysBlockHeader, H256};
+use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
 use irys_types::{
     partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
 };
@@ -30,7 +30,7 @@ use irys_actors::{
     packing::{PackingActor, PackingRequest},
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
-use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex, DataLedger};
+use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::NodeConfig;
