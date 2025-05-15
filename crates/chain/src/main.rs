@@ -66,7 +66,7 @@ async fn main() -> eyre::Result<()> {
         config.consensus.extend_genesis_accounts([
             (
                 irys_types::Address::from_slice(
-                    hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                    hex::decode("6f8450cfdb7c9aeddab081a5cf43755201f69582")
                         .unwrap()
                         .as_slice(),
                 ),
