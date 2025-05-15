@@ -77,7 +77,7 @@ impl<E: EngineTypes> PayloadContext<E> {
                     }
                 },
                 None => {
-                    error!("Didn't get a payload from payload builder");
+                    panic!("Didn't get a payload from payload builder");
                 }
             }
         }
