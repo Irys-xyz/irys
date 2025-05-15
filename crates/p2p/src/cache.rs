@@ -71,7 +71,11 @@ impl GossipCache {
     /// # Errors
     ///
     /// This function will return an error if the cache cannot be accessed.
-    pub(crate) fn record_seen(&self, miner_address: Address, key: GossipCacheKey) -> GossipResult<()> {
+    pub(crate) fn record_seen(
+        &self,
+        miner_address: Address,
+        key: GossipCacheKey,
+    ) -> GossipResult<()> {
         let now = Instant::now();
         match key {
             GossipCacheKey::Chunk(chunk_path_hash) => {
