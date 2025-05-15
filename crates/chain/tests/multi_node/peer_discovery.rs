@@ -48,7 +48,11 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     )
     .await?;
 
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
+    node.node_ctx
+        .actor_addresses
+        .start_mining(vdf_mining_state_sender)
+        .unwrap();
 
     let app_state = ApiState {
         ema_service: ema_tx,

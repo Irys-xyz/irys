@@ -23,10 +23,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::{
-    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
-    services::Stop,
-};
+use crate::{block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard};
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
