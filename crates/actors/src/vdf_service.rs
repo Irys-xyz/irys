@@ -351,8 +351,8 @@ fn create_state(
 
 /// return the larger of MINIMUM_CAPACITY or number of seeds required for (chunks in partition / chunks in recall range)
 /// This ensure the capacity of VecDeqeue is large enough for the partition.
-pub fn calc_capacity(config: &Config) -> usize {
-    const MINIMUM_CAPACITY: u64 = 10_000;
+fn calc_capacity(config: &Config) -> usize {
+    const MINIMUM_CAPACITY: u64 = 1;
     let capacity_from_config: u64 =
         config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range;
     let capacity = if capacity_from_config < MINIMUM_CAPACITY {
