@@ -31,12 +31,12 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
             .service_senders
             .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-        let returnted_ema_price = rx.await?;
+        let returned_ema_price = rx.await?;
 
         // assert each new block that we mine
         assert_eq!(header.height, expected_height);
         assert_eq!(
-            ctx.node_ctx.config.consensus.genesis_price, returnted_ema_price,
+            ctx.node_ctx.config.consensus.genesis_price, returned_ema_price,
             "Genisis price not respected for the expected duration"
         );
         assert_ne!(
