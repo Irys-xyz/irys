@@ -59,7 +59,14 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
-    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
+    let mut ctx = IrysNodeTest::new_genesis(config).await;
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    ctx.cfg.consensus.get_mut().num_chunks_in_partition = 40;
+    ctx.cfg.consensus.get_mut().num_chunks_in_recall_range = 2;
+    //start node with modified config
+    let ctx = ctx.start().await;
+
     // (oracle price, EMA price)
     let mut registered_prices = vec![(
         ctx.node_ctx.config.consensus.genesis_price,
