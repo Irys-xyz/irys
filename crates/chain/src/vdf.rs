@@ -3,7 +3,7 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf_service::VdfServiceMessage,
 };
-use irys_types::{block_production::Seed, AtomicVdfStepNumber, Config, H256List, H256, U256};
+use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
@@ -118,26 +118,6 @@ pub fn run_vdf(
         }
     }
     debug!(?global_step_number, "VDF thread stopped");
-}
-
-/// return the larger of MINIMUM_CAPACITY or number of seeds required for (chunks in partition / chunks in recall range)
-/// This ensure the capacity of VecDeqeue is large enough for the partition.
-pub fn calc_capacity(config: &Config) -> usize {
-    const MINIMUM_CAPACITY: u64 = 10_000;
-    let capacity_from_config: u64 =
-        config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range;
-    let capacity = if capacity_from_config < MINIMUM_CAPACITY {
-        tracing::warn!(
-            "capacity in config: {} set too low. Overridden with {}",
-            capacity_from_config,
-            MINIMUM_CAPACITY
-        );
-        MINIMUM_CAPACITY
-    } else {
-        std::cmp::max(MINIMUM_CAPACITY, capacity_from_config)
-    };
-
-    capacity.try_into().expect("expected u64 to cast to u32")
 }
 
 #[cfg(test)]
