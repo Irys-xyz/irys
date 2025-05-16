@@ -11,7 +11,7 @@ use irys_chain::{
 use irys_database::block_header_by_hash;
 use irys_types::{
     irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
-    NodeConfig, NodeMode, PeerAddress, RethPeerInfo, H256,
+    NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
@@ -675,9 +675,9 @@ fn init_configs() -> (
     let mut testnet_config_peer1 = NodeConfig {
         http: HttpConfig {
             // Use random port
-            bind_port: 0,
+            bind_port: http_port_peer1,
             // The same as bind port
-            public_port: 0,
+            public_port: http_port_peer1,
             bind_ip: "127.0.0.1".to_string(),
             public_ip: "127.0.0.1".to_string(),
         },
@@ -693,12 +693,15 @@ fn init_configs() -> (
         )
         .expect("valid key"),
         mode: NodeMode::PeerSync,
+        reth: RethConfig {
+            use_random_ports: true,
+        },
         ..NodeConfig::testnet()
     };
     let mut testnet_config_peer2 = NodeConfig {
         http: HttpConfig {
-            bind_port: 0,
-            public_port: 0,
+            bind_port: http_port_peer2,
+            public_port: http_port_peer2,
             bind_ip: "127.0.0.1".to_string(),
             public_ip: "127.0.0.1".to_string(),
         },
@@ -714,6 +717,9 @@ fn init_configs() -> (
         )
         .expect("valid key"),
         mode: NodeMode::PeerSync,
+        reth: RethConfig {
+            use_random_ports: true,
+        },
         ..NodeConfig::testnet()
     };
     let trusted_peers = vec![PeerAddress {
