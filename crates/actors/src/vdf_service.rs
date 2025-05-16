@@ -591,10 +591,10 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf() {
-        let node_config = NodeConfig::testnet();
-        // set queue to length 4 with 40/4 occurring within the vdf spawn
-        //node_config.consensus.num_chunks_in_partition = 40;
-        //node_config.consensus.num_chunks_in_recall_range = 10;
+        let mut node_config = NodeConfig::testnet();
+        // set queue to length 4 with 40/10 occurring within the vdf spawn
+        node_config.consensus.get_mut().num_chunks_in_partition = 40;
+        node_config.consensus.get_mut().num_chunks_in_recall_range = 10;
         let testnet_config: Config = node_config.into();
         // start service senders/receivers
         let tx = mocked_vdf_service(&testnet_config).await;
