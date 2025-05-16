@@ -209,6 +209,9 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
+    /// Reth node configuration
+    pub reth: RethConfig,
+
     /// Reth settings
     pub reth_peer_info: RethPeerInfo,
 }
@@ -390,6 +393,14 @@ pub struct GossipConfig {
     pub bind_ip: String,
     /// The port number the gossip service listens on
     pub bind_port: u16,
+}
+
+/// # Reth Configuration
+///
+/// Settings that are passed to the reth node
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RethConfig {
+    pub use_random_ports: bool,
 }
 
 /// # Data Packing Configuration
@@ -613,6 +624,9 @@ impl NodeConfig {
                 public_port: 0,
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
                 bind_port: 0,
+            },
+            reth: RethConfig {
+                use_random_ports: true,
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -899,6 +913,9 @@ mod tests {
         bind_port = 0
         public_ip = "127.0.0.1"
         public_port = 0
+
+        [reth]
+        use_random_ports = true
 
         [reth_peer_info]
         peering_tcp_addr = "0.0.0.0:0"

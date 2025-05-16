@@ -183,8 +183,8 @@ async fn start_reth_node(
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
-    random_ports: bool,
 ) -> eyre::Result<NodeExitReason> {
+    let random_ports = config.node_config.reth.use_random_ports;
     let node_handle = match irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
@@ -227,8 +227,6 @@ async fn start_reth_node(
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 pub struct IrysNode {
     pub config: Config,
-    // pub data_exists: bool,
-    pub random_ports: bool,
     pub http_listener: TcpListener,
     pub gossip_listener: TcpListener,
 }
@@ -262,12 +260,10 @@ impl IrysNode {
 
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
-        let random_ports = if node_config.http.bind_port == 0 {
+        if node_config.http.bind_port == 0 {
             node_config.http.bind_port = local_addr.port();
-            true
-        } else {
-            false
-        };
+        }
+
         // If the public port is not specified, use the same as the private one
         if node_config.http.public_port == 0 {
             node_config.http.public_port = node_config.http.bind_port;
@@ -284,7 +280,6 @@ impl IrysNode {
         let config = Config::new(node_config);
         Ok(IrysNode {
             config,
-            random_ports,
             http_listener,
             gossip_listener,
         })
@@ -543,7 +538,6 @@ impl IrysNode {
             latest_height,
             task_manager,
             tokio_runtime,
-            self.random_ports,
         )?;
 
         let mut ctx = irys_node_ctx_rx.await?;
@@ -683,7 +677,6 @@ impl IrysNode {
         latest_block_height: u64,
         mut task_manager: TaskManager,
         tokio_runtime: Runtime,
-        random_ports: bool,
     ) -> eyre::Result<JoinHandle<()>> {
         let reth_thread_handler = std::thread::Builder::new()
             .name("reth-thread".to_string())
@@ -703,7 +696,6 @@ impl IrysNode {
                                 reth_handle_sender,
                                 irys_provider.clone(),
                                 latest_block_height,
-                                random_ports,
                             ),
                             reth_shutdown_receiver,
                         ),

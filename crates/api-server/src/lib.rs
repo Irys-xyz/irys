@@ -96,7 +96,7 @@ pub fn routes() -> impl HttpServiceFactory {
 }
 
 pub async fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
-    let port = app_state.config.node_config.http.bind_port;
+    let port = listener.local_addr().expect("listener to work").port();
     info!(?port, "Starting API server");
 
     HttpServer::new(move || {
