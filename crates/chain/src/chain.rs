@@ -607,8 +607,6 @@ impl IrysNode {
                         let block_index = Arc::new(RwLock::new(block_index));
                         let block_index_service_actor = Self::init_block_index_service(&config, &block_index);
 
-                       
-
                         // start the rest of the services
                         let (irys_node, actix_server, vdf_thread, reth_node, gossip_service_handle) = Self::init_services(
                                 &config,
@@ -626,7 +624,7 @@ impl IrysNode {
                             )
                             .await
                             .expect("initializing services should not fail");
-                    
+
                         let arbiters_guard = irys_node.arbiters.clone();
                         irys_node_ctx_tx
                             .send(irys_node)
