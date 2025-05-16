@@ -7,7 +7,12 @@ use std::time::Duration;
 #[test_log::test(actix_web::test)]
 async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<()> {
     // setup
-    let node = IrysNodeTest::default_async().await;
+    let mut config = NodeConfig::testnet();
+    // set steps dequeue to capacity 40 with 80/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    config.consensus.get_mut().num_chunks_in_partition = 80;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    let node = IrysNodeTest::new_genesis(config.clone()).await;
 
     // action:
     // 1. start the genesis node;
