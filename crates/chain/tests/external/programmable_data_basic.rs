@@ -73,7 +73,10 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         .await
         .start()
         .await;
-    node.node_ctx.actor_addresses.stop_mining()?;
+    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
+    node.node_ctx
+        .actor_addresses
+        .stop_mining(vdf_mining_state_sender)?;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

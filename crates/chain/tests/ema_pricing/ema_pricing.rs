@@ -14,7 +14,13 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
-    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
+    let mut ctx = IrysNodeTest::new_genesis(config).await;
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    ctx.cfg.consensus.get_mut().num_chunks_in_partition = 40;
+    ctx.cfg.consensus.get_mut().num_chunks_in_recall_range = 2;
+    //start node with modified config
+    let ctx = ctx.start().await;
 
     // action
     // we start at 1 because the genesis block is already mined
@@ -25,12 +31,12 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
             .service_senders
             .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-        let returnted_ema_price = rx.await?;
+        let returned_ema_price = rx.await?;
 
         // assert each new block that we mine
         assert_eq!(header.height, expected_height);
         assert_eq!(
-            ctx.node_ctx.config.consensus.genesis_price, returnted_ema_price,
+            ctx.node_ctx.config.consensus.genesis_price, returned_ema_price,
             "Genisis price not respected for the expected duration"
         );
         assert_ne!(
@@ -53,7 +59,13 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    config.consensus.get_mut().num_chunks_in_partition = 40;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    //start node with modified config
     let ctx = IrysNodeTest::new_genesis(config).await.start().await;
+
     // (oracle price, EMA price)
     let mut registered_prices = vec![(
         ctx.node_ctx.config.consensus.genesis_price,

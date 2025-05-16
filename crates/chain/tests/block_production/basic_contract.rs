@@ -21,6 +21,11 @@ sol!(
 #[tokio::test]
 async fn heavy_test_erc20() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    config.consensus.get_mut().num_chunks_in_partition = 40;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let main_address = config.miner_address();
     config.consensus.extend_genesis_accounts(vec![

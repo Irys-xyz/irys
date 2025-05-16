@@ -4,8 +4,8 @@ use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, PeerResponse, ProtocolVersion,
-    VersionRequest,
+    AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
+    ProtocolVersion, VersionRequest,
 };
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
@@ -139,7 +139,12 @@ async fn check_get_block_endpoint(
 
 #[actix_rt::test]
 async fn heavy_api_client_all_endpoints_should_work() {
-    let ctx = IrysNodeTest::default_async().await.start().await;
+    let mut config = NodeConfig::testnet();
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    config.consensus.get_mut().num_chunks_in_partition = 40;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
 
     let api_address = SocketAddr::new(
         IpAddr::from_str("127.0.0.1").unwrap(),

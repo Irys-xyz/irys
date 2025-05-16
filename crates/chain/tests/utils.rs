@@ -1,9 +1,13 @@
 use actix::MailboxError;
 use futures::future::select;
-use irys_actors::block_producer::SolutionFoundMessage;
-use irys_actors::block_tree_service::get_canonical_chain;
-use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
-use irys_actors::{block_validation, SetTestBlocksRemainingMessage};
+use irys_actors::{
+    block_producer::SolutionFoundMessage,
+    block_tree_service::get_canonical_chain,
+    block_validation,
+    mempool_service::{TxIngressError, TxIngressMessage},
+    vdf_service::VdfStepsReadGuard,
+    SetTestBlocksRemainingMessage,
+};
 use irys_api_server::create_listener;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::tx_header_by_txid;
@@ -17,7 +21,6 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
 use sha2::{Digest, Sha256};
@@ -92,6 +95,7 @@ pub async fn capacity_chunk_solution(
         &vdf_steps_guard,
         &partition_hash,
     )
+    .await
     .expect("valid recall range");
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(config.consensus.chunk_size as usize);

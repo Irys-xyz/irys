@@ -44,6 +44,13 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let mut testnet_config = NodeConfig::testnet();
     testnet_config.consensus.get_mut().chunk_size = 32;
     testnet_config.consensus.get_mut().chunk_migration_depth = 2;
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    testnet_config.consensus.get_mut().num_chunks_in_partition = 40;
+    testnet_config
+        .consensus
+        .get_mut()
+        .num_chunks_in_recall_range = 2;
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
     testnet_config.consensus.extend_genesis_accounts(vec![

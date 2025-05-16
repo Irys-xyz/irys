@@ -19,7 +19,6 @@ use irys_types::{
     IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
     Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
@@ -44,6 +43,7 @@ use crate::{
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
+    vdf_service::VdfStepsReadGuard,
     CommitmentCacheMessage,
 };
 

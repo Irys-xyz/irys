@@ -103,7 +103,12 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let node = IrysNodeTest::default_async().await.start().await;
+    let mut config = NodeConfig::testnet();
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    config.consensus.get_mut().num_chunks_in_partition = 40;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    let node = IrysNodeTest::new_genesis(config).await.start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
@@ -134,7 +139,10 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
 
-    node.node_ctx.actor_addresses.start_mining()?;
+    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
+    node.node_ctx
+        .actor_addresses
+        .start_mining(vdf_mining_state_sender)?;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
@@ -333,12 +341,20 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
-    let node = IrysNodeTest::default_async().await.start().await;
+    let mut node = IrysNodeTest::default_async().await;
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    node.cfg.consensus.get_mut().num_chunks_in_partition = 40;
+    node.cfg.consensus.get_mut().num_chunks_in_recall_range = 2;
+    //start node with modified config
+    let node = node.start().await;
+
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
     let mut init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+
     for _ in 0..3 {
         // mine a single block
         let (block, reth_exec_env) = mine_block(&node.node_ctx)
