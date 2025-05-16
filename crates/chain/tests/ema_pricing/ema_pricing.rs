@@ -113,6 +113,11 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
     config.consensus.get_mut().token_price_safe_range = token_price_safe_range;
+    // set steps dequeue to capacity 20 with 40/2 occurring within the vdf spawn
+    // this ensures the steps queue is large enough to check blocks as they are mined for this test
+    config.consensus.get_mut().num_chunks_in_partition = 40;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+
     config.oracle = OracleConfig::Mock {
         initial_price: Amount::token(dec!(1.0)).unwrap(),
         percent_change: Amount::percentage(dec!(0.2)).unwrap(), // every block will increase price by 20%
