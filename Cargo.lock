@@ -4494,6 +4494,7 @@ name = "irys-types"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
  "alloy-core",
  "alloy-primitives",
  "alloy-rlp",
