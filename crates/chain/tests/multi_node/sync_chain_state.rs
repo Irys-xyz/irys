@@ -20,7 +20,9 @@ use reth_db::Database;
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
 use std::{
-    collections::HashMap, net::TcpListener, time::{SystemTime, UNIX_EPOCH}
+    collections::HashMap,
+    net::TcpListener,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};

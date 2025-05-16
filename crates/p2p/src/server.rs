@@ -248,9 +248,11 @@ where
     ///
     /// If the server fails to bind to the specified address and port, an error is returned.
     pub(crate) fn run(self, listener: TcpListener) -> GossipResult<Server> {
+        let node_id = self.data_handler.gossip_client.mining_address;
+        debug!("Node {}: Starting the gossip server", node_id);
         let server = self;
 
-        Ok(HttpServer::new(move || {
+        let server_handle = HttpServer::new(move || {
             App::new()
                 .app_data(Data::new(server.clone()))
                 .wrap(middleware::Logger::default())
@@ -266,7 +268,14 @@ where
         .shutdown_timeout(5)
         .keep_alive(actix_web::http::KeepAlive::Disabled)
         .listen(listener)
-        .map_err(|error| GossipError::Internal(InternalGossipError::Unknown(error.to_string())))?
-        .run())
+        .map_err(|error| GossipError::Internal(InternalGossipError::Unknown(error.to_string())))?;
+
+        debug!(
+            "Node {}: Gossip server listens on {:?}",
+            node_id,
+            server_handle.addrs()
+        );
+
+        Ok(server_handle.run())
     }
 }
