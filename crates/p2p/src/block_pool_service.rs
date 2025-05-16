@@ -1,6 +1,5 @@
-use crate::peer_list_service::{PeerListFacade, PeerListFacadeError};
-use crate::service::fast_forward_vdf_steps_from_block;
-use crate::GossipClient;
+use crate::gossip_service::fast_forward_vdf_steps_from_block;
+use crate::peer_list::{PeerListFacade, PeerListFacadeError};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
     WrapFuture,
@@ -11,9 +10,8 @@ use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
-use irys_types::{Address, BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
+use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
-use std::time::Duration;
 use tracing::{debug, error, info};
 
 #[derive(Debug)]
@@ -30,23 +28,21 @@ impl From<PeerListFacadeError> for BlockPoolError {
 }
 
 #[derive(Debug)]
-pub struct BlockPoolService<A, R, B>
+pub(crate) struct BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
 {
     /// Database provider for accessing transaction headers and related data.
-    pub db: Option<DatabaseProvider>,
-    pub irys_api_client: A,
+    pub(crate) db: Option<DatabaseProvider>,
 
-    pub orphaned_blocks_by_parent: HashMap<BlockHash, IrysBlockHeader>,
-    pub block_hash_to_parent_hash: HashMap<BlockHash, BlockHash>,
+    pub(crate) orphaned_blocks_by_parent: HashMap<BlockHash, IrysBlockHeader>,
+    pub(crate) block_hash_to_parent_hash: HashMap<BlockHash, BlockHash>,
 
-    pub block_producer: Option<B>,
-    pub peer_list: Option<PeerListFacade<A, R>>,
-    pub gossip_client: GossipClient,
-    pub vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
+    pub(crate) block_producer: Option<B>,
+    pub(crate) peer_list: Option<PeerListFacade<A, R>>,
+    pub(crate) vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -58,12 +54,10 @@ where
     fn default() -> Self {
         Self {
             db: None,
-            irys_api_client: A::default(),
             orphaned_blocks_by_parent: HashMap::new(),
             block_hash_to_parent_hash: HashMap::new(),
             block_producer: None,
             peer_list: None,
-            gossip_client: GossipClient::new(Duration::from_secs(5), Address::default()),
             vdf_sender: None,
         }
     }
@@ -104,22 +98,18 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
 {
-    pub fn new_with_client(
+    pub(crate) fn new_with_client(
         db: DatabaseProvider,
-        irys_api_client: A,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
-        gossip_client: GossipClient,
         vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
     ) -> Self {
         Self {
             db: Some(db),
-            irys_api_client,
             orphaned_blocks_by_parent: HashMap::new(),
             block_hash_to_parent_hash: HashMap::new(),
             peer_list: Some(peer_list),
             block_producer: Some(block_producer_addr),
-            gossip_client,
             vdf_sender,
         }
     }
@@ -240,7 +230,7 @@ where
 /// Adds a block to the block pool for processing.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), BlockPoolError>")]
-pub struct ProcessBlock {
+pub(crate) struct ProcessBlock {
     pub header: IrysBlockHeader,
 }
 
@@ -259,7 +249,7 @@ where
 
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), BlockPoolError>")]
-pub struct AddBlockToPoolAndTryToFetchParent {
+struct AddBlockToPoolAndTryToFetchParent {
     pub header: IrysBlockHeader,
 }
 
@@ -387,7 +377,7 @@ where
 /// Get block by its hash
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<Option<IrysBlockHeader>, BlockPoolError>")]
-pub struct GetBlockByHash {
+pub(crate) struct GetBlockByHash {
     pub block_hash: BlockHash,
 }
 
@@ -421,7 +411,7 @@ where
 /// Adds a block to the block pool for processing.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<bool, BlockPoolError>")]
-pub struct BlockExists {
+pub(crate) struct BlockExists {
     pub block_hash: BlockHash,
 }
 

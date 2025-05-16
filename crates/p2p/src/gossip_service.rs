@@ -8,12 +8,12 @@
 )]
 use crate::block_pool_service::BlockPoolService;
 use crate::cache::GossipCacheKey;
-use crate::peer_list_service::PeerListFacade;
+use crate::peer_list::PeerListFacade;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
     cache::GossipCache,
-    client::GossipClient,
+    gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
 };
@@ -30,12 +30,13 @@ use irys_types::{
 };
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::{sync::mpsc, time};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -75,19 +76,19 @@ impl ServiceHandleWithShutdownSignal {
     ///
     /// If the task panics, an error is returned.
     pub async fn stop(mut self) -> Result<(), tokio::task::JoinError> {
-        tracing::info!("Called stop on task \"{}\"", self.name);
+        info!("Called stop on task \"{}\"", self.name);
         match self.shutdown_tx.send(()).await {
             Ok(()) => {
-                tracing::debug!("Shutdown signal sent to task \"{}\"", self.name);
+                debug!("Shutdown signal sent to task \"{}\"", self.name);
             }
             Err(SendError(())) => {
-                tracing::warn!("Shutdown signal was already sent to task \"{}\"", self.name);
+                warn!("Shutdown signal was already sent to task \"{}\"", self.name);
             }
         }
 
         self.wait_for_exit().await?;
 
-        tracing::debug!("Task \"{}\" stopped", self.name);
+        debug!("Task \"{}\" stopped", self.name);
 
         Ok(())
     }
@@ -99,13 +100,11 @@ impl ServiceHandleWithShutdownSignal {
     ///
     /// If the task panics, an error is returned.
     pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
-        tracing::info!("Waiting for task \"{}\" to exit", self.name);
+        info!("Waiting for task \"{}\" to exit", self.name);
         let handle = &mut self.handle;
         handle.await
     }
 }
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub struct GossipService {
@@ -207,16 +206,14 @@ impl GossipService {
         A: ApiClient,
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
-        tracing::debug!("Staring gossip service");
+        debug!("Staring gossip service");
         self.sync_state.store(needs_catching_up);
 
         // TODO: get the db
         let block_pool_service = BlockPoolService::new_with_client(
             db,
-            api_client.clone(),
             peer_list.clone(),
             block_discovery.clone(),
-            self.client.clone(),
             Some(vdf_sender),
         );
         let arbiter = actix::Arbiter::new();
@@ -284,13 +281,12 @@ impl GossipService {
 
     async fn broadcast_data<A, R>(
         &self,
-        original_source: GossipSource,
         data: &GossipData,
         peer_list_service: &PeerListFacade<A, R>,
     ) -> GossipResult<()>
     where
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-        A: ApiClient + Clone + 'static + Unpin + Default,
+        A: ApiClient,
     {
         if self.is_syncing() {
             // If we are syncing, we don't want to broadcast data
@@ -299,18 +295,9 @@ impl GossipService {
 
         debug!("Broadcasting data to peers: {}", data.data_type_and_id());
 
-        let exclude_peers = match original_source {
-            GossipSource::Internal => HashSet::new(),
-            GossipSource::External(miner_address) => {
-                let mut exclude_peers = HashSet::new();
-                exclude_peers.insert(miner_address);
-                exclude_peers
-            }
-        };
-
         // Get all active peers except the source
         let mut peers: Vec<(Address, PeerListItem)> = peer_list_service
-            .top_active_peers(None, Some(exclude_peers))
+            .top_active_peers(None, None)
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
 
@@ -355,11 +342,9 @@ impl GossipService {
                         )
                         .await
                     {
-                        tracing::warn!(
+                        warn!(
                             "Node {:?}: Failed to send data to peer {}: {}",
-                            self.client.mining_address,
-                            peer_miner_address,
-                            error
+                            self.client.mining_address, peer_miner_address, error
                         );
                     }
 
@@ -368,10 +353,9 @@ impl GossipService {
                         .cache
                         .record_seen(*peer_miner_address, GossipCacheKey::from(data))
                     {
-                        tracing::error!(
+                        error!(
                             "Failed to record data in cache for peer {}: {}",
-                            peer_miner_address,
-                            error
+                            peer_miner_address, error
                         );
                     }
                 }
@@ -398,14 +382,14 @@ fn spawn_cache_pruning_task(
     ServiceHandleWithShutdownSignal::spawn(
         "gossip cache pruning",
         move |mut shutdown_rx| async move {
-            tracing::info!("Starting cache pruning task");
+            info!("Starting cache pruning task");
             let mut interval = time::interval(CACHE_CLEANUP_INTERVAL);
 
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         if let Err(error) = cache.prune_expired(CACHE_ENTRY_TTL) {
-                            tracing::error!("Failed to clean up cache: {}", error);
+                            error!("Failed to clean up cache: {}", error);
                             break;
                         }
                     }
@@ -415,7 +399,7 @@ fn spawn_cache_pruning_task(
                 }
             }
 
-            tracing::debug!("Cleanup task complete");
+            debug!("Cleanup task complete");
         },
         task_executor,
     )
@@ -429,7 +413,7 @@ fn spawn_broadcast_task<R, A>(
 ) -> ServiceHandleWithShutdownSignal
 where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    A: ApiClient + Clone + 'static + Unpin + Default,
+    A: ApiClient,
 {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
@@ -440,11 +424,8 @@ where
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
                             Some(data) => {
-                                match service.broadcast_data(GossipSource::Internal, &data, &peer_list_service).await {
-                                    Ok(()) => {}
-                                    Err(error) => {
-                                        tracing::warn!("Failed to broadcast data: {}", error);
-                                    }
+                                if let Err(error) = service.broadcast_data(&data, &peer_list_service).await {
+                                    warn!("Failed to broadcast data: {}", error);
                                 };
                             },
                             None => break, // channel closed
@@ -456,7 +437,7 @@ where
                 }
             }
 
-            tracing::debug!("Broadcast task complete");
+            debug!("Broadcast task complete");
         },
         task_executor,
     )
@@ -473,33 +454,31 @@ fn spawn_watcher_task(
     ServiceHandleWithShutdownSignal::spawn(
         "gossip main",
         move |mut task_shutdown_signal| async move {
-            tracing::debug!("Starting gossip service watch thread");
+            debug!("Starting gossip service watch thread");
 
             let tasks_shutdown_handle = TaskManager::current()
                 .executor()
                 .spawn_critical_with_shutdown_signal("server shutdown task", |_| async move {
                     tokio::select! {
                         _ = task_shutdown_signal.recv() => {
-                            tracing::debug!("Gossip service shutdown signal received");
+                            debug!("Gossip service shutdown signal received");
                         }
                         cleanup_res = cache_pruning_task_handle.wait_for_exit() => {
-                            tracing::warn!("Gossip cleanup exited because: {:?}", cleanup_res);
+                            warn!("Gossip cleanup exited because: {:?}", cleanup_res);
                         }
                         broadcast_res = broadcast_task_handle.wait_for_exit() => {
-                            tracing::warn!("Gossip broadcast exited because: {:?}", broadcast_res);
+                            warn!("Gossip broadcast exited because: {:?}", broadcast_res);
                         }
                     }
 
-                    tracing::debug!("Sending stop signal to server handle...");
+                    debug!("Sending stop signal to server handle...");
                     server_handle.stop(true).await;
-                    tracing::debug!(
-                        "Server handle stop signal sent, waiting for server to shut down..."
-                    );
+                    debug!("Server handle stop signal sent, waiting for server to shut down...");
 
-                    tracing::debug!("Shutting down gossip service tasks");
+                    debug!("Shutting down gossip service tasks");
                     let mut errors: Vec<GossipError> = vec![];
 
-                    tracing::debug!("Gossip listener stopped");
+                    debug!("Gossip listener stopped");
 
                     let mut handle_result = |res: TaskExecutionResult| match res {
                         Ok(()) => {}
@@ -508,33 +487,33 @@ fn spawn_watcher_task(
                         )),
                     };
 
-                    tracing::info!("Stopping gossip cleanup");
+                    info!("Stopping gossip cleanup");
                     handle_result(cache_pruning_task_handle.stop().await);
-                    tracing::info!("Stopping gossip broadcast");
+                    info!("Stopping gossip broadcast");
                     handle_result(broadcast_task_handle.stop().await);
 
                     if errors.is_empty() {
-                        tracing::info!("Gossip main task finished without errors");
+                        info!("Gossip main task finished without errors");
                     } else {
-                        tracing::warn!("Gossip main task finished with errors:");
+                        warn!("Gossip main task finished with errors:");
                         for error in errors {
-                            tracing::warn!("Error: {}", error);
+                            warn!("Error: {}", error);
                         }
                     };
                 });
 
             match server.await {
                 Ok(()) => {
-                    tracing::info!("Gossip server stopped");
+                    info!("Gossip server stopped");
                 }
                 Err(error) => {
-                    tracing::warn!("Gossip server shutdown error: {}", error);
+                    warn!("Gossip server shutdown error: {}", error);
                 }
             };
             match tasks_shutdown_handle.await {
                 Ok(()) => {}
                 Err(error) => {
-                    tracing::warn!("Gossip service shutdown error: {}", error);
+                    warn!("Gossip service shutdown error: {}", error);
                 }
             };
             block_pool_arbiter.stop();
@@ -613,7 +592,7 @@ async fn catch_up_task<
     Ok(())
 }
 
-pub async fn get_block_index<
+async fn get_block_index<
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 >(
@@ -679,26 +658,8 @@ pub async fn fast_forward_vdf_steps_from_block(
         };
 
         if let Err(e) = vdf_sender.send(mining_seed).await {
-            tracing::error!("VDF FF: VDF Send Error: {:?}", e);
+            error!("VDF FF: VDF Send Error: {:?}", e);
         }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub enum GossipSource {
-    Internal,
-    External(Address),
-}
-
-impl GossipSource {
-    #[must_use]
-    pub const fn from_miner_address(address: Address) -> Self {
-        Self::External(address)
-    }
-
-    #[must_use]
-    pub const fn is_internal(&self) -> bool {
-        matches!(self, Self::Internal)
     }
 }
 
@@ -710,7 +671,7 @@ mod tests {
 
     mod catch_up_task {
         use super::*;
-        use crate::peer_list_service::PeerListServiceWithClient;
+        use crate::peer_list::PeerListServiceWithClient;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{Config, NodeConfig, PeerAddress, PeerScore};

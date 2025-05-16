@@ -23,7 +23,16 @@ impl SimpleRNG {
     }
 
     /// Generates random number between 0 and max (exclusive)
+    /// NOTE: max values that approach u32::MAX will take a lot of time, due to the bias logic used!
     pub fn next_range(&mut self, max: u32) -> u32 {
-        self.next() % max
+        // prevent clamping/modulo bias
+        let threshold = u32::MAX - (u32::MAX % max);
+        let mut rand = self.next();
+        // Keep generating new values until we get one below the threshold
+        while rand >= threshold {
+            rand = self.next(); // Get a new random value
+        }
+        // Now clamp it
+        rand % max
     }
 }
