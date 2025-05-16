@@ -1,4 +1,4 @@
-use crate::peer_list_service::{AddPeer, PeerListServiceWithClient};
+use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{GossipService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
@@ -415,10 +415,9 @@ impl GossipServiceTestFixture {
     pub(crate) async fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
 
-        tracing::debug!(
+        debug!(
             "Adding peer {:?} to gossip service {:?}",
-            peer,
-            self.gossip_port
+            peer, self.gossip_port
         );
 
         self.peer_list

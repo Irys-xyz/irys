@@ -1,5 +1,5 @@
 [package]
-name = "irys-gossip-service"
+name = "irys-p2p"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,6 +9,7 @@ irys-actors.workspace = true
 irys-types.workspace = true
 irys-primitives.workspace = true
 irys-api-client.workspace = true
+irys-database.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
 tokio = { workspace = true }
@@ -21,15 +22,14 @@ actix.workspace = true
 serde = { workspace = true }
 reth-tasks = { workspace = true }
 base58.workspace = true
-irys-database.workspace = true
 actix-rt.workspace = true
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
-irys-storage.workspace = true
-async-trait = "0.1"
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-client = { workspace = true, features = ["test-utils"] }
+irys-storage.workspace = true
+async-trait = "0.1"
 
 [lints]
 workspace = true

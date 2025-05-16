@@ -2,7 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list_service::{PeerListFacade, ScoreDecreaseReason};
+use crate::peer_list::{PeerListFacade, ScoreDecreaseReason};
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
@@ -22,11 +22,10 @@ use irys_types::{
     UnpackedChunk,
 };
 use std::net::TcpListener;
-use tracing::info;
-use tracing::log::debug;
+use tracing::{debug, error, info};
 
 #[derive(Debug)]
-pub struct GossipServer<M, B, A, R>
+pub(crate) struct GossipServer<M, B, A, R>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
@@ -59,7 +58,7 @@ where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
-    pub const fn new(
+    pub(crate) const fn new(
         gossip_server_data_handler: GossipServerDataHandler<M, B, A, R>,
         peer_list: PeerListFacade<A, R>,
     ) -> Self {
@@ -84,7 +83,7 @@ where
 
         if let Err(error) = server.data_handler.handle_chunk(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
-            tracing::error!("Failed to send chunk: {}", error);
+            error!("Failed to send chunk: {}", error);
             return HttpResponse::InternalServerError().finish();
         }
 
@@ -97,7 +96,7 @@ where
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
         let Some(peer_address) = req.peer_addr() else {
-            tracing::debug!("Failed to get peer address from gossip post request");
+            debug!("Failed to get peer address from gossip post request");
             return Err(HttpResponse::BadRequest().finish());
         };
 
@@ -105,7 +104,7 @@ where
             Ok(maybe_peer) => {
                 if let Some(peer) = maybe_peer {
                     if peer.address.gossip.ip() != peer_address.ip() {
-                        tracing::debug!(
+                        debug!(
                             "Miner address {} request came from ip {}, but the expected ip was {}",
                             miner_address,
                             peer_address.ip(),
@@ -115,12 +114,12 @@ where
                     }
                     Ok(peer)
                 } else {
-                    tracing::debug!("Miner address {} is not allowed", miner_address);
+                    debug!("Miner address {} is not allowed", miner_address);
                     Err(HttpResponse::Forbidden().finish())
                 }
             }
             Err(error) => {
-                tracing::error!("Failed to check if miner is allowed: {}", error);
+                error!("Failed to check if miner is allowed: {}", error);
                 Err(HttpResponse::InternalServerError().finish())
             }
         }
@@ -149,11 +148,9 @@ where
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
-                tracing::error!(
+                error!(
                     "Node {:?}: Failed to process the block {}: {:?}",
-                    this_node_id,
-                    block_hash_string,
-                    error
+                    this_node_id, block_hash_string, error
                 );
                 // return HttpResponse::InternalServerError().finish();
             } else {
@@ -186,11 +183,11 @@ where
 
         if let Err(error) = server.data_handler.handle_transaction(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
-            tracing::error!("Failed to send transaction: {}", error);
+            error!("Failed to send transaction: {}", error);
             return HttpResponse::InternalServerError().finish();
         }
 
-        tracing::debug!("Gossip data handled");
+        debug!("Gossip data handled");
         HttpResponse::Ok().finish()
     }
 
@@ -218,7 +215,7 @@ where
                 .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData)
                 .await
             {
-                tracing::error!("Failed to decrease peer score: {}", error);
+                error!("Failed to decrease peer score: {}", error);
             }
         }
     }
@@ -239,7 +236,7 @@ where
         {
             Ok(has_data) => HttpResponse::Ok().json(has_data),
             Err(error) => {
-                tracing::error!("Failed to handle get data request: {}", error);
+                error!("Failed to handle get data request: {}", error);
                 HttpResponse::InternalServerError().finish()
             }
         }
@@ -250,7 +247,7 @@ where
     /// # Errors
     ///
     /// If the server fails to bind to the specified address and port, an error is returned.
-    pub fn run(self, listener: TcpListener) -> GossipResult<Server> {
+    pub(crate) fn run(self, listener: TcpListener) -> GossipResult<Server> {
         let server = self;
 
         Ok(HttpServer::new(move || {

@@ -2,6 +2,7 @@ use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture
 use core::time::Duration;
 use irys_actors::mempool_service::MempoolFacade;
 use irys_types::{DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore};
+use tracing::debug;
 
 #[actix_web::test]
 async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
@@ -291,7 +292,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
-    tracing::debug!("Added transactions to ledger: {:?}", ledger.tx_ids);
+    debug!("Added transactions to ledger: {:?}", ledger.tx_ids);
     block.data_ledgers.push(ledger);
 
     // Set up the mock API client to return the transactions

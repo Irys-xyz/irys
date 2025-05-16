@@ -18,7 +18,7 @@ members = [
   "xtask",
   "crates/price-oracle",
   "crates/cli",
-  "crates/gossip-service",
+  "crates/p2p",
   "crates/api-client",
   "crates/reward-curve",
 ]
@@ -52,7 +52,7 @@ irys-vdf = { path = "./crates/vdf" }
 irys-reward-curve = { path = "./crates/reward-curve" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
-irys-gossip-service = { path = "./crates/gossip-service" }
+irys-p2p = { path = "./crates/p2p" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"

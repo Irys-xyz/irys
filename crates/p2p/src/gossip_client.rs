@@ -2,15 +2,15 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
+use crate::peer_list::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use actix::{Actor, Context, Handler};
-use base58::ToBase58;
 use core::time::Duration;
 use irys_api_client::ApiClient;
 use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
+use tracing::error;
 
 #[derive(Debug, Clone, Default)]
 pub struct GossipClient {
@@ -39,15 +39,9 @@ impl GossipClient {
     ///
     /// If the peer is offline or the request fails, an error is returned.
     pub async fn send_data(&self, peer: &PeerListItem, data: &GossipData) -> GossipResult<()> {
-        tracing::trace!("CHECKING IF PEER ONLINE: {:?}", peer);
-        Self::check_if_peer_online(peer)?;
+        Self::check_if_peer_is_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
-                tracing::trace!(
-                    "GOSSIP POSTING to {:?} DATA to: {:?}",
-                    format!("http://{}/gossip/chunk", peer.address.gossip),
-                    unpacked_chunk
-                );
                 self.send_data_internal(
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
@@ -55,11 +49,6 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
-                tracing::trace!(
-                    "GOSSIP POSTING to {:?} DATA to: {:?}",
-                    format!("http://{}/gossip/transaction", peer.address.gossip),
-                    irys_transaction_header
-                );
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
@@ -67,12 +56,6 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Block(irys_block_header) => {
-                tracing::debug!(
-                    "GOSSIP POSTING BLOCK {:?} HEIGHT {:?} DATA to {:?}",
-                    irys_block_header.block_hash.0.to_base58(),
-                    irys_block_header.height,
-                    format!("http://{}/gossip/block", peer.address.gossip),
-                );
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
@@ -84,7 +67,7 @@ impl GossipClient {
         Ok(())
     }
 
-    fn check_if_peer_online(peer: &PeerListItem) -> GossipResult<()> {
+    fn check_if_peer_is_online(peer: &PeerListItem) -> GossipResult<()> {
         if !peer.is_online {
             return Err(GossipError::InvalidPeer("Peer is offline".into()));
         }
@@ -119,7 +102,7 @@ impl GossipClient {
     ) -> GossipResult<()>
     where
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-        A: ApiClient + Clone + 'static + Unpin + Default,
+        A: ApiClient,
     {
         let peer_miner_address = peer.0;
         let peer = peer.1;
@@ -132,7 +115,7 @@ impl GossipClient {
                     .increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online)
                     .await
                 {
-                    tracing::error!("Failed to increase peer score: {}", e);
+                    error!("Failed to increase peer score: {}", e);
                 }
                 Ok(())
             }
@@ -142,7 +125,7 @@ impl GossipClient {
                     .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline)
                     .await
                 {
-                    tracing::error!("Failed to decrease peer score: {}", e);
+                    error!("Failed to decrease peer score: {}", e);
                 };
                 Err(error)
             }
