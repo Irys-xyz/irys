@@ -10,7 +10,6 @@ members = [
     "crates/database",
     "crates/debug-utils",
     "crates/efficient-sampling",
-    "crates/gossip-service",
     "crates/macros",
     "crates/p2p",
     "crates/packing",
