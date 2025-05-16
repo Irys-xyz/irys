@@ -186,6 +186,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let mut config = NodeConfig::testnet();
+    let num_blocks_in_epoch = 2;
 
     // Create multiple signers to test different commitment scenarios
     let signer1 = IrysSigner::random_signer(&config.consensus_config());
@@ -193,7 +194,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     config
         .consensus
-        .set_num_blocks_in_epoch(2)
+        .set_num_blocks_in_epoch(num_blocks_in_epoch)
         .fund_genesis_signers(vec![&signer1, &signer2]);
 
     let genesis_signer = config.miner_address();
