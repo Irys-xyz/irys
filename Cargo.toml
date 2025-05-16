@@ -2,25 +2,26 @@
 exclude = ["ext/"]
 members = [
     "crates/actors",
+    "crates/api-client",
     "crates/c",
     "crates/chain",
+    "crates/cli",
+    "crates/config",
+    "crates/database",
+    "crates/debug-utils",
+    "crates/efficient-sampling",
+    "crates/gossip-service",
+    "crates/macros",
+    "crates/p2p",
+    "crates/packing",
+    "crates/price-oracle",
     "crates/primitives",
     "crates/reth-node-bridge",
-    "crates/types",
-    "crates/packing",
-    "crates/database",
+    "crates/reward-curve",
     "crates/storage",
     "crates/testing-utils",
-    "crates/config",
-    "crates/efficient-sampling",
-    "crates/macros",
-    "crates/debug-utils",
+    "crates/types",
     "xtask",
-    "crates/price-oracle",
-    "crates/cli",
-    "crates/gossip-service",
-    "crates/api-client",
-    "crates/reward-curve",
 ]
 resolver = "2"
 
@@ -52,7 +53,7 @@ irys-vdf = { path = "./crates/vdf" }
 irys-reward-curve = { path = "./crates/reward-curve" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
-irys-gossip-service = { path = "./crates/gossip-service" }
+irys-p2p = { path = "./crates/p2p" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"

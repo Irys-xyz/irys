@@ -4129,7 +4129,7 @@ dependencies = [
  "eyre",
  "irys-actors",
  "irys-database",
- "irys-gossip-service",
+ "irys-p2p",
  "irys-reth-node-bridge",
  "irys-storage",
  "irys-testing-utils",
@@ -4190,7 +4190,7 @@ dependencies = [
  "irys-api-server",
  "irys-config",
  "irys-database",
- "irys-gossip-service",
+ "irys-p2p",
  "irys-packing",
  "irys-price-oracle",
  "irys-reth-node-bridge",
@@ -4294,7 +4294,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "irys-gossip-service"
+name = "irys-macros"
+version = "0.1.0"
+dependencies = [
+ "derive-syn-parse",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+ "toml",
+]
+
+[[package]]
+name = "irys-p2p"
 version = "0.1.0"
 dependencies = [
  "actix",
@@ -4317,17 +4328,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "irys-macros"
-version = "0.1.0"
-dependencies = [
- "derive-syn-parse",
- "proc-macro2",
- "quote",
- "syn 2.0.90",
- "toml",
 ]
 
 [[package]]

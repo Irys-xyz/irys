@@ -8,6 +8,7 @@ use actix_web::dev::Server;
 use base58::ToBase58;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
+    block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
@@ -18,6 +19,7 @@ use irys_actors::{
     ema_service::{EmaService, EmaServiceMessage},
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
+    mempool_service::MempoolServiceFacadeImpl,
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingConfig, PackingRequest},
     reth_service::{
@@ -37,7 +39,10 @@ use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
-use irys_gossip_service::ServiceHandleWithShutdownSignal;
+use irys_p2p::{
+    GossipService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal,
+    SyncState,
+};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::node::RethNode;
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
@@ -61,6 +66,7 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::Database as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     net::TcpListener,
     sync::atomic::AtomicU64,
@@ -140,13 +146,6 @@ impl IrysNodeCtx {
         self.config.node_config.http.bind_port
     }
 }
-
-use irys_actors::block_discovery::BlockDiscoveryFacadeImpl;
-use irys_actors::mempool_service::MempoolServiceFacadeImpl;
-use irys_gossip_service::peer_list_service::PeerListService;
-use irys_gossip_service::peer_list_service::PeerListServiceFacade;
-use irys_gossip_service::service::SyncState;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 // Shared stop guard that can be cloned
 #[derive(Debug)]
@@ -817,8 +816,7 @@ impl IrysNode {
             .send(GetCommitmentStateGuardMessage)
             .await?;
 
-        let (gossip_service, gossip_tx) =
-            irys_gossip_service::GossipService::new(config.node_config.miner_address());
+        let (gossip_service, gossip_tx) = GossipService::new(config.node_config.miner_address());
         let sync_state = gossip_service.sync_state.clone();
 
         // start the block tree service
