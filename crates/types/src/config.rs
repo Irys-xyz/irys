@@ -6,7 +6,7 @@ use crate::{
     },
     PeerAddress, RethPeerInfo,
 };
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use reth_chainspec::Chain;
 use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, Genesis, GenesisAccount};
 use rust_decimal::Decimal;
@@ -259,8 +259,26 @@ impl ConsensusOptions {
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
     }
 
-    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) {
+    pub fn fund_genesis_signers<'a>(
+        &mut self,
+        signers: impl IntoIterator<Item = &'a IrysSigner>,
+    ) -> &mut Self {
+        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
+        for signer in signers {
+            accounts.push((
+                signer.address(),
+                GenesisAccount {
+                    balance: U256::from(690000000000000000_u128),
+                    ..Default::default()
+                },
+            ))
+        }
+        self.extend_genesis_accounts(accounts);
+        self
+    }
+    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) -> &mut Self {
         self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
+        self
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
