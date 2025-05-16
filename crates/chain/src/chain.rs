@@ -608,8 +608,10 @@ impl IrysNode {
                         let block_index = Arc::new(RwLock::new(block_index));
                         let block_index_service_actor = Self::init_block_index_service(&config, &block_index);
 
+                       
+
                         // start the rest of the services
-                        let (irys_node, actix_server, vdf_thread, arbiters, reth_node, gossip_service_handle) = Self::init_services(
+                        let (irys_node, actix_server, vdf_thread, reth_node, gossip_service_handle) = Self::init_services(
                                 &config,
                                 reth_shutdown_sender,
                                 vdf_shutdown_receiver,
@@ -625,6 +627,8 @@ impl IrysNode {
                             )
                             .await
                             .expect("initializing services should not fail");
+                    
+                        let arbiters_guard = irys_node.arbiters.clone();
                         irys_node_ctx_tx
                             .send(irys_node)
                             .expect("irys node ctx sender should not be dropped. Is the reth node thread down?");
@@ -650,8 +654,9 @@ impl IrysNode {
                         }
 
                         debug!("Stopping actors");
-                        for arbiter in arbiters {
-                            arbiter.stop_and_join();
+                        let arbiters = arbiters_guard.read().unwrap();
+                        for arbiter in arbiters.iter() {
+                            arbiter.clone().stop_and_join();
                         }
                         debug!("Actors stopped");
 
@@ -749,7 +754,6 @@ impl IrysNode {
         IrysNodeCtx,
         Server,
         JoinHandle<()>,
-        Vec<ArbiterHandle>,
         RethNodeProvider,
         ServiceHandleWithShutdownSignal,
     )> {
@@ -1033,41 +1037,43 @@ impl IrysNode {
             &config,
         );
 
-        let mut service_arbiters = Vec::new();
-        service_arbiters.push(ArbiterHandle::new(
+        let mut arbiters_guard = irys_node_ctx.arbiters.write().unwrap();
+
+        arbiters_guard.push(ArbiterHandle::new(
             block_producer_arbiter,
             "block_producer_arbiter".to_string(),
         ));
-        service_arbiters.push(ArbiterHandle::new(
+        arbiters_guard.push(ArbiterHandle::new(
             broadcast_arbiter,
             "broadcast_arbiter".to_string(),
         ));
-        service_arbiters.push(ArbiterHandle::new(
+        arbiters_guard.push(ArbiterHandle::new(
             block_discovery_arbiter,
             "block_discovery_arbiter".to_string(),
         ));
-        service_arbiters.push(ArbiterHandle::new(
+        arbiters_guard.push(ArbiterHandle::new(
             validation_arbiter,
             "validation_arbiter".to_string(),
         ));
-        service_arbiters.push(ArbiterHandle::new(
+        arbiters_guard.push(ArbiterHandle::new(
             block_tree_arbiter,
             "block_tree_arbiter".to_string(),
         ));
-        service_arbiters.push(ArbiterHandle::new(
+        arbiters_guard.push(ArbiterHandle::new(
             peer_list_arbiter,
             "peer_list_arbiter".to_string(),
         ));
-        service_arbiters.push(ArbiterHandle::new(
+        arbiters_guard.push(ArbiterHandle::new(
             mempool_arbiter,
             "mempool_arbiter".to_string(),
         ));
-        service_arbiters.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
-        service_arbiters.extend(
+        arbiters_guard.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
+        arbiters_guard.extend(
             part_arbiters
                 .into_iter()
                 .map(|x| ArbiterHandle::new(x, "partition_arbiter".to_string())),
         );
+        drop(arbiters_guard);
 
         let server = run_server(
             ApiState {
@@ -1103,7 +1109,6 @@ impl IrysNode {
             irys_node_ctx,
             server,
             vdf_thread_handler,
-            service_arbiters,
             reth_node,
             gossip_service_handle,
         ))
