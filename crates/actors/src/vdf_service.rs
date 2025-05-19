@@ -542,8 +542,8 @@ mod tests {
     use super::*;
 
     #[actix_rt::test]
-    /// Tests vdf dequeue populates via FIFO and shows steps being dropped.
-    async fn test_vdf() {
+    /// Tests vdf deque populates via FIFO and shows steps being dropped from the deque
+    async fn test_vdf_fifo_steps_deque() {
         let mut node_config = NodeConfig::testnet();
         // set queue to length 4 with 8/2 occurring within the vdf spawn
         node_config.consensus.get_mut().num_chunks_in_partition = 8;
