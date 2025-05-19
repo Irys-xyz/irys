@@ -604,12 +604,20 @@ mod tests {
     use super::*;
 
     #[actix_rt::test]
+    /// Tests vdf dequeue populates via FIFO and shows steps being dropped.
     async fn test_vdf() {
         let mut node_config = NodeConfig::testnet();
-        // set queue to length 4 with 40/10 occurring within the vdf spawn
-        node_config.consensus.get_mut().num_chunks_in_partition = 40;
-        node_config.consensus.get_mut().num_chunks_in_recall_range = 10;
+        // set queue to length 4 with 8/2 occurring within the vdf spawn
+        node_config.consensus.get_mut().num_chunks_in_partition = 8;
+        node_config.consensus.get_mut().num_chunks_in_recall_range = 2;
+        // set queue to length 4 so old steps are discarded FIFO
+        node_config
+            .consensus
+            .get_mut()
+            .vdf
+            .max_allowed_vdf_fork_steps = 4;
         let testnet_config: Config = node_config.into();
+
         // start service senders/receivers
         let (tx, _vdf_service_handle, _task_manager, _task_executor) =
             mocked_vdf_service(&testnet_config).await;
@@ -637,7 +645,6 @@ mod tests {
         let steps = state.read().seeds.iter().cloned().collect::<Vec<_>>();
 
         // Should only contain last 4 seeds
-        // FIXME - this will never be the case because of the calc_capacity() always overwriting with 10k
         assert_eq!(steps.len(), 4);
 
         // Check last 4 seeds are stored
