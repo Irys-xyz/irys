@@ -1,5 +1,6 @@
 use futures::future::Either;
 use irys_database::block_header_by_hash;
+use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
     U256,
@@ -353,21 +354,22 @@ fn create_state(
     }
 }
 
-/// return the larger of MINIMUM_CAPACITY or number of seeds required for (chunks in partition / chunks in recall range)
-/// (chunks in partition / chunks in recall range) ensures the capacity of VecDeqeue is large enough for the partition.
-/// A MINIMUM_CAPACITY of 60k allows for forks. VDF capacity limits the depth at which a fork can happen. If the fork happens out of the VDF range, the node cannot validate it.
+/// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()
+/// num_recall_ranges_in_partition() ensures the capacity of VecDeqeue is large enough for the partition.
+/// max_allowed_vdf_fork_steps of 60k allows for forks. VDF capacity limits the depth at which a fork can happen. If the fork happens out of the VDF range, the node cannot validate it.
 fn calc_capacity(config: &Config) -> usize {
-    const MINIMUM_CAPACITY: u64 = 60_000; // 60_000 is enough for approximately 1_000 minute forks.
-    let capacity_from_config: u64 =
-        config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range;
-    let capacity = if capacity_from_config < MINIMUM_CAPACITY {
+    let capacity_from_config: u64 = num_recall_ranges_in_partition(&config.consensus);
+
+    let max_allowed_vdf_fork_steps = config.consensus.vdf.max_allowed_vdf_fork_steps;
+
+    let capacity = if capacity_from_config < max_allowed_vdf_fork_steps {
         warn!(
             "capacity in config: {} set too low. Overridden with {}",
-            capacity_from_config, MINIMUM_CAPACITY
+            capacity_from_config, max_allowed_vdf_fork_steps
         );
-        MINIMUM_CAPACITY
+        max_allowed_vdf_fork_steps
     } else {
-        std::cmp::max(MINIMUM_CAPACITY, capacity_from_config)
+        capacity_from_config
     };
 
     capacity.try_into().expect("expected u64 to cast to u32")
