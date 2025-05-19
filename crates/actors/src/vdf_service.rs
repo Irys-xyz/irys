@@ -150,7 +150,6 @@ pub enum VdfServiceMessage {
 
 #[derive(Debug)]
 struct Inner {
-    block_index_read_guard: BlockIndexReadGuard,
     vdf_state: AtomicVdfState,
 }
 
@@ -188,7 +187,6 @@ impl VdfService {
                 shutdown,
                 msg_rx: rx,
                 inner: Inner {
-                    block_index_read_guard,
                     vdf_state: Arc::new(RwLock::new(vdf_state)),
                 },
             };
