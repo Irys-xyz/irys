@@ -135,10 +135,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
 
-    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-    node.node_ctx
-        .actor_addresses
-        .start_mining(vdf_mining_state_sender)?;
+    node.node_ctx.start_mining().await?;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {

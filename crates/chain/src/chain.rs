@@ -19,7 +19,7 @@ use irys_actors::{
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
     mempool_service::MempoolServiceFacadeImpl,
-    mining::PartitionMiningActor,
+    mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingConfig, PackingRequest},
     reth_service::{
         BlockHashType, ForkChoiceUpdateMessage, GetPeeringInfoMessage, RethServiceActor,
@@ -124,9 +124,7 @@ impl IrysNodeCtx {
     }
 
     pub async fn stop(self) {
-        let _ = self
-            .actor_addresses
-            .stop_mining(self.vdf_mining_state_sender);
+        let _ = self.stop_mining();
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
@@ -135,15 +133,33 @@ impl IrysNodeCtx {
         self.stop_guard.mark_stopped();
     }
 
-    pub fn start_mining(&self) -> eyre::Result<()> {
-        // start processing new blocks
-        self.actor_addresses
-            .start_mining(self.vdf_mining_state_sender.clone())?;
-        Ok(())
-    }
-
     pub fn get_http_port(&self) -> u16 {
         self.config.node_config.http.bind_port
+    }
+
+    /// Send a message to all known partition actors to ignore any received VDF steps
+    pub async fn stop_mining(&self) -> eyre::Result<()> {
+        // pause VDF thread mining
+        if let Err(e) = self.vdf_mining_state_sender.send(false).await {
+            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
+        }
+
+        self.set_mining(false)
+    }
+    /// Send a message to all known partition actors to begin mining when they receive a VDF step
+    pub async fn start_mining(&self) -> eyre::Result<()> {
+        // start VDF thread mining
+        if let Err(e) = self.vdf_mining_state_sender.send(true).await {
+            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
+        }
+        self.set_mining(true)
+    }
+    /// Send a custom control message to all known partition actors
+    pub fn set_mining(&self, should_mine: bool) -> eyre::Result<()> {
+        for part in &self.actor_addresses.partitions {
+            part.try_send(MiningControl(should_mine))?;
+        }
+        Ok(())
     }
 }
 

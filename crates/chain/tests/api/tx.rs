@@ -35,11 +35,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     )
     .await?;
 
-    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-    node.node_ctx
-        .actor_addresses
-        .start_mining(vdf_mining_state_sender)
-        .unwrap();
+    node.node_ctx.start_mining().await.unwrap();
     let db = node.node_ctx.db.clone();
 
     let storage_tx = IrysTransactionHeader {

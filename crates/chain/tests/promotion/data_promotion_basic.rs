@@ -47,11 +47,7 @@ async fn heavy_data_promotion_test() {
     .await
     .unwrap();
 
-    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-    node.node_ctx
-        .actor_addresses
-        .start_mining(vdf_mining_state_sender)
-        .unwrap();
+    node.node_ctx.start_mining().await.unwrap();
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {

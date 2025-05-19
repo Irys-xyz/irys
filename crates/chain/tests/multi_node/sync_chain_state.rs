@@ -346,12 +346,10 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // this does not directly contribute to the test but does reduce resource usage during test run
     ctx_peer1_node
         .node_ctx
-        .actor_addresses
         .set_mining(false)
         .expect("expect setting mining false on peer1");
     ctx_peer2_node
         .node_ctx
-        .actor_addresses
         .set_mining(false)
         .expect("expect setting mining false on peer2");
 

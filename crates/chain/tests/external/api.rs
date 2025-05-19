@@ -59,10 +59,7 @@ async fn external_api() -> eyre::Result<()> {
     ]);
     let node = node.start().await;
 
-    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-    node.node_ctx
-        .actor_addresses
-        .stop_mining(vdf_mining_state_sender)?;
+    node.node_ctx.stop_mining().await?;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

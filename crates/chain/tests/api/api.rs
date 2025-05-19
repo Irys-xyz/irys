@@ -57,11 +57,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     // FIXME: The node startup already spins up an internal actix-web API service.
     // Is there any reason for spawning another one here?
-    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-    node.node_ctx
-        .actor_addresses
-        .start_mining(vdf_mining_state_sender)
-        .unwrap();
+    node.node_ctx.start_mining().await.unwrap();
 
     let app_state = ApiState {
         ema_service: ema_tx,

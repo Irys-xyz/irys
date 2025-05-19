@@ -308,24 +308,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         .expect("for packing to complete in the wait period");
     }
 
-    pub fn start_mining(&self, vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>) {
-        if self
-            .node_ctx
-            .actor_addresses
-            .start_mining(vdf_mining_state_sender)
-            .is_err()
-        {
+    pub async fn start_mining(&self) {
+        if self.node_ctx.start_mining().await.is_err() {
             panic!("Expected to start mining")
         }
     }
 
-    pub fn stop_mining(&self, vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>) {
-        if self
-            .node_ctx
-            .actor_addresses
-            .stop_mining(vdf_mining_state_sender)
-            .is_err()
-        {
+    pub async fn stop_mining(&self) {
+        if self.node_ctx.stop_mining().await.is_err() {
             panic!("Expected to stop mining")
         }
     }
@@ -402,14 +392,14 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
-        self.node_ctx.actor_addresses.set_mining(true)?;
+        self.node_ctx.set_mining(true)?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
-        self.node_ctx.actor_addresses.set_mining(false)
+        self.node_ctx.set_mining(false)
     }
 
     pub async fn create_submit_data_tx(
