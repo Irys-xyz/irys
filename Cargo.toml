@@ -20,7 +20,7 @@ members = [
   "crates/cli",
   "crates/p2p",
   "crates/api-client",
-  "crates/reward-curve",
+  "crates/reward-curve", "crates/irys-reth",
 ]
 resolver = "2"
 
