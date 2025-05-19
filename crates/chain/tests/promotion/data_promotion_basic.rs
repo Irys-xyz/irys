@@ -38,10 +38,7 @@ async fn heavy_data_promotion_test() {
             ..Default::default()
         },
     )]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),

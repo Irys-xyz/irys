@@ -55,6 +55,13 @@ impl GossipClient {
                 )
                 .await?;
             }
+            GossipData::CommitmentTransaction(commitment_tx) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/commitment_tx", peer.address.gossip),
+                    commitment_tx,
+                )
+                .await?;
+            }
             GossipData::Block(irys_block_header) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),

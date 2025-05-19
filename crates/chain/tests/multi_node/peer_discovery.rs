@@ -40,7 +40,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             ..Default::default()
         },
     )]);
-    let node = IrysNodeTest::new_genesis(config.clone()).await;
+    let node = IrysNodeTest::new_genesis(config.clone());
     let node = node.start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),

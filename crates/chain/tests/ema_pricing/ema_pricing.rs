@@ -14,8 +14,7 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
-    let ctx = IrysNodeTest::new_genesis(config).await;
-    let ctx = ctx.start().await;
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
 
     // action
     // we start at 1 because the genesis block is already mined
@@ -55,8 +54,7 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
     //start node with modified config
-    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
-
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
     // (oracle price, EMA price)
     let mut registered_prices = vec![(
         ctx.node_ctx.config.consensus.genesis_price,
@@ -112,7 +110,7 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         smoothing_interval: 10,
     };
 
-    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
 
     // mine 3 blocks
     let (header_1, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();

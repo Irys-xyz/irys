@@ -47,10 +47,7 @@ async fn heavy_test_mine_tx() {
             ..Default::default()
         },
     )]);
-    let irys_node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let irys_node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     let height = irys_node.get_height().await;
     let data = "Hello, world!".as_bytes().to_vec();

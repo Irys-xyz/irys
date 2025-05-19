@@ -259,28 +259,6 @@ impl ConsensusOptions {
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
     }
 
-    pub fn fund_genesis_signers<'a>(
-        &mut self,
-        signers: impl IntoIterator<Item = &'a IrysSigner>,
-    ) -> &mut Self {
-        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
-        for signer in signers {
-            accounts.push((
-                signer.address(),
-                GenesisAccount {
-                    balance: U256::from(690000000000000000_u128),
-                    ..Default::default()
-                },
-            ))
-        }
-        self.extend_genesis_accounts(accounts);
-        self
-    }
-    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) -> &mut Self {
-        self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
-        self
-    }
-
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
         let Self::Custom(config) = self else {
             panic!("only support mutating custom configs");
@@ -457,7 +435,7 @@ pub struct HttpConfig {
     pub public_port: u16,
     /// The IP address the HTTP service binds to
     pub bind_ip: String,
-    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
+    /// The port that the Node's HTTP server should listen on. Set to 0 for randomization.
     pub bind_port: u16,
 }
 
@@ -606,18 +584,45 @@ impl NodeConfig {
         Address::from_private_key(&self.mining_key)
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn testnet() -> Self {
-        use alloy_signer::utils::secret_key_to_address;
-        use k256::ecdsa::SigningKey;
-        use rust_decimal_macros::dec;
+    pub fn new_random_signer(&self) -> IrysSigner {
+        IrysSigner::random_signer(&self.consensus_config())
+    }
 
-        let mining_key = SigningKey::from_slice(
-            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                .expect("valid hex"),
-        )
-        .expect("valid key");
-        let reward_address = secret_key_to_address(&mining_key);
+    pub fn signer(&self) -> IrysSigner {
+        IrysSigner {
+            signer: self.mining_key.clone(),
+            chain_id: self.consensus_config().chain_id,
+            chunk_size: self.consensus_config().chunk_size,
+        }
+    }
+
+    pub fn api_uri(&self) -> String {
+        format!("http://{}:{}", self.http.public_ip, self.http.public_port)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fund_genesis_accounts<'a>(
+        &mut self,
+        signers: impl IntoIterator<Item = &'a IrysSigner>,
+    ) -> &mut Self {
+        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
+        for signer in signers {
+            accounts.push((
+                signer.address(),
+                GenesisAccount {
+                    balance: U256::from(690000000000000000_u128),
+                    ..Default::default()
+                },
+            ))
+        }
+        self.consensus.extend_genesis_accounts(accounts);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_signer(signer: &IrysSigner) -> Self {
+        let mining_key = signer.signer.clone();
+        let reward_address = signer.address();
         Self {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
@@ -663,6 +668,30 @@ impl NodeConfig {
             },
             reth_peer_info: RethPeerInfo::default(),
         }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_epochs(num_blocks_in_epoch: usize) -> Self {
+        let mut node_config = Self::testnet();
+        node_config.consensus.get_mut().epoch.num_blocks_in_epoch = num_blocks_in_epoch as u64;
+        node_config
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet() -> Self {
+        use k256::ecdsa::SigningKey;
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let signer = IrysSigner {
+            signer: mining_key,
+            chain_id: 0,
+            chunk_size: 0,
+        };
+
+        Self::testnet_with_signer(&signer)
     }
 
     /// get the storage module directory path

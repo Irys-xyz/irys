@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [features]
 nvidia = ["irys-actors/nvidia"]
+test-utils = []
 
 [dependencies]
 # Irys

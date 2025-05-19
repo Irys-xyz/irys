@@ -40,10 +40,7 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     let signer: PrivateKeySigner = node.cfg.mining_key.clone().into();
 
