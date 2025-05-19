@@ -868,7 +868,8 @@ impl IrysNode {
         // Spawn VDF service
         let _handle = VdfService::spawn_service(
             &task_exec,
-            block_tree_guard.clone(),
+            irys_db.clone(),
+            block_index_guard.clone(),
             receivers.vdf,
             vdf_mining_state_sender.clone(),
             &config,
