@@ -857,8 +857,10 @@ mod tests {
 
         [vdf]
         reset_frequency = 1200
+        max_allowed_vdf_fork_steps = 60000
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25
+
         sha_1s_difficulty = 7000
 
         [block_reward_config]
