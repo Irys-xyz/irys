@@ -53,12 +53,10 @@ use irys_storage::{
     ChunkProvider, ChunkType, StorageModule,
 };
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, Config,
-    GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, H256,
-    U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
+    CommitmentTransaction, Config, GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, H256, U256,
 };
-use irys_types::{ArbiterHandle, CloneableJoinHandle, U256};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
