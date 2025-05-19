@@ -47,7 +47,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = IrysNodeTest::new_genesis(config).await.start().await;
+    let node = IrysNodeTest::new_genesis(config).start().await;
 
     assert_eq!(
         node.node_ctx.config.node_config.miner_address(),

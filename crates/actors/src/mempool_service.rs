@@ -92,10 +92,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
     async fn handle_commitment_transaction(
         &self,
-        tx_header: CommitmentTransaction,
+        commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         self.service
-            .send(CommitmentTxIngressMessage(tx_header))
+            .send(CommitmentTxIngressMessage(commitment_tx))
             .await?
     }
 
@@ -304,6 +304,10 @@ impl MempoolService {
 
         // Reject unsupported commitment types
         if matches!(cache_status, CommitmentStatus::Unsupported) {
+            warn!(
+                "Commitment is unsupported: {}",
+                commitment_tx.id.0.to_base58()
+            );
             return false;
         }
 
@@ -312,6 +316,10 @@ impl MempoolService {
             // Get pending transactions for this address
             let pending = self.valid_commitment_tx.get(&commitment_tx.signer);
             if pending.is_none() {
+                warn!(
+                    "Pledge Commitment is unstaked: {}",
+                    commitment_tx.id.0.to_base58()
+                );
                 return false;
             }
 
@@ -608,6 +616,16 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
                 .push(commitment_tx.clone());
 
             self.recent_valid_tx.insert(commitment_tx.id);
+
+            // Gossip transaction
+            let gossip_sender = self.gossip_tx.clone();
+            let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
+
+            let _ = tokio::task::spawn(async move {
+                if let Err(error) = gossip_sender.send(gossip_data).await {
+                    tracing::error!("Failed to send gossip data: {:?}", error);
+                }
+            });
 
             Ok(())
         } else {

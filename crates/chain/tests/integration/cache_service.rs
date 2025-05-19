@@ -39,7 +39,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config).await;
+    let node = IrysNodeTest::new_genesis(config);
     let node = node.start().await;
 
     wait_for_packing(

@@ -4485,6 +4485,7 @@ name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
