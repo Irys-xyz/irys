@@ -217,7 +217,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config).await.start().await;
+    let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
     let recipient_init_balance = reth_context
         .rpc

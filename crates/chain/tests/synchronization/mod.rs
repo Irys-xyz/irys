@@ -34,10 +34,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),

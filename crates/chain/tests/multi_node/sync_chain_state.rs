@@ -651,6 +651,8 @@ fn init_configs() -> (
     let http_port_peer2 = get_available_port();
     let gossip_port_peer2 = get_available_port();
 
+    info!("Ports:\n genesis:http = {}\n genesis:gossip = {}\n peer1:http = {}\n peer1:gossip = {}\n peer2:http = {}\n peer2:gossip = {}", http_port_genesis, gossip_port_genesis, http_port_peer1, gossip_port_peer1, http_port_peer2, gossip_port_peer2);
+
     let mut testnet_config_genesis = NodeConfig {
         http: HttpConfig {
             public_ip: "127.0.0.1".to_string(),
@@ -789,7 +791,7 @@ async fn start_genesis_node(
     account: &IrysSigner, // account with balance at genesis
 ) -> IrysNodeTest<IrysNodeCtx> {
     // init genesis node
-    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone()).await;
+    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone());
     // add accounts with balances to genesis node
     add_account_to_config(&mut genesis_node.cfg, &account);
     // start genesis node
@@ -803,10 +805,10 @@ async fn start_peer_nodes(
     testnet_config_peer2: &Config,
     account: &IrysSigner, // account with balance at genesis
 ) -> (IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>) {
-    let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone()).await;
+    let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone());
     add_account_to_config(&mut peer1_node.cfg, &account);
     let ctx_peer1_node = peer1_node.start().await;
-    let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone()).await;
+    let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone());
     add_account_to_config(&mut peer2_node.cfg, &account);
     let ctx_peer2_node = peer2_node.start().await;
     (ctx_peer1_node, ctx_peer2_node)

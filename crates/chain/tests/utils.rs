@@ -1,10 +1,14 @@
 use actix::MailboxError;
+use actix_web::middleware::Logger;
+use actix_web::App;
+use base58::ToBase58;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_tree_service::get_canonical_chain;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_actors::packing::wait_for_packing;
 use irys_actors::{block_validation, SetTestBlocksRemainingMessage};
-use irys_api_server::create_listener;
+use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
@@ -16,17 +20,20 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
-use irys_types::{Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset};
+use irys_types::{
+    CommitmentTransaction, Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
+use reth_primitives::irys_primitives::CommitmentType;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{debug, info};
 
 use std::collections::HashMap;
 
@@ -163,25 +170,26 @@ pub struct IrysNodeTest<T = ()> {
 impl IrysNodeTest<()> {
     pub async fn default_async() -> Self {
         let config = NodeConfig::testnet();
-        Self::new_genesis(config).await
+        Self::new_genesis(config)
     }
 
     /// Start a new test node in peer-sync mode
-    pub async fn new(mut config: NodeConfig) -> Self {
+    pub fn new(mut config: NodeConfig) -> Self {
+        debug!("{:#?}", config.http);
         config.mode = NodeMode::PeerSync;
-        Self::new_inner(config).await
+        Self::new_inner(config)
     }
 
     /// Start a new test node in genesis mode
-    pub async fn new_genesis(mut config: NodeConfig) -> Self {
+    pub fn new_genesis(mut config: NodeConfig) -> Self {
         config.mode = NodeMode::Genesis;
-        Self::new_inner(config).await
+        Self::new_inner(config)
     }
 
-    async fn new_inner(mut config: NodeConfig) -> Self {
+    fn new_inner(mut config: NodeConfig) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-
+        debug!("{:#?}", config.http);
         Self {
             cfg: config,
             temp_dir,
@@ -190,6 +198,7 @@ impl IrysNodeTest<()> {
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
+        debug!("{:#?}", self.cfg.http);
         let node = IrysNode::new(self.cfg.clone()).await.unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
@@ -198,9 +207,72 @@ impl IrysNodeTest<()> {
             temp_dir: self.temp_dir,
         }
     }
+
+    pub async fn start_and_wait_for_packing(
+        self,
+        seconds_to_wait: u64,
+    ) -> IrysNodeTest<IrysNodeCtx> {
+        let node = self.start().await;
+        node.wait_for_packing(seconds_to_wait).await;
+        node
+    }
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_peer(&self) -> NodeConfig {
+        let node_config = &self.node_ctx.config.node_config;
+        let peer_signer = IrysSigner::random_signer(&node_config.consensus_config());
+        self.testnet_peer_with_signer(&peer_signer)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
+        use irys_types::{PeerAddress, RethPeerInfo};
+        use tracing::debug;
+
+        let node_config = &self.node_ctx.config.node_config;
+
+        if node_config.mode == NodeMode::PeerSync {
+            panic!("Can only create a peer from a genesis config");
+        }
+
+        // Initialize the peer with a random signer, copying the genesis config
+
+        let mut peer_config = node_config.clone();
+        peer_config.mining_key = peer_signer.signer.clone();
+        peer_config.reward_address = peer_signer.address();
+
+        // Make sure this peer does port randomization instead of copying the genesis ports
+        peer_config.http.bind_port = 0;
+        peer_config.http.public_port = 0;
+        peer_config.gossip.bind_port = 0;
+        peer_config.gossip.public_port = 0;
+
+        // Make sure to mark this config as a peer
+        peer_config.mode = NodeMode::PeerSync;
+
+        // Add the genesis node details as a trusted peer
+        peer_config.trusted_peers = vec![
+            (PeerAddress {
+                api: format!(
+                    "{}:{}",
+                    node_config.http.public_ip, node_config.http.public_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                gossip: format!(
+                    "{}:{}",
+                    node_config.http.bind_ip, node_config.http.bind_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                execution: RethPeerInfo::default(),
+            }),
+        ];
+        debug!("{:#?}", peer_config);
+        peer_config
+    }
     pub async fn wait_until_height_on_chain(
         &self,
         target_height: u64,
@@ -226,6 +298,40 @@ impl IrysNodeTest<IrysNodeCtx> {
             );
             Ok(())
         }
+    }
+
+    pub async fn wait_for_packing(&self, seconds_to_wait: u64) {
+        wait_for_packing(
+            self.node_ctx.actor_addresses.packing.clone(),
+            Some(Duration::from_secs(seconds_to_wait)),
+        )
+        .await
+        .expect("for packing to complete in the wait period");
+    }
+
+    pub fn start_mining(&self) {
+        if self.node_ctx.actor_addresses.start_mining().is_err() {
+            panic!("Expected to start mining")
+        }
+    }
+
+    pub fn stop_mining(&self) {
+        if self.node_ctx.actor_addresses.stop_mining().is_err() {
+            panic!("Expected to stop mining")
+        }
+    }
+
+    pub async fn start_public_api(&self) {
+        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+        let api_state = self.node_ctx.get_api_state(ema_tx);
+
+        let _app = actix_web::test::init_service(
+            App::new()
+                .wrap(Logger::default())
+                .app_data(actix_web::web::Data::new(api_state))
+                .service(routes()),
+        )
+        .await;
     }
 
     pub async fn wait_until_height(
@@ -412,6 +518,79 @@ impl IrysNodeTest<IrysNodeCtx> {
             node_ctx: (),
             cfg,
             temp_dir: self.temp_dir,
+        }
+    }
+
+    pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
+        let pledge_tx = CommitmentTransaction {
+            commitment_type: CommitmentType::Pledge,
+            anchor,
+            fee: 1,
+            ..Default::default()
+        };
+        let signer = self.cfg.signer();
+        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+
+        // Submit pledge commitment via API
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        self.post_commitment_tx_request(&api_uri, &pledge_tx).await;
+
+        pledge_tx
+    }
+
+    pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
+        let stake_tx = CommitmentTransaction {
+            commitment_type: CommitmentType::Stake,
+            // TODO: real staking amounts
+            fee: 1,
+            anchor,
+            ..Default::default()
+        };
+
+        let signer = self.cfg.signer();
+        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
+
+        // Submit stake commitment via public API
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        self.post_commitment_tx_request(&api_uri, &stake_tx).await;
+
+        stake_tx
+    }
+
+    async fn post_commitment_tx_request(
+        &self,
+        api_uri: &str,
+        commitment_tx: &CommitmentTransaction,
+    ) {
+        info!("Posting Commitment TX: {}", commitment_tx.id.0.to_base58());
+
+        let client = awc::Client::default();
+        let url = format!("{}/v1/commitment_tx", api_uri);
+        let mut response = client
+            .post(url)
+            .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        if response.status() != StatusCode::OK {
+            // Read the response body
+            let body_bytes = response.body().await.expect("Failed to read response body");
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            panic!(
+                "Response status: {} - {}\nRequest Body: {}",
+                response.status(),
+                body_str,
+                serde_json::to_string_pretty(&commitment_tx).unwrap(),
+            );
+        } else {
+            info!(
+                "Response status: {}\n{}",
+                response.status(),
+                serde_json::to_string_pretty(&commitment_tx).unwrap()
+            );
         }
     }
 }

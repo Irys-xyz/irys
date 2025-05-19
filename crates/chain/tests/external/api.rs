@@ -32,7 +32,7 @@ async fn external_api() -> eyre::Result<()> {
     testnet_config.http.bind_port = 8080; // external test, should never be run concurrently
 
     let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
     let main_address = node.cfg.miner_address();
     node.cfg.consensus.extend_genesis_accounts(vec![
         (
