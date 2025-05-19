@@ -24,6 +24,8 @@ use std::{
 use tracing::{debug, error, trace, warn};
 
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
+use crate::services::ServiceSenders;
+use crate::StorageModuleServiceMessage;
 
 use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
 
@@ -40,6 +42,10 @@ pub struct EpochServiceActor {
     pub all_active_partitions: Vec<PartitionHash>,
     /// List of partition hashes not yet assigned to a mining address
     pub unassigned_partitions: Vec<PartitionHash>,
+    /// Reference to mpsc service channels
+    pub service_senders: ServiceSenders,
+    /// Submodules config
+    pub storage_submodules_config: StorageSubmodulesConfig,
     /// Current partition & ledger parameters
     pub config: Config,
     /// Computed commitment state
@@ -65,13 +71,19 @@ pub enum EpochServiceError {
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(config: &Config) -> Self {
+    pub fn new(
+        service_senders: &ServiceSenders,
+        storage_submodules_config: &StorageSubmodulesConfig,
+        config: &Config,
+    ) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
             ledgers: Arc::new(RwLock::new(Ledgers::new(&config.consensus))),
             partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
+            service_senders: service_senders.clone(),
+            storage_submodules_config: storage_submodules_config.clone(),
             config: config.clone(),
             commitment_state: Default::default(),
         }
@@ -81,7 +93,6 @@ impl EpochServiceActor {
         &mut self,
         genesis_block: IrysBlockHeader,
         commitments: Vec<CommitmentTransaction>,
-        storage_module_config: StorageSubmodulesConfig,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         Self::validate_commitments(&genesis_block, &commitments)?;
 
@@ -93,7 +104,7 @@ impl EpochServiceActor {
         }
 
         let storage_module_info =
-            self.map_storage_modules_to_partition_assignments(storage_module_config);
+            self.map_storage_modules_to_partition_assignments(&self.storage_submodules_config);
 
         Ok(storage_module_info)
     }
@@ -101,7 +112,6 @@ impl EpochServiceActor {
     pub fn replay_epoch_data(
         &mut self,
         epoch_replay_data: Vec<EpochReplayData>,
-        storage_module_config: StorageSubmodulesConfig,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         // Initialize as None for the first iteration
         let mut previous_epoch_block: Option<IrysBlockHeader> = None;
@@ -122,7 +132,7 @@ impl EpochServiceActor {
         }
 
         let storage_module_info =
-            self.map_storage_modules_to_partition_assignments(storage_module_config);
+            self.map_storage_modules_to_partition_assignments(&self.storage_submodules_config);
 
         Ok(storage_module_info)
     }
@@ -214,6 +224,8 @@ impl EpochServiceActor {
         self.allocate_additional_capacity();
 
         self.assign_partition_hashes_to_pledges();
+
+        self.notify_storage_module_service();
 
         Ok(())
     }
@@ -737,6 +749,30 @@ impl EpochServiceActor {
         }
     }
 
+    /// Notifies the StorageModuleService about partition assignment changes.
+    ///
+    /// Maps current storage modules to their partition assignments and sends
+    /// this information to the StorageModuleService for processing.
+    ///
+    /// NOTE: Currently sends updates on every epoch block. Future optimization:
+    /// only send when assignments actually change.
+    ///
+    /// # Returns
+    /// Result indicating success or failure of the message send operation.
+    pub fn notify_storage_module_service(&self) {
+        let storage_module_infos =
+            self.map_storage_modules_to_partition_assignments(&self.storage_submodules_config);
+        // Create the message
+        let message = StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+            storage_module_infos: storage_module_infos.into(),
+        };
+
+        // Send the message
+        if let Err(e) = self.service_senders.storage_modules.send(message) {
+            warn!("Failed to send partition assignments update: {}", e);
+        }
+    }
+
     /// Returns a vector of all partition assignments associated with the provided miner address.
     ///
     /// This function extracts assignments from both data and capacity partitions where
@@ -801,81 +837,74 @@ impl EpochServiceActor {
     /// * `Vec<StorageModuleInfo>` - Vector of storage module information with assigned partitions
     pub fn map_storage_modules_to_partition_assignments(
         &self,
-        storage_module_config: StorageSubmodulesConfig,
+        cfg: &StorageSubmodulesConfig,
     ) -> Vec<StorageModuleInfo> {
-        let miner_address = self.config.node_config.miner_address();
-        // Retrieve all partition assignments for the current miner
-        let miner_assignments = self.get_partition_assignments(miner_address);
+        let miner = self.config.node_config.miner_address();
+        let assignments = self.get_partition_assignments(miner);
+        let num_chunks = self.config.consensus.num_chunks_in_partition as u32;
+        let paths = &cfg.submodule_paths;
 
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition as u32;
-        let pa = self.partition_assignments.read().unwrap();
-        let sm_paths = storage_module_config.submodule_paths;
+        let mut module_infos = Vec::new();
 
-        // STEP 1: Process Publish ledger partition assignments
-        // Filter assignments to only include those for the Publish ledger
-        let publish_assignments = miner_assignments
+        // STEP 1: Publish ledger
+        for pa in assignments
             .iter()
-            .filter(|pa| pa.ledger_id == Some(DataLedger::Publish as u32));
-
-        // Create StorageModuleInfo for each Publish ledger assignment
-        let mut module_infos: Vec<StorageModuleInfo> = Vec::new();
-        for (idx, assign) in publish_assignments.enumerate() {
+            .filter(|pa| pa.ledger_id == Some(DataLedger::Publish as u32))
+        {
+            let id = module_infos.len();
+            let path = match paths.get(id) {
+                Some(p) => p.clone(),
+                None => {
+                    error!("No available storage modules for partition assignment!");
+                    return module_infos;
+                }
+            };
             module_infos.push(StorageModuleInfo {
-                id: idx,
-                partition_assignment: Some(*assign),
-                submodules: vec![(
-                    partition_chunk_offset_ie!(0, num_chunks_in_partition),
-                    sm_paths[idx].clone(),
-                )],
+                id,
+                partition_assignment: Some(*pa),
+                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
             });
         }
 
-        // Remember current index for Submit ledger assignments
-        let idx_start = module_infos.len();
-
-        // STEP 2: Process Submit ledger partition assignments
-        // Filter assignments to only include those for the Submit ledger
-        let submit_assignments = miner_assignments
+        // STEP 2: Submit ledger
+        for pa in assignments
             .iter()
-            .filter(|pa| pa.ledger_id == Some(DataLedger::Submit as u32));
-
-        for (idx, assign) in submit_assignments.enumerate() {
+            .filter(|pa| pa.ledger_id == Some(DataLedger::Submit as u32))
+        {
+            let id = module_infos.len();
+            let path = match paths.get(id) {
+                Some(p) => p.clone(),
+                None => {
+                    error!("No available storage modules for partition assignment!");
+                    return module_infos;
+                }
+            };
             module_infos.push(StorageModuleInfo {
-                id: idx_start + idx,
-                partition_assignment: Some(*assign),
-                submodules: vec![(
-                    partition_chunk_offset_ie!(0, num_chunks_in_partition),
-                    sm_paths[idx_start + idx].clone(),
-                )],
+                id,
+                partition_assignment: Some(*pa),
+                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
             });
         }
 
-        // Exit early if no capacity partitions exist
-        if pa.capacity_partitions.is_empty() {
-            return module_infos;
-        }
-
-        // STEP 3: Process Capacity partition assignments (ledger_id == None)
-        // Note: The order is preserved from the BTreeMap's natural ordering by partition_hash
-        let capacity_assignments = miner_assignments.iter().filter(|pa| pa.ledger_id == None);
-
-        // Populate remaining storage modules with capacity partition assignments
-        // Only use as many capacity assignments as we have remaining storage modules
-        let idx_start = module_infos.len();
-        let modules_remaining = sm_paths.len() - module_infos.len();
-
-        for (idx, assign) in capacity_assignments.enumerate() {
-            // Stop if we've filled all available storage modules
-            if idx == modules_remaining {
-                break;
-            }
+        // STEP 3: Capacity
+        let remaining = paths.len().saturating_sub(module_infos.len());
+        for pa in assignments
+            .iter()
+            .filter(|pa| pa.ledger_id.is_none())
+            .take(remaining)
+        {
+            let id = module_infos.len();
+            let path = match paths.get(id) {
+                Some(p) => p.clone(),
+                None => {
+                    error!("No available storage modules for partition assignment!");
+                    return module_infos;
+                }
+            };
             module_infos.push(StorageModuleInfo {
-                id: idx_start + idx,
-                partition_assignment: Some(*assign),
-                submodules: vec![(
-                    partition_chunk_offset_ie!(0, num_chunks_in_partition),
-                    sm_paths[idx_start + idx].clone(),
-                )],
+                id,
+                partition_assignment: Some(*pa),
+                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
             });
         }
 

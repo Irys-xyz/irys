@@ -7,7 +7,7 @@ use tracing_subscriber::{
     layer::SubscriberExt, util::SubscriberInitExt as _, EnvFilter, Layer, Registry,
 };
 
-#[tokio::main(flavor = "current_thread")]
+#[actix_web::main]
 async fn main() -> eyre::Result<()> {
     // init logging
     init_tracing().expect("initializing tracing should work");

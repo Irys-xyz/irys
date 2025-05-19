@@ -11,7 +11,7 @@ use irys_chain::{
 use irys_database::block_header_by_hash;
 use irys_types::{
     irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
-    NodeConfig, NodeMode, PeerAddress, RethPeerInfo, H256,
+    NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
@@ -21,6 +21,7 @@ use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
 use std::{
     collections::HashMap,
+    net::TcpListener,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, Duration};
@@ -624,6 +625,14 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
+fn get_available_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("Failed to bind to address")
+        .local_addr()
+        .expect("Failed to get local addr")
+        .port()
+}
+
 /// setup configs for genesis, peer1 and peer2 for e2e tests
 /// FIXME: hardcoded ports https://github.com/Irys-xyz/irys/issues/367
 fn init_configs() -> (
@@ -633,17 +642,26 @@ fn init_configs() -> (
     Vec<PeerAddress>,
     Vec<PeerAddress>,
 ) {
+    let http_port_genesis = get_available_port();
+    let gossip_port_genesis = get_available_port();
+
+    let http_port_peer1 = get_available_port();
+    let gossip_port_peer1 = get_available_port();
+
+    let http_port_peer2 = get_available_port();
+    let gossip_port_peer2 = get_available_port();
+
     let mut testnet_config_genesis = NodeConfig {
         http: HttpConfig {
             public_ip: "127.0.0.1".to_string(),
-            public_port: 8078,
-            bind_port: 8078,
+            public_port: http_port_genesis,
+            bind_port: http_port_genesis,
             bind_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            public_port: 8079,
+            public_port: gossip_port_genesis,
             public_ip: "127.0.0.1".to_string(),
-            bind_port: 8079,
+            bind_port: gossip_port_genesis,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -657,16 +675,16 @@ fn init_configs() -> (
     let mut testnet_config_peer1 = NodeConfig {
         http: HttpConfig {
             // Use random port
-            bind_port: 0,
+            bind_port: http_port_peer1,
             // The same as bind port
-            public_port: 0,
+            public_port: http_port_peer1,
             bind_ip: "127.0.0.1".to_string(),
             public_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            public_port: 8083,
+            public_port: gossip_port_peer1,
             public_ip: "127.0.0.1".to_string(),
-            bind_port: 8083,
+            bind_port: gossip_port_peer1,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -675,19 +693,22 @@ fn init_configs() -> (
         )
         .expect("valid key"),
         mode: NodeMode::PeerSync,
+        reth: RethConfig {
+            use_random_ports: true,
+        },
         ..NodeConfig::testnet()
     };
     let mut testnet_config_peer2 = NodeConfig {
         http: HttpConfig {
-            bind_port: 0,
-            public_port: 0,
+            bind_port: http_port_peer2,
+            public_port: http_port_peer2,
             bind_ip: "127.0.0.1".to_string(),
             public_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            public_port: 8085,
+            public_port: gossip_port_peer2,
             public_ip: "127.0.0.1".to_string(),
-            bind_port: 8085,
+            bind_port: gossip_port_peer2,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -696,27 +717,46 @@ fn init_configs() -> (
         )
         .expect("valid key"),
         mode: NodeMode::PeerSync,
+        reth: RethConfig {
+            use_random_ports: true,
+        },
         ..NodeConfig::testnet()
     };
     let trusted_peers = vec![PeerAddress {
-        api: "127.0.0.1:8078".parse().expect("valid SocketAddr expected"),
-        gossip: "127.0.0.1:8079".parse().expect("valid SocketAddr expected"),
+        api: format!("127.0.0.1:{}", http_port_genesis)
+            .parse()
+            .expect("valid SocketAddr expected"),
+        gossip: format!("127.0.0.1:{}", gossip_port_genesis)
+            .parse()
+            .expect("valid SocketAddr expected"),
         execution: RethPeerInfo::default(),
     }];
     let genesis_trusted_peers = vec![
         PeerAddress {
-            api: "127.0.0.1:8078".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8079".parse().expect("valid SocketAddr expected"),
+            api: format!("127.0.0.1:{}", http_port_genesis)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("127.0.0.1:{}", gossip_port_genesis)
+                .parse()
+                .expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         },
         PeerAddress {
-            api: "127.0.0.1:8082".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8083".parse().expect("valid SocketAddr expected"),
+            api: format!("127.0.0.1:{}", http_port_peer1)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("127.0.0.1:{}", gossip_port_peer1)
+                .parse()
+                .expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         },
         PeerAddress {
-            api: "127.0.0.1:8084".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8085".parse().expect("valid SocketAddr expected"),
+            api: format!("127.0.0.1:{}", http_port_peer2)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("127.0.0.1:{}", gossip_port_peer2)
+                .parse()
+                .expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         },
     ];

@@ -6,7 +6,7 @@ use crate::{
     },
     PeerAddress, RethPeerInfo,
 };
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use reth_chainspec::Chain;
 use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, Genesis, GenesisAccount};
 use rust_decimal::Decimal;
@@ -209,6 +209,9 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
+    /// Reth node configuration
+    pub reth: RethConfig,
+
     /// Reth settings
     pub reth_peer_info: RethPeerInfo,
 }
@@ -256,8 +259,26 @@ impl ConsensusOptions {
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
     }
 
-    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) {
+    pub fn fund_genesis_signers<'a>(
+        &mut self,
+        signers: impl IntoIterator<Item = &'a IrysSigner>,
+    ) -> &mut Self {
+        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
+        for signer in signers {
+            accounts.push((
+                signer.address(),
+                GenesisAccount {
+                    balance: U256::from(690000000000000000_u128),
+                    ..Default::default()
+                },
+            ))
+        }
+        self.extend_genesis_accounts(accounts);
+        self
+    }
+    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) -> &mut Self {
         self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
+        self
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
@@ -390,6 +411,14 @@ pub struct GossipConfig {
     pub bind_ip: String,
     /// The port number the gossip service listens on
     pub bind_port: u16,
+}
+
+/// # Reth Configuration
+///
+/// Settings that are passed to the reth node
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RethConfig {
+    pub use_random_ports: bool,
 }
 
 /// # Data Packing Configuration
@@ -613,6 +642,9 @@ impl NodeConfig {
                 public_port: 0,
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
                 bind_port: 0,
+            },
+            reth: RethConfig {
+                use_random_ports: true,
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -899,6 +931,9 @@ mod tests {
         bind_port = 0
         public_ip = "127.0.0.1"
         public_port = 0
+
+        [reth]
+        use_random_ports = true
 
         [reth_peer_info]
         peering_tcp_addr = "0.0.0.0:0"

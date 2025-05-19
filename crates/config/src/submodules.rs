@@ -51,6 +51,44 @@ impl StorageSubmodulesConfig {
         Ok(config)
     }
 
+    pub fn load_for_test(instance_dir: PathBuf, num_submodules: usize) -> eyre::Result<Self> {
+        let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
+
+        // Create test config with hardcoded paths
+        tracing::info!(
+            "Creating test config at {:?} with {} submodule paths",
+            config_path_local,
+            num_submodules
+        );
+
+        // Create the submodule paths using a naming pattern
+        let mut submodule_paths = Vec::new();
+        for i in 0..num_submodules {
+            submodule_paths
+                .push(Path::new(&instance_dir).join(format!("storage_modules/submodule_{}", i)));
+        }
+
+        let config = StorageSubmodulesConfig {
+            is_using_hardcoded_paths: true,
+            submodule_paths,
+        };
+
+        // Write and verify config
+        fs::create_dir_all(instance_dir).expect(".irys config dir can be created");
+        let toml = toml::to_string(&config).expect("Able to serialize config");
+        fs::write(&config_path_local, toml).unwrap_or_else(|_| {
+            panic!("Failed to write config to {}", config_path_local.display())
+        });
+
+        // Ensure the submodule paths exist, StorageModule::new() will do the rest
+        for path in &config.submodule_paths {
+            fs::create_dir_all(path).expect("to create submodule dir");
+        }
+
+        // Load the config to verify it parses
+        StorageSubmodulesConfig::from_toml(config_path_local)
+    }
+
     pub fn load(instance_dir: PathBuf) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
