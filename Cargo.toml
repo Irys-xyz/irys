@@ -20,13 +20,14 @@ members = [
   "crates/cli",
   "crates/p2p",
   "crates/api-client",
-  "crates/reward-curve", "crates/irys-reth",
+  "crates/reward-curve",
+  "crates/irys-reth",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
