@@ -204,9 +204,12 @@ mod tests {
             mocked_vdf_service(&config).await;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let _ = tx.send(VdfServiceMessage::GetVdfStateMessage {
+        if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {
             response: oneshot_tx,
-        });
+        }) {
+            panic!("error: {:?}", e);
+        };
+
         let vdf_steps = oneshot_rx
             .await
             .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
