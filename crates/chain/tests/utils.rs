@@ -33,7 +33,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 use std::collections::HashMap;
 
@@ -226,7 +226,6 @@ impl IrysNodeTest<IrysNodeCtx> {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
         use irys_types::{PeerAddress, RethPeerInfo};
-        use tracing::debug;
 
         let node_config = &self.node_ctx.config.node_config;
 
