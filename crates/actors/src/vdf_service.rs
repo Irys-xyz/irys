@@ -488,14 +488,9 @@ pub fn vdf_steps_are_valid(
 
 pub mod test_helpers {
     use super::*;
-    use crate::{
-        block_tree_service::{BlockState, BlockTreeCache, BlockTreeReadGuard, ChainState},
-        vdf_service::{VdfService, VdfServiceMessage},
-    };
+    use crate::vdf_service::{VdfService, VdfServiceMessage};
 
-    use irys_types::IrysBlockHeader;
-    use irys_types::H256;
-    use reth::{core::args, tasks::TaskManager};
+    use reth::tasks::TaskManager;
     use std::sync::RwLock;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
@@ -507,26 +502,6 @@ pub mod test_helpers {
         TaskManager,
         TaskExecutor,
     ) {
-        //setup mock blocks and tree
-        let height_chain_max = 15;
-        let max_confirmed_height = height_chain_max / 2;
-        let mut blocks = (0..=height_chain_max)
-            .map(|height| {
-                let block = IrysBlockHeader {
-                    height,
-                    ..IrysBlockHeader::new_mock_header()
-                };
-
-                // Determine chain state based on block height
-                let state = if block.height <= max_confirmed_height {
-                    ChainState::Onchain
-                } else {
-                    ChainState::NotOnchain(BlockState::ValidationScheduled)
-                };
-
-                (block, state)
-            })
-            .collect::<Vec<_>>();
         // prep to spawn VDF service
         // this is so we can send it new VDF steps as part of this test
         let task_manager = TaskManager::new(tokio::runtime::Handle::current());
