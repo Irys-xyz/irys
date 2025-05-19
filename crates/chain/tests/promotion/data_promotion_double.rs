@@ -34,10 +34,6 @@ async fn heavy_double_root_data_promotion_test() {
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     // Testnet / single node config
     config.consensus.get_mut().chunk_migration_depth = 1;
-    // set steps dequeue to capacity 100 with 200/2 occurring within the vdf spawn
-    // this ensures the steps queue is large enough to check blocks as they are mined for this test
-    config.consensus.get_mut().num_chunks_in_partition = 200;
-    config.consensus.get_mut().num_chunks_in_recall_range = 2;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
