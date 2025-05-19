@@ -9,6 +9,40 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+alloy-dyn-abi = "1.1.0"
+alloy-evm = { version = "0.7.1", default-features = false }
+alloy-primitives = { version = "1.1.0", default-features = false, features = ["map-foldhash"] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
+alloy-consensus = { version = "0.15.10", default-features = false }
+alloy-eips = { version = "0.15.10", default-features = false }
+alloy-genesis = { version = "0.15.10", default-features = false }
+alloy-network = { version = "0.15.10", default-features = false }
+alloy-rpc-types = { version = "0.15.10", features = ["eth"], default-features = false }
+alloy-rpc-types-eth = { version = "0.15.10", default-features = false }
+
+reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-network = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
+revm = { version = "23.1.0", default-features = false }
+
+tokio.workspace = true
+eyre.workspace = true
+serde.workspace = true
+futures.workspace = true
+tracing.workspace = true
+arbitrary.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+reth-e2e-test-utils = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
 
 [lints]
 workspace = true
