@@ -20,7 +20,6 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
     tokio::time::sleep(Duration::from_secs(2)).await;
     // restart the node
     let ctx = ctx.stop().await.start().await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // assert -- expect that the non genesis node can continue with the genesis data
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
@@ -37,7 +36,6 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
         "we expect the genesis block + 1 new block (the second block does not get saved)"
     );
     mine_block(&ctx.node_ctx).await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
         .unwrap();
@@ -73,7 +71,6 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     let mut node = IrysNodeTest::new_genesis(config.clone());
     node.cfg.base_directory = test_dir;
     let ctx = node.start().await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // assert -- expect that the non genesis node can continue with the genesis data
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
@@ -90,7 +87,6 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
         "we expect the genesis block + 1 new block (the second block does not get saved)"
     );
     mine_block(&ctx.node_ctx).await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
         .unwrap();
