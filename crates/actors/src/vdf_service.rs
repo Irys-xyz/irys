@@ -540,7 +540,14 @@ pub mod test_helpers {
         BlockTreeReadGuard::new(block_tree_cache)
     }
 
-    pub async fn mocked_vdf_service(config: &Config) -> UnboundedSender<VdfServiceMessage> {
+    pub async fn mocked_vdf_service(
+        config: &Config,
+    ) -> (
+        UnboundedSender<VdfServiceMessage>,
+        JoinHandle<()>,
+        TaskManager,
+        TaskExecutor,
+    ) {
         //setup mock blocks and tree
         let height_chain_max = 15;
         let max_confirmed_height = height_chain_max / 2;
@@ -569,7 +576,7 @@ pub mod test_helpers {
         let (tx, rx) = unbounded_channel();
         let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
 
-        let _handle = VdfService::spawn_service(
+        let vdf_service_handle = VdfService::spawn_service(
             &task_executor,
             block_tree_guard.clone(),
             rx,
@@ -577,7 +584,7 @@ pub mod test_helpers {
             &config,
         );
 
-        tx
+        (tx, vdf_service_handle, task_manager, task_executor)
     }
 }
 
@@ -598,7 +605,8 @@ mod tests {
         node_config.consensus.get_mut().num_chunks_in_recall_range = 10;
         let testnet_config: Config = node_config.into();
         // start service senders/receivers
-        let tx = mocked_vdf_service(&testnet_config).await;
+        let (tx, _vdf_service_handle, _task_manager, _task_executor) =
+            mocked_vdf_service(&testnet_config).await;
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {

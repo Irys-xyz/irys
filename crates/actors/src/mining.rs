@@ -511,7 +511,8 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new();
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        let tx = mocked_vdf_service(&config).await;
+        let (tx, _vdf_service_handle, _task_manager, _task_executor) =
+            mocked_vdf_service(&config).await;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let _ = tx.send(VdfServiceMessage::GetVdfStateMessage {
@@ -637,7 +638,8 @@ mod tests {
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
-        let tx = mocked_vdf_service(&config).await;
+        let (tx, _vdf_service_handle, _task_manager, _task_executor) =
+            mocked_vdf_service(&config).await;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let _ = tx.send(VdfServiceMessage::GetVdfStateMessage {
