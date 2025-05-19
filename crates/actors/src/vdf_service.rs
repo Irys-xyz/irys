@@ -273,7 +273,9 @@ impl Inner {
                     .clone()
                     .expect("expected valid mining_state_sender");
 
-                let _ = sender.send(false).await;
+                if let Err(e) = sender.send(false).await {
+                    tracing::error!("failed to send false to mining_state_sender: {:?}", e);
+                }
             }
             VdfServiceMessage::StartMiningMessage => {
                 let sender = self
@@ -284,7 +286,9 @@ impl Inner {
                     .clone()
                     .expect("expected valid mining_state_sender");
 
-                let _ = sender.send(true).await;
+                if let Err(e) = sender.send(true).await {
+                    tracing::error!("failed to send true to mining_state_sender: {:?}", e);
+                }
             }
         };
         Ok(())
