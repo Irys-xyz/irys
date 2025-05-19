@@ -39,25 +39,6 @@ pub struct VdfState {
 }
 
 impl VdfState {
-    /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new_vdf_state(
-        block_index: BlockIndexReadGuard,
-        db: DatabaseProvider,
-        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
-        config: &Config,
-    ) -> VdfState {
-        create_state(block_index, db, vdf_mining_state_sender, &config)
-    }
-
-    pub fn new_vdf_state_from_capacity(capacity: usize) -> VdfState {
-        VdfState {
-            global_step: 0,
-            capacity,
-            seeds: VecDeque::with_capacity(capacity),
-            mining_state_sender: None,
-        }
-    }
-
     pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
         (self.global_step, self.seeds.back().cloned())
     }
