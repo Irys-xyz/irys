@@ -353,7 +353,7 @@ fn create_state(
 /// (chunks in partition / chunks in recall range) ensures the capacity of VecDeqeue is large enough for the partition.
 /// A MINIMUM_CAPACITY of 60k allows for forks. VDF capacity limits the depth at which a fork can happen. If the fork happens out of the VDF range, the node cannot validate it.
 fn calc_capacity(config: &Config) -> usize {
-    const MINIMUM_CAPACITY: u64 = 60_000; // 60_000 is enough for approximately 1_000 hour forks.
+    const MINIMUM_CAPACITY: u64 = 60_000; // 60_000 is enough for approximately 1_000 minute forks.
     let capacity_from_config: u64 =
         config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range;
     let capacity = if capacity_from_config < MINIMUM_CAPACITY {
