@@ -308,14 +308,24 @@ impl IrysNodeTest<IrysNodeCtx> {
         .expect("for packing to complete in the wait period");
     }
 
-    pub fn start_mining(&self) {
-        if self.node_ctx.actor_addresses.start_mining().is_err() {
+    pub fn start_mining(&self, vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>) {
+        if self
+            .node_ctx
+            .actor_addresses
+            .start_mining(vdf_mining_state_sender)
+            .is_err()
+        {
             panic!("Expected to start mining")
         }
     }
 
-    pub fn stop_mining(&self) {
-        if self.node_ctx.actor_addresses.stop_mining().is_err() {
+    pub fn stop_mining(&self, vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>) {
+        if self
+            .node_ctx
+            .actor_addresses
+            .stop_mining(vdf_mining_state_sender)
+            .is_err()
+        {
             panic!("Expected to stop mining")
         }
     }

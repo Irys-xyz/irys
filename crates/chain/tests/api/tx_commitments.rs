@@ -203,7 +203,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .await;
 
         // Initialize blockchain components
-        node.start_mining();
+        let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
+        node.start_mining(vdf_mining_state_sender);
 
         let uri = format!(
             "http://127.0.0.1:{}",
@@ -216,12 +217,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             Some(Duration::from_secs(10)),
         )
         .await?;
-
-        let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
-        node.node_ctx
-            .actor_addresses
-            .start_mining(vdf_mining_state_sender)
-            .unwrap();
 
         // Initialize API for submitting commitment transactions
         let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
