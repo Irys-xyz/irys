@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::{
-    cache_service::CacheServiceAction, ema_service::EmaServiceMessage, CommitmentCacheMessage,
-    StorageModuleServiceMessage, vdf_service::VdfServiceMessage, 
+    cache_service::CacheServiceAction, ema_service::EmaServiceMessage,
+    vdf_service::VdfServiceMessage, CommitmentCacheMessage, StorageModuleServiceMessage,
 };
 
 // Only contains senders, thread-safe to clone and share
