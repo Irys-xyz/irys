@@ -138,24 +138,21 @@ impl IrysNodeCtx {
     }
 
     /// Send a message to all known partition actors to ignore any received VDF steps
+    ///
     pub async fn stop_mining(&self) -> eyre::Result<()> {
-        // pause VDF thread mining
-        if let Err(e) = self.vdf_mining_state_sender.send(false).await {
-            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
-        }
-
-        self.set_mining(false)
+        self.set_mining(false).await
     }
-    /// Send a message to all known partition actors to begin mining when they receive a VDF step
+    /// Start VDF thread mining and Send a message to all known partition actors to begin mining when they receive a VDF step
     pub async fn start_mining(&self) -> eyre::Result<()> {
-        // start VDF thread mining
-        if let Err(e) = self.vdf_mining_state_sender.send(true).await {
-            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
-        }
-        self.set_mining(true)
+        self.set_mining(true).await
     }
     /// Send a custom control message to all known partition actors
-    pub fn set_mining(&self, should_mine: bool) -> eyre::Result<()> {
+    pub async fn set_mining(&self, should_mine: bool) -> eyre::Result<()> {
+        // start/stop VDF thread mining
+        if let Err(e) = self.vdf_mining_state_sender.send(should_mine).await {
+            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
+        }
+        // Send a custom control message to all known partition actors
         for part in &self.actor_addresses.partitions {
             part.try_send(MiningControl(should_mine))?;
         }

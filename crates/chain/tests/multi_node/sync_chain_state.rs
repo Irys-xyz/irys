@@ -347,10 +347,12 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     ctx_peer1_node
         .node_ctx
         .set_mining(false)
+        .await
         .expect("expect setting mining false on peer1");
     ctx_peer2_node
         .node_ctx
         .set_mining(false)
+        .await
         .expect("expect setting mining false on peer2");
 
     // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
