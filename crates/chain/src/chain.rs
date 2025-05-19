@@ -77,7 +77,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::{self};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -197,6 +197,7 @@ async fn start_reth_node(
         latest_block,
         random_ports,
     )
+    .in_current_span()
     .await
     {
         Ok(handle) => handle,
@@ -463,9 +464,6 @@ impl IrysNode {
         // Start with base genesis and update fields
         let (chain_spec, genesis_block) = IrysChainSpecBuilder::from_config(&self.config).build();
 
-        // Log startup information
-        debug!("NODE STARTUP: {:?}", node_mode);
-
         // In all startup modes, irys_db and block_index are prerequisites
         let irys_db = init_irys_db(&config).expect("could not open irys db");
         let mut block_index = BlockIndex::new(&config.node_config)
@@ -547,8 +545,11 @@ impl IrysNode {
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
         let node_config = &ctx.config.node_config;
+
+        // Log startup information
         info!(
-            "Started node!\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}",
+            "Started node! ({:?})\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}",
+            &node_mode,
             &ctx.config.node_config.miner_address().to_base58(),
             ctx.reth_handle.network.peer_id(),
             &node_config.http.bind_ip,
@@ -589,6 +590,7 @@ impl IrysNode {
         block_index: BlockIndex,
         gossip_listener: TcpListener,
     ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
+        let span = Span::current();
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
@@ -620,6 +622,7 @@ impl IrysNode {
                                 irys_db,
                                 gossip_listener
                             )
+                            .instrument(Span::current())
                             .await
                             .expect("initializing services should not fail");
 
@@ -664,7 +667,7 @@ impl IrysNode {
 
                         debug!("VDF thread finished");
                         reth_node
-                    })
+                    }.instrument(span.clone()))
                 }
             })?;
         Ok(actor_main_thread_handle)
@@ -682,11 +685,15 @@ impl IrysNode {
         mut task_manager: TaskManager,
         tokio_runtime: Runtime,
     ) -> eyre::Result<JoinHandle<()>> {
+        let span = Span::current();
+        let span2 = span.clone();
+
         let reth_thread_handler = std::thread::Builder::new()
             .name("reth-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
                 let exec = task_manager.executor();
+                let _ = span2.clone().enter();
                 let run_reth_until_ctrl_c_or_signal = async || {
                     _ = run_to_completion_or_panic(
                         &mut task_manager,
@@ -700,12 +707,14 @@ impl IrysNode {
                                 reth_handle_sender,
                                 irys_provider.clone(),
                                 latest_block_height,
-                            ),
+                            )
+                            .instrument(span2),
                             reth_shutdown_receiver,
                         ),
                     )
                     .await
                     .inspect_err(|e| error!("Reth thread error: {:?}", &e));
+
                     debug!("Sending shutdown signal to the main actor thread");
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
@@ -717,7 +726,8 @@ impl IrysNode {
                     reth_node_handle
                 };
 
-                let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
+                let reth_node =
+                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal().instrument(span));
 
                 debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
                 task_manager.graceful_shutdown();

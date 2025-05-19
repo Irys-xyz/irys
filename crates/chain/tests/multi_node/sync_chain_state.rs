@@ -25,7 +25,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::{error, info, span, Level};
 
 pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
     let attributes = PayloadAttributes {
@@ -790,6 +790,8 @@ async fn start_genesis_node(
     testnet_config_genesis: &NodeConfig,
     account: &IrysSigner, // account with balance at genesis
 ) -> IrysNodeTest<IrysNodeCtx> {
+    let span = span!(Level::DEBUG, "genesis");
+    let _enter = span.enter();
     // init genesis node
     let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone());
     // add accounts with balances to genesis node
@@ -805,12 +807,20 @@ async fn start_peer_nodes(
     testnet_config_peer2: &Config,
     account: &IrysSigner, // account with balance at genesis
 ) -> (IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>) {
-    let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone());
-    add_account_to_config(&mut peer1_node.cfg, &account);
-    let ctx_peer1_node = peer1_node.start().await;
-    let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone());
-    add_account_to_config(&mut peer2_node.cfg, &account);
-    let ctx_peer2_node = peer2_node.start().await;
+    let ctx_peer1_node = {
+        let span = span!(Level::DEBUG, "peer1");
+        let _enter = span.enter();
+        let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone());
+        add_account_to_config(&mut peer1_node.cfg, &account);
+        peer1_node.start().await
+    };
+    let ctx_peer2_node = {
+        let span = span!(Level::DEBUG, "peer2");
+        let _enter = span.enter();
+        let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone());
+        add_account_to_config(&mut peer2_node.cfg, &account);
+        peer2_node.start().await
+    };
     (ctx_peer1_node, ctx_peer2_node)
 }
 
