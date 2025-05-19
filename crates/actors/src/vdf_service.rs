@@ -1,13 +1,13 @@
 use futures::future::Either;
-use irys_database::block_header_by_hash;
+use irys_database::{block_header_by_hash, BlockIndex};
 use irys_efficient_sampling::num_recall_ranges_in_partition;
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
     U256,
 };
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use nodit::{interval::ii, InclusiveInterval, Interval};
-
 use rayon::prelude::*;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database;
@@ -24,7 +24,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::{block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard};
+use crate::block_index_service::BlockIndexReadGuard;
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -150,7 +150,7 @@ pub enum VdfServiceMessage {
 
 #[derive(Debug)]
 struct Inner {
-    block_tree_read_guard: BlockTreeReadGuard,
+    block_index_read_guard: BlockIndexReadGuard,
     vdf_state: AtomicVdfState,
 }
 
@@ -171,24 +171,24 @@ impl VdfService {
     /// Spawn a new VDF service
     pub fn spawn_service(
         exec: &TaskExecutor,
-        block_tree_read_guard: BlockTreeReadGuard,
+        irys_db: DatabaseProvider,
+        block_index_read_guard: BlockIndexReadGuard,
         rx: UnboundedReceiver<VdfServiceMessage>,
         vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
         config: &Config,
     ) -> JoinHandle<()> {
-        let capacity = calc_capacity(config);
-        let vdf_state = VdfState {
-            global_step: 0,
-            seeds: VecDeque::with_capacity(capacity),
-            capacity,
-            mining_state_sender: Some(vdf_mining_state_sender),
-        };
+        let vdf_state = create_state(
+            block_index_read_guard.clone(),
+            irys_db,
+            vdf_mining_state_sender,
+            config,
+        );
         exec.spawn_critical_with_graceful_shutdown_signal("VDF Service", |shutdown| async move {
             let vdf_service = Self {
                 shutdown,
                 msg_rx: rx,
                 inner: Inner {
-                    block_tree_read_guard,
+                    block_index_read_guard,
                     vdf_state: Arc::new(RwLock::new(vdf_state)),
                 },
             };
@@ -495,7 +495,7 @@ pub mod test_helpers {
 
     use irys_types::IrysBlockHeader;
     use irys_types::H256;
-    use reth::tasks::TaskManager;
+    use reth::{core::args, tasks::TaskManager};
     use std::sync::RwLock;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
@@ -555,17 +555,29 @@ pub mod test_helpers {
                 (block, state)
             })
             .collect::<Vec<_>>();
-        let block_tree_guard = genesis_tree(&mut blocks);
-        // Spawn VDF service
+        // prep to spawn VDF service
         // this is so we can send it new VDF steps as part of this test
         let task_manager = TaskManager::new(tokio::runtime::Handle::current());
         let task_executor = task_manager.executor();
         let (tx, rx) = unbounded_channel();
         let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
 
+        let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
+            BlockIndex::new(&config.node_config).await.unwrap(),
+        ));
+
+        let block_index_guard = BlockIndexReadGuard::new(block_index);
+
+        let irys_db_env =
+            open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir());
+        let irys_db = DatabaseProvider(Arc::new(irys_db_env.expect("expected valid irys_db_env")));
+
+        // spawn VDF service
+        // this is so we can send it new VDF steps as part of this test
         let vdf_service_handle = VdfService::spawn_service(
             &task_executor,
-            block_tree_guard.clone(),
+            irys_db,
+            block_index_guard.clone(),
             rx,
             vdf_mining_state_sender,
             &config,
