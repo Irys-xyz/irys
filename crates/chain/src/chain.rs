@@ -234,7 +234,6 @@ pub struct IrysNode {
 impl IrysNode {
     /// Creates a new node builder instance.
     pub async fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
-        debug!("{:#?}", node_config.http);
         // we create the listener here so we know the port before we start passing around `config`
         let http_listener = create_listener(
             format!(
@@ -462,7 +461,6 @@ impl IrysNode {
 
         // Log startup information
         debug!("NODE STARTUP: {:?}", node_mode);
-        debug!("Trusted Peers:\n {:#?}", config.node_config.trusted_peers);
 
         // In all startup modes, irys_db and block_index are prerequisites
         let irys_db = init_irys_db(&config).expect("could not open irys db");

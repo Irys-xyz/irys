@@ -175,7 +175,6 @@ impl IrysNodeTest<()> {
 
     /// Start a new test node in peer-sync mode
     pub fn new(mut config: NodeConfig) -> Self {
-        debug!("{:#?}", config.http);
         config.mode = NodeMode::PeerSync;
         Self::new_inner(config)
     }
@@ -189,7 +188,6 @@ impl IrysNodeTest<()> {
     fn new_inner(mut config: NodeConfig) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-        debug!("{:#?}", config.http);
         Self {
             cfg: config,
             temp_dir,
@@ -198,7 +196,6 @@ impl IrysNodeTest<()> {
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
-        debug!("{:#?}", self.cfg.http);
         let node = IrysNode::new(self.cfg.clone()).await.unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
@@ -270,7 +267,6 @@ impl IrysNodeTest<IrysNodeCtx> {
                 execution: RethPeerInfo::default(),
             }),
         ];
-        debug!("{:#?}", peer_config);
         peer_config
     }
     pub async fn wait_until_height_on_chain(
