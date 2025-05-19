@@ -104,7 +104,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testnet();
-    let node = IrysNodeTest::new_genesis(config).await.start().await;
+    let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
