@@ -499,34 +499,6 @@ pub mod test_helpers {
     use std::sync::RwLock;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-    //FIXME: this is duplicated from ema service and should be somewhere central that does not duplicate code!
-    fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
-        let mut block_hash = H256::random();
-        let mut iter = blocks.iter_mut();
-        let genesis_block = &mut (iter.next().unwrap()).0;
-        genesis_block.block_hash = block_hash;
-        genesis_block.cumulative_diff = 0.into();
-
-        let mut block_tree_cache = BlockTreeCache::new(&genesis_block);
-        block_tree_cache.mark_tip(&block_hash).unwrap();
-        for (block, state) in iter {
-            block.previous_block_hash = block_hash;
-            block.cumulative_diff = block.height.into();
-            block_hash = H256::random();
-            block.block_hash = block_hash;
-            block_tree_cache
-                .add_common(
-                    block.block_hash.clone(),
-                    block,
-                    Arc::new(Vec::new()),
-                    state.clone(),
-                )
-                .unwrap();
-        }
-        let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
-        BlockTreeReadGuard::new(block_tree_cache)
-    }
-
     pub async fn mocked_vdf_service(
         config: &Config,
     ) -> (
