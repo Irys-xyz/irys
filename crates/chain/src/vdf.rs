@@ -200,8 +200,7 @@ mod tests {
         let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let (_, mining_state_rx) = mpsc::channel::<bool>(1);
 
-        let (tx, _vdf_service_handle, _task_manager, _task_executor) =
-            mocked_vdf_service(&config).await;
+        let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {

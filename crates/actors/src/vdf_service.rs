@@ -498,7 +498,6 @@ pub mod test_helpers {
         UnboundedSender<VdfServiceMessage>,
         JoinHandle<()>,
         TaskManager,
-        TaskExecutor,
     ) {
         // prep to spawn VDF service
         // this is so we can send it new VDF steps as part of this test
@@ -528,7 +527,7 @@ pub mod test_helpers {
             &config,
         );
 
-        (tx, vdf_service_handle, task_manager, task_executor)
+        (tx, vdf_service_handle, task_manager)
     }
 }
 
@@ -557,8 +556,7 @@ mod tests {
         let testnet_config: Config = node_config.into();
 
         // start service senders/receivers
-        let (tx, _vdf_service_handle, _task_manager, _task_executor) =
-            mocked_vdf_service(&testnet_config).await;
+        let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&testnet_config).await;
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {
