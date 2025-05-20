@@ -63,7 +63,6 @@ impl BlockDiscoveryFacadeImpl {
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
-        debug!("BlockDiscoveryFacadeImpl::handle_block");
         self.addr
             .send(BlockDiscoveredMessage(Arc::new(block)))
             .await
@@ -93,10 +92,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     type Result = ResponseFuture<eyre::Result<()>>;
 
     fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        debug!(
-            "BlockDiscoveryActor: received block discovery message for block: {:?}",
-            msg.0.block_hash.0.to_base58()
-        );
         // Validate discovered block
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
@@ -118,10 +113,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         };
 
-        debug!(
-            "Submitting ledger tx validation for block: {:?}",
-            new_block_header.block_hash.0.to_base58()
-        );
         //====================================
         // Submit ledger TX validation
         //------------------------------------
@@ -153,10 +144,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         };
 
-        debug!(
-            "Submit publish tx ledger for block: {:?}",
-            new_block_header.block_hash.0.to_base58()
-        );
         //====================================
         // Publish ledger TX Validation
         //------------------------------------
@@ -203,10 +190,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         }
 
-        debug!(
-            "Commitment ledger tx validation for block: {:?}",
-            new_block_header.block_hash.0.to_base58()
-        );
         //====================================
         // Commitment ledger TX Validation
         //------------------------------------
@@ -243,10 +226,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         }
 
-        debug!(
-            "Block pre-validation for block: {:?}",
-            new_block_header.block_hash.0.to_base58()
-        );
         //====================================
         // Block header pre-validation
         //------------------------------------
