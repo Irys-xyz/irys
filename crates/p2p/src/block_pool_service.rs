@@ -129,7 +129,7 @@ where
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
 
-        // Adding the block to the pool, so if a block depending on that block arrives, i
+        // Adding the block to the pool, so if a block depending on that block arrives,
         // this block won't be requested from the network
         self.orphaned_blocks_by_parent
             .insert(prev_block_hash, block_header.clone());
@@ -188,7 +188,7 @@ where
                         })?;
 
                     info!(
-                        "Block pool: Block has been {} processed",
+                        "Block pool: Block {} has been processed",
                         current_block_hash.0.to_base58()
                     );
                     self_addr.do_send(RemoveBlockFromPool {
