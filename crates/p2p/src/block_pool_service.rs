@@ -132,7 +132,6 @@ where
         let block_producer = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
-        let sync_state = self.sync_state.clone();
 
         // Adding the block to the pool, so if a block depending on that block arrives, i
         // this block won't be requested from the network
