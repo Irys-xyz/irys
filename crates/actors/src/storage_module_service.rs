@@ -17,7 +17,6 @@ use futures::future::Either;
 use irys_config::StorageSubmodulesConfig;
 use irys_storage::{PackingParams, StorageModule, StorageModuleInfo};
 use irys_types::{ArbiterHandle, Config, PartitionChunkRange};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{
     path::PathBuf,
@@ -32,7 +31,7 @@ use tracing::{debug, warn};
 
 use crate::{
     block_tree_service::BlockTreeReadGuard, mining::PartitionMiningActor, packing::PackingRequest,
-    ActorAddresses,
+    vdf_service::VdfStepsReadGuard, ActorAddresses,
 };
 
 // Messages that the StorageModuleService service supports

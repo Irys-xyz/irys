@@ -203,12 +203,19 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .await;
 
         // Initialize blockchain components
-        node.start_mining();
+        node.start_mining().await;
 
         let uri = format!(
             "http://127.0.0.1:{}",
             node.node_ctx.config.node_config.http.bind_port
         );
+
+        // Initialize blockchain components
+        wait_for_packing(
+            node.node_ctx.actor_addresses.packing.clone(),
+            Some(Duration::from_secs(10)),
+        )
+        .await?;
 
         // Initialize API for submitting commitment transactions
         let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();

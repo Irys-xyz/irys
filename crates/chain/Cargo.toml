@@ -39,7 +39,7 @@ reth-primitives.workspace = true
 reth.workspace = true
 toml.workspace = true
 serde_json = "1"
-sha2 = "0.10"
+sha2.workspace = true
 actix-rt.workspace = true
 actix-web.workspace = true
 actix-http.workspace = true
@@ -62,8 +62,8 @@ reth-tracing.workspace = true
 hex.workspace = true
 test-fuzz.workspace = true
 k256 = { version = "0.13", default-features = false, features = [
-	"ecdsa",
-	"serde",
+    "ecdsa",
+    "serde",
 ] }
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-provider.workspace = true

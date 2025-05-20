@@ -35,7 +35,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     )
     .await?;
 
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+    node.node_ctx.start_mining().await.unwrap();
     let db = node.node_ctx.db.clone();
 
     let storage_tx = IrysTransactionHeader {

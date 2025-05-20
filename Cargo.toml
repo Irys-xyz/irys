@@ -1,26 +1,26 @@
 [workspace]
 exclude = ["ext/"]
 members = [
-  "crates/actors",
-  "crates/c",
-  "crates/chain",
-  "crates/primitives",
-  "crates/reth-node-bridge",
-  "crates/types",
-  "crates/packing",
-  "crates/database",
-  "crates/storage",
-  "crates/testing-utils",
-  "crates/config",
-  "crates/efficient-sampling",
-  "crates/macros",
-  "crates/debug-utils",
-  "xtask",
-  "crates/price-oracle",
-  "crates/cli",
-  "crates/p2p",
-  "crates/api-client",
-  "crates/reward-curve",
+    "crates/actors",
+    "crates/api-client",
+    "crates/c",
+    "crates/chain",
+    "crates/cli",
+    "crates/config",
+    "crates/database",
+    "crates/debug-utils",
+    "crates/efficient-sampling",
+    "crates/macros",
+    "crates/p2p",
+    "crates/packing",
+    "crates/price-oracle",
+    "crates/primitives",
+    "crates/reth-node-bridge",
+    "crates/reward-curve",
+    "crates/storage",
+    "crates/testing-utils",
+    "crates/types",
+    "xtask",
 ]
 resolver = "2"
 
@@ -68,7 +68,7 @@ alloy-core = { path = "./ext/alloy-core/crates/core" }
 alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
 alloy-genesis = { path = "./ext/alloy/crates/genesis", default-features = false }
 alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = [
-  "arbitrary",
+    "arbitrary",
 ] }
 rand = "0.8"
 hex = "0.4"
@@ -99,9 +99,11 @@ assert_matches = "1"
 bytes = "1.5"
 derive_more = { version = "1", features = ["full"] }
 eyre = "0.6"
+sha2 = "0.10"
 color-eyre = "0.6"
 itertools = "0.13"
 futures = "0.3"
+rayon = "1.8.0"
 bytemuck = "1"
 futures-concurrency = "7"
 test-log = { version = "0.2", features = ["trace"] }

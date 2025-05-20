@@ -11,11 +11,15 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
-use irys_actors::block_producer::SolutionFoundMessage;
-use irys_actors::block_tree_service::get_canonical_chain;
-use irys_actors::mempool_service::{TxExistenceQuery, TxIngressError, TxIngressMessage};
-use irys_actors::packing::wait_for_packing;
-use irys_actors::{block_validation, SetTestBlocksRemainingMessage};
+use irys_actors::{
+    block_producer::SolutionFoundMessage,
+    block_tree_service::get_canonical_chain,
+    block_validation,
+    mempool_service::{TxExistenceQuery, TxIngressError, TxIngressMessage},
+    packing::wait_for_packing,
+    vdf_service::VdfStepsReadGuard,
+    SetTestBlocksRemainingMessage,
+};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::tables::IrysBlockHeaders;
@@ -37,7 +41,6 @@ use irys_types::{
     CommitmentTransaction, Config, IrysTransactionHeader, IrysTransactionId, NodeConfig, NodeMode,
     TxChunkOffset,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
 use reth_db::cursor::*;
@@ -102,6 +105,7 @@ pub async fn capacity_chunk_solution(
         &vdf_steps_guard,
         &partition_hash,
     )
+    .await
     .expect("valid recall range");
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(config.consensus.chunk_size as usize);
@@ -307,14 +311,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         .expect("for packing to complete in the wait period");
     }
 
-    pub fn start_mining(&self) {
-        if self.node_ctx.actor_addresses.start_mining().is_err() {
+    pub async fn start_mining(&self) {
+        if self.node_ctx.start_mining().await.is_err() {
             panic!("Expected to start mining")
         }
     }
 
-    pub fn stop_mining(&self) {
-        if self.node_ctx.actor_addresses.stop_mining().is_err() {
+    pub async fn stop_mining(&self) {
+        if self.node_ctx.stop_mining().await.is_err() {
             panic!("Expected to stop mining")
         }
     }
@@ -393,14 +397,14 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
-        self.node_ctx.actor_addresses.set_mining(true)?;
+        self.node_ctx.set_partition_mining(true).await?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
-        self.node_ctx.actor_addresses.set_mining(false)
+        self.node_ctx.set_partition_mining(false).await
     }
 
     pub async fn wait_for_mempool(

@@ -69,8 +69,9 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
             },
         ),
     ]);
+
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    node.node_ctx.actor_addresses.stop_mining()?;
+    node.node_ctx.stop_mining().await?;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

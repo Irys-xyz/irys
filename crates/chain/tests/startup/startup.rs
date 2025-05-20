@@ -7,7 +7,8 @@ use std::time::Duration;
 #[test_log::test(actix_web::test)]
 async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<()> {
     // setup
-    let node = IrysNodeTest::default_async().await;
+    let config = NodeConfig::testnet();
+    let node = IrysNodeTest::new_genesis(config.clone());
 
     // action:
     // 1. start the genesis node;
@@ -51,7 +52,6 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     let test_dir = temp_dir.path().to_path_buf();
 
     let config = NodeConfig::testnet();
-
     let mut node = IrysNodeTest::new_genesis(config.clone());
     node.cfg.base_directory = test_dir.clone();
 

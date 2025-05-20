@@ -103,7 +103,8 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let node = IrysNodeTest::default_async().await.start().await;
+    let config = NodeConfig::testnet();
+    let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
@@ -134,7 +135,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
 
-    node.node_ctx.actor_addresses.start_mining()?;
+    node.node_ctx.start_mining().await?;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
@@ -333,12 +334,15 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
-    let node = IrysNodeTest::default_async().await.start().await;
+    let node = IrysNodeTest::default_async().await;
+    let node = node.start().await;
+
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
     let mut init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+
     for _ in 0..3 {
         // mine a single block
         let (block, reth_exec_env) = mine_block(&node.node_ctx)

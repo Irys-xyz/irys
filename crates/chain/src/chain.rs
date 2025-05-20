@@ -19,14 +19,14 @@ use irys_actors::{
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
     mempool_service::MempoolServiceFacadeImpl,
-    mining::PartitionMiningActor,
+    mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingConfig, PackingRequest},
     reth_service::{
         BlockHashType, ForkChoiceUpdateMessage, GetPeeringInfoMessage, RethServiceActor,
     },
     services::ServiceSenders,
     validation_service::ValidationService,
-    vdf_service::{GetVdfStateMessage, VdfService},
+    vdf_service::{VdfService, VdfServiceMessage, VdfStepsReadGuard},
 };
 use irys_actors::{
     ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
@@ -53,11 +53,10 @@ use irys_storage::{
     ChunkProvider, ChunkType, StorageModule,
 };
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, Config,
-    GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, H256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
+    CommitmentTransaction, Config, GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, H256, U256,
 };
-use irys_types::{ArbiterHandle, CloneableJoinHandle, U256};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -93,9 +92,6 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub service_senders: ServiceSenders,
-    // vdf channel for fast forwarding steps during sync
-    pub vdf_sender:
-        tokio::sync::mpsc::Sender<irys_actors::broadcast_mining_service::BroadcastMiningSeed>,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -123,7 +119,7 @@ impl IrysNodeCtx {
     }
 
     pub async fn stop(self) {
-        let _ = self.actor_addresses.stop_mining();
+        let _ = self.stop_mining();
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
@@ -132,14 +128,33 @@ impl IrysNodeCtx {
         self.stop_guard.mark_stopped();
     }
 
-    pub fn start_mining(&self) -> eyre::Result<()> {
-        // start processing new blocks
-        self.actor_addresses.start_mining()?;
-        Ok(())
-    }
-
     pub fn get_http_port(&self) -> u16 {
         self.config.node_config.http.bind_port
+    }
+
+    /// Stop VDF thread mining and send a message to all known partition actors to ignore any received VDF steps
+    pub async fn stop_mining(&self) -> eyre::Result<()> {
+        // stop VDF thread mining
+        if let Err(e) = self.service_senders.vdf_mining.send(false).await {
+            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
+        }
+        self.set_partition_mining(false).await
+    }
+    /// Start VDF thread mining and Send a message to all known partition actors to begin mining when they receive a VDF step
+    pub async fn start_mining(&self) -> eyre::Result<()> {
+        // start VDF thread mining
+        if let Err(e) = self.service_senders.vdf_mining.send(true).await {
+            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
+        }
+        self.set_partition_mining(true).await
+    }
+    // Send a custom control message to all known partition actors to enable/disable partition mining
+    pub async fn set_partition_mining(&self, should_mine: bool) -> eyre::Result<()> {
+        // Send a custom control message to all known partition actors
+        for part in &self.actor_addresses.partitions {
+            part.try_send(MiningControl(should_mine))?;
+        }
+        Ok(())
     }
 }
 
@@ -562,7 +577,7 @@ impl IrysNode {
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.peer_list.clone(),
-                ctx.vdf_sender.clone(),
+                ctx.service_senders.vdf_seed.clone(),
             )
             .await?;
         }
@@ -760,7 +775,7 @@ impl IrysNode {
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
 
-        // start services
+        // start service senders/receivers
         let (service_senders, receivers) = ServiceSenders::new();
 
         // start reth service
@@ -868,17 +883,24 @@ impl IrysNode {
             &storage_modules_guard,
         );
 
-        let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
-        let (vdf_mining_state_sender, vdf_mining_state_rx) = mpsc::channel::<bool>(1);
-
-        // spawn the vdf service
-        let vdf_service = Self::init_vdf_service(
+        // Spawn VDF service
+        let _handle = VdfService::spawn_service(
+            &task_exec,
+            irys_db.clone(),
+            block_index_guard.clone(),
+            receivers.vdf,
+            service_senders.vdf_mining.clone(),
             &config,
-            &irys_db,
-            &block_index_guard,
-            vdf_mining_state_sender,
         );
-        let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
+
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let vdf_service_sender = service_senders.vdf.clone();
+        let _ = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
+            response: oneshot_tx,
+        });
+        let vdf_steps_guard = oneshot_rx
+            .await
+            .expect("to receive VdfStepsReadGuard response from GetVdfStateMessage");
 
         // spawn the validation service
         let validation_arbiter = Self::init_validation_service(
@@ -921,7 +943,7 @@ impl IrysNode {
             task_exec,
             peer_list_service.clone(),
             irys_db.clone(),
-            vdf_sender.clone(),
+            service_senders.vdf_seed.clone(),
             gossip_listener,
             true,
             latest_known_block_height,
@@ -974,13 +996,13 @@ impl IrysNode {
         let vdf_thread_handler = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
-            new_seed_rx,
-            vdf_mining_state_rx,
+            receivers.vdf_seed,
+            receivers.vdf_mining,
             latest_block,
             seed,
             global_step_number,
             broadcast_mining_actor,
-            vdf_service.clone(),
+            service_senders.vdf.clone(),
             atomic_global_step_number,
         );
 
@@ -998,7 +1020,6 @@ impl IrysNode {
                 block_index: block_index_service_actor,
                 epoch_service: epoch_service_actor,
                 reth: reth_service_actor,
-                vdf: vdf_service,
             },
             arbiters: Arc::new(RwLock::new(Vec::new())),
             reward_curve,
@@ -1008,7 +1029,6 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
-            vdf_sender,
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
@@ -1130,7 +1150,7 @@ impl IrysNode {
         seed: H256,
         global_step_number: u64,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
-        vdf_service: actix::Addr<VdfService>,
+        vdf_service: tokio::sync::mpsc::UnboundedSender<VdfServiceMessage>,
         atomic_global_step_number: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
@@ -1341,23 +1361,6 @@ impl IrysNode {
             });
         SystemRegistry::set(validation_service);
         validation_arbiter
-    }
-
-    fn init_vdf_service(
-        config: &Config,
-        irys_db: &DatabaseProvider,
-        block_index_guard: &BlockIndexReadGuard,
-        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
-    ) -> actix::Addr<VdfService> {
-        let vdf_service_actor = VdfService::new(
-            block_index_guard.clone(),
-            irys_db.clone(),
-            vdf_mining_state_sender.clone(),
-            &config,
-        );
-        let vdf_service = vdf_service_actor.start();
-        SystemRegistry::set(vdf_service.clone());
-        vdf_service
     }
 
     fn init_chunk_migration_service(

@@ -333,6 +333,9 @@ pub struct VdfConfig {
     /// Number of checkpoints to include in each VDF step
     pub num_checkpoints_in_vdf_step: usize,
 
+    /// Minimum number of steps to store in FIFO VecDeque to allow for network forks
+    pub max_allowed_vdf_fork_steps: u64,
+
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
 }
@@ -511,6 +514,7 @@ impl ConsensusConfig {
                 reset_frequency: 10 * 120,
                 parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
+                max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: 7_000,
             },
             chunk_size: Self::CHUNK_SIZE,
@@ -902,8 +906,10 @@ mod tests {
 
         [vdf]
         reset_frequency = 1200
+        max_allowed_vdf_fork_steps = 60000
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25
+
         sha_1s_difficulty = 7000
 
         [block_reward_config]

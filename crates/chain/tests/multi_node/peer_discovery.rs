@@ -48,7 +48,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     )
     .await?;
 
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+    node.node_ctx.start_mining().await.unwrap();
 
     let app_state = ApiState {
         ema_service: ema_tx,

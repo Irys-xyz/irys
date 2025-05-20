@@ -4089,12 +4089,14 @@ dependencies = [
  "nodit",
  "openssl",
  "rand",
+ "rayon",
  "reth",
  "reth-db",
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",
  "serde_json",
+ "sha2 0.10.8",
  "tempfile",
  "test-log",
  "tokio",
@@ -4546,13 +4548,10 @@ dependencies = [
 name = "irys-vdf"
 version = "0.1.0"
 dependencies = [
- "actix",
- "actix-rt",
  "base58",
  "eyre",
  "hex",
  "irys-types",
- "nodit",
  "openssl",
  "rayon",
  "sha2 0.10.8",

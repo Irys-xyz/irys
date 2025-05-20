@@ -1,13 +1,13 @@
 use actix::Addr;
 use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf_service::{VdfSeed, VdfService},
+    vdf_service::VdfServiceMessage,
 };
 use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tracing::{debug, info};
 
 pub fn run_vdf(
@@ -19,7 +19,7 @@ pub fn run_vdf(
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
-    vdf_service: Addr<VdfService>,
+    vdf_service: UnboundedSender<VdfServiceMessage>,
     atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
     let mut hasher = Sha256::new();
@@ -39,9 +39,28 @@ pub fn run_vdf(
 
     loop {
         if shutdown_listener.try_recv().is_ok() {
-            // Shutdown signal received
+            tracing::info!("VDF loop shutdown signal received");
             break;
         };
+
+        // check for VDF fast forward step
+        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
+            // if the step number is ahead of local nodes vdf steps
+            if global_step_number < proposed_ff_to_mining_seed.global_step {
+                debug!(
+                    "Fastforward Step {:?} with Seed {:?}",
+                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
+                );
+                hash = proposed_ff_to_mining_seed.seed.0;
+                global_step_number = proposed_ff_to_mining_seed.global_step;
+            } else {
+                debug!(
+                    "Fastforward Step {} is not ahead of {}",
+                    proposed_ff_to_mining_seed.global_step, global_step_number
+                );
+            }
+            continue;
+        }
 
         // check if vdf mining state should change
         if let Ok(new_mining_state) = vdf_mining_state_listener.try_recv() {
@@ -80,7 +99,9 @@ pub fn run_vdf(
             hash.clone(),
             global_step_number
         );
-        vdf_service.do_send(VdfSeed(Seed(hash)));
+        if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
+            panic!("Unable to send new Seed to VDF service: {:?}", e);
+        }
         broadcast_mining_service.do_send(BroadcastMiningSeed {
             seed: Seed(hash),
             checkpoints: H256List(checkpoints.clone()),
@@ -95,23 +116,6 @@ pub fn run_vdf(
             );
             hash = apply_reset_seed(hash, reset_seed);
         }
-
-        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
-            // if the step number is ahead of local nodes vdf steps
-            if global_step_number < proposed_ff_to_mining_seed.global_step {
-                debug!(
-                    "Fastforward Step {:?} with Seed {:?}",
-                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
-                );
-                hash = proposed_ff_to_mining_seed.seed.0;
-                global_step_number = proposed_ff_to_mining_seed.global_step;
-            } else {
-                debug!(
-                    "Fastforward Step {} is not ahead of {}",
-                    proposed_ff_to_mining_seed.global_step, global_step_number
-                );
-            }
-        }
     }
     debug!(?global_step_number, "VDF thread stopped");
 }
@@ -120,9 +124,11 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf_service::{calc_capacity, GetVdfStateMessage};
+    use irys_actors::{
+        vdf_service::test_helpers::mocked_vdf_service, vdf_service::vdf_steps_are_valid,
+    };
     use irys_types::*;
-    use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
+    use irys_vdf::vdf_sha_verification;
     use nodit::interval::ii;
     use std::{
         sync::{atomic::AtomicU64, Arc},
@@ -180,10 +186,10 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_service() {
-        let mut config = NodeConfig::testnet();
-        config.consensus.get_mut().vdf.reset_frequency = 2;
-        config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new(config);
+        let mut node_config = NodeConfig::testnet();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new(node_config);
 
         let seed = H256::random();
         let reset_seed = H256::random();
@@ -191,12 +197,21 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
-        let capacity = calc_capacity(&config);
         let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let (_, mining_state_rx) = mpsc::channel::<bool>(1);
-        let vdf_service = VdfService::from_capacity(capacity).start();
-        SystemRegistry::set(vdf_service.clone());
-        let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
+
+        let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;
+
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {
+            response: oneshot_tx,
+        }) {
+            panic!("error: {:?}", e);
+        };
+
+        let vdf_steps = oneshot_rx
+            .await
+            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -214,7 +229,7 @@ mod tests {
                     mining_state_rx,
                     shutdown_rx,
                     broadcast_mining_service,
-                    vdf_service,
+                    tx,
                     atomic_global_step_number,
                 )
             }
@@ -225,7 +240,11 @@ mod tests {
 
         let step_num = vdf_steps.read().global_step;
 
-        assert!(step_num > 4, "Should have more than 4 seeds");
+        assert!(
+            step_num > 4,
+            "Should have more than 4 seeds, only have {}",
+            step_num
+        );
 
         // get last 4 steps
         let steps = vdf_steps
