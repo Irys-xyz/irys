@@ -62,7 +62,9 @@ impl ServiceSendersInner {
         let (commitments_cache_sender, commitments_cached_receiver) =
             unbounded_channel::<CommitmentCacheMessage>();
         let (vdf_sender, vdf_receiver) = unbounded_channel::<VdfServiceMessage>();
+        // enabling/disabling VDF mining thread
         let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
+        // vdf channel for fast forwarding steps during node sync
         let (vdf_seed_sender, vdf_seed_receiver) = channel::<BroadcastMiningSeed>(1);
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
 
