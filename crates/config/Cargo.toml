@@ -8,10 +8,8 @@ rust-version.workspace = true
 test-utils = ["irys-types/test-utils"]
 
 [dependencies]
-reth-primitives.workspace = true
 irys-types.workspace = true
 eyre.workspace = true
-reth-chainspec.workspace = true
 irys-primitives.workspace = true
 once_cell.workspace = true
 tracing.workspace = true

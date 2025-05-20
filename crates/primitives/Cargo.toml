@@ -4,21 +4,16 @@ name = "irys-primitives"
 version = "0.1.0"
 
 [dependencies]
-alloy-eips.workspace = true
-alloy-genesis.workspace = true
-alloy-primitives.workspace = true
-alloy-rlp.workspace = true
-# alloy-rpc-types-engine.workspace = true
-alloy-serde.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
 derive_more.workspace = true
 modular-bitfield.workspace = true
-reth-codecs.workspace = true
 ruint.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
+
+[dev-dependencies]
 test-fuzz.workspace = true
 
 [package.metadata.cargo-machete]

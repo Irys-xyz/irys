@@ -34,7 +34,6 @@ use reth::{
     },
 };
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
-use reth_e2e_test_utils::{setup, transaction::TransactionTestContext, wallet::Wallet};
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::EthEvmFactory;

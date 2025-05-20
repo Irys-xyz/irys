@@ -9,29 +9,29 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-alloy-dyn-abi = "1.1.0"
-alloy-evm = { version = "0.7.1", default-features = false }
-alloy-primitives = { version = "1.1.0", default-features = false, features = ["map-foldhash"] }
-alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
-alloy-consensus = { version = "0.15.10", default-features = false }
-alloy-eips = { version = "0.15.10", default-features = false }
-alloy-genesis = { version = "0.15.10", default-features = false }
-alloy-network = { version = "0.15.10", default-features = false }
-alloy-rpc-types = { version = "0.15.10", features = ["eth"], default-features = false }
-alloy-rpc-types-eth = { version = "0.15.10", default-features = false }
+alloy-dyn-abi.workspace = true
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-genesis.workspace = true
+alloy-network.workspace = true
+alloy-rpc-types.workspace = true
+alloy-rpc-types-eth.workspace = true
 
-reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-network = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55f467f023e6a7a5a67debb57a" }
-revm = { version = "23.1.0", default-features = false }
+reth-node-ethereum.workspace = true
+reth-tracing.workspace = true
+reth-network.workspace = true
+reth-chainspec.workspace = true
+reth.workspace = true
+reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
+reth-trie-db.workspace = true
+reth-ethereum-engine-primitives.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-transaction-pool.workspace = true
+revm.workspace = true
 
 tokio.workspace = true
 eyre.workspace = true

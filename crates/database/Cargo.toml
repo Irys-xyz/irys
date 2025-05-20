@@ -12,15 +12,11 @@ alloy-primitives.workspace = true
 actix.workspace = true
 base58.workspace = true
 tokio = { workspace = true, features = ["fs"] }
-reth-node-metrics.workspace = true
 irys-config.workspace = true
-reth-db.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
-reth-db-api.workspace = true
 bytes.workspace = true
 modular-bitfield.workspace = true
-reth-codecs.workspace = true
 eyre.workspace = true
 irys-types.workspace = true
 irys-primitives.workspace = true

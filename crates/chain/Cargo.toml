@@ -33,9 +33,6 @@ tracing-error.workspace = true
 eyre.workspace = true
 rand.workspace = true
 nodit.workspace = true
-reth-db.workspace = true
-reth-primitives.workspace = true
-reth.workspace = true
 toml.workspace = true
 serde_json = "1"
 sha2 = "0.10"
@@ -45,32 +42,19 @@ actix-http.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-alloy-network = { path = "../../ext/alloy/crates/network" }
-alloy-signer-local.workspace = true
-alloy-core.workspace = true
 actix.workspace = true
-alloy-consensus.workspace = true
-alloy-eips.workspace = true
-
 awc.workspace = true
 modular-bitfield.workspace = true
-reth-cli-runner.workspace = true
 futures.workspace = true
-reth-tracing.workspace = true
 hex.workspace = true
 test-fuzz.workspace = true
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "serde"] }
-alloy-sol-macro = { workspace = true, features = ["json"] }
-alloy-provider.workspace = true
 core_affinity = "0.8.1"
 
 [dev-dependencies]
 assert_matches = "1.5.0"
 awc.workspace = true
 irys-actors = { workspace = true, features = ["test-utils"] }
-alloy-sol-types.workspace = true
-alloy-contract.workspace = true
 test-log.workspace = true
 rstest.workspace = true
 rust_decimal.workspace = true
