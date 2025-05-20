@@ -6,7 +6,6 @@ use irys_types::{DataLedger, LedgerChunkOffset, NodeConfig};
 #[actix::test]
 async fn heavy_pending_chunks_test() {
     // Turn on tracing even before the nodes start
-    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // Configure a test network
