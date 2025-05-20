@@ -53,6 +53,7 @@ irys-reward-curve = { path = "./crates/reward-curve" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
 irys-p2p = { path = "./crates/p2p" }
+irys-reth = { path = "./crates/irys-reth" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -99,7 +100,12 @@ semver = "1.0"
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+  "json",
+  "ansi",
+] }
 tempfile = "3"
 csv = "1"
 jsonrpsee = "0.24"
@@ -111,13 +117,21 @@ futures-util = "0.3"
 # reth & alloy deps
 alloy-dyn-abi = "1.1.0"
 alloy-evm = { version = "0.7.1", default-features = false }
-alloy-primitives = { version = "1.1.0", default-features = false, features = ["map-foldhash", "arbitrary"] }
-alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
+alloy-primitives = { version = "1.1.0", default-features = false, features = [
+  "map-foldhash",
+  "arbitrary",
+] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = [
+  "core-net",
+] }
 alloy-consensus = { version = "0.15.10", default-features = false }
 alloy-eips = { version = "0.15.10", default-features = false }
 alloy-genesis = { version = "0.15.10", default-features = false }
+
 alloy-network = { version = "0.15.10", default-features = false }
-alloy-rpc-types = { version = "0.15.10", features = ["eth"], default-features = false }
+alloy-rpc-types = { version = "0.15.10", features = [
+  "eth",
+], default-features = false }
 alloy-rpc-types-eth = { version = "0.15.10", default-features = false }
 
 reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
@@ -131,6 +145,9 @@ reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334ee
 reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+reth-codecs = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+reth-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+
 revm = { version = "23.1.0", default-features = false }
 
 [profile.dev]
@@ -276,7 +293,7 @@ ignored = ["modular-bitfield", "test-fuzz"]
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
 [workspace.metadata.typos]
 default.extend-ignore-re = [
-  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$", # disable a single line: spellchecker:disable-line
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
 files.extend-exclude = ["ext/*", "fixtures/*"]

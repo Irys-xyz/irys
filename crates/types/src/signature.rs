@@ -1,5 +1,5 @@
 use crate::{Arbitrary, Signature};
-use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, U256 as RethU256};
+use alloy_primitives::{bytes, ruint::aliases::U256, Address, U256 as RethU256};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
@@ -23,7 +23,7 @@ impl IrysSignature {
 
     /// converts the parity to a bool, then to the Ethereum standard NonEip155 parity (27 or 28)
     pub fn with_eth_parity(mut self) -> Self {
-        self.0 = self.0.with_parity(Parity::NonEip155(self.0.v().y_parity()));
+        self.0 = self.0.with_parity(27 + self.0.v().y_parity() as u8);
         self
     }
 
@@ -48,11 +48,7 @@ impl IrysSignature {
 
 impl Default for IrysSignature {
     fn default() -> Self {
-        IrysSignature::new(Signature::new(
-            RethU256::ZERO,
-            RethU256::ZERO,
-            Parity::Parity(false),
-        ))
+        IrysSignature::new(Signature::new(RethU256::ZERO, RethU256::ZERO, false))
     }
 }
 
@@ -98,7 +94,7 @@ impl Compact for IrysSignature {
 
         let r = U256::from_le_slice(&buf[0..32]);
         let s = U256::from_le_slice(&buf[32..64]);
-        let signature = Signature::new(r, s, Parity::NonEip155(buf[64] == 1));
+        let signature = Signature::new(r, s, buf[64] == 1);
         buf.advance(65);
         (IrysSignature::new(signature), buf)
     }
@@ -150,7 +146,6 @@ mod tests {
     use super::*;
 
     use crate::{irys::IrysSigner, ConsensusConfig, IrysTransaction, IrysTransactionHeader, H256};
-    use alloy_core::hex::{self};
     use alloy_primitives::Address;
     use k256::ecdsa::SigningKey;
 

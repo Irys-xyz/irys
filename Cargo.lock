@@ -5028,6 +5028,7 @@ dependencies = [
 name = "irys-primitives"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "arbitrary",
  "bytes",
  "derive_more 1.0.0",
@@ -5085,6 +5086,7 @@ dependencies = [
  "futures-util",
  "irys-database",
  "irys-packing",
+ "irys-reth",
  "irys-storage",
  "irys-types",
  "jsonrpsee",
@@ -5147,6 +5149,7 @@ version = "0.1.0"
 dependencies = [
  "actix",
  "actix-rt",
+ "alloy-primitives",
  "alloy-rlp",
  "arbitrary",
  "base58",
@@ -5167,6 +5170,8 @@ dependencies = [
  "openssl",
  "pretty_assertions",
  "rand 0.8.5",
+ "reth-codecs 1.3.12 (git+https://github.com/paradigmxyz/reth?rev=a411d9334eeaec55)",
+ "reth-primitives",
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",
@@ -10487,6 +10492,7 @@ version = "1.3.12"
 source = "git+https://github.com/paradigmxyz/reth?rev=a411d9334eeaec55#a411d9334eeaec55f467f023e6a7a5a67debb57a"
 dependencies = [
  "alloy-consensus",
+ "c-kzg",
  "once_cell",
  "reth-ethereum-forks 1.3.12 (git+https://github.com/paradigmxyz/reth?rev=a411d9334eeaec55)",
  "reth-ethereum-primitives 1.3.12 (git+https://github.com/paradigmxyz/reth?rev=a411d9334eeaec55)",

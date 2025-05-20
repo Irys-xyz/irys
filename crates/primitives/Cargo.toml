@@ -12,6 +12,7 @@ ruint.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
+alloy-primitives.workspace = true
 
 [dev-dependencies]
 test-fuzz.workspace = true
