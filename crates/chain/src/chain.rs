@@ -137,8 +137,7 @@ impl IrysNodeCtx {
         self.config.node_config.http.bind_port
     }
 
-    /// Send a message to all known partition actors to ignore any received VDF steps
-    ///
+    /// Stop VDF thread mining and send a message to all known partition actors to ignore any received VDF steps
     pub async fn stop_mining(&self) -> eyre::Result<()> {
         self.set_mining(false).await
     }
