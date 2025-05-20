@@ -29,10 +29,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
             ..Default::default()
         },
     )]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     let uri = format!(
         "http://127.0.0.1:{}",
@@ -185,34 +182,16 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // 3. The commitment state correctly tracks stake and pledge relationships
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
-    let mut config = NodeConfig::testnet();
-    let num_blocks_in_epoch: usize = 2;
-    config
-        .consensus
-        .set_num_blocks_in_epoch(num_blocks_in_epoch);
+    let num_blocks_in_epoch = 2;
+    let mut config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
 
     // Create multiple signers to test different commitment scenarios
     let signer1 = IrysSigner::random_signer(&config.consensus_config());
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![
-        (
-            signer1.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
-                ..Default::default()
-            },
-        ),
-        (
-            signer2.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
-                ..Default::default()
-            },
-        ),
-    ]);
+
+    config.fund_genesis_accounts(vec![&signer1, &signer2]);
 
     let genesis_signer = config.miner_address();
-
     let genesis_parts_before;
     let signer1_parts_before;
     let signer2_parts_before;
@@ -220,9 +199,11 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let node = {
         // Start a test node with custom configuration
         let node = IrysNodeTest::new_genesis(config.clone())
-            .await
-            .start()
+            .start_and_wait_for_packing(10)
             .await;
+
+        // Initialize blockchain components
+        node.start_mining().await;
 
         let uri = format!(
             "http://127.0.0.1:{}",
@@ -235,7 +216,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             Some(Duration::from_secs(10)),
         )
         .await?;
-        node.node_ctx.actor_addresses.start_mining().unwrap();
 
         // Initialize API for submitting commitment transactions
         let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -415,6 +395,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     restarted_node.node_ctx.stop().await;
     Ok(())
 }
+
 async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
     let stake_tx = CommitmentTransaction {
         commitment_type: CommitmentType::Stake,

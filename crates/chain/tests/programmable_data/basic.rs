@@ -44,6 +44,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let mut testnet_config = NodeConfig::testnet();
     testnet_config.consensus.get_mut().chunk_size = 32;
     testnet_config.consensus.get_mut().chunk_migration_depth = 2;
+    testnet_config
+        .consensus
+        .get_mut()
+        .num_chunks_in_recall_range = 2;
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
     testnet_config.consensus.extend_genesis_accounts(vec![
@@ -69,10 +73,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(testnet_config)
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(testnet_config).start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

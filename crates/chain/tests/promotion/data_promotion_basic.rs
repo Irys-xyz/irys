@@ -38,10 +38,7 @@ async fn heavy_data_promotion_test() {
             ..Default::default()
         },
     )]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -50,7 +47,7 @@ async fn heavy_data_promotion_test() {
     .await
     .unwrap();
 
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+    node.node_ctx.start_mining().await.unwrap();
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {

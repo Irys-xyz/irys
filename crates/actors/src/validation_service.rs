@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
-use actix::{Actor, Context, Handler, Message, Supervised, WrapFuture};
-use actix::{AsyncContext, SystemService};
+use crate::vdf_service::{vdf_steps_are_valid, VdfStepsReadGuard};
+use actix::{
+    Actor, AsyncContext, Context, Handler, Message, Supervised, SystemService, WrapFuture,
+};
 use irys_types::{Config, IrysBlockHeader};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
-use irys_vdf::vdf_steps_are_valid;
+use std::sync::Arc;
 use tracing::error;
 
 use crate::{

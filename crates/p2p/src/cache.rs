@@ -34,6 +34,7 @@ impl From<&GossipData> for GossipCacheKey {
         match data {
             GossipData::Chunk(chunk) => GossipCacheKey::Chunk(chunk.chunk_path_hash()),
             GossipData::Transaction(transaction) => GossipCacheKey::Transaction(transaction.id),
+            GossipData::CommitmentTransaction(comm_tx) => GossipCacheKey::Transaction(comm_tx.id),
             GossipData::Block(block) => GossipCacheKey::Block(block.block_hash),
         }
     }
@@ -122,6 +123,13 @@ impl GossipCache {
                     .read()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 txs.get(&transaction.id).cloned().unwrap_or_default()
+            }
+            GossipData::CommitmentTransaction(commitment_tx) => {
+                let txs = self
+                    .transactions
+                    .read()
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
+                txs.get(&commitment_tx.id).cloned().unwrap_or_default()
             }
             GossipData::Block(block) => {
                 let blocks = self

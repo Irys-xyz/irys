@@ -5,6 +5,7 @@ use crate::{
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
+    vdf_service::VdfStepsReadGuard,
 };
 use base58::ToBase58;
 use eyre::ensure;
@@ -16,7 +17,6 @@ use irys_types::{
     DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use tracing::{debug, info};
 
@@ -92,7 +92,7 @@ pub async fn prevalidate_block(
     );
 
     // Recall range check
-    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard)?;
+    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard).await?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -296,7 +296,7 @@ pub fn solution_hash_is_valid(
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 /// Check recall range is valid
-pub fn recall_recall_range_is_valid(
+pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStepsReadGuard,
@@ -323,7 +323,7 @@ pub fn recall_recall_range_is_valid(
     )
 }
 
-pub fn get_recall_range(
+pub async fn get_recall_range(
     step_num: u64,
     config: &ConsensusConfig,
     steps_guard: &VdfStepsReadGuard,
@@ -476,10 +476,12 @@ mod tests {
             EpochServiceActor, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
             NewEpochMessage,
         },
+        services::ServiceSenders,
         BlockFinalizedMessage,
     };
     use actix::{prelude::*, SystemRegistry};
 
+    use irys_config::StorageSubmodulesConfig;
     use irys_database::{add_genesis_commitments, BlockIndex};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
@@ -546,7 +548,11 @@ mod tests {
             BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let epoch_service = EpochServiceActor::new(&config);
+        let storage_submodules_config =
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+        let service_senders = ServiceSenders::new().0;
+        let epoch_service =
+            EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers

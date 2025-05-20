@@ -7,7 +7,7 @@ use tracing_subscriber::{
     layer::SubscriberExt, util::SubscriberInitExt as _, EnvFilter, Layer, Registry,
 };
 
-#[tokio::main(flavor = "current_thread")]
+#[actix_web::main]
 async fn main() -> eyre::Result<()> {
     // init logging
     init_tracing().expect("initializing tracing should work");
@@ -44,7 +44,7 @@ async fn main() -> eyre::Result<()> {
     // start the node
     info!("starting the node, mode: {:?}", &config.mode);
     let handle = IrysNode::new(config).await?.start().await?;
-    handle.start_mining()?;
+    handle.start_mining().await?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down
     tokio::task::spawn_blocking(|| {

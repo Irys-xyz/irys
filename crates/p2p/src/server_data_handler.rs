@@ -11,8 +11,8 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
-    GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
-    RethPeerInfo, UnpackedChunk, H256,
+    CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
+    IrysTransactionResponse, RethPeerInfo, UnpackedChunk, H256,
 };
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -159,6 +159,61 @@ where
             }
             Err(error) => {
                 error!("Error when sending transaction to mempool: {:?}", error);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn handle_commitment_tx(
+        &self,
+        transaction_request: GossipRequest<CommitmentTransaction>,
+    ) -> GossipResult<()> {
+        debug!(
+            "Node {}: Gossip commitment transaction received from peer {}: {:?}",
+            self.gossip_client.mining_address,
+            transaction_request.miner_address,
+            transaction_request.data.id.0.to_base58()
+        );
+        let tx = transaction_request.data;
+        let source_miner_address = transaction_request.miner_address;
+        let tx_id = tx.id;
+
+        let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
+        self.cache
+            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
+
+        if already_seen {
+            debug!(
+                "Node {}: Commitment Transaction {} is already recorded in the cache, skipping",
+                self.gossip_client.mining_address,
+                tx_id.0.to_base58()
+            );
+            return Ok(());
+        }
+
+        if self.mempool.is_known_tx(tx_id).await? {
+            debug!(
+                "Node {}: Commitment Transaction has already been handled, skipping",
+                self.gossip_client.mining_address
+            );
+            return Ok(());
+        }
+
+        match self
+            .mempool
+            .handle_commitment_transaction(tx)
+            .await
+            .map_err(GossipError::from)
+        {
+            Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
+                debug!("Commitment Transaction sent to mempool");
+                Ok(())
+            }
+            Err(error) => {
+                error!(
+                    "Error when sending commitment transaction to mempool: {:?}",
+                    error
+                );
                 Err(error)
             }
         }

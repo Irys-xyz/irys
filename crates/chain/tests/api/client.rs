@@ -4,8 +4,8 @@ use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, PeerResponse, ProtocolVersion,
-    VersionRequest,
+    AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
+    ProtocolVersion, VersionRequest,
 };
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
@@ -139,7 +139,8 @@ async fn check_get_block_endpoint(
 
 #[actix_rt::test]
 async fn heavy_api_client_all_endpoints_should_work() {
-    let ctx = IrysNodeTest::default_async().await.start().await;
+    let config = NodeConfig::testnet();
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
 
     let api_address = SocketAddr::new(
         IpAddr::from_str("127.0.0.1").unwrap(),

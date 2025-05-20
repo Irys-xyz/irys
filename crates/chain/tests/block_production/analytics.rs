@@ -64,10 +64,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
     let _reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     let http_url = format!(

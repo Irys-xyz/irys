@@ -6,7 +6,7 @@ use crate::{
     },
     PeerAddress, RethPeerInfo,
 };
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use reth_chainspec::Chain;
 use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, Genesis, GenesisAccount};
 use rust_decimal::Decimal;
@@ -209,6 +209,9 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
+    /// Reth node configuration
+    pub reth: RethConfig,
+
     /// Reth settings
     pub reth_peer_info: RethPeerInfo,
 }
@@ -254,10 +257,6 @@ impl ConsensusOptions {
     ) {
         let config = self.get_mut();
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
-    }
-
-    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) {
-        self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
@@ -334,6 +333,9 @@ pub struct VdfConfig {
     /// Number of checkpoints to include in each VDF step
     pub num_checkpoints_in_vdf_step: usize,
 
+    /// Minimum number of steps to store in FIFO VecDeque to allow for network forks
+    pub max_allowed_vdf_fork_steps: u64,
+
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
 }
@@ -392,6 +394,14 @@ pub struct GossipConfig {
     pub bind_port: u16,
 }
 
+/// # Reth Configuration
+///
+/// Settings that are passed to the reth node
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RethConfig {
+    pub use_random_ports: bool,
+}
+
 /// # Data Packing Configuration
 ///
 /// Controls how data is compressed and packed for storage.
@@ -425,7 +435,7 @@ pub struct HttpConfig {
     pub public_port: u16,
     /// The IP address the HTTP service binds to
     pub bind_ip: String,
-    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
+    /// The port that the Node's HTTP server should listen on. Set to 0 for randomization.
     pub bind_port: u16,
 }
 
@@ -484,6 +494,7 @@ impl ConsensusConfig {
                 reset_frequency: 10 * 120,
                 parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
+                max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: 7_000,
             },
             chunk_size: Self::CHUNK_SIZE,
@@ -573,18 +584,45 @@ impl NodeConfig {
         Address::from_private_key(&self.mining_key)
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn testnet() -> Self {
-        use alloy_signer::utils::secret_key_to_address;
-        use k256::ecdsa::SigningKey;
-        use rust_decimal_macros::dec;
+    pub fn new_random_signer(&self) -> IrysSigner {
+        IrysSigner::random_signer(&self.consensus_config())
+    }
 
-        let mining_key = SigningKey::from_slice(
-            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                .expect("valid hex"),
-        )
-        .expect("valid key");
-        let reward_address = secret_key_to_address(&mining_key);
+    pub fn signer(&self) -> IrysSigner {
+        IrysSigner {
+            signer: self.mining_key.clone(),
+            chain_id: self.consensus_config().chain_id,
+            chunk_size: self.consensus_config().chunk_size,
+        }
+    }
+
+    pub fn api_uri(&self) -> String {
+        format!("http://{}:{}", self.http.public_ip, self.http.public_port)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fund_genesis_accounts<'a>(
+        &mut self,
+        signers: impl IntoIterator<Item = &'a IrysSigner>,
+    ) -> &mut Self {
+        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
+        for signer in signers {
+            accounts.push((
+                signer.address(),
+                GenesisAccount {
+                    balance: U256::from(690000000000000000_u128),
+                    ..Default::default()
+                },
+            ))
+        }
+        self.consensus.extend_genesis_accounts(accounts);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_signer(signer: &IrysSigner) -> Self {
+        let mining_key = signer.signer.clone();
+        let reward_address = signer.address();
         Self {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
@@ -614,6 +652,9 @@ impl NodeConfig {
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
                 bind_port: 0,
             },
+            reth: RethConfig {
+                use_random_ports: true,
+            },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
                 gpu_packing_batch_size: 1024,
@@ -627,6 +668,30 @@ impl NodeConfig {
             },
             reth_peer_info: RethPeerInfo::default(),
         }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_epochs(num_blocks_in_epoch: usize) -> Self {
+        let mut node_config = Self::testnet();
+        node_config.consensus.get_mut().epoch.num_blocks_in_epoch = num_blocks_in_epoch as u64;
+        node_config
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet() -> Self {
+        use k256::ecdsa::SigningKey;
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let signer = IrysSigner {
+            signer: mining_key,
+            chain_id: 0,
+            chunk_size: 0,
+        };
+
+        Self::testnet_with_signer(&signer)
     }
 
     /// get the storage module directory path
@@ -821,8 +886,10 @@ mod tests {
 
         [vdf]
         reset_frequency = 1200
+        max_allowed_vdf_fork_steps = 60000
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25
+
         sha_1s_difficulty = 7000
 
         [block_reward_config]
@@ -899,6 +966,9 @@ mod tests {
         bind_port = 0
         public_ip = "127.0.0.1"
         public_port = 0
+
+        [reth]
+        use_random_ports = true
 
         [reth_peer_info]
         peering_tcp_addr = "0.0.0.0:0"

@@ -600,7 +600,7 @@ dependencies = [
  "dashmap 6.1.0",
  "futures",
  "futures-utils-wasm",
- "lru",
+ "lru 0.12.5",
  "pin-project",
  "reqwest 0.12.15",
  "serde",
@@ -2753,7 +2753,7 @@ dependencies = [
  "hkdf",
  "lazy_static",
  "libp2p-identity",
- "lru",
+ "lru 0.12.5",
  "more-asserts",
  "multiaddr",
  "parking_lot 0.11.2",
@@ -4085,15 +4085,18 @@ dependencies = [
  "irys-testing-utils",
  "irys-types",
  "irys-vdf",
+ "lru 0.14.0",
  "nodit",
  "openssl",
  "rand",
+ "rayon",
  "reth",
  "reth-db",
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",
  "serde_json",
+ "sha2 0.10.8",
  "tempfile",
  "test-log",
  "tokio",
@@ -4485,6 +4488,7 @@ name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4494,6 +4498,7 @@ name = "irys-types"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
  "alloy-core",
  "alloy-primitives",
  "alloy-rlp",
@@ -4543,13 +4548,10 @@ dependencies = [
 name = "irys-vdf"
 version = "0.1.0"
 dependencies = [
- "actix",
- "actix-rt",
  "base58",
  "eyre",
  "hex",
  "irys-types",
- "nodit",
  "openssl",
  "rayon",
  "sha2 0.10.8",
@@ -5066,6 +5068,15 @@ name = "lru"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.2",
+]
+
+[[package]]
+name = "lru"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f8cc7106155f10bdf99a6f379688f543ad6596a415375b36a59a054ceda1198"
 dependencies = [
  "hashbrown 0.15.2",
 ]
@@ -6355,7 +6366,7 @@ dependencies = [
  "crossterm",
  "instability",
  "itertools 0.13.0",
- "lru",
+ "lru 0.12.5",
  "paste",
  "strum",
  "strum_macros",
