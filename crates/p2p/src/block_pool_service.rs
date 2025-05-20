@@ -12,6 +12,7 @@ use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
+use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info};
 
 #[derive(Debug)]
@@ -42,7 +43,7 @@ where
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
-    pub(crate) vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
+    pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -102,7 +103,7 @@ where
         db: DatabaseProvider,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
-        vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
+        vdf_sender: Option<Sender<BroadcastMiningSeed>>,
     ) -> Self {
         Self {
             db: Some(db),

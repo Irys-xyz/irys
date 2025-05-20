@@ -18,7 +18,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::{
-    sync::mpsc::UnboundedReceiver,
+    sync::mpsc::{Sender, UnboundedReceiver},
     task::JoinHandle,
     time::{sleep, Duration},
 };
@@ -35,7 +35,7 @@ pub struct VdfState {
     /// stored seeds
     pub seeds: VecDeque<Seed>,
     /// whether the VDF thread is mining or paused
-    pub mining_state_sender: Option<tokio::sync::mpsc::Sender<bool>>,
+    pub mining_state_sender: Option<Sender<bool>>,
 }
 
 impl VdfState {
@@ -173,7 +173,7 @@ impl VdfService {
         irys_db: DatabaseProvider,
         block_index_read_guard: BlockIndexReadGuard,
         rx: UnboundedReceiver<VdfServiceMessage>,
-        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
+        vdf_mining_state_sender: Sender<bool>,
         config: &Config,
     ) -> JoinHandle<()> {
         let vdf_state = create_state(
@@ -279,7 +279,7 @@ impl Inner {
 fn create_state(
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
-    vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
+    vdf_mining_state_sender: Sender<bool>,
     config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
@@ -490,7 +490,7 @@ pub mod test_helpers {
 
     use reth::tasks::TaskManager;
     use std::sync::RwLock;
-    use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+    use tokio::sync::mpsc::{channel, unbounded_channel, UnboundedSender};
 
     pub async fn mocked_vdf_service(
         config: &Config,
@@ -504,7 +504,7 @@ pub mod test_helpers {
         let task_manager = TaskManager::new(tokio::runtime::Handle::current());
         let task_executor = task_manager.executor();
         let (tx, rx) = unbounded_channel();
-        let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
+        let (vdf_mining_state_sender, _) = channel::<bool>(1);
 
         let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
             BlockIndex::new(&config.node_config).await.unwrap(),

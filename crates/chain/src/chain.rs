@@ -92,11 +92,6 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub service_senders: ServiceSenders,
-    // vdf channel for fast forwarding steps during sync
-    pub vdf_sender:
-        tokio::sync::mpsc::Sender<irys_actors::broadcast_mining_service::BroadcastMiningSeed>,
-    /// mspc for enabling/disabling VDF mining thread
-    pub vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -140,7 +135,7 @@ impl IrysNodeCtx {
     /// Stop VDF thread mining and send a message to all known partition actors to ignore any received VDF steps
     pub async fn stop_mining(&self) -> eyre::Result<()> {
         // stop VDF thread mining
-        if let Err(e) = self.vdf_mining_state_sender.send(false).await {
+        if let Err(e) = self.service_senders.vdf_mining.send(false).await {
             tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
         }
         self.set_partition_mining(false).await
@@ -148,7 +143,7 @@ impl IrysNodeCtx {
     /// Start VDF thread mining and Send a message to all known partition actors to begin mining when they receive a VDF step
     pub async fn start_mining(&self) -> eyre::Result<()> {
         // start VDF thread mining
-        if let Err(e) = self.vdf_mining_state_sender.send(true).await {
+        if let Err(e) = self.service_senders.vdf_mining.send(true).await {
             tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
         }
         self.set_partition_mining(true).await
@@ -582,7 +577,7 @@ impl IrysNode {
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.peer_list.clone(),
-                ctx.vdf_sender.clone(),
+                ctx.service_senders.vdf_seed.clone(),
             )
             .await?;
         }
@@ -888,16 +883,13 @@ impl IrysNode {
             &storage_modules_guard,
         );
 
-        let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
-        let (vdf_mining_state_sender, vdf_mining_state_rx) = mpsc::channel::<bool>(1);
-
         // Spawn VDF service
         let _handle = VdfService::spawn_service(
             &task_exec,
             irys_db.clone(),
             block_index_guard.clone(),
             receivers.vdf,
-            vdf_mining_state_sender.clone(),
+            service_senders.vdf_mining.clone(),
             &config,
         );
 
@@ -951,7 +943,7 @@ impl IrysNode {
             task_exec,
             peer_list_service.clone(),
             irys_db.clone(),
-            vdf_sender.clone(),
+            service_senders.vdf_seed.clone(),
             gossip_listener,
             true,
             latest_known_block_height,
@@ -1004,8 +996,8 @@ impl IrysNode {
         let vdf_thread_handler = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
-            new_seed_rx,
-            vdf_mining_state_rx,
+            receivers.vdf_seed,
+            receivers.vdf_mining,
             latest_block,
             seed,
             global_step_number,
@@ -1037,8 +1029,6 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
-            vdf_sender: vdf_sender.clone(),
-            vdf_mining_state_sender: vdf_mining_state_sender.clone(),
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),

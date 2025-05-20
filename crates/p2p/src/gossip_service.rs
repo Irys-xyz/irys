@@ -34,8 +34,10 @@ use std::collections::VecDeque;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc::error::SendError;
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::mpsc::{channel, error::SendError, Receiver, Sender},
+    time,
+};
 use tracing::{debug, error, info, warn};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
@@ -50,18 +52,18 @@ type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 #[derive(Debug)]
 pub struct ServiceHandleWithShutdownSignal {
     pub handle: tokio::task::JoinHandle<()>,
-    pub shutdown_tx: mpsc::Sender<()>,
+    pub shutdown_tx: Sender<()>,
     pub name: String,
 }
 
 impl ServiceHandleWithShutdownSignal {
     pub fn spawn<F, S, Fut>(name: S, task: F, task_executor: &TaskExecutor) -> Self
     where
-        F: FnOnce(mpsc::Receiver<()>) -> Fut + Send + 'static,
+        F: FnOnce(Receiver<()>) -> Fut + Send + 'static,
         S: Into<String>,
         Fut: core::future::Future<Output = ()> + Send + 'static,
     {
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = channel(1);
         let handle = task_executor.spawn(task(shutdown_rx));
         Self {
             handle,
@@ -109,7 +111,7 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct GossipService {
     cache: Arc<GossipCache>,
-    mempool_data_receiver: Option<mpsc::Receiver<GossipData>>,
+    mempool_data_receiver: Option<Receiver<GossipData>>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
@@ -164,9 +166,9 @@ impl GossipService {
     /// Create a new gossip service. To run the service, use the [`GossipService::run`] method.
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
-    pub fn new(mining_address: Address) -> (Self, mpsc::Sender<GossipData>) {
+    pub fn new(mining_address: Address) -> (Self, Sender<GossipData>) {
         let cache = Arc::new(GossipCache::new());
-        let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
+        let (trusted_data_tx, trusted_data_rx) = channel(1000);
 
         let client_timeout = Duration::from_secs(5);
         let client = GossipClient::new(client_timeout, mining_address);
@@ -197,7 +199,7 @@ impl GossipService {
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
-        vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+        vdf_sender: Sender<BroadcastMiningSeed>,
         listener: TcpListener,
         needs_catching_up: bool,
         latest_known_height: usize,
@@ -406,7 +408,7 @@ fn spawn_cache_pruning_task(
 }
 
 fn spawn_broadcast_task<R, A>(
-    mut mempool_data_receiver: mpsc::Receiver<GossipData>,
+    mut mempool_data_receiver: Receiver<GossipData>,
     service: GossipService,
     task_executor: &TaskExecutor,
     peer_list_service: PeerListFacade<A, R>,
@@ -644,7 +646,7 @@ async fn get_block_index<
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 pub async fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: VDFLimiterInfo,
-    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+    vdf_sender: Sender<BroadcastMiningSeed>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;
     let len = vdf_limiter_info.steps.len();

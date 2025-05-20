@@ -7,7 +7,7 @@ use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U2
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tracing::{debug, info};
 
 pub fn run_vdf(
@@ -19,7 +19,7 @@ pub fn run_vdf(
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
-    vdf_service: tokio::sync::mpsc::UnboundedSender<VdfServiceMessage>,
+    vdf_service: UnboundedSender<VdfServiceMessage>,
     atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
     let mut hasher = Sha256::new();

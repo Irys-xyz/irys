@@ -1,11 +1,14 @@
 use actix::Message;
 use core::ops::Deref;
 use std::sync::Arc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{
+    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+};
 
 use crate::{
-    cache_service::CacheServiceAction, ema_service::EmaServiceMessage,
-    vdf_service::VdfServiceMessage, CommitmentCacheMessage, StorageModuleServiceMessage,
+    broadcast_mining_service::BroadcastMiningSeed, cache_service::CacheServiceAction,
+    ema_service::EmaServiceMessage, vdf_service::VdfServiceMessage, CommitmentCacheMessage,
+    StorageModuleServiceMessage,
 };
 
 // Only contains senders, thread-safe to clone and share
@@ -35,6 +38,8 @@ pub struct ServiceReceivers {
     pub ema: UnboundedReceiver<EmaServiceMessage>,
     pub commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
     pub vdf: UnboundedReceiver<VdfServiceMessage>,
+    pub vdf_mining: Receiver<bool>,
+    pub vdf_seed: Receiver<BroadcastMiningSeed>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
 }
 
@@ -44,6 +49,8 @@ pub struct ServiceSendersInner {
     pub ema: UnboundedSender<EmaServiceMessage>,
     pub commitment_cache: UnboundedSender<CommitmentCacheMessage>,
     pub vdf: UnboundedSender<VdfServiceMessage>,
+    pub vdf_mining: Sender<bool>,
+    pub vdf_seed: Sender<BroadcastMiningSeed>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
 }
 
@@ -55,6 +62,8 @@ impl ServiceSendersInner {
         let (commitments_cache_sender, commitments_cached_receiver) =
             unbounded_channel::<CommitmentCacheMessage>();
         let (vdf_sender, vdf_receiver) = unbounded_channel::<VdfServiceMessage>();
+        let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
+        let (vdf_seed_sender, vdf_seed_receiver) = channel::<BroadcastMiningSeed>(1);
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
 
         let senders = Self {
@@ -62,6 +71,8 @@ impl ServiceSendersInner {
             ema: ema_sender,
             commitment_cache: commitments_cache_sender,
             vdf: vdf_sender,
+            vdf_mining: vdf_mining_sender,
+            vdf_seed: vdf_seed_sender,
             storage_modules: sm_sender,
         };
         let receivers = ServiceReceivers {
@@ -69,6 +80,8 @@ impl ServiceSendersInner {
             ema: ema_receiver,
             commitments_cache: commitments_cached_receiver,
             vdf: vdf_receiver,
+            vdf_mining: vdf_mining_receiver,
+            vdf_seed: vdf_seed_receiver,
             storage_modules: sm_receiver,
         };
         (senders, receivers)
