@@ -1,0 +1,7 @@
+[build]
+rustflags = ["-C", "target-cpu=native"]
+# incremental = true
+# jobs = 2 # number of parallel jobs, defaults to # of CPUs
+
+[alias]
+xtask = "run --package xtask --"

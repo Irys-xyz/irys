@@ -904,10 +904,6 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        let latest_known_block_height = block_index
-            .read()
-            .expect("to have an access to the block index")
-            .latest_height() as usize;
         let current_tree_tip = block_tree_guard.read().tip;
         let latest_known_block_height = block_tree_guard
             .read()

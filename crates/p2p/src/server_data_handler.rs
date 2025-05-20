@@ -172,7 +172,6 @@ where
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
-        let block_height = block_header.height;
         debug!(
             "Node {}: Gossip block received from peer {}: {:?}",
             self.gossip_client.mining_address,
