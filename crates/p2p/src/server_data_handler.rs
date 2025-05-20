@@ -1,5 +1,6 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::cache::GossipCacheKey;
+use crate::gossip_service::SyncState;
 use crate::peer_list::PeerListFacade;
 use crate::types::{GossipDataRequest, InternalGossipError, InvalidDataError};
 use crate::{cache::GossipCache, GossipClient, GossipError, GossipResult};
@@ -31,6 +32,7 @@ where
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
     pub peer_list_service: PeerListFacade<TApiClient, R>,
+    pub sync_state: SyncState,
 }
 
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
@@ -48,6 +50,7 @@ where
             api_client: self.api_client.clone(),
             gossip_client: self.gossip_client.clone(),
             peer_list_service: self.peer_list_service.clone(),
+            sync_state: self.sync_state.clone(),
         }
     }
 }
@@ -169,12 +172,24 @@ where
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
+        let block_height = block_header.height;
         debug!(
             "Node {}: Gossip block received from peer {}: {:?}",
             self.gossip_client.mining_address,
             source_miner_address,
             block_hash.0.to_base58()
         );
+
+        if self.sync_state.is_syncing()
+            && block_header.height > (self.sync_state.sync_height() + 1) as u64
+        {
+            debug!(
+                "Node {}: Block {} is out of the sync range, skipping",
+                self.gossip_client.mining_address,
+                block_hash.0.to_base58()
+            );
+            return Ok(());
+        }
 
         let block_seen = self.cache.seen_block_from_any_peer(&block_hash)?;
 

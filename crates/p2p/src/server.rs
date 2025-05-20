@@ -155,7 +155,7 @@ where
                 // return HttpResponse::InternalServerError().finish();
             } else {
                 info!(
-                    "Node {:?}: Successfully processed block {}",
+                    "Node {:?}: Server handler handled block {}",
                     this_node_id, block_hash_string
                 );
             }

@@ -19,6 +19,7 @@ use crate::{
 };
 use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
+use base58::ToBase58;
 use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
@@ -32,7 +33,7 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::VecDeque;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::{sync::mpsc, time};
@@ -114,22 +115,28 @@ pub struct GossipService {
     pub sync_state: SyncState,
 }
 
-#[derive(Clone, Debug)]
-pub struct SyncState(Arc<AtomicBool>);
+#[derive(Clone, Debug, Default)]
+pub struct SyncState {
+    syncing: Arc<AtomicBool>,
+    sync_height: Arc<AtomicUsize>,
+}
 
 impl SyncState {
+    /// Creates a new SyncState with given syncing flag and sync_height = 0
     pub fn new(is_syncing: bool) -> Self {
-        let sync_state = Arc::new(AtomicBool::new(is_syncing));
-        Self(sync_state)
+        Self {
+            syncing: Arc::new(AtomicBool::new(is_syncing)),
+            sync_height: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     pub fn store(&self, is_syncing: bool) {
-        self.0.store(is_syncing, Ordering::Relaxed);
+        self.syncing.store(is_syncing, Ordering::Relaxed);
     }
 
     /// Returns whether the gossip service is currently syncing
     pub fn is_syncing(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.syncing.load(Ordering::Relaxed)
     }
 
     pub async fn wait_for_sync(&self) {
@@ -139,14 +146,29 @@ impl SyncState {
         }
 
         // Create a future that polls the sync state
-        let sync_state = Arc::clone(&self.0);
+        let syncing = Arc::clone(&self.syncing);
         tokio::spawn(async move {
-            while sync_state.load(Ordering::Relaxed) {
+            while syncing.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
         .expect("Sync checking task failed");
+    }
+
+    /// Sets the current sync height
+    pub fn set_sync_height(&self, height: usize) {
+        self.sync_height.store(height, Ordering::Relaxed);
+    }
+
+    /// Returns the current sync height
+    pub fn sync_height(&self) -> usize {
+        self.sync_height.load(Ordering::Relaxed)
+    }
+
+    /// Increments sync height by 1 and returns the new height
+    pub fn increment_sync_height(&self) -> usize {
+        self.sync_height.fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
@@ -208,6 +230,7 @@ impl GossipService {
     {
         debug!("Staring gossip service");
         self.sync_state.store(needs_catching_up);
+        self.sync_state.set_sync_height(latest_known_height);
 
         // TODO: get the db
         let block_pool_service = BlockPoolService::new_with_client(
@@ -215,6 +238,7 @@ impl GossipService {
             peer_list.clone(),
             block_discovery.clone(),
             Some(vdf_sender),
+            self.sync_state.clone(),
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =
@@ -227,6 +251,7 @@ impl GossipService {
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
             peer_list_service: peer_list.clone(),
+            sync_state: self.sync_state.clone(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
@@ -254,14 +279,7 @@ impl GossipService {
 
         if needs_catching_up {
             task_executor.spawn(async move {
-                if let Err(error) = catch_up_task(
-                    sync_state,
-                    latest_known_height,
-                    api_client.clone(),
-                    peer_list,
-                )
-                .await
-                {
+                if let Err(error) = catch_up_task(sync_state, api_client.clone(), peer_list).await {
                     error!("Failed to catch up: {}", error);
                 }
             });
@@ -527,11 +545,15 @@ async fn catch_up_task<
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 >(
     sync_state: SyncState,
-    mut latest_known_height: usize,
     api_client: A,
     peer_list_service: PeerListFacade<A, R>,
 ) -> Result<(), GossipError> {
+    debug!("Sync task: Starting gossip service sync task, waiting for active peers");
     peer_list_service.wait_for_active_peers().await?;
+    debug!(
+        "Sync task: Gossip service sync task started. Syncing blocks starting from height {}",
+        sync_state.sync_height()
+    );
 
     let limit = 10;
 
@@ -539,7 +561,7 @@ async fn catch_up_task<
     let block_index = get_block_index(
         &peer_list_service,
         &api_client,
-        latest_known_height as usize,
+        sync_state.sync_height(),
         limit,
         5,
     )
@@ -549,21 +571,29 @@ async fn catch_up_task<
     block_queue.extend(block_index);
 
     while let Some(block) = block_queue.pop_front() {
+        debug!(
+            "Sync task: Requesting block {} (height {}) from the network",
+            block.block_hash.0.to_base58(),
+            sync_state.sync_height()
+        );
         match peer_list_service
             .request_block_from_the_network(block.block_hash)
             .await
         {
             Ok(()) => {
-                latest_known_height += 1;
+                sync_state.increment_sync_height();
                 info!(
                     "Successfully requested block {} (height {}) from the network",
-                    block.block_hash, latest_known_height
+                    block.block_hash.0.to_base58(),
+                    sync_state.sync_height()
                 );
             }
             Err(err) => {
                 error!(
                     "Failed to request block {} (height {}) from the network: {}",
-                    block.block_hash, latest_known_height, err
+                    block.block_hash.0.to_base58(),
+                    sync_state.sync_height(),
+                    err
                 );
             }
         }
@@ -574,7 +604,7 @@ async fn catch_up_task<
                 get_block_index(
                     &peer_list_service,
                     &api_client,
-                    latest_known_height as usize,
+                    sync_state.sync_height(),
                     limit,
                     5,
                 )
@@ -624,6 +654,10 @@ async fn get_block_index<
             .map_err(|network_error| GossipError::Network(network_error.to_string()))
         {
             Ok(index) => {
+                debug!(
+                    "Fetched block index from peer {:?}: {:?}",
+                    miner_address, index
+                );
                 return Ok(index);
             }
             Err(error) => {

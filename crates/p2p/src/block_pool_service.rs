@@ -1,4 +1,4 @@
-use crate::gossip_service::fast_forward_vdf_steps_from_block;
+use crate::gossip_service::{fast_forward_vdf_steps_from_block, SyncState};
 use crate::peer_list::{PeerListFacade, PeerListFacadeError};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
@@ -43,6 +43,8 @@ where
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
     pub(crate) vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
+
+    sync_state: SyncState,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -59,6 +61,7 @@ where
             block_producer: None,
             peer_list: None,
             vdf_sender: None,
+            sync_state: SyncState::default(),
         }
     }
 }
@@ -103,6 +106,7 @@ where
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
         vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
+        sync_state: SyncState,
     ) -> Self {
         Self {
             db: Some(db),
@@ -111,6 +115,7 @@ where
             peer_list: Some(peer_list),
             block_producer: Some(block_producer_addr),
             vdf_sender,
+            sync_state,
         }
     }
 
@@ -127,6 +132,14 @@ where
         let block_producer = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
+        let sync_state = self.sync_state.clone();
+
+        // Adding the block to the pool, so if a block depending on that block arrives, i
+        // this block won't be requested from the network
+        self.orphaned_blocks_by_parent
+            .insert(prev_block_hash, block_header.clone());
+        self.block_hash_to_parent_hash
+            .insert(current_block_hash, prev_block_hash);
 
         debug!(
             "GOSSIP process_block() BLOCK HEIGHT: {}",
@@ -160,7 +173,7 @@ where
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
 
                     info!(
-                        "FF VDF Steps for block for block {}",
+                        "FF VDF Steps for block for block {} completed",
                         current_block_hash.0.to_base58()
                     );
 
@@ -179,7 +192,10 @@ where
                             BlockPoolError::BlockError(block_error)
                         })?;
 
-                    info!("Block {} processed", current_block_hash.0.to_base58());
+                    info!(
+                        "Block pool: Block has been {} processed",
+                        current_block_hash.0.to_base58()
+                    );
                     self_addr.do_send(RemoveBlockFromPool {
                         parent_block_hash: previous_block_header.block_hash,
                         block_hash: block_header.block_hash,
@@ -269,6 +285,7 @@ where
         let block_header = msg.header;
         let self_addr = ctx.address();
         let current_block_hash = block_header.block_hash;
+        let current_block_height = block_header.height;
         let previous_block_hash = block_header.previous_block_hash;
         let parent_is_also_in_cache = self
             .orphaned_blocks_by_parent
@@ -279,6 +296,11 @@ where
             .contains_key(&block_header.previous_block_hash);
 
         if !already_in_cache {
+            debug!(
+                "Adding block {} (height {}) to the pool for processing",
+                current_block_hash.0.to_base58(),
+                current_block_height
+            );
             self.orphaned_blocks_by_parent
                 .insert(previous_block_hash, block_header);
             self.block_hash_to_parent_hash
@@ -287,24 +309,28 @@ where
 
         Box::pin(
             async move {
-                if !already_in_cache {
-                    // If the parent is also in the cache it's likely that processing has already started
-                    if !parent_is_also_in_cache {
-                        self_addr
-                            .send(RequestBlockFromTheNetwork {
-                                block_hash: previous_block_hash,
-                            })
-                            .await
-                            .map_err(|mailbox| {
-                                BlockPoolError::OtherInternal(format!(
-                                    "Can't request the block from the network: {:?}",
-                                    mailbox
-                                ))
-                            })?
-                    } else {
-                        Ok(())
-                    }
+                // If the parent is also in the cache it's likely that processing has already started
+                if !parent_is_also_in_cache {
+                    debug!(
+                        "Parent block {} not found in the cache, requesting it from the network",
+                        previous_block_hash.0.to_base58()
+                    );
+                    self_addr
+                        .send(RequestBlockFromTheNetwork {
+                            block_hash: previous_block_hash,
+                        })
+                        .await
+                        .map_err(|mailbox| {
+                            BlockPoolError::OtherInternal(format!(
+                                "Can't request the block from the network: {:?}",
+                                mailbox
+                            ))
+                        })?
                 } else {
+                    debug!(
+                        "Parent block {} is already in the cache, skipping get data request",
+                        previous_block_hash.0.to_base58()
+                    );
                     Ok(())
                 }
             }
