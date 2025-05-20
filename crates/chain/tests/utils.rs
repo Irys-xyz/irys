@@ -393,14 +393,14 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
-        self.node_ctx.set_mining(true).await?;
+        self.node_ctx.set_partition_mining(true).await?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
-        self.node_ctx.set_mining(false).await
+        self.node_ctx.set_partition_mining(false).await
     }
 
     pub async fn wait_for_mempool(
