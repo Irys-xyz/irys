@@ -796,8 +796,9 @@ mod tests {
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
+            sync_state.set_sync_height(10);
 
-            catch_up_task(sync_state.clone(), 10, api_client_stub.clone(), peer_list)
+            catch_up_task(sync_state.clone(), api_client_stub.clone(), peer_list)
                 .await
                 .expect("to finish catching up");
 
