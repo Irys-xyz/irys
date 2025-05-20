@@ -505,6 +505,7 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 anchor_expiry_depth: 10,
+                // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
@@ -897,6 +898,10 @@ mod tests {
         [mempool]
         max_data_txs_per_block = 100
         anchor_expiry_depth = 10
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
 
         [difficulty_adjustment]
         block_time = 1
