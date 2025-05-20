@@ -4,8 +4,9 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{DataLedger, LedgerChunkOffset, NodeConfig};
 
 #[actix::test]
-async fn heavy_pending_chunks_test() {
+async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
+    // std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // Configure a test network
@@ -28,8 +29,8 @@ async fn heavy_pending_chunks_test() {
         data.extend_from_slice(chunk);
     }
 
-    let tx = signer.create_transaction(data, None).unwrap();
-    let tx = signer.sign_transaction(tx).unwrap();
+    let tx = signer.create_transaction(data, None)?;
+    let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
     post_chunk(&app, &tx, 0, &chunks).await;
@@ -40,7 +41,7 @@ async fn heavy_pending_chunks_test() {
     post_storage_tx(&app, &tx).await;
 
     // Mine some blocks to trigger chunk migration
-    genesis_node.mine_blocks(2).await.unwrap();
+    genesis_node.mine_blocks(2).await?;
 
     // Finally verify the chunks didn't get dropped
     let c1 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(0)).await;
@@ -51,4 +52,6 @@ async fn heavy_pending_chunks_test() {
     assert_matches!(c3, Some(_));
 
     genesis_node.stop().await;
+
+    Ok(())
 }
