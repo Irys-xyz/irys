@@ -7,7 +7,7 @@ use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
     block_validation,
-    mempool_service::{TxIngressError, TxIngressMessage},
+    mempool_service::{TxExistenceQuery, TxIngressError, TxIngressMessage},
     packing::wait_for_packing,
     vdf_service::VdfStepsReadGuard,
     SetTestBlocksRemainingMessage,
@@ -25,7 +25,8 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{
-    CommitmentTransaction, Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset,
+    CommitmentTransaction, Config, IrysTransactionHeader, IrysTransactionId, NodeConfig, NodeMode,
+    TxChunkOffset,
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
@@ -400,6 +401,35 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
         self.node_ctx.set_mining(false).await
+    }
+
+    pub async fn wait_for_mempool(
+        &self,
+        tx_id: IrysTransactionId,
+        seconds_to_wait: u64,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait; // 1 second per retry
+
+        while mempool_service
+            .send(TxExistenceQuery(tx_id))
+            .await?
+            .is_ok_and(|f| f == false)
+        {
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+
+        if retries == max_retries {
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transaction found in mempool after {} retries", &retries);
+            Ok(())
+        }
     }
 
     pub async fn create_submit_data_tx(
