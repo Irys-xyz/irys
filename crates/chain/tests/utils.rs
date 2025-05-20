@@ -550,6 +550,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        self.post_commitment_tx_request(&api_uri, commitment_tx)
+            .await;
+    }
+
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let pledge_tx = CommitmentTransaction {
             commitment_type: CommitmentType::Pledge,
@@ -746,6 +752,49 @@ where
     let body = test::read_body(resp).await;
     debug!("Response body: {:#?}", body);
     assert_eq!(status, StatusCode::OK);
+}
+
+pub async fn post_commitment_tx<T, B>(app: &T, tx: &CommitmentTransaction)
+where
+    T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+    B: MessageBody + Unpin,
+{
+    let req = TestRequest::post()
+        .uri("/v1/commitment_tx")
+        .set_json(tx.clone())
+        .to_request();
+
+    let resp = call_service(&app, req).await;
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    debug!("Response body: {:#?}", body);
+    assert_eq!(status, StatusCode::OK);
+}
+
+pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
+    let stake_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Stake,
+        // TODO: real staking amounts
+        fee: 1,
+        anchor: anchor.clone(),
+        ..Default::default()
+    };
+
+    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+    stake_tx
+}
+
+pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
+    let stake_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Pledge,
+        // TODO: real pledging amounts
+        fee: 1,
+        anchor: anchor.clone(),
+        ..Default::default()
+    };
+
+    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+    stake_tx
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.
