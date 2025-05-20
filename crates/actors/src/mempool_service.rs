@@ -26,8 +26,9 @@ use irys_types::{
 };
 use irys_types::{
     Address, CommitmentTransaction, Config, DataRoot, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, U256,
+    IrysTransactionId, TxChunkOffset, U256,
 };
+use lru::LruCache;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -36,6 +37,7 @@ use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use tracing::{debug, error, info, warn};
 
 #[async_trait::async_trait]
@@ -127,6 +129,10 @@ pub struct MempoolService {
     storage_modules_guard: StorageModulesReadGuard,
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
+    /// LRU caches for out of order gossip data
+    pending_chunks: LruCache<DataRoot, HashMap<TxChunkOffset, UnpackedChunk>>,
+    _pending_pledges: LruCache<Address, Vec<CommitmentTransaction>>,
+
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
     gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
@@ -176,6 +182,8 @@ impl MempoolService {
             service_senders,
             gossip_tx,
             recent_valid_tx: HashSet::new(),
+            pending_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            _pending_pledges: LruCache::new(NonZeroUsize::new(100).unwrap()),
         }
     }
     // Helper to get the canonical chain and latest height
@@ -455,7 +463,7 @@ impl ChunkIngressError {
 impl Handler<TxIngressMessage> for MempoolService {
     type Result = Result<(), TxIngressError>;
 
-    fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, tx_msg: TxIngressMessage, ctx: &mut Context<Self>) -> Self::Result {
         let tx = &tx_msg.0;
         debug!(
             "received tx {:?} (data_root {:?})",
@@ -554,6 +562,25 @@ impl Handler<TxIngressMessage> for MempoolService {
                 );
             }
         };
+
+        // Process any chunks that arrived before their parent transaction
+        // These were temporarily stored in the pending_chunks cache
+        if let Some(chunks_map) = self.pending_chunks.pop(&tx.data_root) {
+            // Extract owned chunks from the map to process them
+            let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
+
+            // PERFORMANCE CONSIDERATION:
+            // This is executing in a synchronous actor context. If this transaction has
+            // many pending chunks (hundreds or thousands), processing them
+            // all here could block the actor for a significant time, delaying other messages.
+            // This should be addressed when the mempool_service is converted to a tokio service
+            // and the handlers become async
+            for chunk in chunks {
+                // Process each chunk with full ownership (no cloning needed)
+                self.handle(ChunkIngressMessage(chunk), ctx)
+                    .expect("pending chunks should be processed by the mempool");
+            }
+        }
 
         // Gossip transaction
         let gossip_sender = self.gossip_tx.clone();
@@ -673,8 +700,24 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                         .flatten()
                     })
                 })
-            })
-            .ok_or(ChunkIngressError::UnknownTransaction)?; // Handle None case by converting it to an error
+            });
+
+        let data_size = match data_size {
+            Some(ds) => ds,
+            None => {
+                // We don't have a data_root for this chunk but possibly the transaction containing this
+                // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
+                if let Some(chunks_map) = self.pending_chunks.get_mut(&chunk.data_root) {
+                    chunks_map.insert(chunk.tx_offset, chunk.clone());
+                } else {
+                    // If there's no entry for this data_root yet, create one
+                    let mut new_map = HashMap::new();
+                    new_map.insert(chunk.tx_offset, chunk.clone());
+                    self.pending_chunks.put(chunk.data_root, new_map);
+                }
+                return Ok(());
+            }
+        };
 
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
