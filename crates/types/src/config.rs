@@ -377,6 +377,22 @@ pub struct MempoolConfig {
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
+
+    /// Maximum number of addresses in the LRU cache for out-of-order stakes and pledges
+    /// Controls memory usage for tracking transactions that arrive before their dependencies
+    pub max_pending_pledge_items: usize,
+
+    /// Maximum number of pending pledge transactions allowed per address
+    /// Limits the resources that can be consumed by a single address
+    pub max_pledges_per_item: usize,
+
+    /// Maximum number of transaction data roots to keep in the pending cache
+    /// For transactions whose chunks arrive before the transaction header
+    pub max_pending_chunk_items: usize,
+
+    /// Maximum number of chunks that can be cached per data root
+    /// Prevents memory exhaustion from excessive chunk storage for a single transaction
+    pub max_chunks_per_item: usize,
 }
 
 /// # Gossip Network Configuration
@@ -489,6 +505,11 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 anchor_expiry_depth: 10,
+                // TODO: Move the following to a node config
+                max_pending_pledge_items: 100,
+                max_pledges_per_item: 100,
+                max_pending_chunk_items: 30,
+                max_chunks_per_item: 500,
             },
             vdf: VdfConfig {
                 reset_frequency: 10 * 120,
@@ -877,6 +898,10 @@ mod tests {
         [mempool]
         max_data_txs_per_block = 100
         anchor_expiry_depth = 10
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
 
         [difficulty_adjustment]
         block_time = 1

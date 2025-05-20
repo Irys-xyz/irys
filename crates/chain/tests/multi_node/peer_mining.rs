@@ -33,9 +33,10 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     debug!("{:#?}", peer_node.node_ctx.config.node_config);
 
     let stake_tx = peer_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
-    let _pledge_tx = peer_node.post_pledge_commitment(H256::zero()).await;
+    let pledge_tx = peer_node.post_pledge_commitment(H256::zero()).await;
 
     genesis_node.wait_for_mempool(stake_tx.id, 10).await?;
+    genesis_node.wait_for_mempool(pledge_tx.id, 10).await?;
 
     genesis_node.mine_block().await.unwrap();
     let block = genesis_node.get_block_by_height(1).await.unwrap();
