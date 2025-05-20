@@ -4244,7 +4244,6 @@ name = "irys-config"
 version = "0.1.0"
 dependencies = [
  "eyre",
- "hex",
  "irys-primitives",
  "irys-types",
  "once_cell",
