@@ -1,4 +1,4 @@
-use crate::gossip_service::{fast_forward_vdf_steps_from_block, SyncState};
+use crate::gossip_service::fast_forward_vdf_steps_from_block;
 use crate::peer_list::{PeerListFacade, PeerListFacadeError};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
@@ -43,8 +43,6 @@ where
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
     pub(crate) vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
-
-    sync_state: SyncState,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -61,7 +59,6 @@ where
             block_producer: None,
             peer_list: None,
             vdf_sender: None,
-            sync_state: SyncState::default(),
         }
     }
 }
@@ -106,7 +103,6 @@ where
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
         vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
-        sync_state: SyncState,
     ) -> Self {
         Self {
             db: Some(db),
@@ -115,7 +111,6 @@ where
             peer_list: Some(peer_list),
             block_producer: Some(block_producer_addr),
             vdf_sender,
-            sync_state,
         }
     }
 

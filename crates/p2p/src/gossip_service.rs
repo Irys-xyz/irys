@@ -238,7 +238,6 @@ impl GossipService {
             peer_list.clone(),
             block_discovery.clone(),
             Some(vdf_sender),
-            self.sync_state.clone(),
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =
