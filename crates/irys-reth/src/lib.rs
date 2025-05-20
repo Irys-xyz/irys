@@ -456,6 +456,7 @@ where
 }
 
 mod evm {
+    use std::collections::BTreeMap;
     use std::convert::Infallible;
 
     use alloy_consensus::{Block, Header, Transaction};
@@ -465,7 +466,8 @@ mod evm {
 
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-    use alloy_primitives::{keccak256, Bytes, Log, LogData};
+    use alloy_primitives::map::foldhash::HashMap;
+    use alloy_primitives::{keccak256, Bytes, FixedBytes, Log, LogData};
     use reth::primitives::{SealedBlock, SealedHeader};
     use reth::providers::BlockExecutionResult;
     use reth::revm::context::result::ExecutionResult;
@@ -486,9 +488,11 @@ mod evm {
     use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
     use revm::context::{BlockEnv, CfgEnv};
 
+    use revm::database::states::plain_account::PlainStorage;
+    use revm::database::PlainAccount;
     use revm::inspector::NoOpInspector;
     use revm::precompile::{PrecompileSpecId, Precompiles};
-    use revm::state::{Account, EvmStorageSlot};
+    use revm::state::{Account, AccountInfo, EvmStorageSlot};
     use revm::{DatabaseCommit, MainBuilder, MainContext};
 
     use super::*;
@@ -521,159 +525,118 @@ mod evm {
             f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
         ) -> Result<u64, BlockExecutionError> {
             let tx_envelope = tx.tx();
-
             let tx_envelope_input_buf = tx_envelope.input();
             let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
+
             if let Ok(system_tx) = rlp_decoded_system_tx {
-                // handle the signer nonce incerment
-                {
-                    let evm = self.inner.evm_mut();
-                    let db = evm.db_mut();
-                    {
-                        let signer = tx.signer();
-                        let state = db.load_cache_account(*signer).unwrap();
-                        let Some(plain_account) = state.account.as_ref() else {
-                            tracing::warn!("signer account does not exist");
-                            return Err(BlockExecutionError::Validation(
-                                BlockValidationError::InvalidTx {
-                                    hash: *tx_envelope.hash(),
-                                    // todo is there a more appropriate error to use?
-                                    error: Box::new(
-                                        InvalidTransaction::OverflowPaymentInTransaction,
-                                    ),
-                                },
-                            ));
-                        };
-                        let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+                // Handle the signer nonce increment
+                self.increment_signer_nonce(&tx)?;
+
+                // Process different system transaction types
+                let target;
+                let new_account_state = match system_tx {
+                    SystemTransaction::ReleaseStake(balance_increment) => {
+                        let log = self.create_system_log(
+                            balance_increment.target,
+                            "SYSTEM_TX_RELEASE_STAKE",
+                            vec![
+                                DynSolValue::Uint(balance_increment.amount, 256),
+                                DynSolValue::Address(balance_increment.target),
+                            ],
+                        );
+                        target = balance_increment.target;
+                        let res = self.handle_balance_increment(log, balance_increment);
+                        Ok(res)
+                    }
+                    SystemTransaction::BlockReward(balance_increment) => {
+                        let log = self.create_system_log(
+                            balance_increment.target,
+                            "SYSTEM_TX_BLOCK_REWARD",
+                            vec![
+                                DynSolValue::Uint(balance_increment.amount, 256),
+                                DynSolValue::Address(balance_increment.target),
+                            ],
+                        );
+                        target = balance_increment.target;
+                        let res = self.handle_balance_increment(log, balance_increment);
+                        Ok(res)
+                    }
+                    SystemTransaction::Stake(balance_decrement) => {
+                        let log = self.create_system_log(
+                            balance_decrement.target,
+                            "SYSTEM_TX_STAKE",
+                            vec![
+                                DynSolValue::Uint(balance_decrement.amount, 256),
+                                DynSolValue::Address(balance_decrement.target),
+                            ],
+                        );
+                        target = balance_decrement.target;
+                        self.handle_balance_decrement(log, tx_envelope.hash(), balance_decrement)?
+                    }
+                    SystemTransaction::StorageFees(balance_decrement) => {
+                        let log = self.create_system_log(
+                            balance_decrement.target,
+                            "SYSTEM_TX_STORAGE_FEES",
+                            vec![
+                                DynSolValue::Uint(balance_decrement.amount, 256),
+                                DynSolValue::Address(balance_decrement.target),
+                            ],
+                        );
+                        target = balance_decrement.target;
+                        self.handle_balance_decrement(log, tx_envelope.hash(), balance_decrement)?
+                    }
+                };
+
+                // at this point, the system tx has been processed, and it was valid *enough*
+                // that we should generate a receipt for it even in a failure state
+                let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+                let execution_result = match new_account_state {
+                    Ok((plain_account, execution_result)) => {
                         let storage = plain_account
                             .storage
                             .iter()
                             .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
                             .collect();
-                        let mut new_account_info = plain_account.info.clone();
-                        new_account_info.set_nonce(tx_envelope.nonce() + 1);
-
                         new_state.insert(
-                            *signer,
+                            target,
                             Account {
-                                info: new_account_info,
+                                info: plain_account.info,
                                 storage,
                                 status: revm::state::AccountStatus::Touched,
                             },
                         );
-                        db.commit(new_state);
-                    }
-                }
 
+                        execution_result
+                    }
+                    Err(execution_result) => execution_result,
+                };
+
+                f(&execution_result);
+
+                // Build and store the receipt
                 let evm = self.inner.evm_mut();
+                self.system_call_receipts
+                    .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
+                        tx: tx_envelope,
+                        evm,
+                        result: execution_result,
+                        state: &new_state,
+                        cumulative_gas_used: 0,
+                    }));
+
+                // Commit the changes to the database
                 let db = evm.db_mut();
-
-                match system_tx {
-                    SystemTransaction::ReleaseStake(balance_increment) => unimplemented!(),
-                    SystemTransaction::BlockReward(balance_increment) => unimplemented!(),
-                    SystemTransaction::Stake(balance_decrement) => unimplemented!(),
-                    SystemTransaction::StorageFees(balance_decrement) => {
-                        let state = db.load_cache_account(balance_decrement.target).unwrap();
-                        let hash = *tx_envelope.hash();
-                        tracing::error!("special tx {:}", hash);
-
-                        // handle a case when an account has never existed (0 balance, no data stored on it)
-                        // We don't even create a receipt in this case (eth does the same with native txs)
-                        let Some(plain_account) = state.account.as_ref() else {
-                            tracing::warn!("account does not exist");
-                            return Err(BlockExecutionError::Validation(
-                                BlockValidationError::InvalidTx {
-                                    hash: *tx_envelope.hash(),
-                                    // todo is there a more appropriate error to use?
-                                    error: Box::new(
-                                        InvalidTransaction::OverflowPaymentInTransaction,
-                                    ),
-                                },
-                            ));
-                        };
-
-                        // handle a case where the balance of the user is too low
-                        let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
-                        let execution_result;
-                        if plain_account.info.balance < balance_decrement.amount {
-                            tracing::warn!(?plain_account.info.balance, ?balance_decrement.amount);
-                            execution_result = ExecutionResult::Revert {
-                                gas_used: 0,
-                                output: Bytes::new(),
-                            };
-                        } else {
-                            // Create new account info with updated balance
-                            let new_account_balance =
-                                plain_account.info.balance - balance_decrement.amount;
-                            let storage = plain_account
-                                .storage
-                                .iter()
-                                .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
-                                .collect();
-                            let mut new_account_info = plain_account.info.clone();
-
-                            new_account_info.balance = new_account_balance;
-                            new_state.insert(
-                                balance_decrement.target,
-                                Account {
-                                    info: new_account_info,
-                                    storage,
-                                    status: revm::state::AccountStatus::Touched,
-                                },
-                            );
-
-                            // generate logs to attach to the receipt
-                            let param_values = DynSolValue::Tuple(vec![
-                                DynSolValue::Uint(balance_decrement.amount, 256),
-                                DynSolValue::Address(balance_decrement.target),
-                            ]);
-                            let encoded_data = param_values.abi_encode();
-                            let log = Log {
-                                address: balance_decrement.target,
-                                data: LogData::new(
-                                    vec![keccak256("SYSTEM_TX_DECREMENT_BALANCE")],
-                                    encoded_data.into(),
-                                )
-                                .unwrap(),
-                            };
-                            execution_result = ExecutionResult::Success {
-                                reason: revm::context::result::SuccessReason::Return,
-                                gas_used: 0,
-                                gas_refunded: 0,
-                                logs: vec![log],
-                                output: Output::Call(Bytes::new()),
-                            }
-                        }
-                        f(&execution_result);
-
-                        self.system_call_receipts
-                            .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
-                                tx: tx.tx(),
-                                evm,
-                                result: execution_result,
-                                state: &new_state,
-                                // cumulative gas used is 0 because system txs are always executed at the beginning of the block, and use 0 gas
-                                cumulative_gas_used: 0,
-                            }));
-
-                        // Commit the changes to the database
-                        let evm = self.inner.evm_mut();
-                        let db = evm.db_mut();
-                        // todo test revert
-                        db.commit(new_state);
-                    }
-                }
-
+                db.commit(new_state);
                 Ok(0)
             } else {
-                let res = self.inner.execute_transaction_with_result_closure(tx, f);
-                dbg!(&res);
-                res
+                // Handle regular transactions using the inner executor
+                self.inner.execute_transaction_with_result_closure(tx, f)
             }
         }
 
         fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
             let (evm, mut block_res) = self.inner.finish()?;
+            // Combine system receipts with regular transaction receipts
             let total_receipts = [self.system_call_receipts, block_res.receipts].concat();
             block_res.receipts = total_receipts;
 
@@ -690,6 +653,160 @@ mod evm {
 
         fn evm(&self) -> &Self::Evm {
             self.inner.evm()
+        }
+    }
+
+    impl<'db, DB, E> CustomBlockExecutor<'_, E>
+    where
+        DB: Database + 'db,
+        E: Evm<
+            DB = &'db mut State<DB>,
+            Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
+        >,
+    {
+        /// Creates a system transaction log with the specified event name and parameters
+        fn create_system_log(
+            &self,
+            target: Address,
+            event_name: &str,
+            params: Vec<DynSolValue>,
+        ) -> Log {
+            let encoded_data = DynSolValue::Tuple(params).abi_encode();
+            Log {
+                address: target,
+                data: LogData::new(vec![keccak256(event_name)], encoded_data.into()).unwrap(),
+            }
+        }
+
+        /// Increments the signer's nonce for system transactions
+        fn increment_signer_nonce<T: ExecutableTx<Self>>(
+            &mut self,
+            tx: &T,
+        ) -> Result<(), BlockExecutionError> {
+            let evm = self.inner.evm_mut();
+            let db = evm.db_mut();
+            let signer = tx.signer();
+            let state = db.load_cache_account(*signer).unwrap();
+
+            let Some(plain_account) = state.account.as_ref() else {
+                tracing::warn!("signer account does not exist");
+                return Err(BlockExecutionError::Validation(
+                    BlockValidationError::InvalidTx {
+                        hash: *tx.tx().hash(),
+                        error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
+                    },
+                ));
+            };
+
+            let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+            let storage = plain_account
+                .storage
+                .iter()
+                .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
+                .collect();
+
+            let mut new_account_info = plain_account.info.clone();
+            new_account_info.set_nonce(tx.tx().nonce() + 1);
+
+            new_state.insert(
+                *signer,
+                Account {
+                    info: new_account_info,
+                    storage,
+                    status: revm::state::AccountStatus::Touched,
+                },
+            );
+
+            db.commit(new_state);
+            Ok(())
+        }
+
+        /// Handles system transaction that increases account balance
+        fn handle_balance_increment(
+            &mut self,
+            log: Log,
+            balance_increment: BalanceIncrement,
+        ) -> (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>) {
+            let evm = self.inner.evm_mut();
+
+            let db = evm.db_mut();
+            let state = db.load_cache_account(balance_increment.target).unwrap();
+
+            // Get the existing account or create a new one if it doesn't exist
+            let account_info = if let Some(plain_account) = state.account.as_ref() {
+                let mut plain_account = plain_account.clone();
+                // Add the incremented amount to the balance
+                plain_account.info.balance += balance_increment.amount;
+                plain_account
+            } else {
+                // Create a new account with the incremented balance
+                let mut account = PlainAccount::new_empty_with_storage(PlainStorage::default());
+                account.info.balance = balance_increment.amount;
+                account
+            };
+
+            let execution_result = ExecutionResult::Success {
+                reason: revm::context::result::SuccessReason::Return,
+                gas_used: 0,
+                gas_refunded: 0,
+                logs: vec![log],
+                output: Output::Call(Bytes::new()),
+            };
+
+            (account_info, execution_result)
+        }
+
+        /// Handles system transaction that decreases account balance
+        fn handle_balance_decrement(
+            &mut self,
+            log: Log,
+            tx_hash: &FixedBytes<32>,
+            balance_decrement: BalanceDecrement,
+        ) -> Result<
+            Result<
+                (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>),
+                ExecutionResult<<E as Evm>::HaltReason>,
+            >,
+            BlockExecutionError,
+        > {
+            let evm = self.inner.evm_mut();
+
+            let db = evm.db_mut();
+            let state = db.load_cache_account(balance_decrement.target).unwrap();
+
+            // Get the existing account or create a new one if it doesn't exist
+            // handle a case when an account has never existed (0 balance, no data stored on it)
+            // We don't even create a receipt in this case (eth does the same with native txs)
+            let Some(plain_account) = state.account.as_ref() else {
+                tracing::warn!("account does not exist");
+                return Err(BlockExecutionError::Validation(
+                    BlockValidationError::InvalidTx {
+                        hash: *tx_hash,
+                        // todo is there a more appropriate error to use?
+                        error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
+                    },
+                ));
+            };
+            let mut new_account_info = plain_account.clone();
+            if new_account_info.info.balance < balance_decrement.amount {
+                tracing::warn!(?plain_account.info.balance, ?balance_decrement.amount);
+                return Ok(Err(ExecutionResult::Revert {
+                    gas_used: 0,
+                    output: Bytes::new(),
+                }));
+            }
+            // Apply the decrement amount to the balance
+            new_account_info.info.balance -= balance_decrement.amount;
+
+            let execution_result = ExecutionResult::Success {
+                reason: revm::context::result::SuccessReason::Return,
+                gas_used: 0,
+                gas_refunded: 0,
+                logs: vec![log],
+                output: Output::Call(Bytes::new()),
+            };
+
+            Ok(Ok((new_account_info, execution_result)))
         }
     }
 
