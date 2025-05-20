@@ -15,11 +15,8 @@ pub enum SystemTransaction {
 
 /// Stable 1-byte discriminants
 pub const RELEASE_STAKE_ID: u8 = 0x00;
-
 pub const BLOCK_REWARD_ID: u8 = 0x01;
-
 pub const STAKE_ID: u8 = 0x02;
-
 pub const STORAGE_FEES_ID: u8 = 0x03;
 
 impl Encodable for SystemTransaction {

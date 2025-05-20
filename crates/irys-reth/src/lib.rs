@@ -1,8 +1,9 @@
 use std::{marker::PhantomData, sync::Arc, time::SystemTime};
 
+use alloy_consensus::TxLegacy;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
-use alloy_primitives::{Address, U256};
-use alloy_rlp::Decodable;
+use alloy_primitives::{Address, TxKind, U256};
+use alloy_rlp::{Decodable, Encodable};
 use evm::{CustomBlockAssembler, MyEthEvmFactory};
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
@@ -32,9 +33,27 @@ use reth_transaction_pool::{
     TransactionOrdering,
 };
 use reth_trie_db::MerklePatriciaTrie;
+use std::sync::LazyLock;
+use system_tx::SystemTransaction;
 use tracing::{debug, info};
 
 pub mod system_tx;
+
+pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction) -> TxLegacy {
+    let mut system_tx_rlp = Vec::with_capacity(512);
+    system_tx.encode(&mut system_tx_rlp);
+    let tx_raw = TxLegacy {
+        gas_limit: 99000,
+        value: U256::ZERO,
+        nonce,
+        gas_price: 1_000_000_000u128, // 1 Gwei
+        chain_id: Some(chain_id),
+        to: TxKind::Call(Address::ZERO),
+        input: system_tx_rlp.into(),
+        ..Default::default()
+    };
+    tx_raw
+}
 
 // todo: write tests
 // todo: see how 2 nodes behave
@@ -375,6 +394,19 @@ mod evm {
 
     use super::*;
 
+    // === SYSTEM TX LOG TOPICS HELPERS ===
+    pub mod system_tx_topics {
+        use alloy_primitives::keccak256;
+        use std::sync::LazyLock;
+        pub static RELEASE_STAKE: LazyLock<[u8; 32]> =
+            LazyLock::new(|| keccak256("SYSTEM_TX_RELEASE_STAKE").0);
+        pub static BLOCK_REWARD: LazyLock<[u8; 32]> =
+            LazyLock::new(|| keccak256("SYSTEM_TX_BLOCK_REWARD").0);
+        pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
+        pub static STORAGE_FEES: LazyLock<[u8; 32]> =
+            LazyLock::new(|| keccak256("SYSTEM_TX_STORAGE_FEES").0);
+    }
+
     pub(crate) struct CustomBlockExecutor<'a, Evm> {
         receipt_builder: &'a RethReceiptBuilder,
         system_call_receipts: Vec<Receipt>,
@@ -417,7 +449,7 @@ mod evm {
                     system_tx::SystemTransaction::ReleaseStake(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
-                            "SYSTEM_TX_RELEASE_STAKE",
+                            vec![(*system_tx_topics::RELEASE_STAKE).into()],
                             vec![
                                 DynSolValue::Uint(balance_increment.amount, 256),
                                 DynSolValue::Address(balance_increment.target),
@@ -430,7 +462,7 @@ mod evm {
                     system_tx::SystemTransaction::BlockReward(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
-                            "SYSTEM_TX_BLOCK_REWARD",
+                            vec![(*system_tx_topics::BLOCK_REWARD).into()],
                             vec![
                                 DynSolValue::Uint(balance_increment.amount, 256),
                                 DynSolValue::Address(balance_increment.target),
@@ -443,7 +475,7 @@ mod evm {
                     system_tx::SystemTransaction::Stake(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
-                            "SYSTEM_TX_STAKE",
+                            vec![(*system_tx_topics::STAKE).into()],
                             vec![
                                 DynSolValue::Uint(balance_decrement.amount, 256),
                                 DynSolValue::Address(balance_decrement.target),
@@ -455,7 +487,7 @@ mod evm {
                     system_tx::SystemTransaction::StorageFees(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
-                            "SYSTEM_TX_STORAGE_FEES",
+                            vec![(*system_tx_topics::STORAGE_FEES).into()],
                             vec![
                                 DynSolValue::Uint(balance_decrement.amount, 256),
                                 DynSolValue::Address(balance_decrement.target),
@@ -547,13 +579,13 @@ mod evm {
         fn create_system_log(
             &self,
             target: Address,
-            event_name: &str,
+            topics: Vec<FixedBytes<32>>,
             params: Vec<DynSolValue>,
         ) -> Log {
             let encoded_data = DynSolValue::Tuple(params).abi_encode();
             Log {
                 address: target,
-                data: LogData::new(vec![keccak256(event_name)], encoded_data.into()).unwrap(),
+                data: LogData::new(topics, encoded_data.into()).unwrap(),
             }
         }
 
@@ -887,5 +919,284 @@ mod evm {
                 true,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_genesis::Genesis;
+    use alloy_network::EthereumWallet;
+    use alloy_primitives::{Signature, TxKind, B256};
+    use alloy_rlp::Encodable;
+    use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
+    use reth::providers::AccountReader;
+    use reth_e2e_test_utils::{setup, wallet::Wallet};
+    use reth_network::NetworkEventListenerProvider;
+    use reth_transaction_pool::TransactionPool;
+
+    use crate::{
+        evm::system_tx_topics,
+        system_tx::{BalanceDecrement, SystemTransaction},
+    };
+
+    use super::*;
+
+    pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
+        let attributes = PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::ZERO),
+        };
+        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn can_decrement_balance_of_account_that_has_balance() -> eyre::Result<()> {
+        let (mut nodes, _tasks, wallet) =
+            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
+        let wallets = Wallet::new(3).wallet_gen();
+
+        let mut node = nodes.pop().unwrap();
+
+        let signer_a = EthereumWallet::from(wallets[1].clone());
+        let signer_a = signer_a.default_signer();
+
+        let signer_b = EthereumWallet::from(wallet.inner.clone());
+        let signer_b = signer_b.default_signer();
+
+        // Get the balance of signer_b
+        let signer_a_address = signer_a.address();
+        let signer_a_balance = node
+            .inner
+            .provider
+            .basic_account(&signer_a_address)
+            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get signer_a balance: {}", err);
+                U256::ZERO
+            });
+        let signer_b_address = signer_b.address();
+        let signer_b_balance = node
+            .inner
+            .provider
+            .basic_account(&signer_b_address)
+            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get signer_b balance: {}", err);
+                U256::ZERO
+            });
+        tracing::info!(?signer_b_address, ?signer_b_balance, "Signer B balance");
+        tracing::info!(?signer_a_address, ?signer_a_balance, "Signer A balance");
+
+        let mut tx_hashes = Vec::new();
+
+        // submit 5 valid txs with incrementing nonce
+        for i in 0..5u64 {
+            let system_tx = SystemTransaction::StorageFees(BalanceDecrement {
+                amount: U256::ONE,
+                target: signer_a.address(),
+            });
+
+            let tx_raw = compose_system_tx(i, 1, system_tx);
+            let pooled_tx = sign_tx(tx_raw, &signer_b).await;
+            let tx_hash = node
+                .inner
+                .pool
+                .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
+                .await
+                .unwrap();
+            tx_hashes.push(tx_hash);
+        }
+
+        let block_payload = node.new_payload().await?;
+        let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
+        // trigger forkchoice update via engine api to commit the block to the blockchain
+        node.update_forkchoice(block_payload_hash, block_payload_hash)
+            .await?;
+        let outcome = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+        tracing::info!(?outcome.receipts);
+
+        // Assert that all submitted system txs are included in the block
+        let block_txs: std::collections::HashSet<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+        let submitted_tx_hashes: std::collections::HashSet<_> = tx_hashes.into_iter().collect();
+        assert_eq!(block_txs, submitted_tx_hashes, "Not all submitted system transactions were included in the block");
+
+        // Assert balances after the transaction
+        let signer_a_balance_after = node
+            .inner
+            .provider
+            .basic_account(&signer_a_address)
+            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get signer_a balance after: {}", err);
+                U256::ZERO
+            });
+        let signer_b_balance_after = node
+            .inner
+            .provider
+            .basic_account(&signer_b_address)
+            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get signer_b balance after: {}", err);
+                U256::ZERO
+            });
+        assert_eq!(
+            signer_a_balance_after,
+            signer_a_balance - U256::from(5u64),
+            "signer_a's balance should be reduced by 5"
+        );
+        assert_eq!(
+            signer_b_balance_after, signer_b_balance,
+            "signer_b's balance should not change"
+        );
+
+        // Assert that 'balance decrement' (storage fees) receipts are present
+        let storage_fees_topic = *system_tx_topics::STORAGE_FEES;
+        let receipts = &outcome.receipts;
+        let mut storage_fees_receipt_count = 0;
+        for block_receipt in receipts {
+            for receipt in block_receipt {
+                if receipt.logs.iter().any(|log| {
+                    log.data
+                        .topics()
+                        .iter()
+                        .any(|topic| topic == &storage_fees_topic)
+                }) {
+                    storage_fees_receipt_count += 1;
+                }
+            }
+        }
+        assert!(
+            storage_fees_receipt_count >= 5,
+            "Expected at least 5 'balance decrement' receipts, found {}",
+            storage_fees_receipt_count
+        );
+        Ok(())
+    }
+
+    async fn sign_tx(
+        mut tx_raw: TxLegacy,
+        new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
+    ) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
+        let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
+        let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
+            .try_into_recovered()
+            .unwrap();
+
+        let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
+
+        return pooled_tx;
+    }
+
+    fn custom_chain() -> Arc<ChainSpec> {
+        let custom_genesis = r#"
+{
+  "config": {
+    "chainId": 1,
+    "homesteadBlock": 0,
+    "daoForkSupport": true,
+    "eip150Block": 0,
+    "eip155Block": 0,
+    "eip158Block": 0,
+    "byzantiumBlock": 0,
+    "constantinopleBlock": 0,
+    "petersburgBlock": 0,
+    "istanbulBlock": 0,
+    "muirGlacierBlock": 0,
+    "berlinBlock": 0,
+    "londonBlock": 0,
+    "arrowGlacierBlock": 0,
+    "grayGlacierBlock": 0,
+    "shanghaiTime": 0,
+    "cancunTime": 0,
+    "terminalTotalDifficulty": "0x0",
+    "terminalTotalDifficultyPassed": true
+  },
+  "nonce": "0x0",
+  "timestamp": "0x0",
+  "extraData": "0x00",
+  "gasLimit": "0x1c9c380",
+  "difficulty": "0x0",
+  "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "alloc": {
+    "0x14dc79964da2c08b23698b3d3cc7ca32193d9955": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x1cbd3b2770909d4e10f157cabc84c7264073c9ec": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x2546bcd3c84621e976d8185a91a922ae77ecec30": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x71be63f3384f5fb98995898a86b02fb2426c5788": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x8626f6940e2eb28930efb4cef49b2d1f2c9c1199": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x90f79bf6eb2c4f870365e785982e1f101e93b906": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x976ea74026e726554db657fa54763abd0c3a0aa9": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x9c41de96b2088cdc640c6182dfcf5491dc574a57": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xa0ee7a142d267c1f36714e4a8f75612f20a79720": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xbcd4042de499d14e55001ccbb24a551f3b954096": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xbda5747bfd65f08deb54cb465eb87d40e51b197e": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xcd3b766ccdd6ae721141f452c550ca635964ce71": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xdd2fd4581271e230360230f9337d5c0430bf44c0": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xdf3e18d64bc6a983f673ab319ccae4f1a57c7097": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xfabb0ac9d68b0b445fb7357272ff202c5651694a": {
+      "balance": "0xd3c21bcecceda1000000"
+    }
+  },
+  "number": "0x0"
+}
+"#;
+        let genesis: Genesis = serde_json::from_str(custom_genesis).unwrap();
+        Arc::new(genesis.into())
     }
 }
