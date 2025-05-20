@@ -1,73 +1,39 @@
-use std::{
-    marker::PhantomData,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{marker::PhantomData, sync::Arc, time::SystemTime};
 
-use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
-use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, Encodable2718};
-use alloy_genesis::Genesis;
-use alloy_network::{EthereumWallet, NetworkWallet};
-use alloy_primitives::{keccak256, Address, Bytes, Log, LogData, Signature, TxKind, B256, U256};
+use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_primitives::{Address, U256};
 use alloy_rlp::{Decodable, Encodable, Error as RlpError, Result as RlpResult};
-use alloy_rlp::{RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper};
-use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
-use bytes::BytesMut;
+use alloy_rlp::{RlpDecodable, RlpEncodable};
 use evm::{CustomBlockAssembler, MyEthEvmFactory};
-use futures::StreamExt;
 use reth::{
-    api::{
-        BuiltPayload, FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes,
-    },
+    api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
     builder::{
         components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PoolBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder, PayloadBuilderConfig,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
-    primitives::{EthPrimitives, Recovered},
-    providers::{
-        providers::ProviderFactoryBuilder, AccountReader, CanonStateSubscriptions, EthStorage,
-    },
-    transaction_pool::{
-        blobstore::InMemoryBlobStore, EthTransactionPool, PoolConfig,
-        TransactionValidationTaskExecutor,
-    },
+    primitives::EthPrimitives,
+    providers::{providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage},
+    transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
-use reth_evm::EthEvmFactory;
 use reth_evm_ethereum::RethReceiptBuilder;
-use reth_network::NetworkEventListenerProvider;
 use reth_node_ethereum::{
     node::{
-        EthereumAddOns, EthereumConsensusBuilder, EthereumExecutorBuilder, EthereumNetworkBuilder,
-        EthereumPayloadBuilder,
+        EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder, EthereumPayloadBuilder,
     },
-    EthEngineTypes, EthEvmConfig, EthereumNode,
+    EthEngineTypes, EthEvmConfig,
 };
-use reth_tracing::{
-    tracing::{self, level_filters::LevelFilter},
-    LayerInfo, LogFormat, RethTracer, Tracer,
-};
+use reth_tracing::tracing::{self};
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    CoinbaseTipOrdering, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering, TransactionPool,
+    EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction, Priority,
+    TransactionOrdering,
 };
 use reth_trie_db::MerklePatriciaTrie;
 use tracing::{debug, info};
-
-pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
-    let attributes = PayloadAttributes {
-        timestamp,
-        prev_randao: B256::ZERO,
-        suggested_fee_recipient: Address::ZERO,
-        withdrawals: Some(vec![]),
-        parent_beacon_block_root: Some(B256::ZERO),
-    };
-    EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 enum SystemTransaction {
@@ -492,14 +458,14 @@ where
 mod evm {
     use std::convert::Infallible;
 
-    use alloy_consensus::{Block, Header, Transaction, TxReceipt};
-    use alloy_dyn_abi::{DynSolType, DynSolValue};
+    use alloy_consensus::{Block, Header, Transaction};
+    use alloy_dyn_abi::DynSolValue;
     use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
     use alloy_evm::eth::receipt_builder::ReceiptBuilder;
-    use alloy_evm::eth::spec::EthExecutorSpec;
+
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-    use alloy_primitives::{keccak256, Bytes, Log, LogData, Uint};
+    use alloy_primitives::{keccak256, Bytes, Log, LogData};
     use reth::primitives::{SealedBlock, SealedHeader};
     use reth::providers::BlockExecutionResult;
     use reth::revm::context::result::ExecutionResult;
@@ -509,18 +475,17 @@ mod evm {
     use reth_ethereum_primitives::Receipt;
     use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, BlockValidationError};
     use reth_evm::eth::receipt_builder::ReceiptBuilderCtx;
-    use reth_evm::eth::spec::EthSpec;
+
     use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
     use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
     use reth_evm::precompiles::PrecompilesMap;
     use reth_evm::{
-        ConfigureEvm, EthEvm, EthEvmFactory, EvmEnv, EvmFactory, InspectorFor, IntoTxEnv,
-        NextBlockEnvAttributes, TransactionEnv,
+        ConfigureEvm, EthEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes,
     };
     use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
     use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
     use revm::context::{BlockEnv, CfgEnv};
-    use revm::database::PlainAccount;
+
     use revm::inspector::NoOpInspector;
     use revm::precompile::{PrecompileSpecId, Precompiles};
     use revm::state::{Account, EvmStorageSlot};
@@ -528,7 +493,7 @@ mod evm {
 
     use super::*;
 
-    pub struct CustomBlockExecutor<'a, Evm> {
+    pub(crate) struct CustomBlockExecutor<'a, Evm> {
         receipt_builder: &'a RethReceiptBuilder,
         system_call_receipts: Vec<Receipt>,
         pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
