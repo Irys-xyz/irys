@@ -2,8 +2,7 @@ use std::{marker::PhantomData, sync::Arc, time::SystemTime};
 
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, U256};
-use alloy_rlp::{Decodable, Encodable, Error as RlpError, Result as RlpResult};
-use alloy_rlp::{RlpDecodable, RlpEncodable};
+use alloy_rlp::Decodable;
 use evm::{CustomBlockAssembler, MyEthEvmFactory};
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
@@ -35,130 +34,8 @@ use reth_transaction_pool::{
 use reth_trie_db::MerklePatriciaTrie;
 use tracing::{debug, info};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
-enum SystemTransaction {
-    ReleaseStake(BalanceIncrement),
-    BlockReward(BalanceIncrement),
-    Stake(BalanceDecrement),
-    StorageFees(BalanceDecrement),
-}
+pub mod system_tx;
 
-/// Stable 1-byte discriminants
-const RELEASE_STAKE_ID: u8 = 0x00;
-const BLOCK_REWARD_ID: u8 = 0x01;
-const STAKE_ID: u8 = 0x02;
-const STORAGE_FEES_ID: u8 = 0x03;
-
-impl Encodable for SystemTransaction {
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        match self {
-            SystemTransaction::ReleaseStake(bi) => {
-                out.put_u8(RELEASE_STAKE_ID);
-                bi.encode(out);
-            }
-            SystemTransaction::BlockReward(bi) => {
-                out.put_u8(BLOCK_REWARD_ID);
-                bi.encode(out);
-            }
-            SystemTransaction::Stake(bd) => {
-                out.put_u8(STAKE_ID);
-                bd.encode(out);
-            }
-            SystemTransaction::StorageFees(bd) => {
-                out.put_u8(STORAGE_FEES_ID);
-                bd.encode(out);
-            }
-        }
-    }
-
-    fn length(&self) -> usize {
-        1 + match self {
-            SystemTransaction::ReleaseStake(bi) => bi.length(),
-            SystemTransaction::BlockReward(bi) => bi.length(),
-            SystemTransaction::Stake(bd) => bd.length(),
-            SystemTransaction::StorageFees(bd) => bd.length(),
-        }
-    }
-}
-
-impl Decodable for SystemTransaction {
-    fn decode(buf: &mut &[u8]) -> RlpResult<Self> {
-        if buf.is_empty() {
-            return Err(RlpError::InputTooShort);
-        }
-
-        let disc = buf[0];
-        *buf = &buf[1..]; // advance past the discriminant byte
-
-        match disc {
-            RELEASE_STAKE_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
-                Ok(SystemTransaction::ReleaseStake(inner))
-            }
-            BLOCK_REWARD_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
-                Ok(SystemTransaction::BlockReward(inner))
-            }
-            STAKE_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(SystemTransaction::Stake(inner))
-            }
-            STORAGE_FEES_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(SystemTransaction::StorageFees(inner))
-            }
-            _ => Err(RlpError::Custom("invalid system-transaction discriminant")),
-        }
-    }
-}
-
-impl Default for SystemTransaction {
-    fn default() -> Self {
-        unimplemented!("relying on the default impl for `SYSTEM_TX` is a critical bug")
-    }
-}
-
-#[derive(
-    serde::Deserialize,
-    serde::Serialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-    RlpEncodable,
-    RlpDecodable,
-    arbitrary::Arbitrary,
-)]
-struct BalanceDecrement {
-    amount: U256,
-    target: Address,
-}
-
-#[derive(
-    serde::Deserialize,
-    serde::Serialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-    RlpEncodable,
-    RlpDecodable,
-    arbitrary::Arbitrary,
-)]
-struct BalanceIncrement {
-    amount: U256,
-    target: Address,
-}
-
-// todo: balance increments (releasing stake, block rewads); decerments (staking, commitment, storage fees);
-// todo: get rid of json, use encode / decode traits (look at shadows)
-// todo: nonce update
 // todo: write tests
 // todo: see how 2 nodes behave
 // todo exepriments how to prevent user from producing system tx -- maybe we can access the block producer address
@@ -403,7 +280,8 @@ where
         base_fee: u64,
     ) -> Priority<Self::PriorityValue> {
         let tx_envelope_input_buf = transaction.input();
-        let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
+        let rlp_decoded_system_tx =
+            system_tx::SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
         if rlp_decoded_system_tx.is_ok() {
             return Priority::Value(U256::MAX);
         }
@@ -456,7 +334,7 @@ where
 }
 
 mod evm {
-    use std::collections::BTreeMap;
+
     use std::convert::Infallible;
 
     use alloy_consensus::{Block, Header, Transaction};
@@ -466,7 +344,7 @@ mod evm {
 
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-    use alloy_primitives::map::foldhash::HashMap;
+
     use alloy_primitives::{keccak256, Bytes, FixedBytes, Log, LogData};
     use reth::primitives::{SealedBlock, SealedHeader};
     use reth::providers::BlockExecutionResult;
@@ -492,7 +370,7 @@ mod evm {
     use revm::database::PlainAccount;
     use revm::inspector::NoOpInspector;
     use revm::precompile::{PrecompileSpecId, Precompiles};
-    use revm::state::{Account, AccountInfo, EvmStorageSlot};
+    use revm::state::{Account, EvmStorageSlot};
     use revm::{DatabaseCommit, MainBuilder, MainContext};
 
     use super::*;
@@ -526,7 +404,8 @@ mod evm {
         ) -> Result<u64, BlockExecutionError> {
             let tx_envelope = tx.tx();
             let tx_envelope_input_buf = tx_envelope.input();
-            let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
+            let rlp_decoded_system_tx =
+                system_tx::SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
 
             if let Ok(system_tx) = rlp_decoded_system_tx {
                 // Handle the signer nonce increment
@@ -535,7 +414,7 @@ mod evm {
                 // Process different system transaction types
                 let target;
                 let new_account_state = match system_tx {
-                    SystemTransaction::ReleaseStake(balance_increment) => {
+                    system_tx::SystemTransaction::ReleaseStake(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
                             "SYSTEM_TX_RELEASE_STAKE",
@@ -548,7 +427,7 @@ mod evm {
                         let res = self.handle_balance_increment(log, balance_increment);
                         Ok(res)
                     }
-                    SystemTransaction::BlockReward(balance_increment) => {
+                    system_tx::SystemTransaction::BlockReward(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
                             "SYSTEM_TX_BLOCK_REWARD",
@@ -561,7 +440,7 @@ mod evm {
                         let res = self.handle_balance_increment(log, balance_increment);
                         Ok(res)
                     }
-                    SystemTransaction::Stake(balance_decrement) => {
+                    system_tx::SystemTransaction::Stake(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
                             "SYSTEM_TX_STAKE",
@@ -573,7 +452,7 @@ mod evm {
                         target = balance_decrement.target;
                         self.handle_balance_decrement(log, tx_envelope.hash(), balance_decrement)?
                     }
-                    SystemTransaction::StorageFees(balance_decrement) => {
+                    system_tx::SystemTransaction::StorageFees(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
                             "SYSTEM_TX_STORAGE_FEES",
@@ -725,7 +604,7 @@ mod evm {
         fn handle_balance_increment(
             &mut self,
             log: Log,
-            balance_increment: BalanceIncrement,
+            balance_increment: system_tx::BalanceIncrement,
         ) -> (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>) {
             let evm = self.inner.evm_mut();
 
@@ -761,7 +640,7 @@ mod evm {
             &mut self,
             log: Log,
             tx_hash: &FixedBytes<32>,
-            balance_decrement: BalanceDecrement,
+            balance_decrement: system_tx::BalanceDecrement,
         ) -> Result<
             Result<
                 (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>),
