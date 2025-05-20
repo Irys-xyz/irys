@@ -131,7 +131,7 @@ pub struct MempoolService {
     commitment_state_guard: CommitmentStateReadGuard,
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
-    _pending_pledges: LruCache<Address, Vec<CommitmentTransaction>>,
+    pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
 
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
@@ -186,7 +186,7 @@ impl MempoolService {
             gossip_tx,
             recent_valid_tx: HashSet::new(),
             pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
-            _pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         }
     }
     // Helper to get the canonical chain and latest height
@@ -286,7 +286,7 @@ impl MempoolService {
         Ok(rx.recv().expect("Failed to receive result from thread"))
     }
 
-    fn is_commitment_valid(&self, commitment_tx: &CommitmentTransaction) -> bool {
+    fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
         // Check if already staked in the blockchain
         let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
 
@@ -294,7 +294,7 @@ impl MempoolService {
         // Only pledges require special validation when not already staked
         let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
         if !is_pledge || is_staked {
-            return true;
+            return CommitmentStatus::Accepted;
         }
 
         // For unstaked pledges, validate against cache and pending transactions
@@ -319,30 +319,33 @@ impl MempoolService {
                 "Commitment is unsupported: {}",
                 commitment_tx.id.0.to_base58()
             );
-            return false;
+            return CommitmentStatus::Unsupported;
         }
 
         // For unstaked addresses, check for pending stake transactions
+        // For unstaked addresses, check for pending stake transactions
         if matches!(cache_status, CommitmentStatus::Unstaked) {
             // Get pending transactions for this address
-            let pending = self.valid_commitment_tx.get(&commitment_tx.signer);
-            if pending.is_none() {
-                warn!(
-                    "Pledge Commitment is unstaked: {}",
-                    commitment_tx.id.0.to_base58()
-                );
-                return false;
+            if let Some(pending) = self.valid_commitment_tx.get(&commitment_tx.signer) {
+                // Check if there's at least one pending stake transaction
+                if pending
+                    .iter()
+                    .any(|c| c.commitment_type == CommitmentType::Stake)
+                {
+                    return CommitmentStatus::Accepted;
+                }
             }
 
-            // Valid if there's at least one pending stake transaction
-            return pending
-                .unwrap()
-                .iter()
-                .any(|c| c.commitment_type == CommitmentType::Stake);
+            // No pending stakes found
+            warn!(
+                "Pledge Commitment is unstaked: {}",
+                commitment_tx.id.0.to_base58()
+            );
+            return CommitmentStatus::Unstaked;
         }
 
         // All other cases are valid
-        true
+        CommitmentStatus::Accepted
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -608,7 +611,7 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
     fn handle(
         &mut self,
         commitment_tx_msg: CommitmentTxIngressMessage,
-        _ctx: &mut Context<Self>,
+        ctx: &mut Context<Self>,
     ) -> Self::Result {
         let commitment_tx = commitment_tx_msg.0.clone();
         debug!(
@@ -635,7 +638,8 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
         self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
 
         // Check pending commitments and cached commitments and active commitments
-        if self.is_commitment_valid(&commitment_tx) {
+        let commitment_status = self.get_commitment_status(&commitment_tx);
+        if commitment_status == CommitmentStatus::Accepted {
             // Validate tx signature
             self.validate_signature(&commitment_tx)?;
 
@@ -646,6 +650,30 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
                 .push(commitment_tx.clone());
 
             self.recent_valid_tx.insert(commitment_tx.id);
+
+            // Process any pending pledges for this newly staked address
+            // ------------------------------------------------------
+            // When a stake transaction is accepted, we can now process any pledge
+            // transactions from the same address that arrived earlier but were
+            // waiting for the stake. This effectively resolves the dependency
+            // order for address-based validation.
+            if let Some(pledges_lru) = self.pending_pledges.pop(&commitment_tx.signer) {
+                // Extract all pending pledges as a vector of owned transactions
+                let pledges: Vec<_> = pledges_lru
+                    .into_iter()
+                    .map(|(_, pledge_tx)| pledge_tx)
+                    .collect();
+
+                // PERFORMANCE NOTE: Processing all pending pledges synchronously
+                // If an address has accumulated many pending pledges, this could
+                // potentially block the actor for a significant time.
+                for pledge_tx in pledges {
+                    // Re-process each pledge now that its signer is staked
+                    // No need to clone as we own the transaction objects
+                    self.handle(CommitmentTxIngressMessage(pledge_tx), ctx)
+                        .expect("Failed to process pending pledge for newly staked address");
+                }
+            }
 
             // Gossip transaction
             let gossip_sender = self.gossip_tx.clone();
@@ -659,7 +687,32 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
 
             Ok(())
         } else {
-            Err(TxIngressError::Skipped)
+            if commitment_status == CommitmentStatus::Unstaked {
+                // For unstaked pledges, we cache them in a 2-level LRU structure:
+                // Level 1: Keyed by signer address (allows tracking multiple addresses)
+                // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
+
+                if let Some(pledges_cache) = self.pending_pledges.get_mut(&commitment_tx.signer) {
+                    // Address already exists in cache - add this pledge transaction to its lru cache
+                    pledges_cache.put(commitment_tx.id, commitment_tx.clone());
+                } else {
+                    // First pledge from this address - create a new nested lru cache
+                    let max_pending_pledge_items =
+                        self.config.consensus.mempool.max_pending_pledge_items;
+                    let mut new_address_cache =
+                        LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+                    // Add the pledge transaction to the new lru cache for the address
+                    new_address_cache.put(commitment_tx.id, commitment_tx.clone());
+
+                    // Add the address cache to the primary lru cache
+                    self.pending_pledges
+                        .put(commitment_tx.signer, new_address_cache);
+                }
+                Ok(())
+            } else {
+                Err(TxIngressError::Skipped)
+            }
         }
     }
 }
