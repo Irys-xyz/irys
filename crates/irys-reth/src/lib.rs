@@ -392,20 +392,9 @@ mod evm {
     use revm::state::{Account, EvmStorageSlot};
     use revm::{DatabaseCommit, MainBuilder, MainContext};
 
-    use super::*;
+    use crate::system_tx::system_tx_topics;
 
-    // === SYSTEM TX LOG TOPICS HELPERS ===
-    pub mod system_tx_topics {
-        use alloy_primitives::keccak256;
-        use std::sync::LazyLock;
-        pub static RELEASE_STAKE: LazyLock<[u8; 32]> =
-            LazyLock::new(|| keccak256("SYSTEM_TX_RELEASE_STAKE").0);
-        pub static BLOCK_REWARD: LazyLock<[u8; 32]> =
-            LazyLock::new(|| keccak256("SYSTEM_TX_BLOCK_REWARD").0);
-        pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
-        pub static STORAGE_FEES: LazyLock<[u8; 32]> =
-            LazyLock::new(|| keccak256("SYSTEM_TX_STORAGE_FEES").0);
-    }
+    use super::*;
 
     pub(crate) struct CustomBlockExecutor<'a, Evm> {
         receipt_builder: &'a RethReceiptBuilder,
@@ -444,12 +433,13 @@ mod evm {
                 self.increment_signer_nonce(&tx)?;
 
                 // Process different system transaction types
+                let topic = system_tx.topic();
                 let target;
                 let new_account_state = match system_tx {
                     system_tx::SystemTransaction::ReleaseStake(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
-                            vec![(*system_tx_topics::RELEASE_STAKE).into()],
+                            vec![topic],
                             vec![
                                 DynSolValue::Uint(balance_increment.amount, 256),
                                 DynSolValue::Address(balance_increment.target),
@@ -462,7 +452,7 @@ mod evm {
                     system_tx::SystemTransaction::BlockReward(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
-                            vec![(*system_tx_topics::BLOCK_REWARD).into()],
+                            vec![topic],
                             vec![
                                 DynSolValue::Uint(balance_increment.amount, 256),
                                 DynSolValue::Address(balance_increment.target),
@@ -475,7 +465,7 @@ mod evm {
                     system_tx::SystemTransaction::Stake(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
-                            vec![(*system_tx_topics::STAKE).into()],
+                            vec![topic],
                             vec![
                                 DynSolValue::Uint(balance_decrement.amount, 256),
                                 DynSolValue::Address(balance_decrement.target),
@@ -487,7 +477,7 @@ mod evm {
                     system_tx::SystemTransaction::StorageFees(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
-                            vec![(*system_tx_topics::STORAGE_FEES).into()],
+                            vec![topic],
                             vec![
                                 DynSolValue::Uint(balance_decrement.amount, 256),
                                 DynSolValue::Address(balance_decrement.target),
@@ -926,19 +916,23 @@ mod evm {
 mod tests {
     use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
     use alloy_genesis::Genesis;
-    use alloy_network::EthereumWallet;
-    use alloy_primitives::{Signature, TxKind, B256};
+    use alloy_network::{EthereumWallet, TxSigner};
+    use alloy_primitives::{FixedBytes, Signature, TxKind, B256};
     use alloy_rlp::Encodable;
     use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
-    use reth::providers::AccountReader;
+    use alloy_signer_local::PrivateKeySigner;
+    use eyre::OptionExt;
+    use reth::{
+        api::FullNodePrimitives,
+        builder::{rpc::RethRpcAddOns, FullNode},
+        providers::AccountReader,
+        rpc::api::eth::helpers::EthTransactions,
+    };
     use reth_e2e_test_utils::{setup, wallet::Wallet};
     use reth_network::NetworkEventListenerProvider;
     use reth_transaction_pool::TransactionPool;
 
-    use crate::{
-        evm::system_tx_topics,
-        system_tx::{BalanceDecrement, SystemTransaction},
-    };
+    use crate::system_tx::{BalanceDecrement, SystemTransaction};
 
     use super::*;
 
@@ -953,115 +947,140 @@ mod tests {
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
     }
 
+    // todo tx ordering test
+    // todo block broadcast test
+
+    // #[test_log::test(tokio::test)]
+    // async fn storage_fees_decrement_account_balance() -> eyre::Result<()> {}
+
+    // #[test_log::test(tokio::test)]
+    // async fn stake_decrement_account_balance() -> eyre::Result<()> {}
+
+    // #[test_log::test(tokio::test)]
+    // async fn block_reward_increment_account_balance() -> eyre::Result<()> {}
+
     #[test_log::test(tokio::test)]
-    async fn can_decrement_balance_of_account_that_has_balance() -> eyre::Result<()> {
-        let (mut nodes, _tasks, wallet) =
+    #[rstest::rstest]
+    #[case::release_stake(release_stake, signer_b())]
+    #[case::release_stake_init_no_balance(release_stake, signer_random())]
+    #[case::block_reward(block_reward, signer_b())]
+    #[case::block_reward_init_no_balance(block_reward, signer_random())]
+    async fn release_stake_increment_account_balance(
+        #[case] system_tx: impl Fn(Address) -> SystemTransaction,
+        #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
+    ) -> eyre::Result<()> {
+        // setup
+        let (mut nodes, _tasks, ..) =
             setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
-        let wallets = Wallet::new(3).wallet_gen();
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let wallets = Wallet::new(2).wallet_gen();
+        let block_producer = EthereumWallet::from(wallets[0].clone());
+        let block_producer = block_producer.default_signer();
 
-        let mut node = nodes.pop().unwrap();
+        let signer_b_balance = get_balance(&node.inner, signer_b.address());
+        let block_producer_balance = get_balance(&node.inner, block_producer.address());
 
-        let signer_a = EthereumWallet::from(wallets[1].clone());
-        let signer_a = signer_a.default_signer();
+        let tx_count = 5;
+        let system_tx = system_tx(signer_b.address());
+        let pooled_txs = (0..tx_count)
+            .map(|nonce| compose_system_tx(nonce, 1, system_tx.clone()))
+            .map(|tx| sign_tx(tx, &block_producer))
+            .collect::<Vec<_>>();
+        let pooled_txs = futures::future::join_all(pooled_txs).await;
 
-        let signer_b = EthereumWallet::from(wallet.inner.clone());
-        let signer_b = signer_b.default_signer();
-
-        // Get the balance of signer_b
-        let signer_a_address = signer_a.address();
-        let signer_a_balance = node
-            .inner
-            .provider
-            .basic_account(&signer_a_address)
-            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
-            .unwrap_or_else(|err| {
-                tracing::warn!("Failed to get signer_a balance: {}", err);
-                U256::ZERO
-            });
-        let signer_b_address = signer_b.address();
-        let signer_b_balance = node
-            .inner
-            .provider
-            .basic_account(&signer_b_address)
-            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
-            .unwrap_or_else(|err| {
-                tracing::warn!("Failed to get signer_b balance: {}", err);
-                U256::ZERO
-            });
-        tracing::info!(?signer_b_address, ?signer_b_balance, "Signer B balance");
-        tracing::info!(?signer_a_address, ?signer_a_balance, "Signer A balance");
-
-        let mut tx_hashes = Vec::new();
-
-        // submit 5 valid txs with incrementing nonce
-        for i in 0..5u64 {
-            let system_tx = SystemTransaction::StorageFees(BalanceDecrement {
-                amount: U256::ONE,
-                target: signer_a.address(),
-            });
-
-            let tx_raw = compose_system_tx(i, 1, system_tx);
-            let pooled_tx = sign_tx(tx_raw, &signer_b).await;
-            let tx_hash = node
-                .inner
-                .pool
-                .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
-                .await
-                .unwrap();
-            tx_hashes.push(tx_hash);
-        }
-
+        // actoin: submit txs and get produce a new block payload and update fork choice
+        let tx_hashes = pooled_txs
+            .into_iter()
+            .map(|tx| {
+                node.inner
+                    .pool
+                    .add_transaction(reth_transaction_pool::TransactionOrigin::Private, tx)
+            })
+            .collect::<Vec<_>>();
+        let tx_hashes = futures::future::try_join_all(tx_hashes).await?;
         let block_payload = node.new_payload().await?;
         let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
-        // trigger forkchoice update via engine api to commit the block to the blockchain
         node.update_forkchoice(block_payload_hash, block_payload_hash)
             .await?;
-        let outcome = node.inner.provider.get_state(0..=1).unwrap().unwrap();
-        tracing::info!(?outcome.receipts);
 
-        // Assert that all submitted system txs are included in the block
-        let block_txs: std::collections::HashSet<_> = block_payload
+        // Assert
+        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+
+        // ensure all txs are included in the block
+        let block_txs = get_block_txs(block_payload);
+        let submitted_tx_hashes: std::collections::HashSet<_> = tx_hashes.into_iter().collect();
+        assert_eq!(
+            block_txs, submitted_tx_hashes,
+            "Not all submitted system transactions were included in the block"
+        );
+
+        // assert all txs have a corresponding log
+        asserst_topic_present_in_logs(block_execution, system_tx.topic().into(), tx_count);
+
+        // assert balance for signer_b is updated
+        let signer_b_balance_after = get_balance(&node.inner, signer_b.address());
+        assert_eq!(
+            signer_b_balance_after,
+            signer_b_balance + U256::from(5u64),
+            "signer_b's balance should be reduced by 5"
+        );
+
+        // assert balance for sginer b remains as is (system txs cost nothing)
+        let block_producer_balance_after = get_balance(&node.inner, block_producer.address());
+        assert_eq!(
+            block_producer_balance_after, block_producer_balance,
+            "bolck_producer's balance should not change"
+        );
+        Ok(())
+    }
+
+    fn release_stake(address: Address) -> SystemTransaction {
+        let system_tx = SystemTransaction::ReleaseStake(system_tx::BalanceIncrement {
+            amount: U256::ONE,
+            target: address,
+        });
+        system_tx
+    }
+
+    fn block_reward(address: Address) -> SystemTransaction {
+        let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
+            amount: U256::ONE,
+            target: address,
+        });
+        system_tx
+    }
+
+    #[rstest::fixture]
+    fn signer_b() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
+        let wallets = Wallet::new(2).wallet_gen();
+        let signer_b = EthereumWallet::from(wallets[1].clone());
+        let signer_b = signer_b.default_signer();
+        signer_b
+    }
+
+    #[rstest::fixture]
+    fn signer_random() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
+        Arc::new(PrivateKeySigner::random())
+    }
+
+    fn get_block_txs(
+        block_payload: EthBuiltPayload,
+    ) -> std::collections::HashSet<alloy_primitives::FixedBytes<32>> {
+        block_payload
             .block()
             .body()
             .transactions
             .iter()
             .map(|tx| *tx.hash())
-            .collect();
-        let submitted_tx_hashes: std::collections::HashSet<_> = tx_hashes.into_iter().collect();
-        assert_eq!(block_txs, submitted_tx_hashes, "Not all submitted system transactions were included in the block");
+            .collect()
+    }
 
-        // Assert balances after the transaction
-        let signer_a_balance_after = node
-            .inner
-            .provider
-            .basic_account(&signer_a_address)
-            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
-            .unwrap_or_else(|err| {
-                tracing::warn!("Failed to get signer_a balance after: {}", err);
-                U256::ZERO
-            });
-        let signer_b_balance_after = node
-            .inner
-            .provider
-            .basic_account(&signer_b_address)
-            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
-            .unwrap_or_else(|err| {
-                tracing::warn!("Failed to get signer_b balance after: {}", err);
-                U256::ZERO
-            });
-        assert_eq!(
-            signer_a_balance_after,
-            signer_a_balance - U256::from(5u64),
-            "signer_a's balance should be reduced by 5"
-        );
-        assert_eq!(
-            signer_b_balance_after, signer_b_balance,
-            "signer_b's balance should not change"
-        );
-
-        // Assert that 'balance decrement' (storage fees) receipts are present
-        let storage_fees_topic = *system_tx_topics::STORAGE_FEES;
-        let receipts = &outcome.receipts;
+    fn asserst_topic_present_in_logs(
+        block_execution: reth::providers::ExecutionOutcome,
+        storage_fees_topic: [u8; 32],
+        desired_repetitions: u64,
+    ) {
+        let receipts = &block_execution.receipts;
         let mut storage_fees_receipt_count = 0;
         for block_receipt in receipts {
             for receipt in block_receipt {
@@ -1076,11 +1095,30 @@ mod tests {
             }
         }
         assert!(
-            storage_fees_receipt_count >= 5,
-            "Expected at least 5 'balance decrement' receipts, found {}",
+            storage_fees_receipt_count >= desired_repetitions,
+            "Expected at least 5 receipts, found {}",
             storage_fees_receipt_count
         );
-        Ok(())
+    }
+
+    fn get_balance<N, AddOns>(
+        node: &FullNode<N, AddOns>,
+        addr: Address,
+    ) -> alloy_primitives::Uint<256, 4>
+    where
+        N: FullNodeComponents<Provider: CanonStateSubscriptions>,
+        AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
+        N::Types: NodeTypes<Primitives: FullNodePrimitives>,
+    {
+        let signer_balance = node
+            .provider
+            .basic_account(&addr)
+            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get signer_b balance: {}", err);
+                U256::ZERO
+            });
+        signer_balance
     }
 
     async fn sign_tx(

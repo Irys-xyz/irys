@@ -1,4 +1,5 @@
 use alloy_primitives::Address;
+use alloy_primitives::FixedBytes;
 use alloy_primitives::U256;
 use alloy_rlp::Decodable;
 use alloy_rlp::Encodable;
@@ -11,6 +12,29 @@ pub enum SystemTransaction {
     BlockReward(BalanceIncrement),
     Stake(BalanceDecrement),
     StorageFees(BalanceDecrement),
+}
+pub mod system_tx_topics {
+    use alloy_primitives::keccak256;
+    use std::sync::LazyLock;
+    pub static RELEASE_STAKE: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SYSTEM_TX_RELEASE_STAKE").0);
+    pub static BLOCK_REWARD: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SYSTEM_TX_BLOCK_REWARD").0);
+    pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
+    pub static STORAGE_FEES: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SYSTEM_TX_STORAGE_FEES").0);
+}
+
+impl SystemTransaction {
+    pub fn topic(&self) -> FixedBytes<32> {
+        use system_tx_topics::*;
+        match self {
+            SystemTransaction::ReleaseStake(_) => (*RELEASE_STAKE).into(),
+            SystemTransaction::BlockReward(_) => (*BLOCK_REWARD).into(),
+            SystemTransaction::Stake(_) => (*STAKE).into(),
+            SystemTransaction::StorageFees(_) => (*STORAGE_FEES).into(),
+        }
+    }
 }
 
 /// Stable 1-byte discriminants

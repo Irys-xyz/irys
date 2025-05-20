@@ -120,6 +120,7 @@ alloy-network = { version = "0.15.10", default-features = false }
 alloy-rpc-types = { version = "0.15.10", features = ["eth"], default-features = false }
 alloy-rpc-types-eth = { version = "0.15.10", default-features = false }
 alloy-rpc-types-engine = { version = "0.15.10", default-features = false }
+alloy-signer-local = { version = "0.15.10", default-features = false }
 
 reth-e2e-test-utils = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
