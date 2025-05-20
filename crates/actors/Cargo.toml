@@ -20,6 +20,7 @@ nodit.workspace = true
 actix-rt.workspace = true
 
 tokio.workspace = true
+lru.workspace = true
 reth-db.workspace = true
 irys-primitives.workspace = true
 eyre.workspace = true

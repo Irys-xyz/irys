@@ -9,6 +9,7 @@ use derive_more::{Add, From, Into};
 use eyre::eyre;
 use reth_codecs::Compact;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 use std::ops::{Add, Deref, DerefMut};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -243,6 +244,12 @@ pub struct TxChunkOffset(pub u32);
 impl TxChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         TxChunkOffset(u32::from_be_bytes(bytes))
+    }
+}
+
+impl Hash for TxChunkOffset {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }
 

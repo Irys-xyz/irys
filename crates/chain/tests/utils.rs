@@ -1,6 +1,14 @@
 use actix::MailboxError;
-use actix_web::middleware::Logger;
+use actix_http::Request;
+use actix_web::test::call_service;
+use actix_web::test::{self, TestRequest};
 use actix_web::App;
+use actix_web::{
+    body::BoxBody,
+    dev::{Service, ServiceResponse},
+    Error,
+};
+use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
 use irys_actors::{
@@ -14,6 +22,7 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::tables::IrysBlockHeaders;
 use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -25,35 +34,28 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{
+    Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
+    UnpackedChunk,
+};
+use irys_types::{
     CommitmentTransaction, Config, IrysTransactionHeader, IrysTransactionId, NodeConfig, NodeMode,
     TxChunkOffset,
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
+use reth_db::cursor::*;
+use reth_db::Database;
 use reth_primitives::irys_primitives::CommitmentType;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
-use tracing::info;
-
-use std::collections::HashMap;
-
-use actix_web::{
-    dev::{Service, ServiceResponse},
-    test,
-};
-use awc::{body::MessageBody, http::StatusCode};
-use irys_database::tables::IrysBlockHeaders;
-use irys_types::{
-    Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
-    UnpackedChunk,
-};
-use reth_db::cursor::*;
-use reth_db::Database;
+use tracing::debug;
 use tracing::error;
+use tracing::info;
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
@@ -321,17 +323,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn start_public_api(&self) {
+    pub async fn start_public_api(
+        &self,
+    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
         let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
         let api_state = self.node_ctx.get_api_state(ema_tx);
 
-        let _app = actix_web::test::init_service(
+        actix_web::test::init_service(
             App::new()
-                .wrap(Logger::default())
+                // Remove the logger middleware
                 .app_data(actix_web::web::Data::new(api_state))
                 .service(routes()),
         )
-        .await;
+        .await
     }
 
     pub async fn wait_until_height(
@@ -717,6 +721,35 @@ pub async fn post_chunk<T, B>(
     .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Posts a storage transaction to the node via HTTP POST request using the actix-web test framework.
+///
+/// This function submits the transaction header to the `/v1/tx` endpoint and verifies
+/// that the response has a successful HTTP 200 status code. The response body is logged
+/// for debugging purposes.
+///
+/// # Arguments
+/// * `app` - The actix-web service to test against
+/// * `tx` - The Irys transaction to submit (only the header is sent)
+///
+/// # Panics
+/// Panics if the response status is not HTTP 200 OK.
+pub async fn post_storage_tx<T, B>(app: &T, tx: &IrysTransaction)
+where
+    T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+    B: MessageBody + Unpin,
+{
+    let req = TestRequest::post()
+        .uri("/v1/tx")
+        .set_json(tx.header.clone())
+        .to_request();
+
+    let resp = call_service(&app, req).await;
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    debug!("Response body: {:#?}", body);
+    assert_eq!(status, StatusCode::OK);
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.
