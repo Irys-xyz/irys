@@ -130,7 +130,7 @@ pub struct MempoolService {
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     /// LRU caches for out of order gossip data
-    pending_chunks: LruCache<DataRoot, HashMap<TxChunkOffset, UnpackedChunk>>,
+    pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     _pending_pledges: LruCache<Address, Vec<CommitmentTransaction>>,
 
     /// Reference to all the services we can send messages to
@@ -168,6 +168,9 @@ impl MempoolService {
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
+        let mempool_config = &config.consensus.mempool;
+        let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
+        let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
         Self {
             irys_db,
             reth_db,
@@ -182,8 +185,8 @@ impl MempoolService {
             service_senders,
             gossip_tx,
             recent_valid_tx: HashSet::new(),
-            pending_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            _pending_pledges: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
+            _pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         }
     }
     // Helper to get the canonical chain and latest height
@@ -668,6 +671,8 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk: UnpackedChunk = chunk_msg.0;
 
+        let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
+
         info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
         // Check to see if we have a cached data_root for this chunk
@@ -708,12 +713,13 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
                 if let Some(chunks_map) = self.pending_chunks.get_mut(&chunk.data_root) {
-                    chunks_map.insert(chunk.tx_offset, chunk.clone());
+                    chunks_map.put(chunk.tx_offset, chunk.clone());
                 } else {
                     // If there's no entry for this data_root yet, create one
-                    let mut new_map = HashMap::new();
-                    new_map.insert(chunk.tx_offset, chunk.clone());
-                    self.pending_chunks.put(chunk.data_root, new_map);
+                    let mut new_lru_cache =
+                        LruCache::new(NonZeroUsize::new(max_chunks_per_item).unwrap());
+                    new_lru_cache.put(chunk.tx_offset, chunk.clone());
+                    self.pending_chunks.put(chunk.data_root, new_lru_cache);
                 }
                 return Ok(());
             }
