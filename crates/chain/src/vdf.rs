@@ -43,19 +43,6 @@ pub fn run_vdf(
             break;
         };
 
-        // check if vdf mining state should change
-        if let Ok(new_mining_state) = vdf_mining_state_listener.try_recv() {
-            tracing::info!("Setting mining state to {}", new_mining_state);
-            vdf_mining = new_mining_state;
-        }
-
-        // if mining disabled, wait 200ms and continue loop i.e. check again
-        if !vdf_mining {
-            tracing::trace!("VDF Mining Paused, waiting 200ms");
-            std::thread::sleep(Duration::from_millis(200));
-            continue;
-        }
-
         // check for VDF fast forward step
         if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
             // if the step number is ahead of local nodes vdf steps
@@ -72,6 +59,19 @@ pub fn run_vdf(
                     proposed_ff_to_mining_seed.global_step, global_step_number
                 );
             }
+            continue;
+        }
+
+        // check if vdf mining state should change
+        if let Ok(new_mining_state) = vdf_mining_state_listener.try_recv() {
+            tracing::info!("Setting mining state to {}", new_mining_state);
+            vdf_mining = new_mining_state;
+        }
+
+        // if mining disabled, wait 200ms and continue loop i.e. check again
+        if !vdf_mining {
+            tracing::trace!("VDF Mining Paused, waiting 200ms");
+            std::thread::sleep(Duration::from_millis(200));
             continue;
         }
 
