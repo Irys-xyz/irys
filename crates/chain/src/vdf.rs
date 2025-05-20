@@ -96,8 +96,7 @@ pub fn run_vdf(
             hash = apply_reset_seed(hash, reset_seed);
         }
 
-        /* if let */
-        while let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
+        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
             // if the step number is ahead of local nodes vdf steps
             if global_step_number < proposed_ff_to_mining_seed.global_step {
                 debug!(
