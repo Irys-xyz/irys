@@ -119,7 +119,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         debug!(
-            "Submiting ledger tx validation for block: {:?}",
+            "Submitting ledger tx validation for block: {:?}",
             new_block_header.block_hash.0.to_base58()
         );
         //====================================
