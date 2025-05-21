@@ -17,9 +17,9 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
         .await;
 
     let (service1_handle, gossip_service1_message_bus) =
-        gossip_service_test_fixture_1.run_service(false).await;
+        gossip_service_test_fixture_1.run_service().await;
     let (service2_handle, _gossip_service2_message_bus) =
-        gossip_service_test_fixture_2.run_service(false).await;
+        gossip_service_test_fixture_2.run_service().await;
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -80,7 +80,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
 
     // Start all services
     for fixture in &mut fixtures {
-        let (handle, bus) = fixture.run_service(false).await;
+        let (handle, bus) = fixture.run_service().await;
         handles.push(handle);
         message_buses.push(bus);
     }
@@ -128,8 +128,8 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -173,8 +173,8 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
+    let (service2_handle, _) = fixture2.run_service().await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -219,8 +219,8 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
         .await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -259,7 +259,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     // Add peer2 but don't start its service
     fixture1.add_peer(&fixture2).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -299,8 +299,8 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     fixture2.api_client_stub.txs.insert(tx1.id, tx1.clone());
     fixture2.api_client_stub.txs.insert(tx2.id, tx2.clone());
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -338,8 +338,8 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(1500)).await;

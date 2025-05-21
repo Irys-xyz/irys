@@ -1,6 +1,6 @@
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
-use crate::{GossipService, ServiceHandleWithShutdownSignal};
+use crate::{P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
@@ -19,8 +19,8 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress,
-    PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, NodeMode,
+    PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -354,9 +354,8 @@ impl GossipServiceTestFixture {
     /// Can panic
     pub(crate) async fn run_service(
         &mut self,
-        catch_up: bool,
     ) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
-        let (gossip_service, internal_message_bus) = GossipService::new(self.mining_address);
+        let (gossip_service, internal_message_bus) = P2PService::new(self.mining_address);
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()
@@ -387,8 +386,6 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
-                catch_up,
-                0,
             )
             .expect("failed to run gossip service");
 

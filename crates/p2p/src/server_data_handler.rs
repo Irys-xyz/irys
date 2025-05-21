@@ -235,7 +235,7 @@ where
         );
 
         if self.sync_state.is_syncing()
-            && block_header.height > (self.sync_state.sync_height() + 1) as u64
+            && block_header.height > (self.sync_state.sync_target_height() + 1) as u64
         {
             debug!(
                 "Node {}: Block {} is out of the sync range, skipping",

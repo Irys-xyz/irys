@@ -15,11 +15,11 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BlockPoolError {
-    DatabaseError(eyre::Error),
+    DatabaseError(String),
     OtherInternal(String),
-    BlockError(eyre::Error),
+    BlockError(String),
 }
 
 impl From<PeerListFacadeError> for BlockPoolError {
@@ -150,11 +150,9 @@ where
                 // Check if the previous block is in the db
                 let maybe_previous_block_header = db
                     .as_ref()
-                    .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
-                        "Database is not connected"
-                    )))?
+                    .ok_or(BlockPoolError::DatabaseError("Database is not connected".into()))?
                     .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
-                    .map_err(|db_error| BlockPoolError::DatabaseError(db_error))?;
+                    .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))?;
 
                 // If the parent block is in the db, process it
                 if let Some(_previous_block_header) = maybe_previous_block_header {
@@ -186,7 +184,7 @@ where
                             self_addr.do_send(RemoveBlockFromPool {
                                 block_hash: block_header.block_hash,
                             });
-                            return Err(BlockPoolError::BlockError(block_discovery_error))
+                            return Err(BlockPoolError::BlockError(format!("{:?}", block_discovery_error)))
                     }
 
                     info!(
@@ -415,11 +413,11 @@ where
 
         self.db
             .as_ref()
-            .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
-                "Database is not connected"
-            )))?
+            .ok_or(BlockPoolError::DatabaseError(
+                "Database is not connected".into(),
+            ))?
             .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
-            .map_err(|db_error| BlockPoolError::DatabaseError(db_error))
+            .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
     }
 }
 
@@ -448,11 +446,11 @@ where
         Ok(self
             .db
             .as_ref()
-            .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
-                "Database is not connected"
-            )))?
+            .ok_or(BlockPoolError::DatabaseError(
+                "Database is not connected".into(),
+            ))?
             .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
-            .map_err(|db_error| BlockPoolError::DatabaseError(db_error))?
+            .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))?
             .is_some())
     }
 }

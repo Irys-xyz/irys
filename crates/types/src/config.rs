@@ -226,7 +226,7 @@ impl Into<Config> for NodeConfig {
 ///
 /// Defines how the node participates in the network - either as a genesis node
 /// that starts a new network or as a peer that syncs with existing nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,

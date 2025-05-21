@@ -27,7 +27,7 @@ use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
     block_production::Seed, Address, BlockIndexItem, BlockIndexQuery, DatabaseProvider, GossipData,
-    H256List, PeerListItem, RethPeerInfo, VDFLimiterInfo,
+    H256List, NodeMode, PeerListItem, RethPeerInfo, VDFLimiterInfo,
 };
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -35,10 +35,12 @@ use std::collections::VecDeque;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
 };
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
@@ -110,7 +112,7 @@ impl ServiceHandleWithShutdownSignal {
 }
 
 #[derive(Debug)]
-pub struct GossipService {
+pub struct P2PService {
     cache: Arc<GossipCache>,
     mempool_data_receiver: Option<Receiver<GossipData>>,
     client: GossipClient,
@@ -132,7 +134,7 @@ impl SyncState {
         }
     }
 
-    pub fn store(&self, is_syncing: bool) {
+    pub fn set_is_syncing(&self, is_syncing: bool) {
         self.syncing.store(is_syncing, Ordering::Relaxed);
     }
 
@@ -141,6 +143,7 @@ impl SyncState {
         self.syncing.load(Ordering::Relaxed)
     }
 
+    #[must_use]
     pub async fn wait_for_sync(&self) {
         // If already synced, return immediately
         if !self.is_syncing() {
@@ -158,23 +161,24 @@ impl SyncState {
         .expect("Sync checking task failed");
     }
 
-    /// Sets the current sync height
-    pub fn set_sync_height(&self, height: usize) {
+    /// Sets the current sync height. During syncing, the gossip won't
+    /// accept blocks higher than this height
+    pub fn set_sync_target_height(&self, height: usize) {
         self.sync_height.store(height, Ordering::Relaxed);
     }
 
     /// Returns the current sync height
-    pub fn sync_height(&self) -> usize {
+    pub fn sync_target_height(&self) -> usize {
         self.sync_height.load(Ordering::Relaxed)
     }
 
     /// Increments sync height by 1 and returns the new height
-    pub fn increment_sync_height(&self) -> usize {
+    pub fn increment_sync_target_height(&self) -> usize {
         self.sync_height.fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
-impl GossipService {
+impl P2PService {
     /// Returns whether the gossip service is currently syncing
     pub fn is_syncing(&self) -> bool {
         self.sync_state.is_syncing()
@@ -182,10 +186,10 @@ impl GossipService {
 
     /// Waits until the gossip service has completed syncing
     pub async fn wait_for_sync(&self) {
-        self.sync_state.wait_for_sync().await;
+        self.sync_state.wait_for_sync().await
     }
 
-    /// Create a new gossip service. To run the service, use the [`GossipService::run`] method.
+    /// Create a new gossip service. To run the service, use the [`P2PService::run`] method.
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(mining_address: Address) -> (Self, Sender<GossipData>) {
@@ -223,16 +227,12 @@ impl GossipService {
         db: DatabaseProvider,
         vdf_sender: Sender<BroadcastMiningSeed>,
         listener: TcpListener,
-        needs_catching_up: bool,
-        latest_known_height: usize,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
         debug!("Staring gossip service");
-        self.sync_state.store(needs_catching_up);
-        self.sync_state.set_sync_height(latest_known_height);
 
         // TODO: get the db
         let block_pool_service = BlockPoolService::new_with_client(
@@ -278,13 +278,20 @@ impl GossipService {
             peer_list.clone(),
         );
 
-        if needs_catching_up {
-            task_executor.spawn(async move {
-                if let Err(error) = catch_up_task(sync_state, api_client.clone(), peer_list).await {
-                    error!("Failed to catch up: {}", error);
-                }
-            });
-        }
+        // task_executor.spawn(async move {
+        //     if let Err(error) = sync_chain(
+        //         sync_state.clone(),
+        //         api_client.clone(),
+        //         peer_list,
+        //         matches!(node_mode, NodeMode::Genesis),
+        //     )
+        //     .await
+        //     {
+        //         error!("Failed to catch up: {}", error);
+        //         sync_state.set_error(error).await;
+        //         sync_state.set_is_syncing(false);
+        //     }
+        // });
 
         let gossip_service_handle = spawn_watcher_task(
             server,
@@ -426,7 +433,7 @@ fn spawn_cache_pruning_task(
 
 fn spawn_broadcast_task<R, A>(
     mut mempool_data_receiver: Receiver<GossipData>,
-    service: GossipService,
+    service: P2PService,
     task_executor: &TaskExecutor,
     peer_list_service: PeerListFacade<A, R>,
 ) -> ServiceHandleWithShutdownSignal
@@ -541,20 +548,43 @@ fn spawn_watcher_task(
     )
 }
 
-async fn catch_up_task<
+pub async fn sync_chain<
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 >(
     sync_state: SyncState,
     api_client: A,
     peer_list_service: PeerListFacade<A, R>,
+    node_mode: &NodeMode,
 ) -> Result<(), GossipError> {
-    debug!("Sync task: Starting gossip service sync task, waiting for active peers");
-    peer_list_service.wait_for_active_peers().await?;
-    debug!(
-        "Sync task: Gossip service sync task started. Syncing blocks starting from height {}",
-        sync_state.sync_height()
-    );
+    sync_state.set_is_syncing(true);
+    let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
+
+    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}", node_mode, sync_state.sync_target_height());
+
+    if is_in_genesis_mode && sync_state.sync_target_height() <= 1 {
+        debug!("Sync task: The node is a genesis node with no blocks, skipping the sync task");
+        sync_state.set_is_syncing(false);
+        return Ok(());
+    }
+
+    let fetch_index_from_the_trusted_peer = !is_in_genesis_mode;
+    if is_in_genesis_mode {
+        match timeout(Duration::from_secs(30), peer_list_service.wait_for_active_peers()).await {
+            Ok(peer_list_result) => {
+                peer_list_result?;
+            }
+            Err(elapsed) => {
+                warn!("Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task", elapsed);
+                sync_state.set_is_syncing(false);
+                return Ok(());
+            }
+        };
+    } else {
+        peer_list_service.wait_for_active_peers().await?;
+    }
+
+    debug!("Sync task: Syncing started");
 
     let limit = 10;
 
@@ -562,9 +592,10 @@ async fn catch_up_task<
     let block_index = get_block_index(
         &peer_list_service,
         &api_client,
-        sync_state.sync_height(),
+        sync_state.sync_target_height(),
         limit,
         5,
+        fetch_index_from_the_trusted_peer,
     )
     .await?;
 
@@ -573,27 +604,27 @@ async fn catch_up_task<
 
     while let Some(block) = block_queue.pop_front() {
         debug!(
-            "Sync task: Requesting block {} (height {}) from the network",
+            "Sync task: Requesting block {} (sync height is {}) from the network",
             block.block_hash.0.to_base58(),
-            sync_state.sync_height()
+            sync_state.sync_target_height()
         );
         match peer_list_service
             .request_block_from_the_network(block.block_hash)
             .await
         {
             Ok(()) => {
-                sync_state.increment_sync_height();
+                sync_state.increment_sync_target_height();
                 info!(
-                    "Successfully requested block {} (height {}) from the network",
+                    "Successfully requested block {} (sync height is {}) from the network",
                     block.block_hash.0.to_base58(),
-                    sync_state.sync_height()
+                    sync_state.sync_target_height()
                 );
             }
             Err(err) => {
                 error!(
                     "Failed to request block {} (height {}) from the network: {}",
                     block.block_hash.0.to_base58(),
-                    sync_state.sync_height(),
+                    sync_state.sync_target_height(),
                     err
                 );
             }
@@ -605,9 +636,10 @@ async fn catch_up_task<
                 get_block_index(
                     &peer_list_service,
                     &api_client,
-                    sync_state.sync_height(),
+                    sync_state.sync_target_height(),
                     limit,
                     5,
+                    fetch_index_from_the_trusted_peer,
                 )
                 .await?,
             );
@@ -618,7 +650,7 @@ async fn catch_up_task<
         }
     }
 
-    sync_state.store(false);
+    sync_state.set_is_syncing(false);
     info!("Gossip service sync completed");
     Ok(())
 }
@@ -632,17 +664,23 @@ async fn get_block_index<
     start: usize,
     limit: usize,
     retries: usize,
+    fetch_from_the_trusted_peer: bool,
 ) -> GossipResult<Vec<BlockIndexItem>> {
-    let top_peers = peer_list_service.top_active_peers(Some(5), None).await?;
+    let peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
+        peer_list_service.top_trusted_peer().await?
+    } else {
+        peer_list_service.top_active_peers(Some(5), None).await?
+    };
 
-    if top_peers.is_empty() {
+    if peers_to_fetch_index_from.is_empty() {
         return Err(GossipError::Network("No peers available".to_string()));
     }
 
     for _ in 0..retries {
-        let (miner_address, top_peer) = top_peers
-            .choose(&mut rand::thread_rng())
-            .ok_or(GossipError::Network("No peers available".to_string()))?;
+        let (miner_address, top_peer) =
+            peers_to_fetch_index_from
+                .choose(&mut rand::thread_rng())
+                .ok_or(GossipError::Network("No peers available".to_string()))?;
         match api_client
             .get_block_index(
                 top_peer.address.api,
@@ -803,11 +841,16 @@ mod tests {
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
-            sync_state.set_sync_height(10);
 
-            catch_up_task(sync_state.clone(), api_client_stub.clone(), peer_list)
-                .await
-                .expect("to finish catching up");
+            sync_chain(
+                sync_state.clone(),
+                api_client_stub.clone(),
+                peer_list,
+                false,
+                10,
+            )
+            .await
+            .expect("to finish catching up");
 
             // There should be three calls total: two that got items and one that didn't
             let data_requests = block_index_requests.lock().unwrap();

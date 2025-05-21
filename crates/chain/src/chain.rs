@@ -39,8 +39,7 @@ use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
 use irys_p2p::{
-    GossipService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal,
-    SyncState,
+    P2PService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::node::RethNode;
@@ -570,18 +569,17 @@ impl IrysNode {
             &node_config.reth_peer_info.peering_tcp_addr
         );
 
-        // if we are an empty node joining an existing network
-        if *node_mode == NodeMode::PeerSync {
-            sync_state_from_peers(
-                ctx.config.node_config.trusted_peers.clone(),
-                ctx.actor_addresses.block_discovery_addr.clone(),
-                ctx.actor_addresses.mempool.clone(),
-                ctx.peer_list.clone(),
-                ctx.service_senders.vdf_seed.clone(),
-                ctx.service_senders.vdf.clone(),
-            )
-            .await?;
-        }
+        debug!("Start syncing");
+        // This is going to resolve instantly for genesis node with 0 blocks,
+        //  going to wait for sync otherwise
+        irys_p2p::sync_chain(
+            ctx.sync_state.clone(),
+            irys_api_client::IrysApiClient::new(),
+            ctx.peer_list.clone(),
+            node_mode,
+        )
+        .await?;
+        debug!("Sync completed");
 
         Ok(ctx)
     }
@@ -832,8 +830,8 @@ impl IrysNode {
             .send(GetCommitmentStateGuardMessage)
             .await?;
 
-        let (gossip_service, gossip_tx) = GossipService::new(config.node_config.miner_address());
-        let sync_state = gossip_service.sync_state.clone();
+        let (p2p_service, gossip_tx) = P2PService::new(config.node_config.miner_address());
+        let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
         let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
@@ -931,16 +929,22 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        let current_tree_tip = block_tree_guard.read().tip;
-        let latest_known_block_height = block_tree_guard
-            .read()
-            .get_block(&current_tree_tip)
-            // Skip the genesis block, as it shouldn't be handled by the gossip sync and should be
-            // synced before the gossip task starts
-            .map(|block| if block.height > 0 { block.height } else { 1 })
-            .unwrap_or(1);
+        // let current_tree_tip = block_tree_guard.read().tip;
+        // let latest_known_block_height = block_tree_guard
+        //     .read()
+        //     .get_block(&current_tree_tip)
+        //     .map(|block| block.height)
+        //     .unwrap_or(0);
+        let latest_known_block_height = block_index.read().expect("To read the index during startup").latest_height();
 
-        let gossip_service_handle = gossip_service.run(
+        if latest_known_block_height <= 1 {
+            // We handle genesis separately, it shouldn't be handled by the sync task
+            sync_state.set_sync_target_height(1);
+        } else {
+            sync_state.set_sync_target_height(latest_known_block_height as usize);
+        }
+
+        let p2p_service_handle = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
@@ -949,8 +953,6 @@ impl IrysNode {
             irys_db.clone(),
             service_senders.vdf_seed.clone(),
             gossip_listener,
-            matches!(config.node_config.mode, NodeMode::Genesis),
-            latest_known_block_height as usize,
         )?;
 
         // set up the price oracle
@@ -1132,7 +1134,7 @@ impl IrysNode {
             server,
             vdf_thread_handler,
             reth_node,
-            gossip_service_handle,
+            p2p_service_handle,
         ))
     }
 
