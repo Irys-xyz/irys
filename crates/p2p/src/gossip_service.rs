@@ -684,10 +684,15 @@ pub async fn fast_forward_vdf_steps_from_block(
     let block_end_step = vdf_limiter_info.global_step_number;
     let len = vdf_limiter_info.steps.len();
     let block_start_step = block_end_step - len as u64;
-    for (i, step) in vdf_limiter_info.steps.iter().enumerate() {
+    tracing::trace!(
+        "VDF FF: block start-end step: {}-{}",
+        block_start_step,
+        block_end_step
+    );
+    for (i, hash) in vdf_limiter_info.steps.iter().enumerate() {
         //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
         let mining_seed = BroadcastMiningSeed {
-            seed: Seed { 0: *step },
+            seed: Seed { 0: *hash },
             global_step: block_start_step + i as u64,
             checkpoints: H256List::new(),
         };
