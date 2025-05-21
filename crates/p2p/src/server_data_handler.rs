@@ -219,7 +219,7 @@ where
         }
     }
 
-    pub(crate) async fn handle_block_header(
+    pub(crate) async fn handle_block_header_request(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,

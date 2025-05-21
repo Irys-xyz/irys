@@ -935,7 +935,9 @@ impl IrysNode {
         let latest_known_block_height = block_tree_guard
             .read()
             .get_block(&current_tree_tip)
-            .map(|block| block.height)
+            // Skip the genesis block, as it shouldn't be handled by the gossip sync and should be
+            // synced before the gossip task starts
+            .map(|block| if block.height > 0 { block.height } else { 1 })
             .unwrap_or(1);
 
         let gossip_service_handle = gossip_service.run(
@@ -947,7 +949,7 @@ impl IrysNode {
             irys_db.clone(),
             service_senders.vdf_seed.clone(),
             gossip_listener,
-            true,
+            matches!(config.node_config.mode, NodeMode::Genesis),
             latest_known_block_height as usize,
         )?;
 
