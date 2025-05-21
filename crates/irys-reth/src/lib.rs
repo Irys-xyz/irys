@@ -57,6 +57,7 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction
 
 // todo: write tests
 // todo: see how 2 nodes behave
+// todo - what is the `State root task returned incorrect state root`
 // todo exepriments how to prevent user from producing system tx -- maybe we can access the block producer address
 // todo: custom mempool - don't drop system txs if they dont have gas properties
 // todo: custom mempool - after each block, drop all system txs
@@ -916,6 +917,8 @@ mod evm {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
     use alloy_genesis::Genesis;
     use alloy_network::{EthereumWallet, TxSigner};
@@ -1299,25 +1302,72 @@ mod tests {
             "Normal transaction should be included in block"
         );
 
-        // Verify no receipt was created for the system transaction
-        let block_execution = node.inner.provider.get_state(0..=0).unwrap().unwrap();
-        let receipts = &block_execution.receipts;
-        let mut system_tx_receipt_found = false;
-        for block_receipt in receipts {
-            for receipt in block_receipt {
-                if receipt.logs.iter().any(|log| {
-                    log.data
-                        .topics()
-                        .iter()
-                        .any(|topic| *topic == system_tx.topic())
-                }) {
-                    system_tx_receipt_found = true;
-                }
-            }
-        }
+        Ok(())
+    }
+
+    // test decrementing when account exists but not enough balance (expect failed tx receipt)
+    #[test_log::test(tokio::test)]
+    async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
+        // setup
+        let (mut nodes, _tasks, ..) =
+            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let wallets = Wallet::new(2).wallet_gen();
+
+        let block_producer = EthereumWallet::from(wallets[0].clone());
+        let block_producer = block_producer.default_signer();
+        let signer_a = EthereumWallet::from(wallets[1].clone());
+        let signer_a = signer_a.default_signer();
+        let funded_balance = get_balance(&node.inner, signer_a.address());
+
         assert!(
-            !system_tx_receipt_found,
-            "No receipt should be created for failed system transaction"
+            funded_balance > U256::ZERO,
+            "Funded account should have nonzero balance"
+        );
+
+        // Create a system tx that tries to decrement more than the balance
+        let decrement_amount = funded_balance + U256::ONE;
+        let system_tx = SystemTransaction::Stake(BalanceDecrement {
+            amount: decrement_amount,
+            target: signer_a.address(),
+        });
+        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
+        let system_tx_hash = node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Private,
+                system_pooled_tx,
+            )
+            .await?;
+
+        // Produce a new block
+        let block_payload = node.advance_block().await?;
+
+        // Get transactions in the block
+        let block_txs: std::collections::HashSet<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+        dbg!(&block_txs);
+
+        // Verify the system transaction IS included
+        assert!(
+            block_txs.contains(&system_tx_hash),
+            "System transaction should be included in block"
+        );
+        // Verify the receipt for the system tx is a revert/failure
+        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+        let receipts = block_execution.receipts;
+        dbg!(&receipts);
+        let receipt = &receipts[1][0];
+        assert!(
+            !receipt.success,
+            "Expected a revert/failure receipt for system tx with insufficient balance"
         );
 
         Ok(())
