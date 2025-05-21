@@ -1,6 +1,4 @@
 //! endpoint tests
-use std::sync::Arc;
-
 use crate::{
     api::{
         block_index_endpoint_request, chunk_endpoint_request, info_endpoint_request,
@@ -9,10 +7,8 @@ use crate::{
     utils::{mine_block, IrysNodeTest},
 };
 use actix_web::{http::header::ContentType, HttpMessage};
-use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
-use irys_types::{Address, BlockIndexItem, IrysTransactionHeader, Signature, H256};
-use tokio::time::{sleep, Duration};
+use irys_types::BlockIndexItem;
 use tracing::info;
 
 #[actix::test]
