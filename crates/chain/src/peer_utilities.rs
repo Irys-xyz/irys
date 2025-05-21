@@ -384,6 +384,7 @@ pub async fn fetch_and_update_peers(
     Some(results.iter().sum())
 }
 
+/// Polls VDF service for `VdfState` until `global_step` >= `desired_step`, with a 30s timeout.
 async fn wait_for_vdf_step(
     vdf_service_sender: UnboundedSender<VdfServiceMessage>,
     desired_step: u64,
