@@ -556,8 +556,10 @@ pub async fn sync_chain<
     api_client: A,
     peer_list_service: PeerListFacade<A, R>,
     node_mode: &NodeMode,
+    start_sync_from_height: usize,
 ) -> Result<(), GossipError> {
     sync_state.set_is_syncing(true);
+    sync_state.set_sync_target_height(start_sync_from_height);
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
 
     debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}", node_mode, sync_state.sync_target_height());
@@ -846,7 +848,7 @@ mod tests {
                 sync_state.clone(),
                 api_client_stub.clone(),
                 peer_list,
-                false,
+                &NodeMode::PeerSync,
                 10,
             )
             .await
