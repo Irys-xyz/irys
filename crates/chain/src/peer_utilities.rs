@@ -23,9 +23,14 @@ use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
     sync::Arc,
-    thread::sleep,
 };
-use tokio::{sync::Mutex, time::Duration};
+use tokio::{
+    sync::{
+        mpsc::{Sender, UnboundedSender},
+        Mutex,
+    },
+    time::{sleep, Duration},
+};
 use tracing::{error, info, warn};
 
 pub async fn client_request(
@@ -241,8 +246,8 @@ pub async fn sync_state_from_peers(
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_service_addr: PeerListServiceFacade,
-    vdf_seed_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
-    vdf_service_sender: tokio::sync::mpsc::UnboundedSender<VdfServiceMessage>,
+    vdf_seed_sender: Sender<BroadcastMiningSeed>,
+    vdf_service_sender: UnboundedSender<VdfServiceMessage>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -303,24 +308,8 @@ pub async fn sync_state_from_peers(
 
             // wait to be sure the FF steps are saved to VdfState before we try to discover the block that requires them
             let desired_step = block.vdf_limiter_info.global_step_number;
-            loop {
-                tracing::error!("looping waiting for step {}", desired_step);
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
-                    response: oneshot_tx,
-                }) {
-                    panic!(
-                        "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
-                        e
-                    );
-                };
-                let vdf_steps_guard = oneshot_rx
-                    .await
-                    .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
-                if vdf_steps_guard.read().global_step >= desired_step {
-                    break;
-                }
-                sleep(Duration::from_millis(200));
+            if let Err(e) = wait_for_vdf_step(vdf_service_sender.clone(), desired_step).await {
+                panic!("Error when waiting for desired step {:?}", e);
             }
 
             // allow block to be discovered by block discovery actor
@@ -393,4 +382,35 @@ pub async fn fetch_and_update_peers(
     });
     let results = futures::future::join_all(futures).await;
     Some(results.iter().sum())
+}
+
+async fn wait_for_vdf_step(
+    vdf_service_sender: UnboundedSender<VdfServiceMessage>,
+    desired_step: u64,
+) -> eyre::Result<()> {
+    let seconds_to_wait = 30;
+    let retries_per_second = 20;
+    let total_retries = seconds_to_wait * retries_per_second;
+    for _ in 0..total_retries {
+        tracing::trace!("looping waiting for step {}", desired_step);
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
+            response: oneshot_tx,
+        }) {
+            tracing::error!(
+                "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
+                e
+            );
+        };
+        let vdf_steps_guard = oneshot_rx
+            .await
+            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
+        if vdf_steps_guard.read().global_step >= desired_step {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(1000 / retries_per_second)).await;
+    }
+    Err(eyre::eyre!(
+        "timed out after {seconds_to_wait}s waiting for VDF step {desired_step}"
+    ))
 }
