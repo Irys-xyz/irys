@@ -949,11 +949,10 @@ mod tests {
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
     }
 
-    // todo tx ordering test
     // todo block broadcast test
-    // todo test decrementing when account does not exist (expect that even receipt not created)
     // todo test decrementing when account exists but not enough balance (expect failed tx receipt)
 
+    // assert that "incrementing" system txs update account state
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
     #[case::release_stake(release_stake, signer_b())]
@@ -1026,6 +1025,7 @@ mod tests {
         Ok(())
     }
 
+    // check if the "decrementing" system txs update account state
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
     #[case::stake(stake, signer_b())]
@@ -1102,6 +1102,7 @@ mod tests {
         Ok(())
     }
 
+    // expect that system txs get executed first, no matter what. Normal txs get executed only afterwards
     #[test_log::test(tokio::test)]
     async fn test_system_tx_ordering() -> eyre::Result<()> {
         // setup
@@ -1163,7 +1164,13 @@ mod tests {
         let block_payload = node.advance_block().await?;
 
         // Get transactions in the order they appear in the block
-        let block_txs: Vec<_> = block_payload.block().body().transactions.iter().map(|tx| *tx.hash()).collect();
+        let block_txs: Vec<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
 
         // Verify that all system transactions appear before normal transactions
         let mut last_system_tx_pos = 0;
@@ -1201,6 +1208,117 @@ mod tests {
                 tx_hash
             );
         }
+
+        Ok(())
+    }
+
+    // test decrementing when account does not exist (expect that even receipt not created)
+    #[test_log::test(tokio::test)]
+    async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
+        // setup
+        let (mut nodes, _tasks, ..) =
+            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let wallets = Wallet::new(2).wallet_gen();
+
+        let block_producer = EthereumWallet::from(wallets[0].clone());
+        let block_producer = block_producer.default_signer();
+        let signer_a = EthereumWallet::from(wallets[1].clone());
+        let signer_a = signer_a.default_signer();
+
+        // Create a random address that has never existed on chain
+        let nonexistent_address = Address::random();
+
+        // Verify the account doesn't exist
+        let account = node
+            .inner
+            .provider
+            .basic_account(&nonexistent_address)
+            .unwrap();
+        assert!(account.is_none(), "Test account should not exist");
+
+        // Create and submit a system transaction trying to decrement balance of non-existent account
+        let system_tx = SystemTransaction::Stake(BalanceDecrement {
+            amount: U256::ONE,
+            target: nonexistent_address,
+        });
+        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
+        let system_tx_hash = node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Private,
+                system_pooled_tx,
+            )
+            .await?;
+
+        // Submit a normal transaction to ensure block is produced
+        let normal_tx_raw = TxLegacy {
+            gas_limit: 99000,
+            value: U256::ZERO,
+            nonce: 0,
+            gas_price: 1_000_000_000u128,
+            chain_id: Some(1),
+            input: vec![123].into(),
+            to: TxKind::Call(Address::random()),
+            ..Default::default()
+        };
+        let normal_pooled_tx = sign_tx(normal_tx_raw, &signer_a).await;
+        let normal_tx_hash = node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Local,
+                normal_pooled_tx,
+            )
+            .await?;
+
+        // Produce a new block
+        let block_payload = node.advance_block().await?;
+
+        // Get transactions in the block
+        let block_txs: std::collections::HashSet<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+        dbg!(&block_txs);
+
+        // Verify the system transaction is NOT included
+        assert!(
+            !block_txs.contains(&system_tx_hash),
+            "System transaction for non-existent account should not be included in block"
+        );
+
+        // Verify the normal transaction IS included
+        assert!(
+            block_txs.contains(&normal_tx_hash),
+            "Normal transaction should be included in block"
+        );
+
+        // Verify no receipt was created for the system transaction
+        let block_execution = node.inner.provider.get_state(0..=0).unwrap().unwrap();
+        let receipts = &block_execution.receipts;
+        let mut system_tx_receipt_found = false;
+        for block_receipt in receipts {
+            for receipt in block_receipt {
+                if receipt.logs.iter().any(|log| {
+                    log.data
+                        .topics()
+                        .iter()
+                        .any(|topic| *topic == system_tx.topic())
+                }) {
+                    system_tx_receipt_found = true;
+                }
+            }
+        }
+        assert!(
+            !system_tx_receipt_found,
+            "No receipt should be created for failed system transaction"
+        );
 
         Ok(())
     }
