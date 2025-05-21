@@ -129,7 +129,7 @@ where
         let current_block_hash = block_header.block_hash;
         let vdf_limiter_info = block_header.vdf_limiter_info.clone();
         let self_addr = ctx.address();
-        let block_producer = self.block_producer.clone();
+        let block_discovery = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
 
@@ -157,7 +157,7 @@ where
                     .map_err(|db_error| BlockPoolError::DatabaseError(db_error))?;
 
                 // If the parent block is in the db, process it
-                if let Some(previous_block_header) = maybe_previous_block_header {
+                if let Some(_previous_block_header) = maybe_previous_block_header {
                     info!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
@@ -171,7 +171,7 @@ where
                         current_block_hash.0.to_base58()
                     );
 
-                    block_producer
+                    if let Err(block_discovery_error) = block_discovery
                         .as_ref()
                         .ok_or_else(|| {
                             let error_message =
@@ -181,17 +181,19 @@ where
                         })?
                         .handle_block(block_header.clone())
                         .await
-                        .map_err(|block_error| {
-                            error!("{:?}", block_error);
-                            BlockPoolError::BlockError(block_error)
-                        })?;
+                    {
+                            error!("Block pool: Block validation error for block {}: {:?}. Removing block from the pool", block_header.block_hash.0.to_base58(), block_discovery_error);
+                            self_addr.do_send(RemoveBlockFromPool {
+                                block_hash: block_header.block_hash,
+                            });
+                            return Err(BlockPoolError::BlockError(block_discovery_error))
+                    }
 
                     info!(
                         "Block pool: Block {} has been processed",
                         current_block_hash.0.to_base58()
                     );
                     self_addr.do_send(RemoveBlockFromPool {
-                        parent_block_hash: previous_block_header.block_hash,
                         block_hash: block_header.block_hash,
                     });
 
@@ -271,11 +273,7 @@ where
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
-    fn handle(
-        &mut self,
-        msg: TryToFetchParent,
-        ctx: &mut Self::Context,
-    ) -> Self::Result {
+    fn handle(&mut self, msg: TryToFetchParent, ctx: &mut Self::Context) -> Self::Result {
         let block_header = msg.header;
         let self_addr = ctx.address();
         let previous_block_hash = block_header.previous_block_hash;
@@ -319,7 +317,6 @@ where
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 struct RemoveBlockFromPool {
-    pub parent_block_hash: BlockHash,
     pub block_hash: BlockHash,
 }
 
@@ -332,9 +329,9 @@ where
     type Result = ();
 
     fn handle(&mut self, msg: RemoveBlockFromPool, _ctx: &mut Self::Context) -> () {
-        self.orphaned_blocks_by_parent
-            .remove(&msg.parent_block_hash);
-        self.block_hash_to_parent_hash.remove(&msg.block_hash);
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.remove(&msg.block_hash) {
+            self.orphaned_blocks_by_parent.remove(&parent_hash);
+        }
     }
 }
 
@@ -353,13 +350,10 @@ where
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
-    fn handle(
-        &mut self,
-        msg: RequestBlockFromTheNetwork,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
+    fn handle(&mut self, msg: RequestBlockFromTheNetwork, ctx: &mut Self::Context) -> Self::Result {
         let block_hash = msg.block_hash;
         let peer_list_addr = self.peer_list.clone();
+        let self_addr = ctx.address();
 
         let fut = async move {
             // Handle case where peer list address is not set
@@ -369,17 +363,24 @@ where
 
             match peer_list_addr
                 .request_block_from_the_network(block_hash)
-                .await {
+                .await
+            {
                 Ok(_) => {
                     debug!(
                         "Block pool: Requested block {} from the network",
                         block_hash.0.to_base58()
                     );
                     Ok(())
-                },
+                }
                 Err(error) => {
                     error!("Error while trying to fetch parent block {}: {:?}. Removing the block from the pool", block_hash.0.to_base58(), error);
-                    Err(error)
+                    if let Err(err) = self_addr.send(RemoveBlockFromPool { block_hash }).await {
+                        error!(
+                            "Error while trying to request the block from the network: {:?}",
+                            err
+                        );
+                    }
+                    Err(error.into())
                 }
             }
         };
