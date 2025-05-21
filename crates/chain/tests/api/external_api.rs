@@ -58,37 +58,12 @@ async fn heavy_external_api() -> eyre::Result<()> {
     // advance one block
     let (_header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
     // advance one block, finalizing the previous block
-    let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    let (_header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
 
-    let mock_header = IrysTransactionHeader {
-        id: H256::from([255u8; 32]),
-        anchor: H256::from([1u8; 32]),
-        signer: Address::default(),
-        data_root: H256::from([3u8; 32]),
-        data_size: 1024,
-        term_fee: 100,
-        perm_fee: Some(200),
-        ledger_id: 1,
-        bundle_format: None,
-        chain_id: ctx.node_ctx.config.consensus.chain_id,
-        version: 0,
-        ingress_proofs: None,
-        signature: Signature::test_signature().into(),
-    };
-
-    let block_finalized_message = BlockFinalizedMessage {
-        block_header: header,
-        all_txs: Arc::new(vec![mock_header]),
-    };
-
-    //FIXME: magic number could be a constant e.g. 3 blocks worth of time?
-    sleep(Duration::from_millis(10000)).await;
-
-    let _ = ctx
-        .node_ctx
-        .actor_addresses
-        .block_index
-        .send(block_finalized_message);
+    // wait for 1 block in the index
+    if let Err(e) = ctx.wait_until_height_on_chain(1, 10).await {
+        panic!("Error waiting for block height on chain. Error: {:?}", e);
+    }
 
     let mut response = info_endpoint_request(&address).await;
 
