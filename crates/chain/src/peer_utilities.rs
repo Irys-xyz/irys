@@ -245,8 +245,12 @@ pub async fn sync_state_from_peers(
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
 
-    // lets give the local api a few second to load...
-    sleep(Duration::from_millis(15000));
+    // orignal comment "lets give the local api a few second to load..."
+    // I think this pause is actually to allow a few vdf steps to have occured...as it's removal causes the following types of errors:
+    //
+    //     Block validation error Unavailable requested range (1..=2). Stored steps range is (1..=1)
+    //     Block validation error No steps stored!
+    sleep(Duration::from_millis(2000));
 
     //initialize queue
     let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
