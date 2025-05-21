@@ -951,6 +951,8 @@ mod tests {
 
     // todo tx ordering test
     // todo block broadcast test
+    // todo test decrementing when account does not exist (expect that even receipt not created)
+    // todo test decrementing when account exists but not enough balance (expect failed tx receipt)
 
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
@@ -991,10 +993,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let tx_hashes = futures::future::try_join_all(tx_hashes).await?;
-        let block_payload = node.new_payload().await?;
-        let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
-        node.update_forkchoice(block_payload_hash, block_payload_hash)
-            .await?;
+        let block_payload = node.advance_block().await?;
 
         // Assert
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
@@ -1100,6 +1099,109 @@ mod tests {
             block_producer_balance_after, block_producer_balance,
             "bolck_producer's balance should not change"
         );
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_system_tx_ordering() -> eyre::Result<()> {
+        // setup
+        let (mut nodes, _tasks, ..) =
+            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let wallets = Wallet::new(3).wallet_gen();
+
+        let block_producer = EthereumWallet::from(wallets[0].clone());
+        let block_producer = block_producer.default_signer();
+        let signer_a = EthereumWallet::from(wallets[1].clone());
+        let signer_a = signer_a.default_signer();
+        let signer_b = EthereumWallet::from(wallets[2].clone());
+        let signer_b = signer_b.default_signer();
+
+        // Create and submit normal transactions with high gas price
+        let normal_tx_count = 3;
+        let mut normal_tx_hashes = Vec::new();
+        for nonce in 0..normal_tx_count {
+            let tx_raw = TxLegacy {
+                gas_limit: 99000,
+                value: U256::ZERO,
+                nonce,
+                gas_price: 10_000_000_000u128, // 10 Gwei (higher than system tx)
+                chain_id: Some(1),
+                input: vec![123].into(),
+                to: TxKind::Call(Address::random()),
+                ..Default::default()
+            };
+            let pooled_tx = sign_tx(tx_raw, &signer_a).await;
+            let tx_hash = node
+                .inner
+                .pool
+                .add_transaction(reth_transaction_pool::TransactionOrigin::Local, pooled_tx)
+                .await?;
+            normal_tx_hashes.push(tx_hash);
+        }
+
+        // Create and submit system transactions with lower gas price
+        let system_tx_count = 2;
+        let mut system_tx_hashes = Vec::new();
+        let system_tx = SystemTransaction::ReleaseStake(system_tx::BalanceIncrement {
+            amount: U256::ONE,
+            target: signer_b.address(),
+        });
+
+        for nonce in 0..system_tx_count {
+            let tx_raw = compose_system_tx(nonce, 1, system_tx.clone());
+            let pooled_tx = sign_tx(tx_raw, &block_producer).await;
+            let tx_hash = node
+                .inner
+                .pool
+                .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
+                .await?;
+            system_tx_hashes.push(tx_hash);
+        }
+
+        // Produce a new block
+        let block_payload = node.advance_block().await?;
+
+        // Get transactions in the order they appear in the block
+        let block_txs: Vec<_> = block_payload.block().body().transactions.iter().map(|tx| *tx.hash()).collect();
+
+        // Verify that all system transactions appear before normal transactions
+        let mut last_system_tx_pos = 0;
+        let mut first_normal_tx_pos = block_txs.len();
+
+        for (pos, tx_hash) in block_txs.iter().enumerate() {
+            if system_tx_hashes.contains(tx_hash) {
+                last_system_tx_pos = last_system_tx_pos.max(pos);
+            }
+            if normal_tx_hashes.contains(tx_hash) {
+                first_normal_tx_pos = first_normal_tx_pos.min(pos);
+            }
+        }
+
+        assert!(
+            last_system_tx_pos < first_normal_tx_pos,
+            "System transactions should appear before normal transactions in block. Last system tx position: {}, First normal tx position: {}",
+            last_system_tx_pos,
+            first_normal_tx_pos
+        );
+
+        // Verify all transactions were included
+        let block_tx_set: std::collections::HashSet<_> = block_txs.into_iter().collect();
+        for tx_hash in &system_tx_hashes {
+            assert!(
+                block_tx_set.contains(tx_hash),
+                "System transaction {:?} was not included in the block",
+                tx_hash
+            );
+        }
+        for tx_hash in &normal_tx_hashes {
+            assert!(
+                block_tx_set.contains(tx_hash),
+                "Normal transaction {:?} was not included in the block",
+                tx_hash
+            );
+        }
+
         Ok(())
     }
 
