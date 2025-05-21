@@ -1,10 +1,6 @@
-// use alloy_primitives::{wrap_fixed_bytes, U256};
-// use alloy_rlp::{
-//     Decodable, Encodable, Error as RlpError, RlpDecodable, RlpDecodableWrapper, RlpEncodable,
-//     RlpEncodableWrapper,
-// };
-// use bytes::Buf;
-// use reth_codecs::Compact;
+use alloy_rlp::{Decodable, Encodable, Error as RlpError};
+use bytes::Buf;
+use reth_codecs::Compact;
 
 // use super::DestHash;
 
@@ -112,74 +108,75 @@
 //     }
 // }
 
-// #[derive(
-//     PartialEq,
-//     Debug,
-//     Default,
-//     Eq,
-//     Clone,
-//     Copy,
-//     Hash,
-//     Compact,
-//     serde::Serialize,
-//     serde::Deserialize,
-//     arbitrary::Arbitrary,
-// )]
+// TODO: these need to be redone!
+#[derive(
+    PartialEq,
+    Debug,
+    Default,
+    Eq,
+    Clone,
+    Copy,
+    Hash,
+    Compact,
+    serde::Serialize,
+    serde::Deserialize,
+    arbitrary::Arbitrary,
+)]
 
-// pub enum CommitmentType {
-//     #[default]
-//     Stake = 2,
-//     Pledge = 3,
-//     Unpledge = 4,
-//     Unstake = 5,
-// }
+pub enum CommitmentType {
+    #[default]
+    Stake = 2,
+    Pledge = 3,
+    Unpledge = 4,
+    Unstake = 5,
+}
 
-// // TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
+// TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
 
-// #[derive(thiserror::Error, Debug)]
-// pub enum CommitmentTypeDecodeError {
-//     #[error("unknown reserved Commitment type: {0}")]
-//     UnknownCommitmentType(u8),
-// }
+#[derive(thiserror::Error, Debug)]
+pub enum CommitmentTypeDecodeError {
+    #[error("unknown reserved Commitment type: {0}")]
+    UnknownCommitmentType(u8),
+}
 
-// impl TryFrom<u8> for CommitmentType {
-//     type Error = CommitmentTypeDecodeError;
-//     fn try_from(id: u8) -> Result<Self, Self::Error> {
-//         match id {
-//             2 => Ok(CommitmentType::Stake),
-//             3 => Ok(CommitmentType::Pledge),
-//             4 => Ok(CommitmentType::Unpledge),
-//             5 => Ok(CommitmentType::Unstake),
-//             _ => Err(CommitmentTypeDecodeError::UnknownCommitmentType(id)),
-//         }
-//     }
-// }
+impl TryFrom<u8> for CommitmentType {
+    type Error = CommitmentTypeDecodeError;
+    fn try_from(id: u8) -> Result<Self, Self::Error> {
+        match id {
+            2 => Ok(CommitmentType::Stake),
+            3 => Ok(CommitmentType::Pledge),
+            4 => Ok(CommitmentType::Unpledge),
+            5 => Ok(CommitmentType::Unstake),
+            _ => Err(CommitmentTypeDecodeError::UnknownCommitmentType(id)),
+        }
+    }
+}
 
-// impl Encodable for CommitmentType {
-//     fn encode(&self, out: &mut dyn bytes::BufMut) {
-//         match self {
-//             CommitmentType::Stake => out.put_u8(CommitmentType::Stake as u8),
-//             CommitmentType::Pledge => out.put_u8(CommitmentType::Pledge as u8),
-//             CommitmentType::Unpledge => out.put_u8(CommitmentType::Unpledge as u8),
-//             CommitmentType::Unstake => out.put_u8(CommitmentType::Unstake as u8),
-//         };
-//     }
-//     fn length(&self) -> usize {
-//         1
-//     }
-// }
+impl Encodable for CommitmentType {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        match self {
+            CommitmentType::Stake => out.put_u8(CommitmentType::Stake as u8),
+            CommitmentType::Pledge => out.put_u8(CommitmentType::Pledge as u8),
+            CommitmentType::Unpledge => out.put_u8(CommitmentType::Unpledge as u8),
+            CommitmentType::Unstake => out.put_u8(CommitmentType::Unstake as u8),
+        };
+    }
+    fn length(&self) -> usize {
+        1
+    }
+}
 
-// impl Decodable for CommitmentType {
-//     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-//         let _v = buf.to_vec();
-//         let enc_commitment_type = u8::decode(&mut &buf[..])?;
-//         let commitment_type = CommitmentType::try_from(enc_commitment_type)
-//             .or(Err(RlpError::Custom("unknown commitment status")))?;
+impl Decodable for CommitmentType {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let _v = buf.to_vec();
+        let enc_commitment_type = u8::decode(&mut &buf[..])?;
+        let commitment_type = CommitmentType::try_from(enc_commitment_type)
+            .or(Err(RlpError::Custom("unknown commitment status")))?;
 
-//         buf.advance(1);
-//         Ok(commitment_type)
-//     }
-// }
+        buf.advance(1);
+        Ok(commitment_type)
+    }
+}
 
 // #[derive(
 //     Debug,

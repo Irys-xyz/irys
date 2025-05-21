@@ -13,6 +13,8 @@ serde.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
 alloy-primitives.workspace = true
+reth-codecs.workspace = true
+alloy-rlp.workspace = true
 
 [dev-dependencies]
 test-fuzz.workspace = true

@@ -5088,7 +5088,6 @@ dependencies = [
  "futures-util",
  "irys-database",
  "irys-packing",
- "irys-reth",
  "irys-storage",
  "irys-types",
  "jsonrpsee",
