@@ -4,6 +4,7 @@ use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
+    CommitmentCacheMessage,
 };
 use irys_p2p::PeerListServiceFacade;
 use irys_types::block::CombinedBlockHeader;
@@ -241,6 +242,7 @@ pub async fn sync_state_from_peers(
     mempool_addr: Addr<MempoolService>,
     peer_service_addr: PeerListServiceFacade,
     vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+    commitment_cache_sender: tokio::sync::mpsc::UnboundedSender<CommitmentCacheMessage>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -280,20 +282,28 @@ pub async fn sync_state_from_peers(
 
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-                let tx_ingress_msg = TxIngressMessage(
-                    match fetch_txn(&peer.api, &client, *tx)
-                        .await
-                        .expect("valid txn from http GET")
-                    {
-                        IrysTransactionResponse::Commitment(_c) => {
-                            panic!("not implemented commitment txns")
+                match fetch_txn(&peer.api, &client, *tx)
+                    .await
+                    .expect("valid txn from http GET")
+                {
+                    IrysTransactionResponse::Commitment(c) => {
+                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                        let _ =
+                            commitment_cache_sender.send(CommitmentCacheMessage::AddCommitment {
+                                commitment_tx: c.clone(),
+                                response: oneshot_tx,
+                            });
+                        let _status = oneshot_rx
+                            .await
+                            .expect("to receive CommitmentStatus from AddCommitment message");
+                    }
+                    IrysTransactionResponse::Storage(s) => {
+                        let tx_ingress_msg = TxIngressMessage(s);
+                        if let Err(e) = mempool_addr.send(tx_ingress_msg).await {
+                            error!("Error sending txn {:?} to mempool: {}", tx, e);
                         }
-                        IrysTransactionResponse::Storage(s) => s,
-                    },
-                );
-                if let Err(e) = mempool_addr.send(tx_ingress_msg).await {
-                    error!("Error sending txn {:?} to mempool: {}", tx, e);
-                }
+                    }
+                };
             }
 
             fast_forward_vdf_steps_from_block(block.vdf_limiter_info.clone(), vdf_sender.clone())
