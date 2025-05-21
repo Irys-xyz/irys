@@ -48,7 +48,7 @@ pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
     let builder = tempfile::Builder::new()
         .prefix(name.unwrap_or("irys-test-"))
         .rand_bytes(8)
-        .keep(keep)
+        .disable_cleanup(keep)
         .tempdir_in(tmp_path);
 
     let temp_dir = builder.expect("Not able to create a temporary directory.");
