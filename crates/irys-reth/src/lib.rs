@@ -506,6 +506,7 @@ mod evm {
                                 status: revm::state::AccountStatus::Touched,
                             },
                         );
+                        dbg!(&execution_result);
 
                         execution_result
                     }
@@ -514,6 +515,7 @@ mod evm {
 
                 f(&execution_result);
 
+                dbg!(&new_state);
                 // Build and store the receipt
                 let evm = self.inner.evm_mut();
                 self.system_call_receipts
@@ -950,22 +952,13 @@ mod tests {
     // todo tx ordering test
     // todo block broadcast test
 
-    // #[test_log::test(tokio::test)]
-    // async fn storage_fees_decrement_account_balance() -> eyre::Result<()> {}
-
-    // #[test_log::test(tokio::test)]
-    // async fn stake_decrement_account_balance() -> eyre::Result<()> {}
-
-    // #[test_log::test(tokio::test)]
-    // async fn block_reward_increment_account_balance() -> eyre::Result<()> {}
-
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
     #[case::release_stake(release_stake, signer_b())]
     #[case::release_stake_init_no_balance(release_stake, signer_random())]
     #[case::block_reward(block_reward, signer_b())]
     #[case::block_reward_init_no_balance(block_reward, signer_random())]
-    async fn release_stake_increment_account_balance(
+    async fn incr_system_txs(
         #[case] system_tx: impl Fn(Address) -> SystemTransaction,
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
@@ -1022,6 +1015,82 @@ mod tests {
         assert_eq!(
             signer_b_balance_after,
             signer_b_balance + U256::from(5u64),
+            "signer_b's balance should be increased by 5"
+        );
+
+        // assert balance for sginer b remains as is (system txs cost nothing)
+        let block_producer_balance_after = get_balance(&node.inner, block_producer.address());
+        assert_eq!(
+            block_producer_balance_after, block_producer_balance,
+            "bolck_producer's balance should not change"
+        );
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    #[rstest::rstest]
+    #[case::stake(stake, signer_b())]
+    #[case::storage_fees(storage_fees, signer_b())]
+    async fn decr_system_txs(
+        #[case] system_tx: impl Fn(Address) -> SystemTransaction,
+        #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
+    ) -> eyre::Result<()> {
+        // setup
+        let (mut nodes, _tasks, ..) =
+            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let wallets = Wallet::new(2).wallet_gen();
+        let tx_count = 2;
+
+        let block_producer = EthereumWallet::from(wallets[0].clone());
+        let block_producer = block_producer.default_signer();
+
+        let signer_b_balance = get_balance(&node.inner, signer_b.address());
+        let block_producer_balance = get_balance(&node.inner, block_producer.address());
+
+        let system_tx = system_tx(signer_b.address());
+        let pooled_txs = (0..tx_count)
+            .map(|nonce| compose_system_tx(nonce, 1, system_tx.clone()))
+            .map(|tx| sign_tx(tx, &block_producer))
+            .collect::<Vec<_>>();
+
+        let pooled_txs = futures::future::join_all(pooled_txs).await;
+
+        // actoin: submit txs and get produce a new block payload and update fork choice
+        let tx_hashes = pooled_txs
+            .into_iter()
+            .map(|tx| {
+                node.inner
+                    .pool
+                    .add_transaction(reth_transaction_pool::TransactionOrigin::Private, tx)
+            })
+            .collect::<Vec<_>>();
+        let tx_hashes = futures::future::try_join_all(tx_hashes).await?;
+        let block_payload = node.new_payload().await?;
+
+        let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
+        node.update_forkchoice(block_payload_hash, block_payload_hash)
+            .await?;
+
+        // Assert
+        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+
+        // ensure all txs are included in the block
+        let block_txs = get_block_txs(block_payload);
+        let submitted_tx_hashes: std::collections::HashSet<_> = tx_hashes.into_iter().collect();
+        assert_eq!(
+            block_txs, submitted_tx_hashes,
+            "Not all submitted system transactions were included in the block"
+        );
+
+        // assert all txs have a corresponding log
+        asserst_topic_present_in_logs(block_execution, system_tx.topic().into(), tx_count);
+
+        // assert balance for signer_b is updated
+        let signer_b_balance_after = get_balance(&node.inner, signer_b.address());
+        assert_eq!(
+            signer_b_balance_after,
+            signer_b_balance - U256::from(tx_count),
             "signer_b's balance should be reduced by 5"
         );
 
@@ -1044,6 +1113,22 @@ mod tests {
 
     fn block_reward(address: Address) -> SystemTransaction {
         let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
+            amount: U256::ONE,
+            target: address,
+        });
+        system_tx
+    }
+
+    fn stake(address: Address) -> SystemTransaction {
+        let system_tx = SystemTransaction::Stake(system_tx::BalanceDecrement {
+            amount: U256::ONE,
+            target: address,
+        });
+        system_tx
+    }
+
+    fn storage_fees(address: Address) -> SystemTransaction {
+        let system_tx = SystemTransaction::StorageFees(system_tx::BalanceDecrement {
             amount: U256::ONE,
             target: address,
         });
@@ -1096,8 +1181,7 @@ mod tests {
         }
         assert!(
             storage_fees_receipt_count >= desired_repetitions,
-            "Expected at least 5 receipts, found {}",
-            storage_fees_receipt_count
+            "Expected at least {desired_repetitions} receipts, found {storage_fees_receipt_count}",
         );
     }
 
