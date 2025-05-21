@@ -578,6 +578,7 @@ impl IrysNode {
                 ctx.actor_addresses.mempool.clone(),
                 ctx.peer_list.clone(),
                 ctx.service_senders.vdf_seed.clone(),
+                ctx.service_senders.vdf.clone(),
             )
             .await?;
         }

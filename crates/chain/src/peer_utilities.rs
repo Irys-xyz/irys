@@ -4,6 +4,7 @@ use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
+    vdf_service::VdfServiceMessage,
 };
 use irys_p2p::PeerListServiceFacade;
 use irys_types::block::CombinedBlockHeader;
@@ -240,7 +241,8 @@ pub async fn sync_state_from_peers(
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_service_addr: PeerListServiceFacade,
-    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+    vdf_seed_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+    vdf_service_sender: tokio::sync::mpsc::UnboundedSender<VdfServiceMessage>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -293,8 +295,33 @@ pub async fn sync_state_from_peers(
                 }
             }
 
-            fast_forward_vdf_steps_from_block(block.vdf_limiter_info.clone(), vdf_sender.clone())
-                .await;
+            fast_forward_vdf_steps_from_block(
+                block.vdf_limiter_info.clone(),
+                vdf_seed_sender.clone(),
+            )
+            .await;
+
+            // wait to be sure the FF steps are saved to VdfState before we try to discover the block that requires them
+            let desired_step = block.vdf_limiter_info.global_step_number;
+            loop {
+                tracing::error!("looping waiting for step {}", desired_step);
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
+                    response: oneshot_tx,
+                }) {
+                    panic!(
+                        "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
+                        e
+                    );
+                };
+                let vdf_steps_guard = oneshot_rx
+                    .await
+                    .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
+                if vdf_steps_guard.read().global_step >= desired_step {
+                    break;
+                }
+                sleep(Duration::from_millis(200));
+            }
 
             // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
