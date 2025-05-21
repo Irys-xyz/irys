@@ -24,6 +24,7 @@ use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     epoch_service::{EpochServiceActor, NewEpochMessage},
+    vdf_service::{VdfState, VdfStepsReadGuard},
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -35,7 +36,6 @@ use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::NodeConfig;
 use irys_types::PartitionChunkRange;
-use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
 
 #[actix::test]
 async fn genesis_test() {

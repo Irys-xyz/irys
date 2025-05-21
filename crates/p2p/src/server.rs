@@ -18,8 +18,8 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
-    Address, GossipRequest, IrysBlockHeader, IrysTransactionHeader, PeerListItem, RethPeerInfo,
-    UnpackedChunk,
+    Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
+    PeerListItem, RethPeerInfo, UnpackedChunk,
 };
 use std::net::TcpListener;
 use tracing::{debug, error, info};
@@ -144,7 +144,7 @@ where
             let block_hash_string = gossip_request.data.block_hash.0.to_base58();
             if let Err(error) = server
                 .data_handler
-                .handle_block_header(gossip_request, peer.address.api)
+                .handle_block_header_request(gossip_request, peer.address.api)
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
@@ -155,7 +155,7 @@ where
                 // return HttpResponse::InternalServerError().finish();
             } else {
                 info!(
-                    "Node {:?}: Successfully processed block {}",
+                    "Node {:?}: Server handler handled block {}",
                     this_node_id, block_hash_string
                 );
             }
@@ -182,6 +182,33 @@ where
         };
 
         if let Err(error) = server.data_handler.handle_transaction(gossip_request).await {
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+            error!("Failed to send transaction: {}", error);
+            return HttpResponse::InternalServerError().finish();
+        }
+
+        debug!("Gossip data handled");
+        HttpResponse::Ok().finish()
+    }
+
+    async fn handle_commitment_tx(
+        server: Data<Self>,
+        commitment_tx_json: web::Json<GossipRequest<CommitmentTransaction>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let gossip_request = commitment_tx_json.0;
+        let source_miner_address = gossip_request.miner_address;
+
+        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address).await {
+            Ok(peer_address) => peer_address,
+            Err(error_response) => return error_response,
+        };
+
+        if let Err(error) = server
+            .data_handler
+            .handle_commitment_tx(gossip_request)
+            .await
+        {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
             error!("Failed to send transaction: {}", error);
             return HttpResponse::InternalServerError().finish();
@@ -259,6 +286,7 @@ where
                 .service(
                     web::scope("/gossip")
                         .route("/transaction", web::post().to(Self::handle_transaction))
+                        .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
                         .route("/chunk", web::post().to(Self::handle_chunk))
                         .route("/block", web::post().to(Self::handle_block))
                         .route("/get_data", web::post().to(Self::handle_get_data))

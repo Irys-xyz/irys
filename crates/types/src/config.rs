@@ -259,28 +259,6 @@ impl ConsensusOptions {
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
     }
 
-    pub fn fund_genesis_signers<'a>(
-        &mut self,
-        signers: impl IntoIterator<Item = &'a IrysSigner>,
-    ) -> &mut Self {
-        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
-        for signer in signers {
-            accounts.push((
-                signer.address(),
-                GenesisAccount {
-                    balance: U256::from(690000000000000000_u128),
-                    ..Default::default()
-                },
-            ))
-        }
-        self.extend_genesis_accounts(accounts);
-        self
-    }
-    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) -> &mut Self {
-        self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
-        self
-    }
-
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
         let Self::Custom(config) = self else {
             panic!("only support mutating custom configs");
@@ -355,6 +333,9 @@ pub struct VdfConfig {
     /// Number of checkpoints to include in each VDF step
     pub num_checkpoints_in_vdf_step: usize,
 
+    /// Minimum number of steps to store in FIFO VecDeque to allow for network forks
+    pub max_allowed_vdf_fork_steps: u64,
+
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
 }
@@ -396,6 +377,22 @@ pub struct MempoolConfig {
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
+
+    /// Maximum number of addresses in the LRU cache for out-of-order stakes and pledges
+    /// Controls memory usage for tracking transactions that arrive before their dependencies
+    pub max_pending_pledge_items: usize,
+
+    /// Maximum number of pending pledge transactions allowed per address
+    /// Limits the resources that can be consumed by a single address
+    pub max_pledges_per_item: usize,
+
+    /// Maximum number of transaction data roots to keep in the pending cache
+    /// For transactions whose chunks arrive before the transaction header
+    pub max_pending_chunk_items: usize,
+
+    /// Maximum number of chunks that can be cached per data root
+    /// Prevents memory exhaustion from excessive chunk storage for a single transaction
+    pub max_chunks_per_item: usize,
 }
 
 /// # Gossip Network Configuration
@@ -454,7 +451,7 @@ pub struct HttpConfig {
     pub public_port: u16,
     /// The IP address the HTTP service binds to
     pub bind_ip: String,
-    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
+    /// The port that the Node's HTTP server should listen on. Set to 0 for randomization.
     pub bind_port: u16,
 }
 
@@ -508,11 +505,17 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 anchor_expiry_depth: 10,
+                // TODO: Move the following to a node config
+                max_pending_pledge_items: 100,
+                max_pledges_per_item: 100,
+                max_pending_chunk_items: 30,
+                max_chunks_per_item: 500,
             },
             vdf: VdfConfig {
                 reset_frequency: 10 * 120,
                 parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
+                max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: 7_000,
             },
             chunk_size: Self::CHUNK_SIZE,
@@ -602,18 +605,45 @@ impl NodeConfig {
         Address::from_private_key(&self.mining_key)
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn testnet() -> Self {
-        use alloy_signer::utils::secret_key_to_address;
-        use k256::ecdsa::SigningKey;
-        use rust_decimal_macros::dec;
+    pub fn new_random_signer(&self) -> IrysSigner {
+        IrysSigner::random_signer(&self.consensus_config())
+    }
 
-        let mining_key = SigningKey::from_slice(
-            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                .expect("valid hex"),
-        )
-        .expect("valid key");
-        let reward_address = secret_key_to_address(&mining_key);
+    pub fn signer(&self) -> IrysSigner {
+        IrysSigner {
+            signer: self.mining_key.clone(),
+            chain_id: self.consensus_config().chain_id,
+            chunk_size: self.consensus_config().chunk_size,
+        }
+    }
+
+    pub fn api_uri(&self) -> String {
+        format!("http://{}:{}", self.http.public_ip, self.http.public_port)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fund_genesis_accounts<'a>(
+        &mut self,
+        signers: impl IntoIterator<Item = &'a IrysSigner>,
+    ) -> &mut Self {
+        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
+        for signer in signers {
+            accounts.push((
+                signer.address(),
+                GenesisAccount {
+                    balance: U256::from(690000000000000000_u128),
+                    ..Default::default()
+                },
+            ))
+        }
+        self.consensus.extend_genesis_accounts(accounts);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_signer(signer: &IrysSigner) -> Self {
+        let mining_key = signer.signer.clone();
+        let reward_address = signer.address();
         Self {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
@@ -659,6 +689,30 @@ impl NodeConfig {
             },
             reth_peer_info: RethPeerInfo::default(),
         }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_epochs(num_blocks_in_epoch: usize) -> Self {
+        let mut node_config = Self::testnet();
+        node_config.consensus.get_mut().epoch.num_blocks_in_epoch = num_blocks_in_epoch as u64;
+        node_config
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet() -> Self {
+        use k256::ecdsa::SigningKey;
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let signer = IrysSigner {
+            signer: mining_key,
+            chain_id: 0,
+            chunk_size: 0,
+        };
+
+        Self::testnet_with_signer(&signer)
     }
 
     /// get the storage module directory path
@@ -844,6 +898,10 @@ mod tests {
         [mempool]
         max_data_txs_per_block = 100
         anchor_expiry_depth = 10
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
 
         [difficulty_adjustment]
         block_time = 1
@@ -853,8 +911,10 @@ mod tests {
 
         [vdf]
         reset_frequency = 1200
+        max_allowed_vdf_fork_steps = 60000
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25
+
         sha_1s_difficulty = 7000
 
         [block_reward_config]

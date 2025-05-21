@@ -12,6 +12,7 @@ use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
+use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info};
 
 #[derive(Debug)]
@@ -42,7 +43,7 @@ where
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
-    pub(crate) vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
+    pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -102,7 +103,7 @@ where
         db: DatabaseProvider,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
-        vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
+        vdf_sender: Option<Sender<BroadcastMiningSeed>>,
     ) -> Self {
         Self {
             db: Some(db),
@@ -119,19 +120,25 @@ where
         block_header: IrysBlockHeader,
         ctx: &mut <BlockPoolService<A, R, B> as Actor>::Context,
     ) -> ResponseActFuture<Self, Result<(), BlockPoolError>> {
-        debug!("Processing block {}", block_header.block_hash.0.to_base58());
+        debug!(
+            "Block pool: Processing block {} (height {})",
+            block_header.block_hash.0.to_base58(),
+            block_header.height
+        );
         let prev_block_hash = block_header.previous_block_hash;
         let current_block_hash = block_header.block_hash;
         let vdf_limiter_info = block_header.vdf_limiter_info.clone();
         let self_addr = ctx.address();
-        let block_producer = self.block_producer.clone();
+        let block_discovery = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
 
-        debug!(
-            "GOSSIP process_block() BLOCK HEIGHT: {}",
-            block_header.height
-        );
+        // Adding the block to the pool, so if a block depending on that block arrives,
+        // this block won't be requested from the network
+        self.orphaned_blocks_by_parent
+            .insert(prev_block_hash, block_header.clone());
+        self.block_hash_to_parent_hash
+            .insert(current_block_hash, prev_block_hash);
 
         Box::pin(
             async move {
@@ -150,7 +157,7 @@ where
                     .map_err(|db_error| BlockPoolError::DatabaseError(db_error))?;
 
                 // If the parent block is in the db, process it
-                if let Some(previous_block_header) = maybe_previous_block_header {
+                if let Some(_previous_block_header) = maybe_previous_block_header {
                     info!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
@@ -160,11 +167,11 @@ where
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
 
                     info!(
-                        "FF VDF Steps for block for block {}",
+                        "FF VDF Steps for block for block {} completed",
                         current_block_hash.0.to_base58()
                     );
 
-                    block_producer
+                    if let Err(block_discovery_error) = block_discovery
                         .as_ref()
                         .ok_or_else(|| {
                             let error_message =
@@ -174,14 +181,19 @@ where
                         })?
                         .handle_block(block_header.clone())
                         .await
-                        .map_err(|block_error| {
-                            error!("{:?}", block_error);
-                            BlockPoolError::BlockError(block_error)
-                        })?;
+                    {
+                            error!("Block pool: Block validation error for block {}: {:?}. Removing block from the pool", block_header.block_hash.0.to_base58(), block_discovery_error);
+                            self_addr.do_send(RemoveBlockFromPool {
+                                block_hash: block_header.block_hash,
+                            });
+                            return Err(BlockPoolError::BlockError(block_discovery_error))
+                    }
 
-                    info!("Block {} processed", current_block_hash.0.to_base58());
+                    info!(
+                        "Block pool: Block {} has been processed",
+                        current_block_hash.0.to_base58()
+                    );
                     self_addr.do_send(RemoveBlockFromPool {
-                        parent_block_hash: previous_block_header.block_hash,
                         block_hash: block_header.block_hash,
                     });
 
@@ -211,7 +223,7 @@ where
                 );
 
                 self_addr
-                    .send(AddBlockToPoolAndTryToFetchParent {
+                    .send(TryToFetchParent {
                         header: block_header,
                     })
                     .await
@@ -249,11 +261,11 @@ where
 
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), BlockPoolError>")]
-struct AddBlockToPoolAndTryToFetchParent {
+struct TryToFetchParent {
     pub header: IrysBlockHeader,
 }
 
-impl<A, R, B> Handler<AddBlockToPoolAndTryToFetchParent> for BlockPoolService<A, R, B>
+impl<A, R, B> Handler<TryToFetchParent> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -261,50 +273,38 @@ where
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
-    fn handle(
-        &mut self,
-        msg: AddBlockToPoolAndTryToFetchParent,
-        ctx: &mut Self::Context,
-    ) -> Self::Result {
+    fn handle(&mut self, msg: TryToFetchParent, ctx: &mut Self::Context) -> Self::Result {
         let block_header = msg.header;
         let self_addr = ctx.address();
-        let current_block_hash = block_header.block_hash;
         let previous_block_hash = block_header.previous_block_hash;
-        let parent_is_also_in_cache = self
-            .orphaned_blocks_by_parent
+        let parent_is_already_in_the_pool = self
+            .block_hash_to_parent_hash
             .contains_key(&previous_block_hash);
-
-        let already_in_cache = self
-            .orphaned_blocks_by_parent
-            .contains_key(&block_header.previous_block_hash);
-
-        if !already_in_cache {
-            self.orphaned_blocks_by_parent
-                .insert(previous_block_hash, block_header);
-            self.block_hash_to_parent_hash
-                .insert(current_block_hash, previous_block_hash);
-        }
 
         Box::pin(
             async move {
-                if !already_in_cache {
-                    // If the parent is also in the cache it's likely that processing has already started
-                    if !parent_is_also_in_cache {
-                        self_addr
-                            .send(RequestBlockFromTheNetwork {
-                                block_hash: previous_block_hash,
-                            })
-                            .await
-                            .map_err(|mailbox| {
-                                BlockPoolError::OtherInternal(format!(
-                                    "Can't request the block from the network: {:?}",
-                                    mailbox
-                                ))
-                            })?
-                    } else {
-                        Ok(())
-                    }
+                // If the parent is also in the cache it's likely that processing has already started
+                if !parent_is_already_in_the_pool {
+                    debug!(
+                        "Block pool: Parent block {} not found in the cache, requesting it from the network",
+                        previous_block_hash.0.to_base58()
+                    );
+                    self_addr
+                        .send(RequestBlockFromTheNetwork {
+                            block_hash: previous_block_hash,
+                        })
+                        .await
+                        .map_err(|mailbox| {
+                            BlockPoolError::OtherInternal(format!(
+                                "Can't request the block from the network: {:?}",
+                                mailbox
+                            ))
+                        })?
                 } else {
+                    debug!(
+                        "Parent block {} is already in the cache, skipping get data request",
+                        previous_block_hash.0.to_base58()
+                    );
                     Ok(())
                 }
             }
@@ -317,7 +317,6 @@ where
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 struct RemoveBlockFromPool {
-    pub parent_block_hash: BlockHash,
     pub block_hash: BlockHash,
 }
 
@@ -330,9 +329,9 @@ where
     type Result = ();
 
     fn handle(&mut self, msg: RemoveBlockFromPool, _ctx: &mut Self::Context) -> () {
-        self.orphaned_blocks_by_parent
-            .remove(&msg.parent_block_hash);
-        self.block_hash_to_parent_hash.remove(&msg.block_hash);
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.remove(&msg.block_hash) {
+            self.orphaned_blocks_by_parent.remove(&parent_hash);
+        }
     }
 }
 
@@ -351,13 +350,10 @@ where
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
-    fn handle(
-        &mut self,
-        msg: RequestBlockFromTheNetwork,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
+    fn handle(&mut self, msg: RequestBlockFromTheNetwork, ctx: &mut Self::Context) -> Self::Result {
         let block_hash = msg.block_hash;
         let peer_list_addr = self.peer_list.clone();
+        let self_addr = ctx.address();
 
         let fut = async move {
             // Handle case where peer list address is not set
@@ -365,9 +361,28 @@ where
                 "Peer list address not set".to_string(),
             ))?;
 
-            Ok(peer_list_addr
+            match peer_list_addr
                 .request_block_from_the_network(block_hash)
-                .await?)
+                .await
+            {
+                Ok(_) => {
+                    debug!(
+                        "Block pool: Requested block {} from the network",
+                        block_hash.0.to_base58()
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    error!("Error while trying to fetch parent block {}: {:?}. Removing the block from the pool", block_hash.0.to_base58(), error);
+                    if let Err(err) = self_addr.send(RemoveBlockFromPool { block_hash }).await {
+                        error!(
+                            "Error while trying to request the block from the network: {:?}",
+                            err
+                        );
+                    }
+                    Err(error.into())
+                }
+            }
         };
 
         Box::pin(fut.into_actor(self))

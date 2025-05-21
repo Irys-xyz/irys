@@ -12,7 +12,7 @@ async fn heavy_test_wait_until_height() {
     info!("height: {}", height);
     let steps = 2;
     let seconds = 60;
-    irys_node.node_ctx.actor_addresses.set_mining(true).unwrap();
+    irys_node.node_ctx.set_partition_mining(true).await.unwrap();
     irys_node
         .wait_until_height(height + steps, seconds)
         .await
@@ -47,10 +47,7 @@ async fn heavy_test_mine_tx() {
             ..Default::default()
         },
     )]);
-    let irys_node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let irys_node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     let height = irys_node.get_height().await;
     let data = "Hello, world!".as_bytes().to_vec();

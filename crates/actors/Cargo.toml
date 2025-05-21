@@ -11,15 +11,17 @@ irys-database.workspace = true
 irys-packing.workspace = true
 irys-storage.workspace = true
 irys-config.workspace = true
-irys-vdf.workspace = true
 irys-price-oracle.workspace = true
 irys-efficient-sampling.workspace = true
+irys-vdf.workspace = true
 
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
 
 tokio.workspace = true
+lru.workspace = true
+reth-db.workspace = true
 irys-primitives.workspace = true
 eyre.workspace = true
 openssl.workspace = true
@@ -32,6 +34,8 @@ futures.workspace = true
 rust_decimal.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 irys-reward-curve.workspace = true
+rayon.workspace = true
+sha2.workspace = true
 async-trait = "0.1.83"
 # serde.workspace = true
 

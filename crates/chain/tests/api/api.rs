@@ -53,14 +53,11 @@ async fn api_end_to_end_test(chunk_size: usize) {
         },
     )]);
     let chain_id = config.consensus_config().chain_id;
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // FIXME: The node startup already spins up an internal actix-web API service.
     // Is there any reason for spawning another one here?
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+    node.node_ctx.start_mining().await.unwrap();
 
     let app_state = ApiState {
         ema_service: ema_tx,

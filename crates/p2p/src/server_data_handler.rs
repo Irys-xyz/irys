@@ -1,5 +1,6 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::cache::GossipCacheKey;
+use crate::gossip_service::SyncState;
 use crate::peer_list::PeerListFacade;
 use crate::types::{GossipDataRequest, InternalGossipError, InvalidDataError};
 use crate::{cache::GossipCache, GossipClient, GossipError, GossipResult};
@@ -10,8 +11,8 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
-    GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
-    RethPeerInfo, UnpackedChunk, H256,
+    CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
+    IrysTransactionResponse, RethPeerInfo, UnpackedChunk, H256,
 };
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -31,6 +32,7 @@ where
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
     pub peer_list_service: PeerListFacade<TApiClient, R>,
+    pub sync_state: SyncState,
 }
 
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
@@ -48,6 +50,7 @@ where
             api_client: self.api_client.clone(),
             gossip_client: self.gossip_client.clone(),
             peer_list_service: self.peer_list_service.clone(),
+            sync_state: self.sync_state.clone(),
         }
     }
 }
@@ -161,7 +164,62 @@ where
         }
     }
 
-    pub(crate) async fn handle_block_header(
+    pub(crate) async fn handle_commitment_tx(
+        &self,
+        transaction_request: GossipRequest<CommitmentTransaction>,
+    ) -> GossipResult<()> {
+        debug!(
+            "Node {}: Gossip commitment transaction received from peer {}: {:?}",
+            self.gossip_client.mining_address,
+            transaction_request.miner_address,
+            transaction_request.data.id.0.to_base58()
+        );
+        let tx = transaction_request.data;
+        let source_miner_address = transaction_request.miner_address;
+        let tx_id = tx.id;
+
+        let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
+        self.cache
+            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
+
+        if already_seen {
+            debug!(
+                "Node {}: Commitment Transaction {} is already recorded in the cache, skipping",
+                self.gossip_client.mining_address,
+                tx_id.0.to_base58()
+            );
+            return Ok(());
+        }
+
+        if self.mempool.is_known_tx(tx_id).await? {
+            debug!(
+                "Node {}: Commitment Transaction has already been handled, skipping",
+                self.gossip_client.mining_address
+            );
+            return Ok(());
+        }
+
+        match self
+            .mempool
+            .handle_commitment_transaction(tx)
+            .await
+            .map_err(GossipError::from)
+        {
+            Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
+                debug!("Commitment Transaction sent to mempool");
+                Ok(())
+            }
+            Err(error) => {
+                error!(
+                    "Error when sending commitment transaction to mempool: {:?}",
+                    error
+                );
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn handle_block_header_request(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
@@ -175,6 +233,17 @@ where
             source_miner_address,
             block_hash.0.to_base58()
         );
+
+        if self.sync_state.is_syncing()
+            && block_header.height > (self.sync_state.sync_height() + 1) as u64
+        {
+            debug!(
+                "Node {}: Block {} is out of the sync range, skipping",
+                self.gossip_client.mining_address,
+                block_hash.0.to_base58()
+            );
+            return Ok(());
+        }
 
         let block_seen = self.cache.seen_block_from_any_peer(&block_hash)?;
 

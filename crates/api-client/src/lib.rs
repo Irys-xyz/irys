@@ -208,7 +208,10 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         block_index_query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>> {
-        let path = "/block_index";
+        let path = format!(
+            "/block_index?height={}&limit={}",
+            block_index_query.height, block_index_query.limit
+        );
 
         let response = self
             .make_request::<Vec<BlockIndexItem>, _>(

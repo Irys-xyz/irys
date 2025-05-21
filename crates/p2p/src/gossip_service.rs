@@ -19,6 +19,7 @@ use crate::{
 };
 use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
+use base58::ToBase58;
 use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
@@ -32,10 +33,12 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::VecDeque;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc::error::SendError;
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::mpsc::{channel, error::SendError, Receiver, Sender},
+    time,
+};
 use tracing::{debug, error, info, warn};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
@@ -50,18 +53,18 @@ type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 #[derive(Debug)]
 pub struct ServiceHandleWithShutdownSignal {
     pub handle: tokio::task::JoinHandle<()>,
-    pub shutdown_tx: mpsc::Sender<()>,
+    pub shutdown_tx: Sender<()>,
     pub name: String,
 }
 
 impl ServiceHandleWithShutdownSignal {
     pub fn spawn<F, S, Fut>(name: S, task: F, task_executor: &TaskExecutor) -> Self
     where
-        F: FnOnce(mpsc::Receiver<()>) -> Fut + Send + 'static,
+        F: FnOnce(Receiver<()>) -> Fut + Send + 'static,
         S: Into<String>,
         Fut: core::future::Future<Output = ()> + Send + 'static,
     {
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = channel(1);
         let handle = task_executor.spawn(task(shutdown_rx));
         Self {
             handle,
@@ -109,27 +112,33 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct GossipService {
     cache: Arc<GossipCache>,
-    mempool_data_receiver: Option<mpsc::Receiver<GossipData>>,
+    mempool_data_receiver: Option<Receiver<GossipData>>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
 
-#[derive(Clone, Debug)]
-pub struct SyncState(Arc<AtomicBool>);
+#[derive(Clone, Debug, Default)]
+pub struct SyncState {
+    syncing: Arc<AtomicBool>,
+    sync_height: Arc<AtomicUsize>,
+}
 
 impl SyncState {
+    /// Creates a new SyncState with given syncing flag and sync_height = 0
     pub fn new(is_syncing: bool) -> Self {
-        let sync_state = Arc::new(AtomicBool::new(is_syncing));
-        Self(sync_state)
+        Self {
+            syncing: Arc::new(AtomicBool::new(is_syncing)),
+            sync_height: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     pub fn store(&self, is_syncing: bool) {
-        self.0.store(is_syncing, Ordering::Relaxed);
+        self.syncing.store(is_syncing, Ordering::Relaxed);
     }
 
     /// Returns whether the gossip service is currently syncing
     pub fn is_syncing(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.syncing.load(Ordering::Relaxed)
     }
 
     pub async fn wait_for_sync(&self) {
@@ -139,14 +148,29 @@ impl SyncState {
         }
 
         // Create a future that polls the sync state
-        let sync_state = Arc::clone(&self.0);
+        let syncing = Arc::clone(&self.syncing);
         tokio::spawn(async move {
-            while sync_state.load(Ordering::Relaxed) {
+            while syncing.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
         .expect("Sync checking task failed");
+    }
+
+    /// Sets the current sync height
+    pub fn set_sync_height(&self, height: usize) {
+        self.sync_height.store(height, Ordering::Relaxed);
+    }
+
+    /// Returns the current sync height
+    pub fn sync_height(&self) -> usize {
+        self.sync_height.load(Ordering::Relaxed)
+    }
+
+    /// Increments sync height by 1 and returns the new height
+    pub fn increment_sync_height(&self) -> usize {
+        self.sync_height.fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
@@ -164,9 +188,9 @@ impl GossipService {
     /// Create a new gossip service. To run the service, use the [`GossipService::run`] method.
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
-    pub fn new(mining_address: Address) -> (Self, mpsc::Sender<GossipData>) {
+    pub fn new(mining_address: Address) -> (Self, Sender<GossipData>) {
         let cache = Arc::new(GossipCache::new());
-        let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
+        let (trusted_data_tx, trusted_data_rx) = channel(1000);
 
         let client_timeout = Duration::from_secs(5);
         let client = GossipClient::new(client_timeout, mining_address);
@@ -197,7 +221,7 @@ impl GossipService {
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
-        vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+        vdf_sender: Sender<BroadcastMiningSeed>,
         listener: TcpListener,
         needs_catching_up: bool,
         latest_known_height: usize,
@@ -208,6 +232,7 @@ impl GossipService {
     {
         debug!("Staring gossip service");
         self.sync_state.store(needs_catching_up);
+        self.sync_state.set_sync_height(latest_known_height);
 
         // TODO: get the db
         let block_pool_service = BlockPoolService::new_with_client(
@@ -227,6 +252,7 @@ impl GossipService {
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
             peer_list_service: peer_list.clone(),
+            sync_state: self.sync_state.clone(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
@@ -254,14 +280,7 @@ impl GossipService {
 
         if needs_catching_up {
             task_executor.spawn(async move {
-                if let Err(error) = catch_up_task(
-                    sync_state,
-                    latest_known_height,
-                    api_client.clone(),
-                    peer_list,
-                )
-                .await
-                {
+                if let Err(error) = catch_up_task(sync_state, api_client.clone(), peer_list).await {
                     error!("Failed to catch up: {}", error);
                 }
             });
@@ -406,7 +425,7 @@ fn spawn_cache_pruning_task(
 }
 
 fn spawn_broadcast_task<R, A>(
-    mut mempool_data_receiver: mpsc::Receiver<GossipData>,
+    mut mempool_data_receiver: Receiver<GossipData>,
     service: GossipService,
     task_executor: &TaskExecutor,
     peer_list_service: PeerListFacade<A, R>,
@@ -527,11 +546,15 @@ async fn catch_up_task<
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 >(
     sync_state: SyncState,
-    mut latest_known_height: usize,
     api_client: A,
     peer_list_service: PeerListFacade<A, R>,
 ) -> Result<(), GossipError> {
+    debug!("Sync task: Starting gossip service sync task, waiting for active peers");
     peer_list_service.wait_for_active_peers().await?;
+    debug!(
+        "Sync task: Gossip service sync task started. Syncing blocks starting from height {}",
+        sync_state.sync_height()
+    );
 
     let limit = 10;
 
@@ -539,7 +562,7 @@ async fn catch_up_task<
     let block_index = get_block_index(
         &peer_list_service,
         &api_client,
-        latest_known_height as usize,
+        sync_state.sync_height(),
         limit,
         5,
     )
@@ -549,21 +572,29 @@ async fn catch_up_task<
     block_queue.extend(block_index);
 
     while let Some(block) = block_queue.pop_front() {
+        debug!(
+            "Sync task: Requesting block {} (height {}) from the network",
+            block.block_hash.0.to_base58(),
+            sync_state.sync_height()
+        );
         match peer_list_service
             .request_block_from_the_network(block.block_hash)
             .await
         {
             Ok(()) => {
-                latest_known_height += 1;
+                sync_state.increment_sync_height();
                 info!(
                     "Successfully requested block {} (height {}) from the network",
-                    block.block_hash, latest_known_height
+                    block.block_hash.0.to_base58(),
+                    sync_state.sync_height()
                 );
             }
             Err(err) => {
                 error!(
                     "Failed to request block {} (height {}) from the network: {}",
-                    block.block_hash, latest_known_height, err
+                    block.block_hash.0.to_base58(),
+                    sync_state.sync_height(),
+                    err
                 );
             }
         }
@@ -574,7 +605,7 @@ async fn catch_up_task<
                 get_block_index(
                     &peer_list_service,
                     &api_client,
-                    latest_known_height as usize,
+                    sync_state.sync_height(),
                     limit,
                     5,
                 )
@@ -624,6 +655,10 @@ async fn get_block_index<
             .map_err(|network_error| GossipError::Network(network_error.to_string()))
         {
             Ok(index) => {
+                debug!(
+                    "Fetched block index from peer {:?}: {:?}",
+                    miner_address, index
+                );
                 return Ok(index);
             }
             Err(error) => {
@@ -644,15 +679,20 @@ async fn get_block_index<
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 pub async fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: VDFLimiterInfo,
-    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+    vdf_sender: Sender<BroadcastMiningSeed>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;
     let len = vdf_limiter_info.steps.len();
     let block_start_step = block_end_step - len as u64;
-    for (i, step) in vdf_limiter_info.steps.iter().enumerate() {
+    tracing::trace!(
+        "VDF FF: block start-end step: {}-{}",
+        block_start_step,
+        block_end_step
+    );
+    for (i, hash) in vdf_limiter_info.steps.iter().enumerate() {
         //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
         let mining_seed = BroadcastMiningSeed {
-            seed: Seed { 0: *step },
+            seed: Seed { 0: *hash },
             global_step: block_start_step + i as u64,
             checkpoints: H256List::new(),
         };
@@ -763,8 +803,9 @@ mod tests {
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
+            sync_state.set_sync_height(10);
 
-            catch_up_task(sync_state.clone(), 10, api_client_stub.clone(), peer_list)
+            catch_up_task(sync_state.clone(), api_client_stub.clone(), peer_list)
                 .await
                 .expect("to finish catching up");
 

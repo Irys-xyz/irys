@@ -21,13 +21,14 @@ use irys_primitives::CommitmentType;
 use irys_storage::StorageModulesReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, DataLedger,
-    GossipData, IrysTransactionHeader, H256,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
+    IrysTransactionHeader, H256,
 };
 use irys_types::{
-    Address, CommitmentTransaction, Config, DataRoot, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, U256,
+    Address, CommitmentTransaction, Config, DataLedger, DataRoot, IrysBlockHeader,
+    IrysTransactionCommon, IrysTransactionId, TxChunkOffset, U256,
 };
+use lru::LruCache;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -36,6 +37,7 @@ use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use tracing::{debug, error, info, warn};
 
 #[async_trait::async_trait]
@@ -92,10 +94,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
     async fn handle_commitment_transaction(
         &self,
-        tx_header: CommitmentTransaction,
+        commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         self.service
-            .send(CommitmentTxIngressMessage(tx_header))
+            .send(CommitmentTxIngressMessage(commitment_tx))
             .await?
     }
 
@@ -127,6 +129,10 @@ pub struct MempoolService {
     storage_modules_guard: StorageModulesReadGuard,
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
+    /// LRU caches for out of order gossip data
+    pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
+    pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
+
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
     gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
@@ -162,6 +168,9 @@ impl MempoolService {
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
+        let mempool_config = &config.consensus.mempool;
+        let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
+        let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
         Self {
             irys_db,
             reth_db,
@@ -176,6 +185,8 @@ impl MempoolService {
             service_senders,
             gossip_tx,
             recent_valid_tx: HashSet::new(),
+            pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         }
     }
     // Helper to get the canonical chain and latest height
@@ -275,7 +286,7 @@ impl MempoolService {
         Ok(rx.recv().expect("Failed to receive result from thread"))
     }
 
-    fn is_commitment_valid(&self, commitment_tx: &CommitmentTransaction) -> bool {
+    fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
         // Check if already staked in the blockchain
         let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
 
@@ -283,7 +294,7 @@ impl MempoolService {
         // Only pledges require special validation when not already staked
         let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
         if !is_pledge || is_staked {
-            return true;
+            return CommitmentStatus::Accepted;
         }
 
         // For unstaked pledges, validate against cache and pending transactions
@@ -304,26 +315,37 @@ impl MempoolService {
 
         // Reject unsupported commitment types
         if matches!(cache_status, CommitmentStatus::Unsupported) {
-            return false;
+            warn!(
+                "Commitment is unsupported: {}",
+                commitment_tx.id.0.to_base58()
+            );
+            return CommitmentStatus::Unsupported;
         }
 
         // For unstaked addresses, check for pending stake transactions
+        // For unstaked addresses, check for pending stake transactions
         if matches!(cache_status, CommitmentStatus::Unstaked) {
             // Get pending transactions for this address
-            let pending = self.valid_commitment_tx.get(&commitment_tx.signer);
-            if pending.is_none() {
-                return false;
+            if let Some(pending) = self.valid_commitment_tx.get(&commitment_tx.signer) {
+                // Check if there's at least one pending stake transaction
+                if pending
+                    .iter()
+                    .any(|c| c.commitment_type == CommitmentType::Stake)
+                {
+                    return CommitmentStatus::Accepted;
+                }
             }
 
-            // Valid if there's at least one pending stake transaction
-            return pending
-                .unwrap()
-                .iter()
-                .any(|c| c.commitment_type == CommitmentType::Stake);
+            // No pending stakes found
+            warn!(
+                "Pledge Commitment is unstaked: {}",
+                commitment_tx.id.0.to_base58()
+            );
+            return CommitmentStatus::Unstaked;
         }
 
         // All other cases are valid
-        true
+        CommitmentStatus::Accepted
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -447,7 +469,7 @@ impl ChunkIngressError {
 impl Handler<TxIngressMessage> for MempoolService {
     type Result = Result<(), TxIngressError>;
 
-    fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, tx_msg: TxIngressMessage, ctx: &mut Context<Self>) -> Self::Result {
         let tx = &tx_msg.0;
         debug!(
             "received tx {:?} (data_root {:?})",
@@ -547,6 +569,25 @@ impl Handler<TxIngressMessage> for MempoolService {
             }
         };
 
+        // Process any chunks that arrived before their parent transaction
+        // These were temporarily stored in the pending_chunks cache
+        if let Some(chunks_map) = self.pending_chunks.pop(&tx.data_root) {
+            // Extract owned chunks from the map to process them
+            let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
+
+            // PERFORMANCE CONSIDERATION:
+            // This is executing in a synchronous actor context. If this transaction has
+            // many pending chunks (hundreds or thousands), processing them
+            // all here could block the actor for a significant time, delaying other messages.
+            // This should be addressed when the mempool_service is converted to a tokio service
+            // and the handlers become async
+            for chunk in chunks {
+                // Process each chunk with full ownership (no cloning needed)
+                self.handle(ChunkIngressMessage(chunk), ctx)
+                    .expect("pending chunks should be processed by the mempool");
+            }
+        }
+
         // Gossip transaction
         let gossip_sender = self.gossip_tx.clone();
         let gossip_data = GossipData::Transaction(tx.clone());
@@ -570,7 +611,7 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
     fn handle(
         &mut self,
         commitment_tx_msg: CommitmentTxIngressMessage,
-        _ctx: &mut Context<Self>,
+        ctx: &mut Context<Self>,
     ) -> Self::Result {
         let commitment_tx = commitment_tx_msg.0.clone();
         debug!(
@@ -597,7 +638,8 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
         self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
 
         // Check pending commitments and cached commitments and active commitments
-        if self.is_commitment_valid(&commitment_tx) {
+        let commitment_status = self.get_commitment_status(&commitment_tx);
+        if commitment_status == CommitmentStatus::Accepted {
             // Validate tx signature
             self.validate_signature(&commitment_tx)?;
 
@@ -609,9 +651,68 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
 
             self.recent_valid_tx.insert(commitment_tx.id);
 
+            // Process any pending pledges for this newly staked address
+            // ------------------------------------------------------
+            // When a stake transaction is accepted, we can now process any pledge
+            // transactions from the same address that arrived earlier but were
+            // waiting for the stake. This effectively resolves the dependency
+            // order for address-based validation.
+            if let Some(pledges_lru) = self.pending_pledges.pop(&commitment_tx.signer) {
+                // Extract all pending pledges as a vector of owned transactions
+                let pledges: Vec<_> = pledges_lru
+                    .into_iter()
+                    .map(|(_, pledge_tx)| pledge_tx)
+                    .collect();
+
+                // PERFORMANCE NOTE: Processing all pending pledges synchronously
+                // If an address has accumulated many pending pledges, this could
+                // potentially block the actor for a significant time.
+                for pledge_tx in pledges {
+                    // Re-process each pledge now that its signer is staked
+                    // No need to clone as we own the transaction objects
+                    self.handle(CommitmentTxIngressMessage(pledge_tx), ctx)
+                        .expect("Failed to process pending pledge for newly staked address");
+                }
+            }
+
+            // Gossip transaction
+            let gossip_sender = self.gossip_tx.clone();
+            let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
+
+            let _ = tokio::task::spawn(async move {
+                if let Err(error) = gossip_sender.send(gossip_data).await {
+                    tracing::error!("Failed to send gossip data: {:?}", error);
+                }
+            });
+
             Ok(())
         } else {
-            Err(TxIngressError::Skipped)
+            if commitment_status == CommitmentStatus::Unstaked {
+                // For unstaked pledges, we cache them in a 2-level LRU structure:
+                // Level 1: Keyed by signer address (allows tracking multiple addresses)
+                // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
+
+                if let Some(pledges_cache) = self.pending_pledges.get_mut(&commitment_tx.signer) {
+                    // Address already exists in cache - add this pledge transaction to its lru cache
+                    pledges_cache.put(commitment_tx.id, commitment_tx.clone());
+                } else {
+                    // First pledge from this address - create a new nested lru cache
+                    let max_pending_pledge_items =
+                        self.config.consensus.mempool.max_pending_pledge_items;
+                    let mut new_address_cache =
+                        LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+                    // Add the pledge transaction to the new lru cache for the address
+                    new_address_cache.put(commitment_tx.id, commitment_tx.clone());
+
+                    // Add the address cache to the primary lru cache
+                    self.pending_pledges
+                        .put(commitment_tx.signer, new_address_cache);
+                }
+                Ok(())
+            } else {
+                Err(TxIngressError::Skipped)
+            }
         }
     }
 }
@@ -622,6 +723,8 @@ impl Handler<ChunkIngressMessage> for MempoolService {
     fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk: UnpackedChunk = chunk_msg.0;
+
+        let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
 
         info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
@@ -655,8 +758,25 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                         .flatten()
                     })
                 })
-            })
-            .ok_or(ChunkIngressError::UnknownTransaction)?; // Handle None case by converting it to an error
+            });
+
+        let data_size = match data_size {
+            Some(ds) => ds,
+            None => {
+                // We don't have a data_root for this chunk but possibly the transaction containing this
+                // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
+                if let Some(chunks_map) = self.pending_chunks.get_mut(&chunk.data_root) {
+                    chunks_map.put(chunk.tx_offset, chunk.clone());
+                } else {
+                    // If there's no entry for this data_root yet, create one
+                    let mut new_lru_cache =
+                        LruCache::new(NonZeroUsize::new(max_chunks_per_item).unwrap());
+                    new_lru_cache.put(chunk.tx_offset, chunk.clone());
+                    self.pending_chunks.put(chunk.data_root, new_lru_cache);
+                }
+                return Ok(());
+            }
+        };
 
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.

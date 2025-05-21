@@ -21,6 +21,7 @@ sol!(
 #[tokio::test]
 async fn heavy_test_erc20() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
+
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let main_address = config.miner_address();
     config.consensus.extend_genesis_accounts(vec![
@@ -39,10 +40,7 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     let signer: PrivateKeySigner = node.cfg.mining_key.clone().into();
 

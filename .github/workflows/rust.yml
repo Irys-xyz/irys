@@ -17,6 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+
 jobs:
   gate:
     name: gate
@@ -28,36 +29,101 @@ jobs:
         with:
           fetch-depth: 0  # Need full history for comparison
         # this script checks whether we should run on the current commit, based on:
-        # 1.) if it's a push event (new commit) and the special `#disable-ci` string isn't present in the commit message
-        # 2.) if the commit is a pull request, that the base branch has some number of changes 
-        #     (this is to prevent CI running twice, one for the current branch and one for the merge between the current and base branches, if the base branch has no commits ahead of the current)
+        # 1.) if it's a push or pull_request event and the disable string is present in the commit message OR any associated PR description
+        # 2.) if it's a `pull_request` event, also check that the base branch has some number of changes 
+        #     (this is to prevent CI running twice)
         # 3.) if the commit is to the `default` branch (in our case `master`), CI is ALWAYS run
         # 4.) if the event is a workflow_dispatch (manual trigger/failsafe)
       - name: Check if CI should run
         id: set-output
-        run: | 
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |        
           # default to running
           SHOULD_RUN=true
+
+          # this string disables CI if a commit/branch description includes it
+          DISABLE_CI_STRING="#disable-ci"
           
-          # check if CI is disabled in the commit message
-          if [[ "${{ github.event_name }}" == "push" && "${{ contains(github.event.head_commit.message, '#disable-ci') }}" == "true" ]]; then
+          # check if CI is disabled in the commit message (for any event type)
+          if [[ "${{ contains(github.event.head_commit.message, '#disable-ci') }}" == "true" ]]; then
+            echo "commit message contains '$DISABLE_CI_STRING', skipping CI..."
             SHOULD_RUN=false
           fi
           
-          # for pull request events, check if base branch has commits ahead of head branch
-          # this is so we can skip uneeded tests if we're in sync already
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            git fetch origin ${{ github.event.pull_request.base.ref }}:base_branch
-            git fetch origin ${{ github.event.pull_request.head.ref }}:head_branch
+          # Function to check if PR description contains disable string
+          check_pr_description() {
+            local pr_number=$1
+            if [[ -n "$pr_number" ]]; then
+              PR_DESCRIPTION=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/pulls/$pr_number" | \
+                jq --raw-output .body)
+              
+              if [[ "$PR_DESCRIPTION" == *"$DISABLE_CI_STRING"* ]]; then
+                echo "PR #$pr_number description contains '$DISABLE_CI_STRING'"
+                return 1  # Return non-zero (false in bash) if contains disable string
+              fi
+            fi
+            return 0  # Return zero (true in bash) if does NOT contain disable string
+          }
+          
+          # For push events, check if this commit is part of an open PR
+          if [[ "${{ github.event_name }}" == "push" && "$SHOULD_RUN" == "true" ]]; then
+            # Find any PRs associated with this commit
+            COMMIT_SHA="${{ github.event.after }}"
+            ASSOCIATED_PRS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$COMMIT_SHA/pulls" | \
+              jq --raw-output '.[].number')
             
-            # check if base branch has commits that head branch doesn't have (so we can test against the auto merge)
-            AHEAD_COMMITS=$(git rev-list --count head_branch..base_branch)
-            
-            if [[ $AHEAD_COMMITS -eq 0 ]]; then
-              echo "base branch is not ahead of head branch, skipping..."
-              SHOULD_RUN=false
+            if [[ -n "$ASSOCIATED_PRS" ]]; then
+              echo "Found PRs associated with this commit: $ASSOCIATED_PRS"
+              
+              # Default to skipping if any PRs are found
+              ALL_PRS_DISABLED=true
+              PR_COUNT=0
+              
+              # Check each associated PR description
+              for PR_NUMBER in $ASSOCIATED_PRS; do
+                PR_COUNT=$((PR_COUNT+1))
+                # If any PR doesn't have the disable string, we should run
+                if check_pr_description "$PR_NUMBER"; then
+                  echo "PR #$PR_NUMBER doesn't have the disable string, will run CI"
+                  ALL_PRS_DISABLED=false
+                fi
+              done
+              
+              # Only skip if ALL associated PRs have the disable string
+              if [[ "$ALL_PRS_DISABLED" == "true" && "$PR_COUNT" -gt 0 ]]; then
+                echo "All $PR_COUNT associated PRs have the disable string, skipping CI"
+                SHOULD_RUN=false
+              fi
             else
-              echo "base branch is ahead of head branch by $AHEAD_COMMITS commits, running..."
+              echo "No open PRs found associated with this commit"
+            fi
+          fi
+          
+          # For pull_request events, check PR description and branch state
+          if [[ "${{ github.event_name }}" == "pull_request" && "$SHOULD_RUN" == "true" ]]; then
+            # Check PR description
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            if ! check_pr_description "$PR_NUMBER"; then
+              SHOULD_RUN=false
+            fi
+            
+            # Only perform branch comparison check if we haven't already decided to skip
+            if [[ "$SHOULD_RUN" == "true" ]]; then
+              git fetch origin ${{ github.event.pull_request.base.ref }}:base_branch
+              git fetch origin ${{ github.event.pull_request.head.ref }}:head_branch
+              
+              # check if base branch has commits that head branch doesn't have (so we can test against the auto merge)
+              AHEAD_COMMITS=$(git rev-list --count head_branch..base_branch)
+              
+              if [[ $AHEAD_COMMITS -eq 0 ]]; then
+                echo "base branch is not ahead of head branch, skipping..."
+                SHOULD_RUN=false
+              else
+                echo "base branch is ahead of head branch by $AHEAD_COMMITS commits, running..."
+              fi
             fi
           fi
           
@@ -70,6 +136,8 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             SHOULD_RUN=true
           fi
+
+          echo "Should run? ${SHOULD_RUN}"
 
           # write output to the action output file
           echo "should-run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
