@@ -144,7 +144,7 @@ where
             let block_hash_string = gossip_request.data.block_hash.0.to_base58();
             if let Err(error) = server
                 .data_handler
-                .handle_block_header(gossip_request, peer.address.api)
+                .handle_block_header_request(gossip_request, peer.address.api)
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
@@ -155,7 +155,7 @@ where
                 // return HttpResponse::InternalServerError().finish();
             } else {
                 info!(
-                    "Node {:?}: Successfully processed block {}",
+                    "Node {:?}: Server handler handled block {}",
                     this_node_id, block_hash_string
                 );
             }

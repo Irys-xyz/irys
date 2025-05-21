@@ -1,5 +1,6 @@
 pub mod error;
 pub mod routes;
+
 use actix::Addr;
 use actix_cors::Cors;
 use actix_web::dev::Server;
