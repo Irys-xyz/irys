@@ -507,7 +507,6 @@ mod evm {
                                 status: revm::state::AccountStatus::Touched,
                             },
                         );
-                        dbg!(&execution_result);
 
                         execution_result
                     }
@@ -516,7 +515,6 @@ mod evm {
 
                 f(&execution_result);
 
-                dbg!(&new_state);
                 // Build and store the receipt
                 let evm = self.inner.evm_mut();
                 self.system_call_receipts
@@ -930,10 +928,10 @@ mod tests {
     use reth::{
         api::FullNodePrimitives,
         builder::{rpc::RethRpcAddOns, FullNode},
-        providers::AccountReader,
+        providers::{AccountReader, BlockNumReader, StateReader},
         rpc::api::eth::helpers::EthTransactions,
     };
-    use reth_e2e_test_utils::{setup, wallet::Wallet};
+    use reth_e2e_test_utils::{setup, transaction::TransactionTestContext, wallet::Wallet};
     use reth_network::NetworkEventListenerProvider;
     use reth_transaction_pool::TransactionPool;
 
@@ -952,8 +950,64 @@ mod tests {
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
     }
 
-    // todo block broadcast test
-    // todo test decrementing when account exists but not enough balance (expect failed tx receipt)
+    #[test_log::test(tokio::test)]
+    async fn block_gest_broadcasted_between_peers() -> eyre::Result<()> {
+        let total_nodes = 2;
+        let (mut nodes, _tasks, wallet) =
+            setup::<IrysEthereumNode>(total_nodes, custom_chain(), false, eth_payload_attributes)
+                .await?;
+        let wallets = Wallet::new(2).wallet_gen();
+        let block_producer = EthereumWallet::from(wallets[0].clone());
+        let block_producer = block_producer.default_signer();
+        let target_account = EthereumWallet::from(wallets[1].clone());
+        let target_account = target_account.default_signer();
+        let mut second_node = nodes.pop().unwrap();
+        let mut first_node = nodes.pop().unwrap();
+
+        let initial_balance = get_balance(&first_node.inner, target_account.address());
+        let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
+            amount: U256::from(7000000000000000000u64), // 7 ETH
+            target: target_account.address(),
+        });
+        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
+        let system_tx_hash = first_node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Private,
+                system_pooled_tx,
+            )
+            .await?;
+
+        // make the node advance
+        let payload = first_node.advance_block().await?;
+
+        let block_hash = payload.block().hash();
+        let block_number = payload.block().number;
+
+        // assert the block has been committed to the blockchain
+        first_node
+            .assert_new_block(system_tx_hash, block_hash, block_number)
+            .await?;
+
+        // only send forkchoice update to second node
+        second_node
+            .update_forkchoice(block_hash, block_hash)
+            .await?;
+
+        // expect second node advanced via p2p gossip
+        second_node
+            .assert_new_block(system_tx_hash, block_hash, 1)
+            .await?;
+
+        let final_balance = get_balance(&first_node.inner, target_account.address());
+        let final_balance_second = get_balance(&second_node.inner, target_account.address());
+        assert_eq!(final_balance, final_balance_second);
+        assert_eq!(final_balance, initial_balance + U256::from(7000000000000000000u64));
+
+        Ok(())
+    }
 
     // assert that "incrementing" system txs update account state
     #[test_log::test(tokio::test)]
@@ -1288,7 +1342,6 @@ mod tests {
             .iter()
             .map(|tx| *tx.hash())
             .collect();
-        dbg!(&block_txs);
 
         // Verify the system transaction is NOT included
         assert!(
@@ -1353,7 +1406,6 @@ mod tests {
             .iter()
             .map(|tx| *tx.hash())
             .collect();
-        dbg!(&block_txs);
 
         // Verify the system transaction IS included
         assert!(
@@ -1363,7 +1415,6 @@ mod tests {
         // Verify the receipt for the system tx is a revert/failure
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
         let receipts = block_execution.receipts;
-        dbg!(&receipts);
         let receipt = &receipts[1][0];
         assert!(
             !receipt.success,
