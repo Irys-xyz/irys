@@ -93,6 +93,10 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
+    GetTransaction(
+        IrysTransactionHeader,
+        tokio::sync::oneshot::Sender<IrysTransactionHeader>,
+    ),
     ChunkIngressMessage(UnpackedChunk),
     CommitmentTxIngressMessage(CommitmentTransaction),
     GetBestMempoolTxs,
@@ -659,40 +663,6 @@ impl Handler<TxExistenceQuery> for MempoolService {
     }
 }
 
-/// Message to check whether a transaction exists in the mempool or on disk
-#[derive(Message, Debug)]
-#[rtype(result = "Result<Option<IrysTransactionHeader>, TxIngressError>")]
-pub struct GetTransaction(pub H256);
-
-impl GetTransaction {
-    #[must_use]
-    pub fn into_inner(self) -> H256 {
-        self.0
-    }
-}
-
-impl Handler<GetTransaction> for MempoolService {
-    type Result = Result<Option<IrysTransactionHeader>, TxIngressError>;
-
-    fn handle(&mut self, tx_msg: GetTransaction, _ctx: &mut Context<Self>) -> Self::Result {
-        if let Some(tx_header) = self.valid_tx.get(&tx_msg.0) {
-            return Ok(Some(tx_header.clone()));
-        }
-
-        let read_tx = self
-            .irys_db
-            .as_ref()
-            .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
-
-        let txid = tx_msg.0;
-        let tx_header =
-            tx_header_by_txid(&read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
-
-        Ok(tx_header)
-    }
-}
-
 /// Generates an ingress proof for a specific `data_root`
 /// pulls required data from all sources
 pub fn generate_ingress_proof(
@@ -780,6 +750,25 @@ impl Inner {
         let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
 
         match msg {
+            MempoolServiceMessage::GetTransaction(tx, response) => {
+                if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+                    return Ok(Some(tx_header.clone()));
+                }
+
+                let read_tx = mempool_state_guard
+                    .irys_db
+                    .as_ref()
+                    .tx()
+                    .map_err(|_| TxIngressError::DatabaseError)?;
+
+                let txid = tx;
+                let tx_header = tx_header_by_txid(&read_tx, &txid)
+                    .map_err(|_| TxIngressError::DatabaseError)?;
+
+                if let Err(e) = response.send(Ok(tx_header)) {
+                    tracing::error!("response.send(tx_header) error: {:?}", e);
+                };
+            }
             MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
                 for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                     // Remove the submit tx from the pending valid_tx pool
