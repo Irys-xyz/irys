@@ -142,6 +142,8 @@ impl PackingParams {
     }
 }
 
+static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
+
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
 pub struct StorageSubmodule {
@@ -257,7 +259,7 @@ impl StorageModule {
                 )
             })?;
 
-            let params_path = sub_base_path.join("packing_params.toml");
+            let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
             if params_path.exists() == false {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
@@ -357,6 +359,21 @@ impl StorageModule {
     pub fn assign_partition(&self, partition_assignment: PartitionAssignment) {
         let mut pa = self.partition_assignment.write().unwrap();
         *pa = Some(partition_assignment);
+
+        debug!("{:#?}", self.submodules);
+
+        // Also update the packing params file in each submodule
+        for (_, submodule) in self.submodules.iter() {
+            let params = PackingParams {
+                packing_address: self.config.node_config.miner_address(),
+                partition_hash: Some(partition_assignment.partition_hash),
+                ledger: partition_assignment.ledger_id,
+                slot: partition_assignment.slot_index,
+            };
+
+            let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
+            params.write_to_disk(&params_path);
+        }
     }
 
     /// Returns the StorageModules partition_hash if assigned

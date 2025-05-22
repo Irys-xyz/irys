@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use irys_testing_utils::*;
 use irys_types::{NodeConfig, H256};
 use tracing::debug;
@@ -69,8 +67,11 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     let peer_block = peer_node.get_block_by_height(3).await.unwrap();
     debug!("{}", peer_block);
 
-    // Wait to see if anything happens on the peer node
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    peer_node.mine_block().await?;
+
+    let _ = genesis_node.wait_until_height(4, seconds_to_wait).await;
+    let peer_block = peer_node.get_block_by_height(4).await.unwrap();
+    debug!("{}", peer_block);
 
     genesis_node.stop().await;
     peer_node.stop().await;
