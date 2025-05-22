@@ -524,7 +524,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let parent = {
                 let mut attempts = 0;
                 loop {
-                    if attempts > 10 {
+                    if attempts > 20 {
                         break None;
                     }
 
