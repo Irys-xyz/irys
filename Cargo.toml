@@ -124,6 +124,8 @@ alloy-evm = { version = "0.7.1", default-features = false }
 alloy-primitives = { version = "1.1.0", default-features = false, features = [
   "map-foldhash",
   "arbitrary",
+  "rlp",
+  "getrandom",
 ] }
 alloy-rlp = { version = "0.3.10", default-features = false, features = [
   "core-net",
@@ -131,13 +133,18 @@ alloy-rlp = { version = "0.3.10", default-features = false, features = [
 alloy-consensus = { version = "0.15.10", default-features = false }
 alloy-eips = { version = "0.15.10", default-features = false }
 alloy-genesis = { version = "0.15.10", default-features = false }
+alloy-core = { version = "1.1.0", default-features = false }
 alloy-provider = { version = "0.15.10", default-features = false }
 alloy-network = { version = "0.15.10", default-features = false }
-alloy-sol-macro = { version = "1.1.2", default-features = false }
+alloy-sol-macro = { version = "1.1.0", default-features = false }
 alloy-rpc-types = { version = "0.15.10", features = [
   "eth",
 ], default-features = false }
 alloy-rpc-types-eth = { version = "0.15.10", default-features = false }
+alloy-rpc-types-engine = { version = "0.15.10", default-features = false }
+alloy-signer = "1.0.6"
+alloy-signer-local = "1.0.6"
+
 
 # reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 # reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
@@ -205,6 +212,7 @@ reth-evm-ethereum = { path = "./ext/reth/crates/ethereum/evm" }
 reth-trie-db = { path = "./ext/reth/crates/trie/db" }
 reth-evm = { path = "./ext/reth/crates/evm/evm" }
 reth-chainspec = { path = "./ext/reth/crates/chainspec" }
+
 
 revm = { version = "23.1.0", default-features = false }
 
