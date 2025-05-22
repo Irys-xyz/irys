@@ -521,12 +521,35 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }).await??;
 
             // try to get block by hash
-            let parent = context
-            .rpc
-            .inner
-            .eth_api()
-            .block_by_hash(prev_block_header.evm_block_hash, false)
-            .await?.expect("Should be able to get the parent EVM block");
+            // let parent = context
+            // .rpc
+            // .inner
+            // .eth_api()
+            // .block_by_hash(prev_block_header.evm_block_hash, false)
+            // .await?.expect("Should be able to get the parent EVM block");
+            let parent = {
+                let mut attempts = 0;
+                loop {
+                    if attempts > 50 {
+                        break None;
+                    }
+
+                    let result = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_hash(prev_block_header.evm_block_hash, false)
+                        .await?;
+
+                    match result {
+                        Some(block) => break Some(block),
+                        None => {
+                            attempts += 1;
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }.expect("Should be able to get the parent EVM block");
 
             assert!(parent.header.hash == prev_block_header.evm_block_hash);
 
