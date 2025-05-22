@@ -19,6 +19,7 @@ tracing-subscriber.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
 clap = { workspace = true, features = ["derive"] }
+reth-node-core.workspace = true
 
 [lints]
 workspace = true
