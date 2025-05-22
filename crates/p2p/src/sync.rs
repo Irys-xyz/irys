@@ -149,6 +149,7 @@ pub async fn sync_chain<
     peer_list_service: PeerListFacade<A, R>,
     node_mode: &NodeMode,
     start_sync_from_height: usize,
+    genesis_peer_discovery_timeout_millis: u64,
 ) -> Result<(), GossipError> {
     sync_state.set_syncing_from(start_sync_from_height);
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
@@ -163,8 +164,9 @@ pub async fn sync_chain<
 
     let fetch_index_from_the_trusted_peer = !is_in_genesis_mode;
     if is_in_genesis_mode {
+        warn!("Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", genesis_peer_discovery_timeout_millis);
         match timeout(
-            Duration::from_secs(30),
+            Duration::from_millis(genesis_peer_discovery_timeout_millis),
             peer_list_service.wait_for_active_peers(),
         )
         .await
@@ -436,6 +438,7 @@ mod tests {
                 api_client_stub.clone(),
                 peer_list,
                 &NodeMode::PeerSync,
+                10,
                 10,
             )
             .await
