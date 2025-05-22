@@ -345,7 +345,6 @@ impl MempoolService {
         }
 
         // For unstaked addresses, check for pending stake transactions
-        // For unstaked addresses, check for pending stake transactions
         if matches!(cache_status, CommitmentStatus::Unstaked) {
             // Get pending transactions for this address
             if let Some(pending) = mempool_state_guard
