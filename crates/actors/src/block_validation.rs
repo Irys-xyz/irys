@@ -18,7 +18,7 @@ use irys_types::{
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use openssl::sha;
-use tracing::{debug, info};
+use tracing::{debug, info, Span};
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -28,8 +28,10 @@ pub async fn prevalidate_block(
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     steps_guard: VdfStepsReadGuard,
-    ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    span: Span,
 ) -> eyre::Result<()> {
+    let _span = span.enter();
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -111,7 +113,7 @@ pub async fn prevalidate_block(
     };
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = async {
-        check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
+        check_valid_oracle_price(&block, &ema_service_sender).await?;
         debug!(
             block_hash = ?block.block_hash.0.to_base58(),
             ?block.height,
@@ -121,7 +123,7 @@ pub async fn prevalidate_block(
     };
     // Check that the EMA has been correctly calculated
     let ema_valid = async {
-        check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
+        check_valid_ema_calculation(&block, &ema_service_sender).await?;
         debug!(
             block_hash = ?block.block_hash.0.to_base58(),
             ?block.height,

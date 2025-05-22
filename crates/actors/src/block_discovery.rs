@@ -19,7 +19,7 @@ use irys_types::{
 };
 use reth_db::Database;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -42,6 +42,8 @@ pub struct BlockDiscoveryActor {
     pub service_senders: ServiceSenders,
     /// Gossip message bus
     pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
+    /// Tracing span
+    pub span: Span,
 }
 
 #[async_trait::async_trait]
@@ -92,6 +94,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     type Result = ResponseFuture<eyre::Result<()>>;
 
     fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
+        let span = self.span.clone();
+        let _span = span.enter();
         // Validate discovered block
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
@@ -240,6 +244,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
+        let span2 = self.span.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -261,6 +266,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     reward_curve,
                     vdf_steps_guard,
                     ema_service_sender,
+                    span2,
                 )
             });
 

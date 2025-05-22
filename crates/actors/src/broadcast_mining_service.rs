@@ -2,7 +2,7 @@ use crate::mining::PartitionMiningActor;
 use actix::prelude::*;
 use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, Span};
 
 // Message types
 
@@ -38,15 +38,17 @@ pub struct BroadcastPartitionsExpiration(pub H256List);
 /// Broadcaster actor
 #[derive(Debug, Default)]
 pub struct BroadcastMiningService {
-    subscribers: Vec<Addr<PartitionMiningActor>>,
+    pub subscribers: Vec<Addr<PartitionMiningActor>>,
+    pub span: Option<Span>,
 }
 // Actor Definition
 
 impl BroadcastMiningService {
     /// Initialize a new `MiningBroadcaster`
-    pub const fn new() -> Self {
+    pub fn new(span: Option<Span>) -> Self {
         Self {
             subscribers: Vec::new(),
+            span: Some(span.unwrap_or(Span::current())),
         }
     }
 }
@@ -69,6 +71,11 @@ impl Handler<Subscribe> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: Subscribe, _: &mut Context<Self>) {
+        let span = self.span.clone().unwrap();
+        let _span = span.enter();
+
+        debug!("PartitionMiningActor subscribed");
+
         self.subscribers.push(msg.0);
     }
 }
@@ -87,6 +94,8 @@ impl Handler<BroadcastMiningSeed> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
+        let span = self.span.clone().unwrap();
+        let _span = span.enter();
         info!(
             "Broadcast Mining: {:?} subs: {}",
             msg.seed,

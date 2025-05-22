@@ -32,7 +32,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Span};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -86,6 +86,8 @@ pub struct BlockProducerActor {
     /// before mining can be stopped after the first solution. This guard prevents
     /// producing extra blocks that would cause non-deterministic test behavior.
     pub blocks_remaining_for_test: Option<u64>,
+    /// Tracing span
+    pub span: Span,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -123,7 +125,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         Self,
         eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>,
     >;
-
     #[tracing::instrument(skip_all, fields(
         minting_address = ?msg.0.mining_address,
         partition_hash = ?msg.0.partition_hash,
@@ -132,6 +133,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         chunk = ?msg.0.chunk.len(),
     ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
+        let span = self.span.clone();
+        let _span = span.enter();
         let solution = msg.0;
         info!(
             "BlockProducerActor solution received: solution_hash={}",

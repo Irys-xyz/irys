@@ -813,7 +813,8 @@ impl IrysNode {
             .await?;
 
         // start the broadcast mining service
-        let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service();
+        let span = Span::current();
+        let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
 
         // start the epoch service
         let (storage_module_infos, epoch_service_actor) =
@@ -1048,14 +1049,12 @@ impl IrysNode {
         // - Initializes storage modules when they receive partition assignments
         // - Handles the dynamic addition/removal of storage modules
         // - Coordinates with the epoch service for runtime updates
+        debug!("Starting StorageModuleService");
         let _handle = StorageModuleService::spawn_service(
             &task_exec,
             receivers.storage_modules,
             storage_modules,
             &irys_node_ctx.actor_addresses,
-            irys_node_ctx.arbiters.clone(),
-            block_tree_guard.clone(),
-            vdf_steps_guard.clone(),
             &config,
         );
 
@@ -1297,6 +1296,7 @@ impl IrysNode {
             price_oracle,
             service_senders: service_senders.clone(),
             blocks_remaining_for_test: None,
+            span: Span::current(),
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
@@ -1343,6 +1343,7 @@ impl IrysNode {
             gossip_sender,
             epoch_service: epoch_service.clone(),
             reward_curve,
+            span: Span::current(),
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =
@@ -1527,11 +1528,14 @@ fn init_peer_list_service(
     (peer_list_service.into(), peer_list_arbiter)
 }
 
-fn init_broadcaster_service() -> (actix::Addr<BroadcastMiningService>, Arbiter) {
+fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>, Arbiter) {
     let broadcast_arbiter = Arbiter::new();
     let broadcast_mining_actor =
         BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-            BroadcastMiningService::default()
+            BroadcastMiningService {
+                span: Some(span),
+                ..Default::default()
+            }
         });
     SystemRegistry::set(broadcast_mining_actor.clone());
     (broadcast_mining_actor, broadcast_arbiter)
