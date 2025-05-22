@@ -885,14 +885,14 @@ where
 {
     type Result = Vec<(Address, PeerListItem)>;
 
-    fn handle(&mut self, msg: TrustedPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, _msg: TrustedPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         let mut peers: Vec<(Address, PeerListItem)> = self
             .peer_list_cache
             .iter()
             .map(|(key, value)| (*key, value.clone()))
             .collect();
 
-        peers.retain(|(miner_address, peer)| {
+        peers.retain(|(_miner_address, peer)| {
             self.trusted_peers_api_addresses.contains(&peer.address.api)
         });
 
@@ -1170,7 +1170,10 @@ where
             self.currently_running_announcements
                 .remove(&msg.peer_api_address);
             let message = NewPotentialPeer::new(msg.peer_api_address);
-            debug!("Waiting for {:?} to try to announce yourself again", PEER_HANDSHAKE_RETRY_INTERVAL);
+            debug!(
+                "Waiting for {:?} to try to announce yourself again",
+                PEER_HANDSHAKE_RETRY_INTERVAL
+            );
             ctx.run_later(PEER_HANDSHAKE_RETRY_INTERVAL, move |service, ctx| {
                 debug!("Trying to run an announcement again");
                 let address = ctx.address();

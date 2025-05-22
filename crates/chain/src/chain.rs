@@ -577,7 +577,7 @@ impl IrysNode {
             irys_api_client::IrysApiClient::new(),
             ctx.peer_list.clone(),
             node_mode,
-            latest_known_block_height as usize
+            latest_known_block_height as usize,
         )
         .await?;
 

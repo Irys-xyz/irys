@@ -1,7 +1,7 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::cache::GossipCacheKey;
-use crate::gossip_service::SyncState;
 use crate::peer_list::PeerListFacade;
+use crate::sync::SyncState;
 use crate::types::{GossipDataRequest, InternalGossipError, InvalidDataError};
 use crate::{cache::GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};

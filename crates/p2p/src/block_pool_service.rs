@@ -1,5 +1,6 @@
 use crate::gossip_service::fast_forward_vdf_steps_from_block;
 use crate::peer_list::{PeerListFacade, PeerListFacadeError};
+use crate::SyncState;
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
     WrapFuture,
@@ -44,6 +45,8 @@ where
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
     pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+
+    sync_state: SyncState,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -60,6 +63,7 @@ where
             block_producer: None,
             peer_list: None,
             vdf_sender: None,
+            sync_state: SyncState::default(),
         }
     }
 }
@@ -104,6 +108,7 @@ where
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
         vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+        sync_state: SyncState,
     ) -> Self {
         Self {
             db: Some(db),
@@ -112,6 +117,7 @@ where
             peer_list: Some(peer_list),
             block_producer: Some(block_producer_addr),
             vdf_sender,
+            sync_state,
         }
     }
 
@@ -125,6 +131,7 @@ where
             block_header.block_hash.0.to_base58(),
             block_header.height
         );
+        let current_block_height = block_header.height;
         let prev_block_hash = block_header.previous_block_hash;
         let current_block_hash = block_header.block_hash;
         let vdf_limiter_info = block_header.vdf_limiter_info.clone();
@@ -139,6 +146,8 @@ where
             .insert(prev_block_hash, block_header.clone());
         self.block_hash_to_parent_hash
             .insert(current_block_hash, prev_block_hash);
+
+        let sync_state = self.sync_state.clone();
 
         Box::pin(
             async move {
@@ -191,6 +200,7 @@ where
                         "Block pool: Block {} has been processed",
                         current_block_hash.0.to_base58()
                     );
+                    sync_state.mark_processed(current_block_height as usize);
                     self_addr.do_send(RemoveBlockFromPool {
                         block_hash: block_header.block_hash,
                     });

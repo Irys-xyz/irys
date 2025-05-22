@@ -376,6 +376,7 @@ impl GossipServiceTestFixture {
 
         let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
 
+        gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
                 mempool_stub,

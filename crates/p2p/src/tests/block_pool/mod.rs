@@ -1,6 +1,7 @@
 use crate::block_pool_service::{BlockPoolService, ProcessBlock};
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
+use crate::{sync_chain, SyncState};
 use actix::Actor;
 use async_trait::async_trait;
 use base58::ToBase58;
@@ -130,11 +131,13 @@ async fn should_process_block() {
     let peer_addr = peer_list_service.start();
 
     let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
+    let sync_state = SyncState::new(false);
     let service = BlockPoolService::new_with_client(
         db.clone(),
         peer_addr.into(),
         block_discovery_stub.clone(),
         Some(vdf_tx),
+        sync_state,
     );
     let addr = service.start();
 
@@ -284,12 +287,14 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("can't send message to peer list");
 
     let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
+    let sync_state = SyncState::new(false);
 
     let service = BlockPoolService::new_with_client(
         db.clone(),
         peer_addr.into(),
         block_discovery_stub.clone(),
         Some(vdf_tx),
+        sync_state,
     );
     let addr = service.start();
 
