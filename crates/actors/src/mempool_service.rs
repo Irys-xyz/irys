@@ -92,8 +92,8 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 /// Messages that the Mempool Service supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
-    ChunkIngressMessage,
-    CommitmentTxIngressMessage,
+    ChunkIngressMessage(UnpackedChunk),
+    CommitmentTxIngressMessage(CommitmentTransaction),
     GetBestMempoolTxs,
     TxExistenceQuery,
     TxIngressMessage(IrysTransactionHeader),
@@ -497,348 +497,10 @@ impl ChunkIngressError {
     }
 }
 
-/// Needs to be refactored when this handler can be made async.
-/// Mixing async and sync code is fugly.
-
-impl Handler<CommitmentTxIngressMessage> for MempoolService {
-    type Result = Result<(), TxIngressError>;
-
-    fn handle(
-        &mut self,
-        commitment_tx_msg: CommitmentTxIngressMessage,
-        ctx: &mut Context<Self>,
-    ) -> Self::Result {
-        let commitment_tx = commitment_tx_msg.0.clone();
-        debug!(
-            "received commitment tx {:?}",
-            &commitment_tx.id.0.to_base58()
-        );
-
-        // Early out if we already know about this transaction (invalid)
-        if self.invalid_tx.contains(&commitment_tx.id) {
-            return Err(TxIngressError::Skipped);
-        }
-
-        // Check if the transaction already exists in valid transactions
-        let tx_exists = self
-            .valid_commitment_tx
-            .get(&commitment_tx.signer)
-            .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
-
-        if tx_exists {
-            return Err(TxIngressError::Skipped);
-        }
-
-        // Validate the tx anchor
-        self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
-
-        // Check pending commitments and cached commitments and active commitments
-        let commitment_status = self.get_commitment_status(&commitment_tx);
-        if commitment_status == CommitmentStatus::Accepted {
-            // Validate tx signature
-            self.validate_signature(&commitment_tx)?;
-
-            // Add the commitment tx to the valid tx list to be included in the next block
-            self.valid_commitment_tx
-                .entry(commitment_tx.signer)
-                .or_default()
-                .push(commitment_tx.clone());
-
-            self.recent_valid_tx.insert(commitment_tx.id);
-
-            // Process any pending pledges for this newly staked address
-            // ------------------------------------------------------
-            // When a stake transaction is accepted, we can now process any pledge
-            // transactions from the same address that arrived earlier but were
-            // waiting for the stake. This effectively resolves the dependency
-            // order for address-based validation.
-            if let Some(pledges_lru) = self.pending_pledges.pop(&commitment_tx.signer) {
-                // Extract all pending pledges as a vector of owned transactions
-                let pledges: Vec<_> = pledges_lru
-                    .into_iter()
-                    .map(|(_, pledge_tx)| pledge_tx)
-                    .collect();
-
-                // PERFORMANCE NOTE: Processing all pending pledges synchronously
-                // If an address has accumulated many pending pledges, this could
-                // potentially block the actor for a significant time.
-                for pledge_tx in pledges {
-                    // Re-process each pledge now that its signer is staked
-                    // No need to clone as we own the transaction objects
-                    self.handle(CommitmentTxIngressMessage(pledge_tx), ctx)
-                        .expect("Failed to process pending pledge for newly staked address");
-                }
-            }
-
-            // Gossip transaction
-            let gossip_sender = self.gossip_tx.clone();
-            let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
-
-            let _ = tokio::task::spawn(async move {
-                if let Err(error) = gossip_sender.send(gossip_data).await {
-                    tracing::error!("Failed to send gossip data: {:?}", error);
-                }
-            });
-
-            Ok(())
-        } else {
-            if commitment_status == CommitmentStatus::Unstaked {
-                // For unstaked pledges, we cache them in a 2-level LRU structure:
-                // Level 1: Keyed by signer address (allows tracking multiple addresses)
-                // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
-
-                if let Some(pledges_cache) = self.pending_pledges.get_mut(&commitment_tx.signer) {
-                    // Address already exists in cache - add this pledge transaction to its lru cache
-                    pledges_cache.put(commitment_tx.id, commitment_tx.clone());
-                } else {
-                    // First pledge from this address - create a new nested lru cache
-                    let max_pending_pledge_items =
-                        self.config.consensus.mempool.max_pending_pledge_items;
-                    let mut new_address_cache =
-                        LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
-
-                    // Add the pledge transaction to the new lru cache for the address
-                    new_address_cache.put(commitment_tx.id, commitment_tx.clone());
-
-                    // Add the address cache to the primary lru cache
-                    self.pending_pledges
-                        .put(commitment_tx.signer, new_address_cache);
-                }
-                Ok(())
-            } else {
-                Err(TxIngressError::Skipped)
-            }
-        }
-    }
-}
-
 impl Handler<ChunkIngressMessage> for MempoolService {
     type Result = Result<(), ChunkIngressError>;
 
     fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        // TODO: maintain a shared read transaction so we have read isolation
-        let chunk: UnpackedChunk = chunk_msg.0;
-
-        let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
-
-        info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
-
-        // Check to see if we have a cached data_root for this chunk
-        let read_tx = self
-            .irys_db
-            .tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
-
-        let binding = self.storage_modules_guard.read();
-        let candidate_sms = binding
-            .iter()
-            .filter_map(|sm| {
-                sm.get_writeable_offsets(&chunk)
-                    .ok()
-                    .map(|write_offsets| (sm, write_offsets))
-            })
-            .collect::<Vec<_>>();
-
-        let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-            .map_err(|_| ChunkIngressError::DatabaseError)?
-            .map(|cdr| cdr.data_size)
-            .or_else(|| {
-                debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
-                candidate_sms.iter().find_map(|(sm, write_offsets)| {
-                    write_offsets.iter().find_map(|wo| {
-                        sm.query_submodule_db_by_offset(*wo, |tx| {
-                            get_data_size_by_data_root(tx, chunk.data_root)
-                        })
-                        .ok()
-                        .flatten()
-                    })
-                })
-            });
-
-        let data_size = match data_size {
-            Some(ds) => ds,
-            None => {
-                // We don't have a data_root for this chunk but possibly the transaction containing this
-                // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
-                if let Some(chunks_map) = self.pending_chunks.get_mut(&chunk.data_root) {
-                    chunks_map.put(chunk.tx_offset, chunk.clone());
-                } else {
-                    // If there's no entry for this data_root yet, create one
-                    let mut new_lru_cache =
-                        LruCache::new(NonZeroUsize::new(max_chunks_per_item).unwrap());
-                    new_lru_cache.put(chunk.tx_offset, chunk.clone());
-                    self.pending_chunks.put(chunk.data_root, new_lru_cache);
-                }
-                return Ok(());
-            }
-        };
-
-        // Validate that the data_size for this chunk matches the data_size
-        // recorded in the transaction header.
-        if data_size != chunk.data_size {
-            error!(
-                "Invalid data_size for data_root: expected: {} got:{}",
-                data_size, chunk.data_size
-            );
-            return Err(ChunkIngressError::InvalidDataSize);
-        }
-
-        // Next validate the data_path/proof for the chunk, linking
-        // data_root->chunk_hash
-        let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
-        let path_buff = &chunk.data_path;
-
-        info!(
-            "chunk_offset:{} data_size:{} offset:{}",
-            chunk.tx_offset, chunk.data_size, target_offset
-        );
-
-        let path_result = validate_path(root_hash, path_buff, target_offset)
-            .map_err(|_| ChunkIngressError::InvalidProof)?;
-
-        // Use data_size to identify and validate that only the last chunk
-        // can be less than chunk_size
-        let chunk_len = chunk.bytes.len() as u64;
-
-        // TODO: Mark the data_root as invalid if the chunk is an incorrect size
-        // Someone may have created a data_root that seemed valid, but if the
-        // data_path is valid but the chunk size doesn't mach the protocols
-        // consensus size, then the data_root is actually invalid and no future
-        // chunks from that data_root should be ingressed.
-        let chunk_size = self.config.consensus.chunk_size;
-
-        // Is this chunk index any of the chunks before the last in the tx?
-        let num_chunks_in_tx = data_size.div_ceil(chunk_size);
-        if u64::from(*chunk.tx_offset) < num_chunks_in_tx - 1 {
-            // Ensure prefix chunks are all exactly chunk_size
-            if chunk_len != chunk_size {
-                error!(
-                    "InvalidChunkSize: incomplete not last chunk, tx offset: {} chunk len: {}",
-                    chunk.tx_offset, chunk_len
-                );
-                return Err(ChunkIngressError::InvalidChunkSize);
-            }
-        } else {
-            // Ensure the last chunk is no larger than chunk_size
-            if chunk_len > chunk_size {
-                error!(
-                    "InvalidChunkSize: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                    chunk.tx_offset, chunk_len
-                );
-                return Err(ChunkIngressError::InvalidChunkSize);
-            }
-        }
-
-        if path_result.leaf_hash
-            != hash_sha256(&chunk.bytes.0).map_err(|_| ChunkIngressError::InvalidDataHash)?
-        {
-            return Err(ChunkIngressError::InvalidDataHash);
-        }
-        // Check that the leaf hash on the data_path matches the chunk_hash
-
-        // TODO: fix all these unwraps!
-        // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-
-        self.irys_db
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
-
-        for sm in self.storage_modules_guard.read().iter() {
-            if !sm
-                .get_writeable_offsets(&chunk)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
-                sm.write_data_chunk(&chunk)
-                    .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
-            }
-        }
-
-        // ==== INGRESS PROOFS ====
-        let root_hash: H256 = root_hash.into();
-
-        // check if we have generated an ingress proof for this tx already
-        // if we have, update it's expiry height
-
-        //  TODO: hook into whatever manages ingress proofs
-        if read_tx
-            .get::<IngressProofs>(root_hash)
-            .map_err(|_| ChunkIngressError::DatabaseError)?
-            .is_some()
-        {
-            info!(
-                "We've already generated an ingress proof for data root {}",
-                &root_hash
-            );
-
-            return Ok(());
-        };
-
-        // check if we have all the chunks for this tx
-        let read_tx = self
-            .irys_db
-            .tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
-
-        let mut cursor = read_tx
-            .cursor_dup_read::<CachedChunksIndex>()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
-        // get the number of dupsort values (aka the number of chunks)
-        // this ASSUMES that the index isn't corrupt (no double values etc)
-        // the ingress proof generation task does a more thorough check
-        let chunk_count = cursor
-            .dup_count(root_hash)
-            .map_err(|_| ChunkIngressError::DatabaseError)?
-            .ok_or(ChunkIngressError::DatabaseError)?;
-
-        // data size is the offset of the last chunk
-        // add one as index is 0-indexed
-        let expected_chunk_count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
-
-        if chunk_count == expected_chunk_count {
-            // we *should* have all the chunks
-            // dispatch a ingress proof task
-
-            let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
-
-            let (_, latest_height, _, _) = canon_chain
-                .0
-                .last()
-                .ok_or(ChunkIngressError::ServiceUninitialized)?;
-
-            let db = self.irys_db.clone();
-            let signer = self.config.irys_signer();
-            let latest_height = *latest_height;
-            self.task_exec.clone().spawn_blocking(async move {
-                generate_ingress_proof(db.clone(), root_hash, data_size, chunk_size, signer)
-                    // TODO: handle results instead of unwrapping
-                    .unwrap();
-                db.update(|wtx| {
-                    wtx.put::<DataRootLRU>(
-                        root_hash,
-                        DataRootLRUEntry {
-                            last_height: latest_height,
-                            ingress_proof: true,
-                        },
-                    )
-                })
-                .unwrap()
-                .unwrap();
-            });
-        }
-
-        let gossip_sender = self.gossip_tx.clone();
-        let gossip_data = GossipData::Chunk(chunk);
-
-        let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender.send(gossip_data).await {
-                tracing::error!("Failed to send gossip data: {:?}", error);
-            }
-        });
-
-        Ok(())
     }
 }
 #[derive(MessageResponse, Debug)]
@@ -1225,8 +887,371 @@ impl Inner {
         let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
 
         match msg {
-            MempoolServiceMessage::CommitmentTxIngressMessage => {}
-            MempoolServiceMessage::ChunkIngressMessage => {}
+            MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx) => {
+                //let commitment_tx = commitment_tx_msg.0.clone();
+                debug!(
+                    "received commitment tx {:?}",
+                    &commitment_tx.id.0.to_base58()
+                );
+
+                // Early out if we already know about this transaction (invalid)
+                if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
+                    return Err(TxIngressError::Skipped);
+                }
+
+                // Check if the transaction already exists in valid transactions
+                let tx_exists = mempool_state_guard
+                    .valid_commitment_tx
+                    .get(&commitment_tx.signer)
+                    .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
+
+                if tx_exists {
+                    return Err(TxIngressError::Skipped);
+                }
+
+                // Validate the tx anchor
+                mempool_state_guard.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
+
+                // Check pending commitments and cached commitments and active commitments
+                let commitment_status = mempool_state_guard.get_commitment_status(&commitment_tx);
+                if commitment_status == CommitmentStatus::Accepted {
+                    // Validate tx signature
+                    mempool_state_guard.validate_signature(&commitment_tx)?;
+
+                    // Add the commitment tx to the valid tx list to be included in the next block
+                    mempool_state_guard
+                        .valid_commitment_tx
+                        .entry(commitment_tx.signer)
+                        .or_default()
+                        .push(commitment_tx.clone());
+
+                    mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
+
+                    // Process any pending pledges for this newly staked address
+                    // ------------------------------------------------------
+                    // When a stake transaction is accepted, we can now process any pledge
+                    // transactions from the same address that arrived earlier but were
+                    // waiting for the stake. This effectively resolves the dependency
+                    // order for address-based validation.
+                    if let Some(pledges_lru) = mempool_state_guard
+                        .pending_pledges
+                        .pop(&commitment_tx.signer)
+                    {
+                        // Extract all pending pledges as a vector of owned transactions
+                        let pledges: Vec<_> = pledges_lru
+                            .into_iter()
+                            .map(|(_, pledge_tx)| pledge_tx)
+                            .collect();
+
+                        // PERFORMANCE NOTE: Processing all pending pledges synchronously
+                        // If an address has accumulated many pending pledges, this could
+                        // potentially block the actor for a significant time.
+                        for pledge_tx in pledges {
+                            // Re-process each pledge now that its signer is staked
+                            // No need to clone as we own the transaction objects
+                            self.handle(CommitmentTxIngressMessage(pledge_tx), ctx)
+                                .expect(
+                                    "Failed to process pending pledge for newly staked address",
+                                );
+                        }
+                    }
+
+                    // Gossip transaction
+                    // TODO is gossip sender not in the senders struct?
+                    let gossip_sender = mempool_state_guard.gossip_tx.clone();
+                    let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
+
+                    //todo fix this to be async!
+                    let _ = tokio::task::spawn(async move {
+                        if let Err(error) = gossip_sender.send(gossip_data).await {
+                            tracing::error!("Failed to send gossip data: {:?}", error);
+                        }
+                    });
+
+                    Ok(())
+                } else {
+                    if commitment_status == CommitmentStatus::Unstaked {
+                        // For unstaked pledges, we cache them in a 2-level LRU structure:
+                        // Level 1: Keyed by signer address (allows tracking multiple addresses)
+                        // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
+
+                        if let Some(pledges_cache) = mempool_state_guard
+                            .pending_pledges
+                            .get_mut(&commitment_tx.signer)
+                        {
+                            // Address already exists in cache - add this pledge transaction to its lru cache
+                            pledges_cache.put(commitment_tx.id, commitment_tx.clone());
+                        } else {
+                            // First pledge from this address - create a new nested lru cache
+                            let max_pending_pledge_items = mempool_state_guard
+                                .config
+                                .consensus
+                                .mempool
+                                .max_pending_pledge_items;
+                            let mut new_address_cache =
+                                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+                            // Add the pledge transaction to the new lru cache for the address
+                            new_address_cache.put(commitment_tx.id, commitment_tx.clone());
+
+                            // Add the address cache to the primary lru cache
+                            mempool_state_guard
+                                .pending_pledges
+                                .put(commitment_tx.signer, new_address_cache);
+                        }
+                        Ok(())
+                    } else {
+                        Err(TxIngressError::Skipped)
+                    }
+                }
+            }
+            MempoolServiceMessage::ChunkIngressMessage(chunk) => {
+                // TODO: maintain a shared read transaction so we have read isolation
+                let max_chunks_per_item = mempool_state_guard
+                    .config
+                    .consensus
+                    .mempool
+                    .max_chunks_per_item;
+
+                info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
+
+                // Check to see if we have a cached data_root for this chunk
+                let read_tx = mempool_state_guard
+                    .irys_db
+                    .tx()
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+
+                let binding = mempool_state_guard.storage_modules_guard.read();
+                let candidate_sms = binding
+                    .iter()
+                    .filter_map(|sm| {
+                        sm.get_writeable_offsets(&chunk)
+                            .ok()
+                            .map(|write_offsets| (sm, write_offsets))
+                    })
+                    .collect::<Vec<_>>();
+
+                let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+                    .map(|cdr| cdr.data_size)
+                    .or_else(|| {
+                        debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
+                        candidate_sms.iter().find_map(|(sm, write_offsets)| {
+                            write_offsets.iter().find_map(|wo| {
+                                sm.query_submodule_db_by_offset(*wo, |tx| {
+                                    get_data_size_by_data_root(tx, chunk.data_root)
+                                })
+                                .ok()
+                                .flatten()
+                            })
+                        })
+                    });
+
+                let data_size = match data_size {
+                    Some(ds) => ds,
+                    None => {
+                        // We don't have a data_root for this chunk but possibly the transaction containing this
+                        // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
+                        if let Some(chunks_map) =
+                            mempool_state_guard.pending_chunks.get_mut(&chunk.data_root)
+                        {
+                            chunks_map.put(chunk.tx_offset, chunk.clone());
+                        } else {
+                            // If there's no entry for this data_root yet, create one
+                            let mut new_lru_cache =
+                                LruCache::new(NonZeroUsize::new(max_chunks_per_item).unwrap());
+                            new_lru_cache.put(chunk.tx_offset, chunk.clone());
+                            mempool_state_guard
+                                .pending_chunks
+                                .put(chunk.data_root, new_lru_cache);
+                        }
+                        return Ok(());
+                    }
+                };
+
+                // Validate that the data_size for this chunk matches the data_size
+                // recorded in the transaction header.
+                if data_size != chunk.data_size {
+                    error!(
+                        "Invalid data_size for data_root: expected: {} got:{}",
+                        data_size, chunk.data_size
+                    );
+                    return Err(ChunkIngressError::InvalidDataSize);
+                }
+
+                // Next validate the data_path/proof for the chunk, linking
+                // data_root->chunk_hash
+                let root_hash = chunk.data_root.0;
+                let target_offset = u128::from(
+                    chunk.end_byte_offset(mempool_state_guard.config.consensus.chunk_size),
+                );
+                let path_buff = &chunk.data_path;
+
+                info!(
+                    "chunk_offset:{} data_size:{} offset:{}",
+                    chunk.tx_offset, chunk.data_size, target_offset
+                );
+
+                let path_result = validate_path(root_hash, path_buff, target_offset)
+                    .map_err(|_| ChunkIngressError::InvalidProof)?;
+
+                // Use data_size to identify and validate that only the last chunk
+                // can be less than chunk_size
+                let chunk_len = chunk.bytes.len() as u64;
+
+                // TODO: Mark the data_root as invalid if the chunk is an incorrect size
+                // Someone may have created a data_root that seemed valid, but if the
+                // data_path is valid but the chunk size doesn't mach the protocols
+                // consensus size, then the data_root is actually invalid and no future
+                // chunks from that data_root should be ingressed.
+                let chunk_size = mempool_state_guard.config.consensus.chunk_size;
+
+                // Is this chunk index any of the chunks before the last in the tx?
+                let num_chunks_in_tx = data_size.div_ceil(chunk_size);
+                if u64::from(*chunk.tx_offset) < num_chunks_in_tx - 1 {
+                    // Ensure prefix chunks are all exactly chunk_size
+                    if chunk_len != chunk_size {
+                        error!(
+                            "InvalidChunkSize: incomplete not last chunk, tx offset: {} chunk len: {}",
+                            chunk.tx_offset, chunk_len
+                        );
+                        return Err(ChunkIngressError::InvalidChunkSize);
+                    }
+                } else {
+                    // Ensure the last chunk is no larger than chunk_size
+                    if chunk_len > chunk_size {
+                        error!(
+                            "InvalidChunkSize: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
+                            chunk.tx_offset, chunk_len
+                        );
+                        return Err(ChunkIngressError::InvalidChunkSize);
+                    }
+                }
+
+                if path_result.leaf_hash
+                    != hash_sha256(&chunk.bytes.0)
+                        .map_err(|_| ChunkIngressError::InvalidDataHash)?
+                {
+                    return Err(ChunkIngressError::InvalidDataHash);
+                }
+                // Check that the leaf hash on the data_path matches the chunk_hash
+
+                // TODO: fix all these unwraps!
+                // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
+
+                mempool_state_guard
+                    .irys_db
+                    .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+
+                for sm in mempool_state_guard.storage_modules_guard.read().iter() {
+                    if !sm
+                        .get_writeable_offsets(&chunk)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
+                        sm.write_data_chunk(&chunk)
+                            .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
+                    }
+                }
+
+                // ==== INGRESS PROOFS ====
+                let root_hash: H256 = root_hash.into();
+
+                // check if we have generated an ingress proof for this tx already
+                // if we have, update it's expiry height
+
+                //  TODO: hook into whatever manages ingress proofs
+                if read_tx
+                    .get::<IngressProofs>(root_hash)
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+                    .is_some()
+                {
+                    info!(
+                        "We've already generated an ingress proof for data root {}",
+                        &root_hash
+                    );
+
+                    return Ok(());
+                };
+
+                // check if we have all the chunks for this tx
+                let read_tx = mempool_state_guard
+                    .irys_db
+                    .tx()
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+
+                let mut cursor = read_tx
+                    .cursor_dup_read::<CachedChunksIndex>()
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+                // get the number of dupsort values (aka the number of chunks)
+                // this ASSUMES that the index isn't corrupt (no double values etc)
+                // the ingress proof generation task does a more thorough check
+                let chunk_count = cursor
+                    .dup_count(root_hash)
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+                    .ok_or(ChunkIngressError::DatabaseError)?;
+
+                // data size is the offset of the last chunk
+                // add one as index is 0-indexed
+                let expected_chunk_count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
+
+                if chunk_count == expected_chunk_count {
+                    // we *should* have all the chunks
+                    // dispatch a ingress proof task
+
+                    let canon_chain = mempool_state_guard
+                        .block_tree_read_guard
+                        .read()
+                        .get_canonical_chain();
+
+                    let (_, latest_height, _, _) = canon_chain
+                        .0
+                        .last()
+                        .ok_or(ChunkIngressError::ServiceUninitialized)?;
+
+                    let db = mempool_state_guard.irys_db.clone();
+                    let signer = mempool_state_guard.config.irys_signer();
+                    let latest_height = *latest_height;
+                    mempool_state_guard
+                        .task_exec
+                        .clone()
+                        .spawn_blocking(async move {
+                            generate_ingress_proof(
+                                db.clone(),
+                                root_hash,
+                                data_size,
+                                chunk_size,
+                                signer,
+                            )
+                            // TODO: handle results instead of unwrapping
+                            .unwrap();
+                            db.update(|wtx| {
+                                wtx.put::<DataRootLRU>(
+                                    root_hash,
+                                    DataRootLRUEntry {
+                                        last_height: latest_height,
+                                        ingress_proof: true,
+                                    },
+                                )
+                            })
+                            .unwrap()
+                            .unwrap();
+                        });
+                }
+
+                let gossip_sender = mempool_state_guard.gossip_tx.clone();
+                let gossip_data = GossipData::Chunk(chunk);
+
+                let _ = tokio::task::spawn(async move {
+                    if let Err(error) = gossip_sender.send(gossip_data).await {
+                        tracing::error!("Failed to send gossip data: {:?}", error);
+                    }
+                });
+
+                Ok(())
+            }
             MempoolServiceMessage::GetBestMempoolTxs => {}
             MempoolServiceMessage::TxExistenceQuery => {}
             MempoolServiceMessage::TxIngressMessage(tx) => {
