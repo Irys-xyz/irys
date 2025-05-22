@@ -148,7 +148,7 @@ impl alloy_rlp::Encodable for IrysSignature {
             list: true,
             payload_length: sig.rlp_rs_len() + sig.v().length(),
         }
-        .encode(out); // for some reason, we encode V then R then S ? not sure why
+        .encode(out); // V R S encode ordering is specified by ethereum's tx signature specs
         sig.write_rlp_vrs(out, sig.v());
     }
 
