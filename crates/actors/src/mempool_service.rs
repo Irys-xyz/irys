@@ -2,68 +2,45 @@ use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
-use actix::{
-    Actor, Addr, Context, Handler, MailboxError, Message, MessageResponse, Supervised,
-    SystemService,
-};
+use actix::{Addr, Context, Handler, MailboxError, Message, MessageResponse};
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
-use irys_database::db::RethDbWrapper;
-use irys_database::db_cache::data_size_to_chunk_count;
-use irys_database::db_cache::DataRootLRUEntry;
-use irys_database::submodule::get_data_size_by_data_root;
-use irys_database::tables::DataRootLRU;
-use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
-use irys_database::{insert_tx_header, tx_header_by_txid, SystemLedger};
+use futures::future::Either;
+use irys_database::{
+    db::RethDbWrapper,
+    db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
+    submodule::get_data_size_by_data_root,
+    tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
+    {insert_tx_header, tx_header_by_txid, SystemLedger},
+};
 use irys_primitives::CommitmentType;
 use irys_storage::StorageModulesReadGuard;
-use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
-    IrysTransactionHeader, H256,
-};
-use irys_types::{
-    Address, CommitmentTransaction, Config, DataLedger, DataRoot, IrysBlockHeader,
-    IrysTransactionCommon, IrysTransactionId, TxChunkOffset, U256,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
+    validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot, GossipData,
+    IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, IrysTransactionId,
+    TxChunkOffset, H256, U256,
 };
 use lru::LruCache;
-use reth::tasks::TaskExecutor;
-use reth_db::cursor::DbDupCursorRO as _;
-use reth_db::transaction::DbTx as _;
-use reth_db::transaction::DbTxMut as _;
-use reth_db::Database as _;
-use std::collections::HashSet;
-use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
-use std::num::NonZeroUsize;
+use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use reth_db::{
+    cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
+};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    future::Future,
+    num::NonZeroUsize,
+    pin::pin,
+    sync::{Arc, RwLock, RwLockReadGuard},
+};
+use tokio::{
+    sync::mpsc::{Sender, UnboundedReceiver},
+    task::JoinHandle,
+    time::{sleep, Duration},
+};
 use tracing::{debug, error, info, warn};
-
-#[async_trait::async_trait]
-pub trait MempoolFacade: Clone + Send + Sync + 'static {
-    async fn handle_data_transaction(
-        &self,
-        tx_header: IrysTransactionHeader,
-    ) -> Result<(), TxIngressError>;
-    async fn handle_commitment_transaction(
-        &self,
-        tx_header: CommitmentTransaction,
-    ) -> Result<(), TxIngressError>;
-    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
-}
-
-#[derive(Clone, Debug)]
-pub struct MempoolServiceFacadeImpl {
-    service: Addr<MempoolService>,
-}
-
-impl From<Addr<MempoolService>> for MempoolServiceFacadeImpl {
-    fn from(value: Addr<MempoolService>) -> Self {
-        Self { service: value }
-    }
-}
 
 impl From<MailboxError> for TxIngressError {
     fn from(value: MailboxError) -> Self {
@@ -83,36 +60,8 @@ impl From<MailboxError> for ChunkIngressError {
     }
 }
 
-#[async_trait]
-impl MempoolFacade for MempoolServiceFacadeImpl {
-    async fn handle_data_transaction(
-        &self,
-        tx_header: IrysTransactionHeader,
-    ) -> Result<(), TxIngressError> {
-        self.service.send(TxIngressMessage(tx_header)).await?
-    }
-
-    async fn handle_commitment_transaction(
-        &self,
-        commitment_tx: CommitmentTransaction,
-    ) -> Result<(), TxIngressError> {
-        self.service
-            .send(CommitmentTxIngressMessage(commitment_tx))
-            .await?
-    }
-
-    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
-        self.service.send(ChunkIngressMessage(chunk)).await?
-    }
-
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
-        self.service.send(TxExistenceQuery(tx_id)).await?
-    }
-}
-
-/// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
-pub struct MempoolService {
+pub struct MempoolState {
     irys_db: DatabaseProvider,
     reth_db: RethDbWrapper,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
@@ -138,60 +87,120 @@ pub struct MempoolService {
     gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
 }
 
+pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
+
+/// Messages that the Mempool Service supports
+#[derive(Debug)]
+pub enum MempoolServiceMessage {
+    ChunkIngressMessage,
+    CommitmentTxIngressMessage,
+    GetBestMempoolTxs,
+    TxExistenceQuery,
+    TxIngressMessage,
+}
+
+#[derive(Debug)]
+struct Inner {
+    mempool_state: AtomicMempoolState,
+}
+
+/// The Mempool oversees pending transactions and validation of incoming tx.
+#[derive(Debug)]
+pub struct MempoolService {
+    shutdown: GracefulShutdown,
+    msg_rx: UnboundedReceiver<MempoolServiceMessage>,
+    inner: Inner,
+}
+
 impl Default for MempoolService {
     fn default() -> Self {
         unimplemented!("don't rely on the default implementation of the `MempoolService`");
     }
 }
 
-impl Actor for MempoolService {
-    type Context = Context<Self>;
-}
-
-/// Allows this actor to live in the the local service registry
-impl Supervised for MempoolService {}
-
-impl SystemService for MempoolService {}
-
 impl MempoolService {
-    /// Create a new instance of the mempool actor passing in a reference
-    /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
-    pub fn new(
+    /// Spawn a new Mempool service
+    pub fn spawn_service(
+        exec: &TaskExecutor,
         irys_db: DatabaseProvider,
         reth_db: RethDbWrapper,
-        task_exec: TaskExecutor,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_guard: BlockTreeReadGuard,
         commitment_state_guard: CommitmentStateReadGuard,
+        rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
         service_senders: ServiceSenders,
-        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
-    ) -> Self {
-        info!("service started");
-        let mempool_config = &config.consensus.mempool;
-        let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
-        let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
-        Self {
+        //gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
+    ) -> JoinHandle<()> {
+        let mempool_state = create_state(
             irys_db,
             reth_db,
-            valid_tx: BTreeMap::new(),
-            valid_commitment_tx: BTreeMap::new(),
-            invalid_tx: Vec::new(),
-            task_exec,
-            config: config.clone(),
-            storage_modules_guard,
-            block_tree_read_guard: block_tree_guard,
-            commitment_state_guard,
+            exec.clone(),
+            block_tree_guard.clone(),
+            commitment_state_guard.clone(),
+            storage_modules_guard.clone(),
+            config,
             service_senders,
-            gossip_tx,
-            recent_valid_tx: HashSet::new(),
-            pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
-            pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
-        }
+        );
+        exec.spawn_critical_with_graceful_shutdown_signal(
+            "Mempool Service",
+            |shutdown| async move {
+                let mempool_service = Self {
+                    shutdown,
+                    msg_rx: rx,
+                    inner: Inner {
+                        mempool_state: Arc::new(RwLock::new(mempool_state)),
+                    },
+                };
+                mempool_service
+                    .start()
+                    .await
+                    .expect("Mempool service encountered an irrecoverable error")
+            },
+        )
     }
+
+    async fn start(mut self) -> eyre::Result<()> {
+        tracing::info!("starting Mempool service");
+
+        let mut shutdown_future = pin!(self.shutdown);
+        let shutdown_guard = loop {
+            let mut msg_rx = pin!(self.msg_rx.recv());
+            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
+                Either::Left((Some(msg), _)) => {
+                    self.inner.handle_message(msg).await?;
+                }
+                Either::Left((None, _)) => {
+                    tracing::warn!("receiver channel closed");
+                    break None;
+                }
+                Either::Right((shutdown, _)) => {
+                    tracing::warn!("shutdown signal received");
+                    break Some(shutdown);
+                }
+            }
+        };
+
+        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdwon");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg).await?;
+        }
+
+        // explicitly inform the TaskManager that we're shutting down
+        drop(shutdown_guard);
+
+        tracing::info!("shutting down Mempool service");
+        Ok(())
+    }
+
     // Helper to get the canonical chain and latest height
     fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
-        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+        let mempool_state = &self.inner.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
+        let canon_chain = mempool_state_guard
+            .block_tree_read_guard
+            .read()
+            .get_canonical_chain();
         let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
@@ -205,13 +214,16 @@ impl MempoolService {
         tx_id: &IrysTransactionId,
         anchor: &H256,
     ) -> Result<IrysBlockHeader, TxIngressError> {
-        let read_tx = &self
+        let mempool_state = &self.inner.mempool_state.clone();
+        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+
+        let read_tx = mempool_state_guard
             .irys_db
             .tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         let latest_height = self.get_latest_block_height()?;
-        let anchor_expiry_depth = self
+        let anchor_expiry_depth = mempool_state_guard
             .config
             .node_config
             .consensus_config()
@@ -219,11 +231,14 @@ impl MempoolService {
             .anchor_expiry_depth as u64;
 
         // Allow transactions to use the txid of a transaction in the mempool
-        if self.recent_valid_tx.contains(anchor) {
-            let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        if mempool_state_guard.recent_valid_tx.contains(anchor) {
+            let (canonical_blocks, _) = mempool_state_guard
+                .block_tree_read_guard
+                .read()
+                .get_canonical_chain();
             let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
             // Just provide the most recent block as an anchor
-            match irys_database::block_header_by_hash(read_tx, latest_block_hash, false) {
+            match irys_database::block_header_by_hash(&read_tx, latest_block_hash, false) {
                 Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
                     debug!("valid txid anchor {} for tx {}", anchor, tx_id);
                     return Ok(hdr);
@@ -232,13 +247,13 @@ impl MempoolService {
             };
         }
 
-        match irys_database::block_header_by_hash(read_tx, anchor, false) {
+        match irys_database::block_header_by_hash(&read_tx, anchor, false) {
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
                 debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
                 Ok(hdr)
             }
             _ => {
-                self.invalid_tx.push(tx_id.clone());
+                mempool_state_guard.invalid_tx.push(tx_id.clone());
                 warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                 Err(TxIngressError::InvalidAnchor)
             }
@@ -254,7 +269,10 @@ impl MempoolService {
             info!("Signature is valid");
             Ok(())
         } else {
-            self.invalid_tx.push(tx.id());
+            let mempool_state = &self.inner.mempool_state.clone();
+            let mut mempool_state_guard =
+                mempool_state.write().expect("expected valid mempool state");
+            mempool_state_guard.invalid_tx.push(tx.id());
             debug!("Signature is NOT valid");
             Err(TxIngressError::InvalidSignature)
         }
@@ -287,8 +305,12 @@ impl MempoolService {
     }
 
     fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
+        let mempool_state = &self.inner.mempool_state.clone();
+        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
         // Check if already staked in the blockchain
-        let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
+        let is_staked = mempool_state_guard
+            .commitment_state_guard
+            .is_staked(commitment_tx.signer);
 
         // Most commitments are valid by default
         // Only pledges require special validation when not already staked
@@ -298,7 +320,7 @@ impl MempoolService {
         }
 
         // For unstaked pledges, validate against cache and pending transactions
-        let commitment_cache = self.service_senders.commitment_cache.clone();
+        let commitment_cache = mempool_state_guard.service_senders.commitment_cache.clone();
         let commitment_tx_clone = commitment_tx.clone();
         let cache_status = self
             .execute_async_operation(|| async move {
@@ -326,7 +348,10 @@ impl MempoolService {
         // For unstaked addresses, check for pending stake transactions
         if matches!(cache_status, CommitmentStatus::Unstaked) {
             // Get pending transactions for this address
-            if let Some(pending) = self.valid_commitment_tx.get(&commitment_tx.signer) {
+            if let Some(pending) = mempool_state_guard
+                .valid_commitment_tx
+                .get(&commitment_tx.signer)
+            {
                 // Check if there's at least one pending stake transaction
                 if pending
                     .iter()
@@ -353,13 +378,20 @@ impl MempoolService {
     fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
 
-        self.recent_valid_tx.remove(&txid);
+        let mempool_state = &self.inner.mempool_state.clone();
+        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+
+        mempool_state_guard.recent_valid_tx.remove(&txid);
 
         // Create a vector of addresses to update to avoid borrowing issues
-        let addresses_to_check: Vec<Address> = self.valid_commitment_tx.keys().cloned().collect();
+        let addresses_to_check: Vec<Address> = mempool_state_guard
+            .valid_commitment_tx
+            .keys()
+            .cloned()
+            .collect();
 
         for address in addresses_to_check {
-            if let Some(transactions) = self.valid_commitment_tx.get_mut(&address) {
+            if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
                 // Find the index of the transaction to remove
                 if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
                     // Remove the transaction
@@ -368,7 +400,7 @@ impl MempoolService {
 
                     // If the vector is now empty, remove the entry
                     if transactions.is_empty() {
-                        self.valid_commitment_tx.remove(&address);
+                        mempool_state_guard.valid_commitment_tx.remove(&address);
                     }
 
                     // Exit early once we've found and removed the transaction
@@ -1321,4 +1353,52 @@ pub fn generate_ingress_proof(
     db.update(|rw_tx| rw_tx.put::<IngressProofs>(data_root, proof))??;
 
     Ok(())
+}
+
+impl Inner {
+    #[tracing::instrument(skip_all, err)]
+    async fn handle_message(&mut self, msg: MempoolServiceMessage) -> eyre::Result<()> {
+        match msg {
+            MempoolServiceMessage::CommitmentTxIngressMessage => {}
+            MempoolServiceMessage::ChunkIngressMessage => {}
+            MempoolServiceMessage::GetBestMempoolTxs => {}
+            MempoolServiceMessage::TxExistenceQuery => {}
+            MempoolServiceMessage::TxIngressMessage => {}
+        };
+        Ok(())
+    }
+}
+
+/// Create a new instance of the mempool state passing in a reference
+/// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
+pub fn create_state(
+    irys_db: DatabaseProvider,
+    reth_db: RethDbWrapper,
+    task_exec: TaskExecutor,
+    block_tree_guard: BlockTreeReadGuard,
+    commitment_state_guard: CommitmentStateReadGuard,
+    storage_modules_guard: StorageModulesReadGuard,
+    config: &Config,
+    service_senders: ServiceSenders,
+) -> MempoolState {
+    let mempool_config = &config.consensus.mempool;
+    let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
+    let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
+    MempoolState {
+        irys_db,
+        reth_db,
+        valid_tx: BTreeMap::new(),
+        valid_commitment_tx: BTreeMap::new(),
+        invalid_tx: Vec::new(),
+        task_exec,
+        config: config.clone(),
+        storage_modules_guard,
+        block_tree_read_guard: block_tree_guard,
+        commitment_state_guard,
+        service_senders,
+        gossip_tx,
+        recent_valid_tx: HashSet::new(),
+        pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
+        pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
+    }
 }
