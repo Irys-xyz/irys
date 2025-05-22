@@ -51,7 +51,7 @@ use irys_storage::{
 };
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
-    CommitmentTransaction, Config, GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, H256, U256,
 };
 use reth::{
@@ -830,7 +830,10 @@ impl IrysNode {
             .send(GetCommitmentStateGuardMessage)
             .await?;
 
-        let (p2p_service, gossip_tx) = P2PService::new(config.node_config.miner_address());
+        let p2p_service = P2PService::new(
+            config.node_config.miner_address(),
+            receivers.gossip_broadcast,
+        );
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
@@ -868,7 +871,6 @@ impl IrysNode {
             &block_tree_guard,
             &commitment_state_guard,
             &service_senders,
-            gossip_tx.clone(),
         );
         let mempool_facade = MempoolServiceFacadeImpl::from(mempool_service.clone());
 
@@ -924,7 +926,6 @@ impl IrysNode {
             &block_index_guard,
             partition_assignments_guard,
             &vdf_steps_guard,
-            gossip_tx.clone(),
             Arc::clone(&reward_curve),
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
@@ -1317,7 +1318,6 @@ impl IrysNode {
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
-        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
         reward_curve: Arc<HalvingCurve>,
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
@@ -1327,7 +1327,6 @@ impl IrysNode {
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
-            gossip_sender,
             epoch_service: epoch_service.clone(),
             reward_curve,
             span: Span::current(),
@@ -1387,7 +1386,6 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         commitment_state_guard: &CommitmentStateReadGuard,
         service_senders: &ServiceSenders,
-        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> (actix::Addr<MempoolService>, Arbiter) {
         let mempool_service = MempoolService::new(
             irys_db.clone(),
@@ -1398,7 +1396,6 @@ impl IrysNode {
             commitment_state_guard.clone(),
             &config,
             service_senders.clone(),
-            gossip_tx,
         );
         let mempool_arbiter = Arbiter::new();
         let mempool_service =

@@ -1,14 +1,14 @@
-use actix::Message;
-use core::ops::Deref;
-use std::sync::Arc;
-use tokio::sync::mpsc::{
-    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
-};
-
 use crate::{
     broadcast_mining_service::BroadcastMiningSeed, cache_service::CacheServiceAction,
     ema_service::EmaServiceMessage, vdf_service::VdfServiceMessage, CommitmentCacheMessage,
     StorageModuleServiceMessage,
+};
+use actix::Message;
+use core::ops::Deref;
+use irys_types::GossipData;
+use std::sync::Arc;
+use tokio::sync::mpsc::{
+    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
 
 // Only contains senders, thread-safe to clone and share
@@ -41,6 +41,7 @@ pub struct ServiceReceivers {
     pub vdf_mining: Receiver<bool>,
     pub vdf_seed: Receiver<BroadcastMiningSeed>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
+    pub gossip_broadcast: UnboundedReceiver<GossipData>,
 }
 
 #[derive(Debug)]
@@ -52,6 +53,7 @@ pub struct ServiceSendersInner {
     pub vdf_mining: Sender<bool>,
     pub vdf_seed: Sender<BroadcastMiningSeed>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
+    pub gossip_broadcast: UnboundedSender<GossipData>,
 }
 
 impl ServiceSendersInner {
@@ -67,6 +69,8 @@ impl ServiceSendersInner {
         // vdf channel for fast forwarding steps during node sync
         let (vdf_seed_sender, vdf_seed_receiver) = channel::<BroadcastMiningSeed>(1);
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
+        let (gossip_broadcast_sender, gossip_broadcast_receiver) =
+            unbounded_channel::<GossipData>();
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -76,6 +80,7 @@ impl ServiceSendersInner {
             vdf_mining: vdf_mining_sender,
             vdf_seed: vdf_seed_sender,
             storage_modules: sm_sender,
+            gossip_broadcast: gossip_broadcast_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -85,6 +90,7 @@ impl ServiceSendersInner {
             vdf_mining: vdf_mining_receiver,
             vdf_seed: vdf_seed_receiver,
             storage_modules: sm_receiver,
+            gossip_broadcast: gossip_broadcast_receiver,
         };
         (senders, receivers)
     }

@@ -35,12 +35,12 @@ use tracing::{debug, warn};
 pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub internal_message_bus: mpsc::Sender<GossipData>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipData>,
 }
 
 impl MempoolStub {
     #[must_use]
-    pub(crate) fn new(internal_message_bus: mpsc::Sender<GossipData>) -> Self {
+    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipData>) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),
@@ -75,7 +75,6 @@ impl MempoolFacade for MempoolStub {
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
                 .send(GossipData::Transaction(tx_header))
-                .await
                 .expect("to send transaction");
         });
 
@@ -103,7 +102,6 @@ impl MempoolFacade for MempoolStub {
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
                 .send(GossipData::Chunk(chunk))
-                .await
                 .expect("to send chunk");
         });
 
@@ -124,7 +122,7 @@ impl MempoolFacade for MempoolStub {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
-    pub internal_message_bus: mpsc::Sender<GossipData>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipData>,
 }
 
 #[async_trait]
@@ -141,7 +139,6 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
         tokio::runtime::Handle::current().spawn(async move {
             sender
                 .send(GossipData::Block(block))
-                .await
                 .expect("to send block");
         });
 
@@ -314,7 +311,7 @@ impl GossipServiceTestFixture {
         );
         let peer_list = peer_service.start();
 
-        let (gossip_sender, _rx) = mpsc::channel(100);
+        let (gossip_sender, _rx) = mpsc::unbounded_channel();
 
         let mempool_stub = MempoolStub::new(gossip_sender.clone());
         let mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -354,8 +351,12 @@ impl GossipServiceTestFixture {
     /// Can panic
     pub(crate) async fn run_service(
         &mut self,
-    ) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
-        let (gossip_service, internal_message_bus) = P2PService::new(self.mining_address);
+    ) -> (
+        ServiceHandleWithShutdownSignal,
+        mpsc::UnboundedSender<GossipData>,
+    ) {
+        let (internal_message_bus, rx) = tokio::sync::mpsc::unbounded_channel::<GossipData>();
+        let gossip_service = P2PService::new(self.mining_address, rx);
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()

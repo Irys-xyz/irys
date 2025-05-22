@@ -40,8 +40,6 @@ pub struct BlockDiscoveryActor {
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
     pub service_senders: ServiceSenders,
-    /// Gossip message bus
-    pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     /// Tracing span
     pub span: Span,
 }
@@ -253,7 +251,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             "Validating block"
         );
 
-        let gossip_sender = self.gossip_sender.clone();
+        let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
         Box::pin(async move {
             let span3 = span2.clone();
@@ -389,9 +387,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         "sending block to bus: block height {:?}",
                         &new_block_header.height
                     );
-                    if let Err(error) = gossip_sender
-                        .send(GossipData::Block(new_block_header.as_ref().clone()))
-                        .await
+                    if let Err(error) =
+                        gossip_sender.send(GossipData::Block(new_block_header.as_ref().clone()))
                     {
                         tracing::error!("Failed to send gossip message: {}", error);
                     }

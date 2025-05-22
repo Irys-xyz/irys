@@ -28,7 +28,6 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
     // Service 1 receives a message through the message bus from a system's component
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send transaction through message bus");
 
     // Waiting a little for service 2 to receive the tx over gossip
@@ -139,7 +138,6 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     for _ in 0_i32..3_i32 {
         gossip_service1_message_bus
             .send(data.clone())
-            .await
             .expect("Failed to send duplicate transaction");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -185,7 +183,6 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
 
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send chunk data");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -227,7 +224,6 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
     let data = GossipData::Transaction(generate_test_tx().header);
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send transaction to low reputation peer");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -268,7 +264,6 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     // Should not panic when peer is offline
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send transaction to offline peer");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -308,7 +303,6 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     // Send block from service 1 to service 2
     gossip_service1_message_bus
         .send(GossipData::Block(block))
-        .await
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and fetch transactions
@@ -359,7 +353,6 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     // Send block from service 1 to service 2
     gossip_service1_message_bus
         .send(GossipData::Block(block))
-        .await
         .expect("Failed to send block to service 1");
 
     // Wait for service 2 to process the block and attempt to fetch transactions

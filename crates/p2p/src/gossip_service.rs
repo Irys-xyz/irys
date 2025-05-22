@@ -31,7 +31,7 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -109,7 +109,7 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    mempool_data_receiver: Option<Receiver<GossipData>>,
+    mempool_data_receiver: Option<UnboundedReceiver<GossipData>>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
@@ -128,22 +128,21 @@ impl P2PService {
     /// Create a new gossip service. To run the service, use the [`P2PService::run`] method.
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
-    pub fn new(mining_address: Address) -> (Self, Sender<GossipData>) {
+    pub fn new(
+        mining_address: Address,
+        broadcast_data_receiver: UnboundedReceiver<GossipData>,
+    ) -> Self {
         let cache = Arc::new(GossipCache::new());
-        let (trusted_data_tx, trusted_data_rx) = channel(1000);
 
         let client_timeout = Duration::from_secs(5);
         let client = GossipClient::new(client_timeout, mining_address);
 
-        (
-            Self {
-                client,
-                cache,
-                mempool_data_receiver: Some(trusted_data_rx),
-                sync_state: SyncState::new(true),
-            },
-            trusted_data_tx,
-        )
+        Self {
+            client,
+            cache,
+            mempool_data_receiver: Some(broadcast_data_receiver),
+            sync_state: SyncState::new(true),
+        }
     }
 
     /// Spawns all gossip tasks and returns a handle to the service. The service will run until
@@ -354,7 +353,7 @@ fn spawn_cache_pruning_task(
 }
 
 fn spawn_broadcast_task<R, A>(
-    mut mempool_data_receiver: Receiver<GossipData>,
+    mut mempool_data_receiver: UnboundedReceiver<GossipData>,
     service: P2PService,
     task_executor: &TaskExecutor,
     peer_list_service: PeerListFacade<A, R>,
