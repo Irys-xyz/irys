@@ -56,6 +56,8 @@ impl ChunkProvider {
             .iter()
             .filter(|sm| {
                 sm.partition_assignment
+                    .read()
+                    .unwrap()
                     .and_then(|sm| sm.ledger_id)
                     .map_or(false, |ledger_id| ledger_id == ledger as u32)
             })
@@ -97,6 +99,8 @@ impl ChunkProvider {
             .iter()
             .filter(|sm| {
                 sm.partition_assignment
+                    .read()
+                    .unwrap()
                     .and_then(|sm| sm.ledger_id)
                     .map_or(false, |ledger_id| ledger_id == ledger as u32)
             })

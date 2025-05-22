@@ -53,9 +53,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
-use tracing::debug;
-use tracing::error;
-use tracing::info;
+use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
@@ -212,10 +210,19 @@ impl IrysNodeTest<()> {
         }
     }
 
+    pub async fn start_with_name(self, log_name: &str) -> IrysNodeTest<IrysNodeCtx> {
+        let span = debug_span!("NODE", name = %log_name);
+        let _enter = span.enter();
+        self.start().await
+    }
+
     pub async fn start_and_wait_for_packing(
         self,
-        seconds_to_wait: u64,
+        log_name: &str,
+        seconds_to_wait: usize,
     ) -> IrysNodeTest<IrysNodeCtx> {
+        let span = debug_span!("NODE", name = %log_name);
+        let _enter = span.enter();
         let node = self.start().await;
         node.wait_for_packing(seconds_to_wait).await;
         node
@@ -290,22 +297,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height after {} retries",
+                "Failed to reach target height of {} after {} retries",
+                target_height,
                 retries
             ))
         } else {
             info!(
-                "got block after {} seconds and {} retries",
-                max_seconds, &retries
+                "got block at height: {} after {} seconds and {} retries",
+                target_height, max_seconds, &retries
             );
             Ok(())
         }
     }
 
-    pub async fn wait_for_packing(&self, seconds_to_wait: u64) {
+    pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         wait_for_packing(
             self.node_ctx.actor_addresses.packing.clone(),
-            Some(Duration::from_secs(seconds_to_wait)),
+            Some(Duration::from_secs(seconds_to_wait as u64)),
         )
         .await
         .expect("for packing to complete in the wait period");
@@ -361,13 +369,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height after {} retries",
+                "Failed to reach target height {} after {} retries",
+                target_height,
                 retries
             ))
         } else {
             info!(
-                "got block after {} seconds and {} retries",
-                max_seconds, &retries
+                "reached height {} after {} retries",
+                target_height, &retries
             );
             Ok(())
         }
@@ -410,7 +419,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
-        seconds_to_wait: u64,
+        seconds_to_wait: usize,
     ) -> eyre::Result<()> {
         let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
         let mut retries = 0;

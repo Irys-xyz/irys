@@ -199,7 +199,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let node = {
         // Start a test node with custom configuration
         let node = IrysNodeTest::new_genesis(config.clone())
-            .start_and_wait_for_packing(10)
+            .start_and_wait_for_packing("GENESIS", 10)
             .await;
 
         // Initialize blockchain components

@@ -88,7 +88,7 @@ pub struct StorageModule {
     /// an integer uniquely identifying the module
     pub id: usize,
     /// The (Optional) info about a partition assigned to this storage module
-    pub partition_assignment: Option<PartitionAssignment>,
+    pub partition_assignment: RwLock<Option<PartitionAssignment>>,
     /// In-memory chunk buffer awaiting disk write
     pending_writes: Arc<RwLock<ChunkMap>>,
     /// Tracks the storage state of each chunk across all submodules
@@ -141,6 +141,8 @@ impl PackingParams {
         fs::write(&path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
     }
 }
+
+static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
@@ -248,6 +250,7 @@ impl StorageModule {
             ));
 
             let submodule_db_path = sub_base_path.join("db");
+            debug!("submodule_db_path: {:?}", submodule_db_path);
             let submodule_db = create_or_open_submodule_db(&submodule_db_path).map_err(|e| {
                 eyre!(
                     "Failed to create or open submodule database: {} - {}",
@@ -256,7 +259,7 @@ impl StorageModule {
                 )
             })?;
 
-            let params_path = sub_base_path.join("packing_params.toml");
+            let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
             if params_path.exists() == false {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
@@ -345,7 +348,7 @@ impl StorageModule {
 
         Ok(StorageModule {
             id: storage_module_info.id,
-            partition_assignment: storage_module_info.partition_assignment,
+            partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             submodules: submodule_map,
@@ -353,13 +356,39 @@ impl StorageModule {
         })
     }
 
+    pub fn assign_partition(&self, partition_assignment: PartitionAssignment) {
+        let mut pa = self.partition_assignment.write().unwrap();
+        *pa = Some(partition_assignment);
+
+        debug!("{:#?}", self.submodules);
+
+        // Also update the packing params file in each submodule
+        for (_, submodule) in self.submodules.iter() {
+            let params = PackingParams {
+                packing_address: self.config.node_config.miner_address(),
+                partition_hash: Some(partition_assignment.partition_hash),
+                ledger: partition_assignment.ledger_id,
+                slot: partition_assignment.slot_index,
+            };
+
+            let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
+            params.write_to_disk(&params_path);
+        }
+    }
+
     /// Returns the StorageModules partition_hash if assigned
     pub fn partition_hash(&self) -> Option<PartitionHash> {
-        if let Some(part_assign) = self.partition_assignment {
+        let pa = self.partition_assignment.read().unwrap();
+        if let Some(part_assign) = *pa {
             Some(part_assign.partition_hash)
         } else {
             None
         }
+    }
+
+    pub fn partition_assignment(&self) -> Option<PartitionAssignment> {
+        let pa = self.partition_assignment.read().unwrap();
+        *pa
     }
 
     /// Reinit intervals setting them as Uninitialized, and erase db
@@ -390,6 +419,8 @@ impl StorageModule {
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
     pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
         self.partition_assignment
+            .read()
+            .unwrap()
             .and_then(|part| part.slot_index)
             .map(|slot_index| {
                 let start_offset =
@@ -1074,7 +1105,8 @@ impl StorageModule {
     /// Utility method asking the StorageModule to return its chunk range in
     /// ledger relative coordinates
     pub fn get_storage_module_ledger_range(&self) -> eyre::Result<LedgerChunkRange> {
-        if let Some(part_assign) = self.partition_assignment {
+        let pa = self.partition_assignment.read().unwrap();
+        if let Some(part_assign) = *pa {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
                 let end = start + self.config.consensus.num_chunks_in_partition;
@@ -1249,6 +1281,8 @@ pub fn get_overlapped_storage_modules(
         .filter(|module| {
             module
                 .partition_assignment
+                .read()
+                .unwrap()
                 .and_then(|pa| pa.ledger_id)
                 .map_or(false, |id| id == ledger as u32)
                 && module
@@ -1272,6 +1306,8 @@ pub fn get_storage_module_at_offset(
         .find(|module| {
             module
                 .partition_assignment
+                .read()
+                .unwrap()
                 .and_then(|pa| pa.ledger_id)
                 .map_or(false, |id| id == ledger as u32)
                 && module
