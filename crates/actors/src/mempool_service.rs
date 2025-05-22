@@ -100,7 +100,7 @@ pub enum MempoolServiceMessage {
     ChunkIngressMessage(UnpackedChunk),
     CommitmentTxIngressMessage(CommitmentTransaction),
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<VdfStepsReadGuard>),
-    TxExistenceQuery,
+    TxExistenceQuery(tokio::sync::oneshot::Sender<bool>),
     TxIngressMessage(IrysTransactionHeader),
 }
 
@@ -506,49 +506,6 @@ impl ChunkIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub storage_tx: Vec<IrysTransactionHeader>,
-}
-
-/// Message to check whether a transaction exists in the mempool or on disk
-#[derive(Message, Debug)]
-#[rtype(result = "Result<bool, TxIngressError>")]
-pub struct TxExistenceQuery(pub H256);
-
-impl TxExistenceQuery {
-    #[must_use]
-    pub fn into_inner(self) -> H256 {
-        self.0
-    }
-}
-
-impl Handler<TxExistenceQuery> for MempoolService {
-    type Result = Result<bool, TxIngressError>;
-
-    fn handle(&mut self, tx_msg: TxExistenceQuery, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.valid_tx.contains_key(&tx_msg.0) {
-            return Ok(true);
-        }
-
-        if self.recent_valid_tx.contains(&tx_msg.0) {
-            return Ok(true);
-        }
-
-        // Still has it, just invalid
-        if self.invalid_tx.contains(&tx_msg.0) {
-            return Ok(true);
-        }
-
-        let read_tx = self
-            .irys_db
-            .as_ref()
-            .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
-
-        let txid = tx_msg.0;
-        let tx_header =
-            tx_header_by_txid(&read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
-
-        Ok(tx_header.is_some())
-    }
 }
 
 /// Generates an ingress proof for a specific `data_root`
@@ -1218,7 +1175,34 @@ impl Inner {
                     tracing::error!("response.send(txns) error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::TxExistenceQuery => {}
+            MempoolServiceMessage::TxExistenceQuery(response) => {
+                if self.valid_tx.contains_key(&tx_msg.0) {
+                    return Ok(true);
+                }
+
+                if self.recent_valid_tx.contains(&tx_msg.0) {
+                    return Ok(true);
+                }
+
+                // Still has it, just invalid
+                if self.invalid_tx.contains(&tx_msg.0) {
+                    return Ok(true);
+                }
+
+                let read_tx = self
+                    .irys_db
+                    .as_ref()
+                    .tx()
+                    .map_err(|_| TxIngressError::DatabaseError)?;
+
+                let txid = tx_msg.0;
+                let tx_header = tx_header_by_txid(&read_tx, &txid)
+                    .map_err(|_| TxIngressError::DatabaseError)?;
+
+                if let Err(e) = response.send(tx_header.is_some()) {
+                    tracing::error!("response.send(bool) error: {:?}", e);
+                };
+            }
             MempoolServiceMessage::TxIngressMessage(tx) => {
                 debug!(
                     "received tx {:?} (data_root {:?})",
