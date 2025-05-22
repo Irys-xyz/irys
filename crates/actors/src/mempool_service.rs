@@ -498,12 +498,6 @@ impl ChunkIngressError {
     }
 }
 
-impl Handler<ChunkIngressMessage> for MempoolService {
-    type Result = Result<(), ChunkIngressError>;
-
-    fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
-    }
-}
 #[derive(MessageResponse, Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
