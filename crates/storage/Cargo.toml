@@ -20,6 +20,8 @@ irys-packing.workspace = true
 derive_more.workspace = true
 base58.workspace = true
 atomic-write-file = "0.2"
+reth-db.workspace = true
+
 
 [dev-dependencies]
 test-log.workspace = true
