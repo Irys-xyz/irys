@@ -31,6 +31,7 @@ reth-trie-db.workspace = true
 reth-ethereum-engine-primitives.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-transaction-pool.workspace = true
+reth-primitives-traits.workspace = true
 revm.workspace = true
 
 tokio.workspace = true

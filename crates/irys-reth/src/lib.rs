@@ -12,11 +12,14 @@ use reth::{
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder, PayloadBuilderConfig,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
-    primitives::EthPrimitives,
-    providers::{providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage},
+    primitives::{EthPrimitives, SealedBlock},
+    providers::{
+        providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage,
+        StateProviderFactory,
+    },
     transaction_pool::TransactionValidationTaskExecutor,
 };
-use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
@@ -29,8 +32,9 @@ use reth_node_ethereum::{
 use reth_tracing::tracing::{self};
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction, Priority,
-    TransactionOrdering,
+    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
+    Priority, TransactionOrdering, TransactionOrigin, TransactionValidationOutcome,
+    TransactionValidator,
 };
 use reth_trie_db::MerklePatriciaTrie;
 use std::sync::LazyLock;
@@ -176,7 +180,7 @@ where
 {
     type Pool = Pool<
         TransactionValidationTaskExecutor<
-            EthTransactionValidator<Node::Provider, EthPooledTransaction>,
+            IrysEthTransactionValidator<Node::Provider, EthPooledTransaction>,
         >,
         SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
@@ -215,6 +219,12 @@ where
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let validator = TransactionValidationTaskExecutor {
+            validator: IrysEthTransactionValidator {
+                inner: validator.validator,
+            },
+            to_validation_task: validator.to_validation_task,
+        };
 
         let ordering = SystemTxsCoinbaseTipOrdering::default();
         let transaction_pool =
@@ -256,8 +266,8 @@ where
             ctx.task_executor().spawn_critical(
                 "txpool maintenance task",
                 reth_transaction_pool::maintain::maintain_transaction_pool_future(
-                    client,
-                    pool,
+                    client.clone(),
+                    pool.clone(),
                     chain_events,
                     ctx.task_executor().clone(),
                     reth_transaction_pool::maintain::MaintainPoolConfig {
@@ -270,10 +280,84 @@ where
                     },
                 ),
             );
+
+            // spawn custom irys pool maintenance task
+            // - delete all system txs on each new block or reorg
+            //
+            // ctx.task_executor().spawn_critical(
+            //     "irys txpool maintenance task",
+            //     reth_transaction_pool::maintain::maintain_transaction_pool_future(
+            //         client,
+            //         pool,
+            //         chain_events,
+            //         ctx.task_executor().clone(),
+            //         reth_transaction_pool::maintain::MaintainPoolConfig {
+            //             max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
+            //             no_local_exemptions: transaction_pool
+            //                 .config()
+            //                 .local_transactions_config
+            //                 .no_exemptions,
+            //             ..Default::default()
+            //         },
+            //     ),
+            // );
             debug!(target: "reth::cli", "Spawned txpool maintenance task");
         }
 
         Ok(transaction_pool)
+    }
+}
+
+/// A [`TransactionValidator`] implementation that validates ethereum transaction.
+/// This validator is non-blocking, all validation work is done in a separate task.
+// #[derive(Debug, Clone)]
+// pub struct IrysTransactionValidationTaskExecutor<Client, Tx> {
+//     /// The validator that will validate transactions on a separate task.
+//     pub inner: TransactionValidationTaskExecutor<EthTransactionValidator<Client, Tx>>,
+// }
+
+// impl<Client, Tx> TransactionValidator for IrysTransactionValidationTaskExecutor<Client, Tx>
+// where
+//     V: TransactionValidator + Clone + 'static,
+// {
+//     type Transaction = <V as TransactionValidator>::Transaction;
+// }
+//
+//
+
+#[derive(Debug, Clone)]
+pub struct IrysEthTransactionValidator<Client, T> {
+    /// The type that performs the actual validation.
+    inner: EthTransactionValidator<Client, T>,
+}
+
+impl<Client, Tx> TransactionValidator for IrysEthTransactionValidator<Client, Tx>
+where
+    Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
+    Tx: EthPoolTransaction,
+{
+    type Transaction = Tx;
+
+    async fn validate_transaction(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Self::Transaction,
+    ) -> TransactionValidationOutcome<Self::Transaction> {
+        self.inner.validate_one(origin, transaction)
+    }
+
+    async fn validate_transactions(
+        &self,
+        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
+    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
+        self.inner.validate_all(transactions)
+    }
+
+    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
+    where
+        B: reth_primitives_traits::Block,
+    {
+        self.inner.on_new_head_block(new_tip_block)
     }
 }
 

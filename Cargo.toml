@@ -133,6 +133,7 @@ reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9
 reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 revm = { version = "23.1.0", default-features = false }
 

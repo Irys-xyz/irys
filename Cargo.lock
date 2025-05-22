@@ -5068,6 +5068,7 @@ dependencies = [
  "reth-evm-ethereum",
  "reth-network",
  "reth-node-ethereum",
+ "reth-primitives-traits",
  "reth-tracing",
  "reth-transaction-pool",
  "reth-trie-db",
