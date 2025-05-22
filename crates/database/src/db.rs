@@ -1,6 +1,11 @@
 use crate::reth_db::DatabaseError;
-use reth_db::DatabaseEnv;
-use reth_db_api::database_metrics::{DatabaseMetadata, DatabaseMetadataValue, DatabaseMetrics};
+use reth_db::mdbx::cursor::Cursor;
+use reth_db::mdbx::TransactionKind;
+use reth_db::table::{Decode, Decompress, DupSort, Encode as _, Table, TableRow};
+use reth_db::transaction::DbTx;
+use reth_db::{Database as _, DatabaseEnv};
+use reth_db_api::database_metrics::DatabaseMetrics;
+use std::borrow::Cow;
 use std::sync::RwLock;
 use std::sync::{Arc, PoisonError, RwLockReadGuard};
 use tracing::info;
@@ -77,17 +82,6 @@ impl reth_db::Database for RethDbWrapper {
             .view(f)
     }
 
-    fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
-    where
-        F: FnOnce(&Self::TX) -> eyre::Result<T>,
-    {
-        let guard = self.db.read().map_err(db_read_error)?;
-        guard
-            .as_ref()
-            .ok_or_else(db_connection_closed_error)?
-            .view_eyre(f)
-    }
-
     fn update<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
         F: FnOnce(&Self::TXMut) -> T,
@@ -98,7 +92,21 @@ impl reth_db::Database for RethDbWrapper {
             .ok_or_else(db_connection_closed_error)?
             .update(f)
     }
+}
 
+pub trait IrysDatabaseExt: reth_db::Database {
+    fn update_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&Self::TXMut) -> eyre::Result<T>;
+
+    /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
+    /// end of the execution. This functions allows for `eyre` results.
+    fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&Self::TX) -> eyre::Result<T>;
+}
+
+impl IrysDatabaseExt for RethDbWrapper {
     fn update_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
@@ -109,13 +117,89 @@ impl reth_db::Database for RethDbWrapper {
             .ok_or_else(db_connection_closed_error)?
             .update_eyre(f)
     }
+
+    /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
+    /// end of the execution. This functions allows for `eyre` results.
+    fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&Self::TX) -> eyre::Result<T>,
+    {
+        let guard = self.db.read().map_err(db_read_error)?;
+        guard
+            .as_ref()
+            .ok_or_else(db_connection_closed_error)?
+            .view_eyre(f)
+    }
+}
+
+impl IrysDatabaseExt for DatabaseEnv {
+    fn update_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
+    {
+        let tx = self.tx_mut()?;
+
+        let res = f(&tx);
+        tx.commit()?;
+
+        res
+    }
+
+    /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
+    /// end of the execution. This functions allows for `eyre` results.
+    fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&Self::TX) -> eyre::Result<T>,
+    {
+        let tx = self.tx()?;
+
+        let res = f(&tx);
+        tx.commit()?;
+
+        res
+    }
 }
 
 impl DatabaseMetrics for RethDbWrapper {}
 
-impl DatabaseMetadata for RethDbWrapper {
-    fn metadata(&self) -> DatabaseMetadataValue {
-        let guard = self.db.read().unwrap();
-        guard.as_ref().unwrap().metadata()
+pub trait IrysDupCursorExt<T: DupSort> {
+    /// Count the number of dupilicates.
+    fn dup_count(&mut self, key: T::Key) -> Result<Option<u32>, DatabaseError>;
+}
+
+pub fn decoder<'a, T>((k, v): (Cow<'a, [u8]>, Cow<'a, [u8]>)) -> Result<TableRow<T>, DatabaseError>
+where
+    T: Table,
+    T::Key: Decode,
+    T::Value: Decompress,
+{
+    Ok((
+        match k {
+            Cow::Borrowed(k) => Decode::decode(k)?,
+            Cow::Owned(k) => Decode::decode_owned(k)?,
+        },
+        match v {
+            Cow::Borrowed(v) => Decompress::decompress(v)?,
+            Cow::Owned(v) => Decompress::decompress_owned(v)?,
+        },
+    ))
+}
+
+use reth_db::cursor::DbCursorRO;
+
+impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
+    fn dup_count(&mut self, key: <T>::Key) -> Result<Option<u32>, DatabaseError> {
+        Ok(
+            // we seek to the key & check the key exists
+            // if we pass a nonexistant key to get_dup_count, it'll panic
+            match self.seek_exact(key)? {
+                Some(_v) => Some(
+                    self.inner
+                        .get_dup_count()
+                        .map_err(|e| DatabaseError::Read(e.into()))?,
+                ),
+                None => None,
+            },
+        )
     }
 }

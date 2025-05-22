@@ -1,27 +1,34 @@
+use crate::tables::TableSet;
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
+use irys_database::db::IrysDupCursorExt as _;
+use irys_database::db_cache::CachedChunk;
+use irys_database::{impl_compression_for_compact, open_or_create_db};
 use irys_types::Base64;
+use paste::paste;
 use reth_codecs::Compact;
 use reth_db::cursor::DbCursorRO;
+use reth_db::cursor::DbDupCursorRO;
+use reth_db::table::TableInfo;
+use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::{table::DupSort, DatabaseError};
 use reth_db::{tables, Database};
-use reth_db::{HasName, HasTableType, TableType, TableViewer};
+use reth_db::{TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::{fmt, u128};
-
-use irys_database::{impl_compression_for_compact, open_or_create_db};
-use reth_db::cursor::DbDupCursorRO;
-use reth_db::transaction::DbTx;
-
-use irys_database::db_cache::CachedChunk;
 
 impl_compression_for_compact!(CachedChunk2);
 
 tables! {
     DupSortTables;
-    table CachedChunks2<Key = B256, Value = CachedChunk2, SubKey = u128>;
+
+    table CachedChunks2 {
+        type Key = B256;
+        type Value = CachedChunk2;
+        type SubKey = u128;
+    }
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary)]
