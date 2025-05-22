@@ -306,7 +306,7 @@ impl MempoolService {
 
     fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
         let mempool_state = &self.inner.mempool_state.clone();
-        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+        let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
         // Check if already staked in the blockchain
         let is_staked = mempool_state_guard
             .commitment_state_guard
