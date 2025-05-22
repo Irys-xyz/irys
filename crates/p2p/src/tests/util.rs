@@ -19,8 +19,8 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig,
-    PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress,
+    PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -387,7 +387,7 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
-                vdf_service_tx
+                vdf_service_tx,
             )
             .expect("failed to run gossip service");
 

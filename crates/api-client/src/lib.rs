@@ -138,9 +138,7 @@ impl ApiClient for IrysApiClient {
 
         match response {
             Ok(_) => Ok(()),
-            Err(e) => {
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -171,9 +169,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(peer_response)) => Ok(peer_response),
             Ok(None) => Err(eyre::eyre!("No response from peer")),
-            Err(e) => {
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -189,9 +185,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(block)) => Ok(Some(block)),
             Ok(None) => Ok(None),
-            Err(e) => {
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -216,9 +210,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(block_index)) => Ok(block_index),
             Ok(None) => Ok(vec![]),
-            Err(e) => {
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 }

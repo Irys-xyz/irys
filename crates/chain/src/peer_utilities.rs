@@ -24,11 +24,9 @@ use std::{
     net::SocketAddr,
     sync::Arc,
 };
-use tokio::{
-    sync::{
-        mpsc::{Sender, UnboundedSender},
-        Mutex,
-    },
+use tokio::sync::{
+    mpsc::{Sender, UnboundedSender},
+    Mutex,
 };
 use tracing::{error, info, warn};
 

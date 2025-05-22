@@ -1,10 +1,10 @@
+use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
+use irys_actors::vdf_service::VdfServiceMessage;
+use irys_types::{block_production::Seed, H256List, VDFLimiterInfo};
 use std::time::Duration;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::time::sleep;
 use tracing::error;
-use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::vdf_service::VdfServiceMessage;
-use irys_types::{H256List, VDFLimiterInfo, block_production::Seed};
 
 /// Polls VDF service for `VdfState` until `global_step` >= `desired_step`, with a 30s timeout.
 pub async fn wait_for_vdf_step(

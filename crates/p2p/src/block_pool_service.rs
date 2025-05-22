@@ -7,6 +7,7 @@ use actix::{
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
+use irys_actors::vdf_service::VdfServiceMessage;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
@@ -14,7 +15,6 @@ use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tracing::{debug, error, info};
-use irys_actors::vdf_service::VdfServiceMessage;
 
 #[derive(Debug, Clone)]
 pub enum BlockPoolError {
@@ -143,7 +143,10 @@ where
         let block_discovery = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
-        let vdf_service_sender = self.vdf_service_sender.clone().expect("valid vdf service sender");
+        let vdf_service_sender = self
+            .vdf_service_sender
+            .clone()
+            .expect("valid vdf service sender");
 
         // Adding the block to the pool, so if a block depending on that block arrives,
         // this block won't be requested from the network

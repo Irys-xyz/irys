@@ -24,22 +24,19 @@ use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::MempoolFacade;
+use irys_actors::vdf_service::VdfServiceMessage;
 use irys_api_client::ApiClient;
-use irys_types::{
-    Address, DatabaseProvider, GossipData, PeerListItem,
-    RethPeerInfo,
-};
+use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
 };
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
-use irys_actors::vdf_service::VdfServiceMessage;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
