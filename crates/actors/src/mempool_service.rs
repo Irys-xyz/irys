@@ -99,7 +99,7 @@ pub enum MempoolServiceMessage {
     ),
     ChunkIngressMessage(UnpackedChunk),
     CommitmentTxIngressMessage(CommitmentTransaction),
-    GetBestMempoolTxs,
+    GetBestMempoolTxs(tokio::sync::oneshot::Sender<VdfStepsReadGuard>),
     TxExistenceQuery,
     TxIngressMessage(IrysTransactionHeader),
 }
@@ -506,118 +506,6 @@ impl ChunkIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub storage_tx: Vec<IrysTransactionHeader>,
-}
-
-#[derive(Message, Debug)]
-#[rtype(result = "MempoolTxs")]
-pub struct GetBestMempoolTxs;
-
-impl Handler<GetBestMempoolTxs> for MempoolService {
-    type Result = MempoolTxs;
-
-    fn handle(&mut self, _msg: GetBestMempoolTxs, _ctx: &mut Self::Context) -> Self::Result {
-        let reth_db = self.reth_db.clone();
-        let mut fees_spent_per_address = HashMap::new();
-        let mut commitment_tx = Vec::new();
-        let mut unfunded_address = HashSet::new();
-
-        // Helper function that verifies transaction funding and tracks cumulative fees
-        // Returns true if the transaction can be funded based on current account balance
-        // and previously included transactions in this block
-        let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
-            let signer = tx.signer();
-
-            // Skip transactions from addresses with previously unfunded transactions
-            // This ensures we don't include any transactions (including pledges) from
-            // addresses that couldn't afford their stake commitments
-            if unfunded_address.contains(&signer) {
-                return false;
-            }
-
-            let fee = tx.total_fee();
-            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
-
-            // Calculate total required balance including previously selected transactions
-            let tx_ref = &reth_db.tx().unwrap();
-            let has_funds = irys_database::get_account_balance(tx_ref, signer).unwrap()
-                >= U256::from(current_spent + fee);
-
-            // Track fees for this address regardless of whether this specific transaction is included
-            fees_spent_per_address
-                .entry(signer)
-                .and_modify(|val| *val += fee)
-                .or_insert(fee);
-
-            // If transaction cannot be funded, mark the entire address as unfunded
-            // Since stakes are processed before pledges, this prevents inclusion of
-            // pledge commitments when their associated stake commitment is unfunded
-            if !has_funds {
-                unfunded_address.insert(signer);
-                return false;
-            }
-
-            has_funds
-        };
-
-        // Process commitments in priority order (stakes then pledges)
-        // This order ensures stake transactions are processed before pledges
-        for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
-            // Gather all commitments of current type from all addresses
-            let mut sorted_commitments: Vec<_> = self
-                .valid_commitment_tx
-                .values()
-                .flat_map(|txs| {
-                    txs.iter()
-                        .filter(|tx| tx.commitment_type == *commitment_type)
-                        .map(|tx| tx.clone())
-                })
-                .collect();
-
-            // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
-
-            // Select fundable commitments in fee-priority order
-            for tx in sorted_commitments {
-                if check_funding(&tx) {
-                    commitment_tx.push(tx);
-                }
-            }
-        }
-
-        // Prepare storage transactions for inclusion after commitments
-        let mut all_storage_txs: Vec<_> = self.valid_tx.values().cloned().collect();
-
-        // Sort storage transactions by fee (highest first) to maximize revenue
-        all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
-
-        // Apply block size constraint and funding checks to storage transactions
-        let mut storage_tx = Vec::new();
-        let max_txs = self
-            .config
-            .node_config
-            .consensus_config()
-            .mempool
-            .max_data_txs_per_block
-            .try_into()
-            .expect("max_data_txs_per_block to fit into usize");
-
-        // Select storage transactions in fee-priority order, respecting funding limits
-        // and maximum transaction count per block
-        for tx in all_storage_txs {
-            if check_funding(&tx) {
-                storage_tx.push(tx);
-                if storage_tx.len() >= max_txs {
-                    break;
-                }
-            }
-        }
-
-        // Return selected transactions grouped by type
-        MempoolTxs {
-            commitment_tx,
-            storage_tx,
-        }
-    }
 }
 
 /// Message to check whether a transaction exists in the mempool or on disk
@@ -1222,7 +1110,114 @@ impl Inner {
 
                 Ok(())
             }
-            MempoolServiceMessage::GetBestMempoolTxs => {}
+            MempoolServiceMessage::GetBestMempoolTxs(response) => {
+                let reth_db = mempool_state_guard.reth_db.clone();
+                let mut fees_spent_per_address = HashMap::new();
+                let mut commitment_tx = Vec::new();
+                let mut unfunded_address = HashSet::new();
+
+                // Helper function that verifies transaction funding and tracks cumulative fees
+                // Returns true if the transaction can be funded based on current account balance
+                // and previously included transactions in this block
+                let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
+                    let signer = tx.signer();
+
+                    // Skip transactions from addresses with previously unfunded transactions
+                    // This ensures we don't include any transactions (including pledges) from
+                    // addresses that couldn't afford their stake commitments
+                    if unfunded_address.contains(&signer) {
+                        return false;
+                    }
+
+                    let fee = tx.total_fee();
+                    let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
+
+                    // Calculate total required balance including previously selected transactions
+                    let tx_ref = &reth_db.tx().unwrap();
+                    let has_funds = irys_database::get_account_balance(tx_ref, signer).unwrap()
+                        >= U256::from(current_spent + fee);
+
+                    // Track fees for this address regardless of whether this specific transaction is included
+                    fees_spent_per_address
+                        .entry(signer)
+                        .and_modify(|val| *val += fee)
+                        .or_insert(fee);
+
+                    // If transaction cannot be funded, mark the entire address as unfunded
+                    // Since stakes are processed before pledges, this prevents inclusion of
+                    // pledge commitments when their associated stake commitment is unfunded
+                    if !has_funds {
+                        unfunded_address.insert(signer);
+                        return false;
+                    }
+
+                    has_funds
+                };
+
+                // Process commitments in priority order (stakes then pledges)
+                // This order ensures stake transactions are processed before pledges
+                for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+                    // Gather all commitments of current type from all addresses
+                    let mut sorted_commitments: Vec<_> = mempool_state_guard
+                        .valid_commitment_tx
+                        .values()
+                        .flat_map(|txs| {
+                            txs.iter()
+                                .filter(|tx| tx.commitment_type == *commitment_type)
+                                .map(|tx| tx.clone())
+                        })
+                        .collect();
+
+                    // Sort commitments by fee (highest first) to maximize network revenue
+                    sorted_commitments.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+
+                    // Select fundable commitments in fee-priority order
+                    for tx in sorted_commitments {
+                        if check_funding(&tx) {
+                            commitment_tx.push(tx);
+                        }
+                    }
+                }
+
+                // Prepare storage transactions for inclusion after commitments
+                let mut all_storage_txs: Vec<_> =
+                    mempool_state_guard.valid_tx.values().cloned().collect();
+
+                // Sort storage transactions by fee (highest first) to maximize revenue
+                all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+
+                // Apply block size constraint and funding checks to storage transactions
+                let mut storage_tx = Vec::new();
+                let max_txs = mempool_state_guard
+                    .config
+                    .node_config
+                    .consensus_config()
+                    .mempool
+                    .max_data_txs_per_block
+                    .try_into()
+                    .expect("max_data_txs_per_block to fit into usize");
+
+                // Select storage transactions in fee-priority order, respecting funding limits
+                // and maximum transaction count per block
+                for tx in all_storage_txs {
+                    if check_funding(&tx) {
+                        storage_tx.push(tx);
+                        if storage_tx.len() >= max_txs {
+                            break;
+                        }
+                    }
+                }
+
+                let txns = MempoolTxs {
+                    commitment_tx,
+                    storage_tx,
+                };
+
+                // Return selected transactions grouped by type
+                if let Err(e) = response.send(txns) {
+                    tracing::error!("response.send(txns) error: {:?}", e);
+                };
+            }
             MempoolServiceMessage::TxExistenceQuery => {}
             MempoolServiceMessage::TxIngressMessage(tx) => {
                 debug!(
