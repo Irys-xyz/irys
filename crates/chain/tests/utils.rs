@@ -11,6 +11,7 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
+use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
@@ -30,6 +31,7 @@ use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
+use irys_types::partition::PartitionAssignment;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
@@ -605,6 +607,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.post_commitment_tx_request(&api_uri, &stake_tx).await;
 
         stake_tx
+    }
+
+    pub async fn get_partition_assignments(
+        &self,
+        mining_address: Address,
+    ) -> Vec<PartitionAssignment> {
+        self.node_ctx
+            .actor_addresses
+            .epoch_service
+            .send(GetMinerPartitionAssignmentsMessage(mining_address))
+            .await
+            .expect("to retrieve partition assignments for miner")
     }
 
     async fn post_commitment_tx_request(

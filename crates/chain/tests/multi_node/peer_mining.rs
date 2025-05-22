@@ -1,8 +1,6 @@
+use crate::utils::IrysNodeTest;
 use irys_testing_utils::*;
 use irys_types::{NodeConfig, H256};
-use tracing::debug;
-
-use crate::utils::IrysNodeTest;
 
 #[actix_web::test]
 async fn heavy_peer_mining_test() -> eyre::Result<()> {
@@ -12,7 +10,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
-    let seconds_to_wait = 10;
+    let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -39,7 +37,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     let stake_tx = peer_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
     let pledge_tx = peer_node.post_pledge_commitment(H256::zero()).await;
 
-    // Wait for them to show up in the genesis_node's mempool
+    // Wait for commitment tx to show up in the genesis_node's mempool
     genesis_node
         .wait_for_mempool(stake_tx.id, seconds_to_wait)
         .await?;
@@ -49,32 +47,43 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
 
     // Mine a block to get the commitments included
     genesis_node.mine_block().await.unwrap();
-    let block = genesis_node.get_block_by_height(1).await.unwrap();
-    debug!("SystemLedgers: {:#?}", block.system_ledgers);
 
     // Mine another block to perform epoch tasks
     genesis_node.mine_block().await.unwrap();
 
-    // Assuming the peer is assigned a partition
+    // Get the genesis nodes view of the peers assignments
+    let peer_assignments = genesis_node
+        .get_partition_assignments(peer_signer.address())
+        .await;
+
+    // Verify that one partition has been assigned to the peer to match its pledge
+    assert_eq!(peer_assignments.len(), 1);
+
+    // Wait for the peer to receive & process the epoch block
+    peer_node.wait_until_height(2, seconds_to_wait).await?;
     peer_node.wait_for_packing(seconds_to_wait).await;
 
-    let _ = peer_node.wait_until_height(2, seconds_to_wait).await;
-    let peer_block = peer_node.get_block_by_height(2).await.unwrap();
-    debug!("{}", peer_block);
+    // Verify that the peer has the same view of its own assignments
+    let peer_assignments_on_peer = peer_node
+        .get_partition_assignments(peer_signer.address())
+        .await;
 
+    // Verify the peer has the same view of assignments as the genesis node
+    assert_eq!(peer_assignments_on_peer.len(), 1);
+    assert_eq!(peer_assignments_on_peer[0], peer_assignments[0]);
+
+    // Mine two more blocks on the peer to trigger an epoch
+    peer_node.mine_block().await?;
     peer_node.mine_block().await?;
 
-    let peer_block = peer_node.get_block_by_height(3).await.unwrap();
-    debug!("{}", peer_block);
+    // Validate the genesis node processes the peers blocks without errors
+    genesis_node.wait_until_height(4, seconds_to_wait).await?;
 
-    peer_node.mine_block().await?;
+    // Mine one more block on the genesis_node to make sure reth state is syncing
+    genesis_node.mine_block().await?;
 
-    let _ = genesis_node.wait_until_height(4, seconds_to_wait).await;
-    let peer_block = peer_node.get_block_by_height(4).await.unwrap();
-    debug!("{}", peer_block);
-
+    // Wind down test
     genesis_node.stop().await;
     peer_node.stop().await;
-
     Ok(())
 }
