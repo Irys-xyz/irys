@@ -399,7 +399,7 @@ mod evm {
 
     pub(crate) struct CustomBlockExecutor<'a, Evm> {
         receipt_builder: &'a RethReceiptBuilder,
-        system_call_receipts: Vec<Receipt>,
+        system_tx_receipts: Vec<Receipt>,
         pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
     }
 
@@ -517,7 +517,7 @@ mod evm {
 
                 // Build and store the receipt
                 let evm = self.inner.evm_mut();
-                self.system_call_receipts
+                self.system_tx_receipts
                     .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
                         tx: tx_envelope,
                         evm,
@@ -539,7 +539,7 @@ mod evm {
         fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
             let (evm, mut block_res) = self.inner.finish()?;
             // Combine system receipts with regular transaction receipts
-            let total_receipts = [self.system_call_receipts, block_res.receipts].concat();
+            let total_receipts = [self.system_tx_receipts, block_res.receipts].concat();
             block_res.receipts = total_receipts;
 
             Ok((evm, block_res))
@@ -807,7 +807,7 @@ mod evm {
             CustomBlockExecutor {
                 inner: EthBlockExecutor::new(evm, ctx, self.inner.spec(), receipt_builder),
                 receipt_builder,
-                system_call_receipts: vec![],
+                system_tx_receipts: vec![],
             }
         }
     }
@@ -1004,7 +1004,10 @@ mod tests {
         let final_balance = get_balance(&first_node.inner, target_account.address());
         let final_balance_second = get_balance(&second_node.inner, target_account.address());
         assert_eq!(final_balance, final_balance_second);
-        assert_eq!(final_balance, initial_balance + U256::from(7000000000000000000u64));
+        assert_eq!(
+            final_balance,
+            initial_balance + U256::from(7000000000000000000u64)
+        );
 
         Ok(())
     }
