@@ -1,7 +1,7 @@
 use crate::reth_db::DatabaseError;
 use reth_db::mdbx::cursor::Cursor;
 use reth_db::mdbx::TransactionKind;
-use reth_db::table::{Decode, Decompress, DupSort, Encode as _, Table, TableRow};
+use reth_db::table::{Decode, Decompress, DupSort, Table, TableRow};
 use reth_db::transaction::DbTx;
 use reth_db::{Database as _, DatabaseEnv};
 use reth_db_api::database_metrics::DatabaseMetrics;
