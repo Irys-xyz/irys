@@ -96,7 +96,7 @@ pub enum MempoolServiceMessage {
     CommitmentTxIngressMessage,
     GetBestMempoolTxs,
     TxExistenceQuery,
-    TxIngressMessage,
+    TxIngressMessage(IrysTransactionHeader),
 }
 
 #[derive(Debug)]
@@ -495,142 +495,6 @@ impl ChunkIngressError {
     /// Allows converting an error that implements Display into an Other error
     pub fn other_display(err: impl Display) -> Self {
         Self::Other(err.to_string())
-    }
-}
-
-impl Handler<TxIngressMessage> for MempoolService {
-    type Result = Result<(), TxIngressError>;
-
-    fn handle(&mut self, tx_msg: TxIngressMessage, ctx: &mut Context<Self>) -> Self::Result {
-        let tx = &tx_msg.0;
-        debug!(
-            "received tx {:?} (data_root {:?})",
-            &tx.id.0.to_base58(),
-            &tx.data_root.0.to_base58()
-        );
-
-        // Early out if we already know about this transaction
-        if self.invalid_tx.contains(&tx.id) || self.recent_valid_tx.contains(&tx.id) {
-            return Err(TxIngressError::Skipped);
-        }
-        // Validate anchor
-        let hdr = self.validate_anchor(&tx.id, &tx.anchor)?;
-
-        let read_tx = &self
-            .irys_db
-            .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
-        let read_reth_tx = &self
-            .reth_db
-            .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
-
-        // Update any associated ingress proofs
-        if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-            let anchor_expiry_depth = self
-                .config
-                .node_config
-                .consensus_config()
-                .mempool
-                .anchor_expiry_depth as u64;
-            let new_expiry = hdr.height + anchor_expiry_depth;
-            debug!(
-                "Updating ingress proof for data root {} expiry from {} -> {}",
-                &tx.data_root, &old_expiry.last_height, &new_expiry
-            );
-            self.irys_db
-                .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
-                    );
-                    TxIngressError::DatabaseError
-                })?
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
-                    );
-                    TxIngressError::DatabaseError
-                })?;
-        }
-
-        // Check account balance
-        if irys_database::get_account_balance(read_reth_tx, tx_msg.0.signer)
-            .map_err(|_| TxIngressError::DatabaseError)?
-            < U256::from(tx_msg.0.total_fee())
-        {
-            error!(
-                "unfunded balance from irys_database::get_account_balance({:?})",
-                tx_msg.0.signer
-            );
-            return Err(TxIngressError::Unfunded);
-        }
-
-        // Validate the transaction signature
-        self.validate_signature(tx)?;
-        self.valid_tx.insert(tx.id, tx.clone());
-        self.recent_valid_tx.insert(tx.id);
-
-        // Cache the data_root in the database
-        match self.irys_db.update_eyre(|db_tx| {
-            irys_database::cache_data_root(db_tx, tx)?;
-            // TODO: tx headers should not immediately be added to the database
-            // this is a work around until the mempool can persist its state
-            // during shutdown. Currently this has the potential to create
-            // orphaned tx headers in the database with expired anchors and
-            // not linked to any blocks.
-            irys_database::insert_tx_header(db_tx, tx)?;
-            Ok(())
-        }) {
-            Ok(()) => {
-                info!(
-                    "Successfully cached data_root {:?} for tx {:?}",
-                    tx.data_root,
-                    tx.id.0.to_base58()
-                );
-            }
-            Err(db_error) => {
-                error!(
-                    "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                    tx.data_root,
-                    tx.id.0.to_base58(),
-                    db_error
-                );
-            }
-        };
-
-        // Process any chunks that arrived before their parent transaction
-        // These were temporarily stored in the pending_chunks cache
-        if let Some(chunks_map) = self.pending_chunks.pop(&tx.data_root) {
-            // Extract owned chunks from the map to process them
-            let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-
-            // PERFORMANCE CONSIDERATION:
-            // This is executing in a synchronous actor context. If this transaction has
-            // many pending chunks (hundreds or thousands), processing them
-            // all here could block the actor for a significant time, delaying other messages.
-            // This should be addressed when the mempool_service is converted to a tokio service
-            // and the handlers become async
-            for chunk in chunks {
-                // Process each chunk with full ownership (no cloning needed)
-                self.handle(ChunkIngressMessage(chunk), ctx)
-                    .expect("pending chunks should be processed by the mempool");
-            }
-        }
-
-        // Gossip transaction
-        let gossip_sender = self.gossip_tx.clone();
-        let gossip_data = GossipData::Transaction(tx.clone());
-
-        let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender.send(gossip_data).await {
-                tracing::error!("Failed to send gossip data: {:?}", error);
-            }
-        });
-
-        Ok(())
     }
 }
 
@@ -1358,12 +1222,145 @@ pub fn generate_ingress_proof(
 impl Inner {
     #[tracing::instrument(skip_all, err)]
     async fn handle_message(&mut self, msg: MempoolServiceMessage) -> eyre::Result<()> {
+        let mempool_state = &self.mempool_state.clone();
+        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+
         match msg {
             MempoolServiceMessage::CommitmentTxIngressMessage => {}
             MempoolServiceMessage::ChunkIngressMessage => {}
             MempoolServiceMessage::GetBestMempoolTxs => {}
             MempoolServiceMessage::TxExistenceQuery => {}
-            MempoolServiceMessage::TxIngressMessage => {}
+            MempoolServiceMessage::TxIngressMessage(tx) => {
+                debug!(
+                    "received tx {:?} (data_root {:?})",
+                    &tx.id.0.to_base58(),
+                    &tx.data_root.0.to_base58()
+                );
+
+                // Early out if we already know about this transaction
+                if mempool_state_guard.invalid_tx.contains(&tx.id)
+                    || mempool_state_guard.recent_valid_tx.contains(&tx.id)
+                {
+                    return Err(TxIngressError::Skipped);
+                }
+                // Validate anchor
+                let hdr = mempool_state_guard.validate_anchor(&tx.id, &tx.anchor)?;
+
+                let read_tx = &mempool_state_guard
+                    .irys_db
+                    .tx()
+                    .map_err(|_| TxIngressError::DatabaseError)?;
+                let read_reth_tx = &mempool_state_guard
+                    .reth_db
+                    .tx()
+                    .map_err(|_| TxIngressError::DatabaseError)?;
+
+                // Update any associated ingress proofs
+                if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
+                    let anchor_expiry_depth = mempool_state_guard
+                        .config
+                        .node_config
+                        .consensus_config()
+                        .mempool
+                        .anchor_expiry_depth as u64;
+                    let new_expiry = hdr.height + anchor_expiry_depth;
+                    debug!(
+                        "Updating ingress proof for data root {} expiry from {} -> {}",
+                        &tx.data_root, &old_expiry.last_height, &new_expiry
+                    );
+                    mempool_state_guard
+                        .irys_db
+                        .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?;
+                }
+
+                // Check account balance
+                if irys_database::get_account_balance(read_reth_tx, tx.signer)
+                    .map_err(|_| TxIngressError::DatabaseError)?
+                    < U256::from(tx.total_fee())
+                {
+                    error!(
+                        "unfunded balance from irys_database::get_account_balance({:?})",
+                        tx.signer
+                    );
+                    return Err(TxIngressError::Unfunded);
+                }
+
+                // Validate the transaction signature
+                mempool_state_guard.validate_signature(tx)?;
+                mempool_state_guard.valid_tx.insert(tx.id, tx.clone());
+                mempool_state_guard.recent_valid_tx.insert(tx.id);
+
+                // Cache the data_root in the database
+                match mempool_state_guard.irys_db.update_eyre(|db_tx| {
+                    irys_database::cache_data_root(db_tx, &tx)?;
+                    // TODO: tx headers should not immediately be added to the database
+                    // this is a work around until the mempool can persist its state
+                    // during shutdown. Currently this has the potential to create
+                    // orphaned tx headers in the database with expired anchors and
+                    // not linked to any blocks.
+                    irys_database::insert_tx_header(db_tx, &tx)?;
+                    Ok(())
+                }) {
+                    Ok(()) => {
+                        info!(
+                            "Successfully cached data_root {:?} for tx {:?}",
+                            tx.data_root,
+                            tx.id.0.to_base58()
+                        );
+                    }
+                    Err(db_error) => {
+                        error!(
+                            "Failed to cache data_root {:?} for tx {:?}: {:?}",
+                            tx.data_root,
+                            tx.id.0.to_base58(),
+                            db_error
+                        );
+                    }
+                };
+
+                // Process any chunks that arrived before their parent transaction
+                // These were temporarily stored in the pending_chunks cache
+                if let Some(chunks_map) = mempool_state_guard.pending_chunks.pop(&tx.data_root) {
+                    // Extract owned chunks from the map to process them
+                    let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
+
+                    // PERFORMANCE CONSIDERATION:
+                    // This is executing in a synchronous actor context. If this transaction has
+                    // many pending chunks (hundreds or thousands), processing them
+                    // all here could block the actor for a significant time, delaying other messages.
+                    // This should be addressed when the mempool_service is converted to a tokio service
+                    // and the handlers become async
+                    for chunk in chunks {
+                        // Process each chunk with full ownership (no cloning needed)
+                        self.handle(ChunkIngressMessage(chunk), ctx)
+                            .expect("pending chunks should be processed by the mempool");
+                    }
+                }
+
+                // Gossip transaction
+                let gossip_sender = mempool_state_guard.gossip_tx.clone();
+                let gossip_data = GossipData::Transaction(tx.clone());
+
+                let _ = tokio::task::spawn(async move {
+                    if let Err(error) = gossip_sender.send(gossip_data).await {
+                        tracing::error!("Failed to send gossip data: {:?}", error);
+                    }
+                });
+            }
         };
         Ok(())
     }
