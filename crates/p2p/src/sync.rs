@@ -95,6 +95,10 @@ impl SyncState {
     }
 
     pub fn is_queue_full(&self) -> bool {
+        if self.sync_target_height() < self.highest_processed_block() {
+            return false;
+        }
+
         self.sync_target_height() - self.highest_processed_block()
             >= MAX_PROCESSING_BLOCKS_QUEUE_SIZE
     }

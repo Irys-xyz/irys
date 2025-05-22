@@ -655,7 +655,7 @@ where
             .post_version(api_address, version_request)
             .await
             .map_err(|e| {
-                error!(
+                warn!(
                     "Failed to announce yourself to address {}: {:?}",
                     api_address, e
                 );
@@ -723,7 +723,7 @@ where
         {
             Ok(()) => {}
             Err(e) => {
-                error!(
+                warn!(
                     "Failed to announce yourself to address {}: {:?}",
                     api_address, e
                 );
@@ -758,7 +758,7 @@ where
                     }
                 }
                 Err(e) => {
-                    error!(
+                    warn!(
                         "Failed to announce yourself to address {}: {:?}",
                         peer.api, e
                     );
