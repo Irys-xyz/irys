@@ -50,6 +50,8 @@ serde_json.workspace = true
 rstest.workspace = true
 futures.workspace = true
 alloy-signer-local.workspace = true
+reth-engine-local.workspace = true
+reth-db = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

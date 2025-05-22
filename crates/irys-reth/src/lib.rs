@@ -12,7 +12,7 @@ use reth::{
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder, PayloadBuilderConfig,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
-    primitives::{EthPrimitives, SealedBlock},
+    primitives::{EthPrimitives, InvalidTransactionError, SealedBlock},
     providers::{
         providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage,
         StateProviderFactory,
@@ -30,11 +30,11 @@ use reth_node_ethereum::{
     EthEngineTypes, EthEvmConfig,
 };
 use reth_tracing::tracing::{self};
+use reth_transaction_pool::TransactionValidationOutcome;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
     EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering, TransactionOrigin, TransactionValidationOutcome,
-    TransactionValidator,
+    Priority, TransactionOrdering, TransactionOrigin, TransactionValidator,
 };
 use reth_trie_db::MerklePatriciaTrie;
 use std::sync::LazyLock;
@@ -60,16 +60,16 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction
 }
 
 // todo: write tests
-// todo: see how 2 nodes behave
 // todo - what is the `State root task returned incorrect state root`
-// todo exepriments how to prevent user from producing system tx -- maybe we can access the block producer address
 // todo: custom mempool - don't drop system txs if they dont have gas properties
 // todo: custom mempool - after each block, drop all system txs
 
 /// Type configuration for an Irys-Ethereum node.
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
-pub struct IrysEthereumNode;
+pub struct IrysEthereumNode {
+    allowed_system_tx_origin: Address,
+}
 
 impl NodeTypes for IrysEthereumNode {
     type Primitives = EthPrimitives;
@@ -81,7 +81,9 @@ impl NodeTypes for IrysEthereumNode {
 
 impl IrysEthereumNode {
     /// Returns a [`ComponentsBuilder`] configured for a regular Ethereum node.
-    pub fn components<Node>() -> ComponentsBuilder<
+    pub fn components<Node>(
+        &self,
+    ) -> ComponentsBuilder<
         Node,
         CustomPoolBuilder,
         BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
@@ -99,7 +101,9 @@ impl IrysEthereumNode {
     {
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(CustomPoolBuilder::default())
+            .pool(CustomPoolBuilder {
+                allowed_system_tx_origin: self.allowed_system_tx_origin,
+            })
             .executor(CustomEthereumExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::default())
             .network(EthereumNetworkBuilder::default())
@@ -129,7 +133,7 @@ where
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components()
+        self.components()
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -164,7 +168,9 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 /// A custom pool builder
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct CustomPoolBuilder;
+pub struct CustomPoolBuilder {
+    pub allowed_system_tx_origin: Address,
+}
 
 // todo add a link form where this code was copied from
 /// Implement the [`PoolBuilder`] trait for the custom pool builder
@@ -222,6 +228,7 @@ where
         let validator = TransactionValidationTaskExecutor {
             validator: IrysEthTransactionValidator {
                 inner: validator.validator,
+                allowed_system_tx_origin: self.allowed_system_tx_origin,
             },
             to_validation_task: validator.to_validation_task,
         };
@@ -281,26 +288,6 @@ where
                 ),
             );
 
-            // spawn custom irys pool maintenance task
-            // - delete all system txs on each new block or reorg
-            //
-            // ctx.task_executor().spawn_critical(
-            //     "irys txpool maintenance task",
-            //     reth_transaction_pool::maintain::maintain_transaction_pool_future(
-            //         client,
-            //         pool,
-            //         chain_events,
-            //         ctx.task_executor().clone(),
-            //         reth_transaction_pool::maintain::MaintainPoolConfig {
-            //             max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
-            //             no_local_exemptions: transaction_pool
-            //                 .config()
-            //                 .local_transactions_config
-            //                 .no_exemptions,
-            //             ..Default::default()
-            //         },
-            //     ),
-            // );
             debug!(target: "reth::cli", "Spawned txpool maintenance task");
         }
 
@@ -308,25 +295,9 @@ where
     }
 }
 
-/// A [`TransactionValidator`] implementation that validates ethereum transaction.
-/// This validator is non-blocking, all validation work is done in a separate task.
-// #[derive(Debug, Clone)]
-// pub struct IrysTransactionValidationTaskExecutor<Client, Tx> {
-//     /// The validator that will validate transactions on a separate task.
-//     pub inner: TransactionValidationTaskExecutor<EthTransactionValidator<Client, Tx>>,
-// }
-
-// impl<Client, Tx> TransactionValidator for IrysTransactionValidationTaskExecutor<Client, Tx>
-// where
-//     V: TransactionValidator + Clone + 'static,
-// {
-//     type Transaction = <V as TransactionValidator>::Transaction;
-// }
-//
-//
-
 #[derive(Debug, Clone)]
 pub struct IrysEthTransactionValidator<Client, T> {
+    allowed_system_tx_origin: Address,
     /// The type that performs the actual validation.
     inner: EthTransactionValidator<Client, T>,
 }
@@ -343,7 +314,38 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        self.inner.validate_one(origin, transaction)
+        // Try to decode as a system transaction
+        let input = transaction.input();
+        let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
+            tracing::trace!(hash = ?transaction.hash(), "non system tx, passing to eth validator");
+            return self.inner.validate_one(origin, transaction);
+        };
+
+        if transaction.sender() != self.allowed_system_tx_origin {
+            tracing::warn!(
+                sender = ?transaction.sender(),
+                allowed_system_tx_origin = ?self.allowed_system_tx_origin,
+                "got system tx that was not signed by the allowed origin");
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::SignerAccountHasBytecode,
+                ),
+            );
+        }
+
+        if !matches!(origin, TransactionOrigin::Private) {
+            tracing::warn!("system txs can only be generated via private origin");
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::SignerAccountHasBytecode,
+                ),
+            );
+        }
+
+        tracing::debug!(nonce = ?transaction.nonce(), "system tx passed all extra checks");
+        return self.inner.validate_one(origin, transaction);
     }
 
     async fn validate_transactions(
@@ -1001,23 +1003,45 @@ mod evm {
 mod tests {
     use std::time::Duration;
 
-    use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_eips::Encodable2718;
     use alloy_genesis::Genesis;
-    use alloy_network::{EthereumWallet, TxSigner};
+    use alloy_network::{EthereumWallet, TxSigner, TxSignerSync};
     use alloy_primitives::{FixedBytes, Signature, TxKind, B256};
     use alloy_rlp::Encodable;
     use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
     use alloy_signer_local::PrivateKeySigner;
     use eyre::OptionExt;
     use reth::{
-        api::FullNodePrimitives,
-        builder::{rpc::RethRpcAddOns, FullNode},
-        providers::{AccountReader, BlockNumReader, StateReader},
-        rpc::api::eth::helpers::EthTransactions,
+        api::{
+            FullNodePrimitives, FullNodeTypesAdapter, NodeTypesWithDBAdapter,
+            PayloadAttributesBuilder,
+        },
+        args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
+        builder::{
+            rpc::{EngineValidatorAddOn, RethRpcAddOns},
+            FullNode, NodeBuilder, NodeComponents, NodeConfig, NodeHandle,
+        },
+        network::PeersHandleProvider,
+        providers::{
+            providers::{BlockchainProvider, NodeTypesForProvider},
+            AccountReader, BlockNumReader, StateReader,
+        },
+        rpc::{
+            api::eth::helpers::EthTransactions,
+            server_types::eth::{error::RpcPoolError, EthApiError},
+        },
+        tasks::TaskManager,
     };
-    use reth_e2e_test_utils::{setup, transaction::TransactionTestContext, wallet::Wallet};
+    use reth_db::{test_utils::TempDatabase, DatabaseEnv};
+    use reth_e2e_test_utils::{
+        node::NodeTestContext, setup, transaction::TransactionTestContext, wallet::Wallet, Adapter,
+        NodeHelperType,
+    };
+    use reth_engine_local::LocalPayloadAttributesBuilder;
     use reth_network::NetworkEventListenerProvider;
     use reth_transaction_pool::TransactionPool;
+    use tracing::{span, Level};
 
     use crate::system_tx::{BalanceDecrement, SystemTransaction};
 
@@ -1034,24 +1058,142 @@ mod tests {
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
     }
 
+    pub type TmpDB = Arc<TempDatabase<DatabaseEnv>>;
+    type TmpNodeAdapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, TmpDB>>> =
+        FullNodeTypesAdapter<N, TmpDB, Provider>;
+
+    /// Creates the initial setup with `num_nodes` started and interconnected.
+    pub async fn setup_irys_reth(
+        num_nodes: &[Address],
+        chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
+        is_dev: bool,
+        attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Copy + 'static,
+    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
+    where
+        LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
+            PayloadAttributesBuilder<
+                <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+            >,
+    {
+        let tasks = TaskManager::current();
+        let exec = tasks.executor();
+
+        let network_config = NetworkArgs {
+            discovery: DiscoveryArgs {
+                disable_discovery: true,
+                ..DiscoveryArgs::default()
+            },
+            ..NetworkArgs::default()
+        };
+
+        // Create nodes and peer them
+        let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
+
+        for (idx, allowed_system_tx_origin) in num_nodes.iter().enumerate() {
+            let node_config = NodeConfig::new(chain_spec.clone())
+                .with_network(network_config.clone())
+                .with_unused_ports()
+                .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
+                .set_dev(is_dev);
+
+            let span = span!(Level::INFO, "node", idx);
+            let _enter = span.enter();
+            let NodeHandle {
+                node,
+                node_exit_future: _,
+            } = NodeBuilder::new(node_config.clone())
+                .testing_node(exec.clone())
+                .node(IrysEthereumNode {
+                    allowed_system_tx_origin: *allowed_system_tx_origin,
+                })
+                .launch()
+                .await?;
+
+            let mut node = NodeTestContext::new(node, attributes_generator).await?;
+
+            // Connect each node in a chain.
+            if let Some(previous_node) = nodes.last_mut() {
+                previous_node.connect(&mut node).await;
+            }
+
+            // Connect last node with the first if there are more than two
+            if idx + 1 == num_nodes.len() && num_nodes.len() > 2 {
+                if let Some(first_node) = nodes.first_mut() {
+                    node.connect(first_node).await;
+                }
+            }
+
+            nodes.push(node);
+        }
+
+        Ok((
+            nodes,
+            tasks,
+            Wallet::default().with_chain_id(chain_spec.chain().into()),
+        ))
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn external_users_cannot_submit_system_txs() -> eyre::Result<()> {
+        // setup
+        let wallets = Wallet::new(2).wallet_gen();
+        let trget_account = EthereumWallet::from(wallets[0].clone());
+        let target_account = trget_account.default_signer();
+        let block_producer = EthereumWallet::from(wallets[1].clone());
+        let block_producer = block_producer.default_signer();
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+        let first_node = nodes.pop().unwrap();
+        let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
+            amount: U256::from(7000000000000000000u64), // 7 ETH
+            target: block_producer.address(),
+        });
+        let mut system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let signed_tx = target_account
+            .sign_transaction(&mut system_tx_raw)
+            .await
+            .unwrap();
+        let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(system_tx_raw.into_signed(signed_tx))
+            .encoded_2718()
+            .into();
+
+        // action
+        let tx_res = first_node.rpc.inject_tx(tx).await;
+
+        // assert
+        assert!(matches!(tx_res, Err(EthApiError::PoolError(_))));
+
+        Ok(())
+    }
+
     #[test_log::test(tokio::test)]
     async fn block_gest_broadcasted_between_peers() -> eyre::Result<()> {
-        let total_nodes = 2;
-        let (mut nodes, _tasks, wallet) =
-            setup::<IrysEthereumNode>(total_nodes, custom_chain(), false, eth_payload_attributes)
-                .await?;
         let wallets = Wallet::new(2).wallet_gen();
-        let block_producer = EthereumWallet::from(wallets[0].clone());
+        let trget_account = EthereumWallet::from(wallets[0].clone());
+        let target_account = trget_account.default_signer();
+        let block_producer = EthereumWallet::from(wallets[1].clone());
         let block_producer = block_producer.default_signer();
-        let target_account = EthereumWallet::from(wallets[1].clone());
-        let target_account = target_account.default_signer();
+
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address(), target_account.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
         let mut second_node = nodes.pop().unwrap();
         let mut first_node = nodes.pop().unwrap();
 
-        let initial_balance = get_balance(&first_node.inner, target_account.address());
+        let initial_balance = get_balance(&first_node.inner, block_producer.address());
+
         let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
             amount: U256::from(7000000000000000000u64), // 7 ETH
-            target: target_account.address(),
+            target: block_producer.address(),
         });
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
@@ -1085,8 +1227,8 @@ mod tests {
             .assert_new_block(system_tx_hash, block_hash, 1)
             .await?;
 
-        let final_balance = get_balance(&first_node.inner, target_account.address());
-        let final_balance_second = get_balance(&second_node.inner, target_account.address());
+        let final_balance = get_balance(&first_node.inner, block_producer.address());
+        let final_balance_second = get_balance(&second_node.inner, block_producer.address());
         assert_eq!(final_balance, final_balance_second);
         assert_eq!(
             final_balance,
@@ -1108,13 +1250,18 @@ mod tests {
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         // setup
-        let (mut nodes, _tasks, ..) =
-            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
-        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let wallets = Wallet::new(2).wallet_gen();
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
 
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let signer_b_balance = get_balance(&node.inner, signer_b.address());
         let block_producer_balance = get_balance(&node.inner, block_producer.address());
 
@@ -1179,17 +1326,21 @@ mod tests {
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         // setup
-        let (mut nodes, _tasks, ..) =
-            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
-        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let wallets = Wallet::new(2).wallet_gen();
-        let tx_count = 2;
-
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
 
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let signer_b_balance = get_balance(&node.inner, signer_b.address());
         let block_producer_balance = get_balance(&node.inner, block_producer.address());
+        let tx_count = 2;
 
         let system_tx = system_tx(signer_b.address());
         let pooled_txs = (0..tx_count)
@@ -1250,17 +1401,22 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_system_tx_ordering() -> eyre::Result<()> {
         // setup
-        let (mut nodes, _tasks, ..) =
-            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
-        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let wallets = Wallet::new(3).wallet_gen();
-
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
         let signer_a = EthereumWallet::from(wallets[1].clone());
         let signer_a = signer_a.default_signer();
         let signer_b = EthereumWallet::from(wallets[2].clone());
         let signer_b = signer_b.default_signer();
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
 
         // Create and submit normal transactions with high gas price
         let normal_tx_count = 3;
@@ -1360,15 +1516,20 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
         // setup
-        let (mut nodes, _tasks, ..) =
-            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
-        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let wallets = Wallet::new(2).wallet_gen();
-
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
         let signer_a = EthereumWallet::from(wallets[1].clone());
         let signer_a = signer_a.default_signer();
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
 
         // Create a random address that has never existed on chain
         let nonexistent_address = Address::random();
@@ -1449,15 +1610,20 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
         // setup
-        let (mut nodes, _tasks, ..) =
-            setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
-        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let wallets = Wallet::new(2).wallet_gen();
-
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
         let signer_a = EthereumWallet::from(wallets[1].clone());
         let signer_a = signer_a.default_signer();
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+
+        let mut node = nodes.pop().ok_or_eyre("no node")?;
         let funded_balance = get_balance(&node.inner, signer_a.address());
 
         assert!(
