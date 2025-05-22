@@ -71,8 +71,10 @@ impl Handler<Subscribe> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: Subscribe, _: &mut Context<Self>) {
-        let span = self.span.clone().unwrap();
-        let _span = span.enter();
+        if self.span.is_some() {
+            let span = self.span.clone().unwrap();
+            let _span = span.enter();
+        }
 
         debug!("PartitionMiningActor subscribed");
 
