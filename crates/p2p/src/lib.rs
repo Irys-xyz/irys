@@ -9,9 +9,10 @@ mod sync;
 #[cfg(test)]
 mod tests;
 mod types;
+mod vdf_utils;
 
 pub use gossip_client::GossipClient;
-pub use gossip_service::fast_forward_vdf_steps_from_block;
+pub use vdf_utils::{fast_forward_vdf_steps_from_block, wait_for_vdf_step};
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use peer_list::{PeerListFacade, PeerListFacadeError, PeerListServiceFacade};

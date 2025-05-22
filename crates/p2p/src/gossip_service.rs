@@ -26,8 +26,8 @@ use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
-    block_production::Seed, Address, DatabaseProvider, GossipData, H256List, PeerListItem,
-    RethPeerInfo, VDFLimiterInfo,
+    Address, DatabaseProvider, GossipData, PeerListItem,
+    RethPeerInfo,
 };
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -37,7 +37,9 @@ use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
 };
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
+use irys_actors::vdf_service::VdfServiceMessage;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -164,6 +166,7 @@ impl P2PService {
         db: DatabaseProvider,
         vdf_sender: Sender<BroadcastMiningSeed>,
         listener: TcpListener,
+        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -177,6 +180,7 @@ impl P2PService {
             block_discovery.clone(),
             Some(vdf_sender),
             self.sync_state.clone(),
+            vdf_service_sender,
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =
@@ -467,31 +471,4 @@ fn spawn_watcher_task(
         },
         task_executor,
     )
-}
-
-/// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
-pub async fn fast_forward_vdf_steps_from_block(
-    vdf_limiter_info: VDFLimiterInfo,
-    vdf_sender: Sender<BroadcastMiningSeed>,
-) {
-    let block_end_step = vdf_limiter_info.global_step_number;
-    let len = vdf_limiter_info.steps.len();
-    let block_start_step = block_end_step - len as u64;
-    tracing::trace!(
-        "VDF FF: block start-end step: {}-{}",
-        block_start_step,
-        block_end_step
-    );
-    for (i, hash) in vdf_limiter_info.steps.iter().enumerate() {
-        //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-        let mining_seed = BroadcastMiningSeed {
-            seed: Seed { 0: *hash },
-            global_step: block_start_step + i as u64,
-            checkpoints: H256List::new(),
-        };
-
-        if let Err(e) = vdf_sender.send(mining_seed).await {
-            error!("VDF FF: VDF Send Error: {:?}", e);
-        }
-    }
 }

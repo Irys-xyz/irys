@@ -48,6 +48,7 @@ impl SyncState {
         self.syncing.load(Ordering::Relaxed)
     }
 
+    /// Waits for the sync flag to be set to false.
     #[must_use]
     pub async fn wait_for_sync(&self) {
         // If already synced, return immediately
@@ -82,6 +83,8 @@ impl SyncState {
         self.sync_target_height.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// [`crate::block_pool_service::BlockPoolService`] marks block as processed once the
+    /// BlockDiscovery finished the pre-validation and scheduled the block for full validation
     pub fn mark_processed(&self, height: usize) {
         let current_height = self.highest_processed_block.load(Ordering::Relaxed);
         if height > current_height {
@@ -90,12 +93,18 @@ impl SyncState {
         }
     }
 
+    /// Highest pre-validated block height. Set by the [`crate::block_pool_service::BlockPoolService`]
     pub fn highest_processed_block(&self) -> usize {
         self.highest_processed_block.load(Ordering::Relaxed)
     }
 
+    /// Checks if more blocks can be scheduled for validation by checking the
+    /// number of blocks scheduled for validation so far versus the highest block
+    /// marked by [`crate::block_pool_service::BlockPoolService`] after pre-validation
     pub fn is_queue_full(&self) -> bool {
-        if self.sync_target_height() < self.highest_processed_block() {
+        // We already past the sync target height, so there's nothing in the queue
+        //  scheduled by the sync task specifically (gossip still can schedule blocks)
+        if self.highest_processed_block() > self.sync_target_height() {
             return false;
         }
 
@@ -103,12 +112,15 @@ impl SyncState {
             >= MAX_PROCESSING_BLOCKS_QUEUE_SIZE
     }
 
+    /// Waits until the length of the validation queue is less than the maximum
+    /// allowed size.
     pub async fn wait_for_an_empty_queue_slot(&self) {
         while self.is_queue_full() {
             tokio::time::sleep(Duration::from_millis(100)).await
         }
     }
 
+    /// Waits for the highest pre-validated block to reach target sync height
     pub async fn wait_for_processed_block_to_reach_target(&self) {
         // If already synced, return immediately
         if !self.is_syncing() {

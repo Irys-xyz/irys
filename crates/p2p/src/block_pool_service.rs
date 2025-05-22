@@ -1,6 +1,5 @@
-use crate::gossip_service::fast_forward_vdf_steps_from_block;
 use crate::peer_list::{PeerListFacade, PeerListFacadeError};
-use crate::SyncState;
+use crate::{fast_forward_vdf_steps_from_block, wait_for_vdf_step, SyncState};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
     WrapFuture,
@@ -13,8 +12,9 @@ use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tracing::{debug, error, info};
+use irys_actors::vdf_service::VdfServiceMessage;
 
 #[derive(Debug, Clone)]
 pub enum BlockPoolError {
@@ -45,6 +45,7 @@ where
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
     pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+    pub(crate) vdf_service_sender: Option<UnboundedSender<VdfServiceMessage>>,
 
     sync_state: SyncState,
 }
@@ -63,6 +64,7 @@ where
             block_producer: None,
             peer_list: None,
             vdf_sender: None,
+            vdf_service_sender: None,
             sync_state: SyncState::default(),
         }
     }
@@ -109,6 +111,7 @@ where
         block_producer_addr: B,
         vdf_sender: Option<Sender<BroadcastMiningSeed>>,
         sync_state: SyncState,
+        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
     ) -> Self {
         Self {
             db: Some(db),
@@ -118,6 +121,7 @@ where
             block_producer: Some(block_producer_addr),
             vdf_sender,
             sync_state,
+            vdf_service_sender: Some(vdf_service_sender),
         }
     }
 
@@ -139,6 +143,7 @@ where
         let block_discovery = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
+        let vdf_service_sender = self.vdf_service_sender.clone().expect("valid vdf service sender");
 
         // Adding the block to the pool, so if a block depending on that block arrives,
         // this block won't be requested from the network
@@ -174,7 +179,21 @@ where
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
 
                     info!(
-                        "FF VDF Steps for block for block {} completed",
+                        "FF VDF Steps for block for block {} completed. Waiting for FF VDF Steps to be saved to VdfState",
+                        current_block_hash.0.to_base58()
+                    );
+
+                    // wait to be sure the FF steps are saved to VdfState before we try to discover the block that requires them
+                    let desired_step = block_header.vdf_limiter_info.global_step_number;
+                    if let Err(vdf_error) = wait_for_vdf_step(vdf_service_sender, desired_step).await {
+                        self_addr.do_send(RemoveBlockFromPool {
+                            block_hash: block_header.block_hash,
+                        });
+                        return Err(BlockPoolError::OtherInternal(format!("Can't process VDF steps for block: {:?}", vdf_error)))
+                    }
+
+                    info!(
+                        "VDF Steps for block {} saved. Starting block validation",
                         current_block_hash.0.to_base58()
                     );
 

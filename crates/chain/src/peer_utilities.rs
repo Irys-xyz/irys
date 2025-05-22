@@ -6,7 +6,7 @@ use irys_actors::{
     mempool_service::{MempoolService, TxIngressMessage},
     vdf_service::VdfServiceMessage,
 };
-use irys_p2p::PeerListServiceFacade;
+use irys_p2p::{wait_for_vdf_step, PeerListServiceFacade};
 use irys_types::block::CombinedBlockHeader;
 
 use irys_p2p::fast_forward_vdf_steps_from_block;
@@ -29,7 +29,6 @@ use tokio::{
         mpsc::{Sender, UnboundedSender},
         Mutex,
     },
-    time::{sleep, Duration},
 };
 use tracing::{error, info, warn};
 
@@ -382,36 +381,4 @@ pub async fn fetch_and_update_peers(
     });
     let results = futures::future::join_all(futures).await;
     Some(results.iter().sum())
-}
-
-/// Polls VDF service for `VdfState` until `global_step` >= `desired_step`, with a 30s timeout.
-async fn wait_for_vdf_step(
-    vdf_service_sender: UnboundedSender<VdfServiceMessage>,
-    desired_step: u64,
-) -> eyre::Result<()> {
-    let seconds_to_wait = 30;
-    let retries_per_second = 20;
-    let total_retries = seconds_to_wait * retries_per_second;
-    for _ in 0..total_retries {
-        tracing::trace!("looping waiting for step {}", desired_step);
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            tracing::error!(
-                "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
-                e
-            );
-        };
-        let vdf_steps_guard = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
-        if vdf_steps_guard.read().global_step >= desired_step {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(1000 / retries_per_second)).await;
-    }
-    Err(eyre::eyre!(
-        "timed out after {seconds_to_wait}s waiting for VDF step {desired_step}"
-    ))
 }

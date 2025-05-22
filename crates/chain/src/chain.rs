@@ -954,6 +954,7 @@ impl IrysNode {
             irys_db.clone(),
             service_senders.vdf_seed.clone(),
             gossip_listener,
+            service_senders.vdf.clone(),
         )?;
 
         // set up the price oracle

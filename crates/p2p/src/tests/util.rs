@@ -19,7 +19,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, NodeMode,
+    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig,
     PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
@@ -375,7 +375,7 @@ impl GossipServiceTestFixture {
         };
 
         let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
-
+        let (vdf_service_tx, _vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
@@ -387,6 +387,7 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
+                vdf_service_tx
             )
             .expect("failed to run gossip service");
 
