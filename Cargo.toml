@@ -99,7 +99,7 @@ toml = "0.8"
 derive-syn-parse = "0"
 proc-macro2 = "1"
 quote = "1"
-semver = "1.0"
+semver = { version = "1.0", features = ["serde"] }
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"
@@ -212,7 +212,7 @@ reth-evm-ethereum = { path = "./ext/reth/crates/ethereum/evm" }
 reth-trie-db = { path = "./ext/reth/crates/trie/db" }
 reth-evm = { path = "./ext/reth/crates/evm/evm" }
 reth-chainspec = { path = "./ext/reth/crates/chainspec" }
-
+reth-primitives-traits = { path = "./ext/reth/crates/primitives-traits" }
 
 revm = { version = "23.1.0", default-features = false }
 

@@ -7,7 +7,7 @@ pub mod payload;
 pub mod precompile;
 pub mod range_specifier;
 pub mod shadow;
-
+pub use alloy_primitives::Address;
 pub use commitment::*;
 // pub use dest_hash::*;
 // pub use genesis::*;
