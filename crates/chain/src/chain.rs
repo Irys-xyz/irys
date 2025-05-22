@@ -1,6 +1,4 @@
-use crate::peer_utilities::{
-    fetch_genesis_block, fetch_genesis_commitments, sync_state_from_peers,
-};
+use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
