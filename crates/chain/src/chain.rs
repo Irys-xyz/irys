@@ -929,21 +929,6 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        // let current_tree_tip = block_tree_guard.read().tip;
-        // let latest_known_block_height = block_tree_guard
-        //     .read()
-        //     .get_block(&current_tree_tip)
-        //     .map(|block| block.height)
-        //     .unwrap_or(0);
-        // let latest_known_block_height = block_index.read().expect("To read the index during startup").latest_height();
-        //
-        // if latest_known_block_height <= 1 {
-        //     // We handle genesis separately, it shouldn't be handled by the sync task
-        //     sync_state.set_sync_target_height(1);
-        // } else {
-        //     sync_state.set_sync_target_height(latest_known_block_height as usize);
-        // }
-
         let p2p_service_handle = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
