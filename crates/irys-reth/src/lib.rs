@@ -1,13 +1,13 @@
 use std::{marker::PhantomData, sync::Arc, time::SystemTime};
 
 use alloy_consensus::{BlockHeader, TxLegacy};
-use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, BlockNumberOrTag};
+use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, TxKind, U256};
 use alloy_rlp::{Decodable, Encodable};
 use evm::{CustomBlockAssembler, MyEthEvmFactory};
 use futures::Stream;
 use reth::{
-    api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
+    api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
         components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PoolBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder, PayloadBuilderConfig,
@@ -15,10 +15,9 @@ use reth::{
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{EthPrimitives, InvalidTransactionError, SealedBlock},
     providers::{
-        providers::ProviderFactoryBuilder, BlockReaderIdExt, CanonStateNotification,
-        CanonStateSubscriptions, EthStorage, StateProviderFactory,
+        providers::ProviderFactoryBuilder, CanonStateNotification, CanonStateSubscriptions,
+        EthStorage, StateProviderFactory,
     },
-    tasks::TaskSpawner,
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
@@ -31,21 +30,15 @@ use reth_node_ethereum::{
     },
     EthEngineTypes, EthEvmConfig,
 };
-use reth_primitives_traits::SealedHeader;
 use reth_tracing::tracing::{self};
+use reth_transaction_pool::TransactionValidationOutcome;
 use reth_transaction_pool::{
-    blobstore::{BlobStoreCanonTracker, DiskFileBlobStore, DiskFileBlobStoreConfig},
-    metrics::MaintainPoolMetrics,
-    BlockInfo, CanonicalStateUpdate, EthPoolTransaction, EthPooledTransaction,
-    EthTransactionValidator, Pool, PoolTransaction, Priority, TransactionOrdering,
-    TransactionOrigin, TransactionPool, TransactionValidator,
-};
-use reth_transaction_pool::{
-    maintain::MaintainPoolConfig, TransactionPoolExt, TransactionValidationOutcome,
+    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
+    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
+    Priority, TransactionOrdering, TransactionOrigin, TransactionPool, TransactionValidator,
 };
 use reth_trie_db::MerklePatriciaTrie;
-use std::sync::LazyLock;
-use system_tx::{SystemTransaction, TransactionPacket};
+use system_tx::SystemTransaction;
 use tracing::{debug, info};
 
 pub mod system_tx;
@@ -318,7 +311,7 @@ pub async fn maintain_system_txs<Node, St>(
     Node: FullNodeTypes<Types = IrysEthereumNode>,
     St: Stream<Item = CanonStateNotification<EthPrimitives>> + Send + Unpin + 'static,
 {
-    use futures::{Stream, StreamExt};
+    use futures::StreamExt;
     loop {
         let event = events.next().await;
         let Some(event) = event else {
@@ -328,16 +321,13 @@ pub async fn maintain_system_txs<Node, St>(
             CanonStateNotification::Commit { new } => {
                 // Get the new block's number and parent hash
                 let new_tip_header = new.tip().sealed_block().header();
-                tracing::warn!(?new_tip_header);
                 let block_number = new_tip_header.number();
                 let parent_hash = new_tip_header.parent_hash();
-                let stale_system_txs = pool.queued_transactions();
-                tracing::warn!(?stale_system_txs);
                 let stale_system_txs = pool
                     .all_transactions()
                     .all()
                     .filter_map(|tx| {
-                        tracing::warn!(?tx);
+                        use alloy_consensus::transaction::Transaction;
                         let input = tx.inner().input();
                         let Ok(system_tx) = SystemTransaction::decode(&mut &input[..]) else {
                             return None;
@@ -352,9 +342,10 @@ pub async fn maintain_system_txs<Node, St>(
                         None
                     })
                     .collect::<Vec<_>>();
+                tracing::warn!(?stale_system_txs, "dropping stale system transactions");
                 pool.remove_transactions(stale_system_txs);
             }
-            CanonStateNotification::Reorg { old, new } => {}
+            CanonStateNotification::Reorg { .. } => {}
         }
     }
 }
@@ -516,7 +507,7 @@ mod evm {
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 
-    use alloy_primitives::{keccak256, Bytes, FixedBytes, Log, LogData};
+    use alloy_primitives::{Bytes, FixedBytes, Log, LogData};
     use reth::primitives::{SealedBlock, SealedHeader};
     use reth::providers::BlockExecutionResult;
     use reth::revm::context::result::ExecutionResult;
@@ -543,8 +534,6 @@ mod evm {
     use revm::precompile::{PrecompileSpecId, Precompiles};
     use revm::state::{Account, EvmStorageSlot};
     use revm::{DatabaseCommit, MainBuilder, MainContext};
-
-    use crate::system_tx::system_tx_topics;
 
     use super::*;
 
@@ -1073,45 +1062,30 @@ mod tests {
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844, TxLegacy};
     use alloy_eips::Encodable2718;
     use alloy_genesis::Genesis;
-    use alloy_network::{EthereumWallet, TxSigner, TxSignerSync};
+    use alloy_network::{EthereumWallet, TxSigner};
     use alloy_primitives::{FixedBytes, Signature, TxKind, B256};
-    use alloy_rlp::Encodable;
-    use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
+
+    use alloy_rpc_types::engine::PayloadAttributes;
     use alloy_signer_local::PrivateKeySigner;
     use eyre::OptionExt;
     use reth::{
-        api::{
-            FullNodePrimitives, FullNodeTypesAdapter, NodeTypesWithDBAdapter,
-            PayloadAttributesBuilder,
-        },
+        api::{FullNodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
-        builder::{
-            rpc::{EngineValidatorAddOn, RethRpcAddOns},
-            FullNode, NodeBuilder, NodeComponents, NodeConfig, NodeHandle,
-        },
-        network::PeersHandleProvider,
-        providers::{
-            providers::{BlockchainProvider, NodeTypesForProvider},
-            AccountReader, BlockNumReader, StateReader,
-        },
-        rpc::{
-            api::eth::helpers::EthTransactions,
-            server_types::eth::{error::RpcPoolError, EthApiError},
-        },
+        builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
+        providers::AccountReader,
+        rpc::{api::eth::helpers::EthTransactions, server_types::eth::EthApiError},
         tasks::TaskManager,
     };
-    use reth_db::{test_utils::TempDatabase, DatabaseEnv};
     use reth_e2e_test_utils::{
-        node::NodeTestContext, setup, transaction::TransactionTestContext, wallet::Wallet, Adapter,
-        NodeHelperType,
+        node::NodeTestContext, transaction::TransactionTestContext, wallet::Wallet, NodeHelperType,
     };
     use reth_engine_local::LocalPayloadAttributesBuilder;
-    use reth_network::NetworkEventListenerProvider;
+
     use reth_transaction_pool::TransactionPool;
-    use tokio::time;
+
     use tracing::{span, Level};
 
-    use crate::system_tx::{BalanceDecrement, SystemTransaction};
+    use crate::system_tx::{BalanceDecrement, SystemTransaction, TransactionPacket};
 
     use super::*;
 
@@ -1126,12 +1100,8 @@ mod tests {
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
     }
 
-    pub type TmpDB = Arc<TempDatabase<DatabaseEnv>>;
-    type TmpNodeAdapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, TmpDB>>> =
-        FullNodeTypesAdapter<N, TmpDB, Provider>;
-
     /// Creates the initial setup with `num_nodes` started and interconnected.
-    pub async fn setup_irys_reth(
+    pub(crate) async fn setup_irys_reth(
         num_nodes: &[Address],
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
@@ -1256,7 +1226,7 @@ mod tests {
             eth_payload_attributes,
         )
         .await?;
-        let mut second_node = nodes.pop().unwrap();
+        let second_node = nodes.pop().unwrap();
         let mut first_node = nodes.pop().unwrap();
 
         let normal_tx = TransactionTestContext::transfer_tx(1, Wallet::default().inner)
@@ -1301,10 +1271,48 @@ mod tests {
             .update_forkchoice(block_hash, block_hash)
             .await?;
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        // todo assert that the system tx is no longer inside the `first_node` mempool
-        panic!();
+        // this is needed for the system tx maintenance task to kick in
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
+        // Assert that the system tx is no longer in the second_node's pool
+        let pool_txs: Vec<_> = second_node
+            .inner
+            .pool
+            .all_transactions()
+            .all()
+            .map(|tx| *tx.hash())
+            .collect();
+        assert!(
+            !pool_txs.contains(&system_tx_hash),
+            "System tx should have been dropped from the pool"
+        );
+
+        // Assert that the system tx is not longer in the first_node's pool
+        // (not that we would expect this in the general case)
+        let pool_txs: Vec<_> = first_node
+            .inner
+            .pool
+            .all_transactions()
+            .all()
+            .map(|tx| *tx.hash())
+            .collect();
+        assert!(
+            !pool_txs.contains(&system_tx_hash),
+            "System tx should have been dropped from the pool"
+        );
+
+        // Assert that the system tx is not in the block produced by first_node
+        let block_txs: std::collections::HashSet<_> = payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+        assert!(
+            !block_txs.contains(&system_tx_hash),
+            "System tx should not have been included in the block"
+        );
         Ok(())
     }
 
@@ -1491,7 +1499,7 @@ mod tests {
 
         let pooled_txs = futures::future::join_all(pooled_txs).await;
 
-        // actoin: submit txs and get produce a new block payload and update fork choice
+        // action: submit txs and get produce a new block payload and update fork choice
         let tx_hashes = pooled_txs
             .into_iter()
             .map(|tx| {
