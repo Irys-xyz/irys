@@ -219,58 +219,6 @@ impl MempoolService {
         Ok(*latest_height)
     }
 
-    // Helper to validate anchor
-    fn validate_anchor(
-        &mut self,
-        tx_id: &IrysTransactionId,
-        anchor: &H256,
-    ) -> Result<IrysBlockHeader, TxIngressError> {
-        let mempool_state = &self.inner.mempool_state.clone();
-        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
-
-        let read_tx = mempool_state_guard
-            .irys_db
-            .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
-
-        let latest_height = self.get_latest_block_height()?;
-        let anchor_expiry_depth = mempool_state_guard
-            .config
-            .node_config
-            .consensus_config()
-            .mempool
-            .anchor_expiry_depth as u64;
-
-        // Allow transactions to use the txid of a transaction in the mempool
-        if mempool_state_guard.recent_valid_tx.contains(anchor) {
-            let (canonical_blocks, _) = mempool_state_guard
-                .block_tree_read_guard
-                .read()
-                .get_canonical_chain();
-            let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
-            // Just provide the most recent block as an anchor
-            match irys_database::block_header_by_hash(&read_tx, latest_block_hash, false) {
-                Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
-                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
-                    return Ok(hdr);
-                }
-                _ => {}
-            };
-        }
-
-        match irys_database::block_header_by_hash(&read_tx, anchor, false) {
-            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
-                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
-                Ok(hdr)
-            }
-            _ => {
-                mempool_state_guard.invalid_tx.push(tx_id.clone());
-                warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
-                Err(TxIngressError::InvalidAnchor)
-            }
-        }
-    }
-
     // Helper to verify signature
     fn validate_signature<T: IrysTransactionCommon>(
         &mut self,
@@ -605,7 +553,7 @@ impl Inner {
                 }
 
                 // Validate the tx anchor
-                mempool_state_guard.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
+                self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
 
                 // Check pending commitments and cached commitments and active commitments
                 let commitment_status = self.get_commitment_status(&commitment_tx).await;
@@ -1104,7 +1052,7 @@ impl Inner {
                     return Err(TxIngressError::Skipped);
                 }
                 // Validate anchor
-                let hdr = mempool_state_guard.validate_anchor(&tx.id, &tx.anchor)?;
+                let hdr = self.validate_anchor(&tx.id, &tx.anchor)?;
 
                 let read_tx = &mempool_state_guard
                     .irys_db
@@ -1327,6 +1275,58 @@ impl Inner {
 
         // All other cases are valid
         CommitmentStatus::Accepted
+    }
+
+    // Helper to validate anchor
+    fn validate_anchor(
+        &mut self,
+        tx_id: &IrysTransactionId,
+        anchor: &H256,
+    ) -> Result<IrysBlockHeader, TxIngressError> {
+        let mempool_state = &self.mempool_state.clone();
+        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+
+        let read_tx = mempool_state_guard
+            .irys_db
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?;
+
+        let latest_height = self.get_latest_block_height()?;
+        let anchor_expiry_depth = mempool_state_guard
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .anchor_expiry_depth as u64;
+
+        // Allow transactions to use the txid of a transaction in the mempool
+        if mempool_state_guard.recent_valid_tx.contains(anchor) {
+            let (canonical_blocks, _) = mempool_state_guard
+                .block_tree_read_guard
+                .read()
+                .get_canonical_chain();
+            let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
+            // Just provide the most recent block as an anchor
+            match irys_database::block_header_by_hash(&read_tx, latest_block_hash, false) {
+                Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
+                    return Ok(hdr);
+                }
+                _ => {}
+            };
+        }
+
+        match irys_database::block_header_by_hash(&read_tx, anchor, false) {
+            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
+                Ok(hdr)
+            }
+            _ => {
+                mempool_state_guard.invalid_tx.push(tx_id.clone());
+                warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
+                Err(TxIngressError::InvalidAnchor)
+            }
+        }
     }
 }
 
