@@ -1,9 +1,7 @@
-use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
 use actix::{Addr, Context, Handler, MailboxError, Message, MessageResponse};
-use async_trait::async_trait;
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -30,7 +28,6 @@ use reth_db::{
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    future::Future,
     num::NonZeroUsize,
     pin::pin,
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -38,7 +35,6 @@ use std::{
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver},
     task::JoinHandle,
-    time::{sleep, Duration},
 };
 use tracing::{debug, error, info, warn};
 
