@@ -522,13 +522,18 @@ impl Inner {
                 }
 
                 // Validate the tx anchor
-                self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
+                if let Err(e) = self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor) {
+                    tracing::error!("Anchor {:?} for tx {:?} failure with error: {:?}", &commitment_tx.anchor, commitment_tx.id, e);
+                    return Ok(());
+                }
 
                 // Check pending commitments and cached commitments and active commitments
                 let commitment_status = self.get_commitment_status(&commitment_tx).await;
                 if commitment_status == CommitmentStatus::Accepted {
                     // Validate tx signature
-                    self.validate_signature(&commitment_tx)?;
+                    if let Err(e) = self.validate_signature(&commitment_tx) {
+                        tracing::error!("Signature validation for commitment_tx {:?} failed with error: {:?}", &commitment_tx, e);
+                    }
 
                     // Add the commitment tx to the valid tx list to be included in the next block
                     mempool_state_guard
@@ -635,7 +640,12 @@ impl Inner {
                 let read_tx = mempool_state_guard
                     .irys_db
                     .tx()
-                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+                    .map_err(|_| ChunkIngressError::DatabaseError);
+
+                if let Err(e) = read_tx {
+                    error!("database error reading tx: {:?}",e);
+                    return Ok(());
+                }
 
                 let binding = mempool_state_guard.storage_modules_guard.read();
                 let candidate_sms = binding
@@ -689,10 +699,10 @@ impl Inner {
                 // recorded in the transaction header.
                 if data_size != chunk.data_size {
                     error!(
-                        "Invalid data_size for data_root: expected: {} got:{}",
-                        data_size, chunk.data_size
+                        "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
+                        ChunkIngressError::InvalidDataSize, data_size, chunk.data_size
                     );
-                    return Err(ChunkIngressError::InvalidDataSize);
+                    return Ok(());
                 }
 
                 // Next validate the data_path/proof for the chunk, linking
@@ -709,7 +719,12 @@ impl Inner {
                 );
 
                 let path_result = validate_path(root_hash, path_buff, target_offset)
-                    .map_err(|_| ChunkIngressError::InvalidProof)?;
+                    .map_err(|_| ChunkIngressError::InvalidProof);
+
+                if let Err(e) = path_result {
+                    error!("error validating path: {:?}",e);
+                    return Ok(());
+                }
 
                 // Use data_size to identify and validate that only the last chunk
                 // can be less than chunk_size
@@ -728,19 +743,19 @@ impl Inner {
                     // Ensure prefix chunks are all exactly chunk_size
                     if chunk_len != chunk_size {
                         error!(
-                            "InvalidChunkSize: incomplete not last chunk, tx offset: {} chunk len: {}",
-                            chunk.tx_offset, chunk_len
+                            "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
+                            ChunkIngressError::InvalidChunkSize, chunk.tx_offset, chunk_len
                         );
-                        return Err(ChunkIngressError::InvalidChunkSize);
+                        return Ok(());
                     }
                 } else {
                     // Ensure the last chunk is no larger than chunk_size
                     if chunk_len > chunk_size {
                         error!(
-                            "InvalidChunkSize: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                            chunk.tx_offset, chunk_len
+                            "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
+                            ChunkIngressError::InvalidChunkSize, chunk.tx_offset, chunk_len
                         );
-                        return Err(ChunkIngressError::InvalidChunkSize);
+                        return Ok(());
                     }
                 }
 
