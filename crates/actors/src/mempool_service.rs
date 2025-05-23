@@ -98,7 +98,10 @@ pub enum MempoolServiceMessage {
         tokio::sync::oneshot::Sender<Option<IrysTransactionHeader>>,
     ),
     ChunkIngressMessage(UnpackedChunk),
-    CommitmentTxIngressMessage(CommitmentTransaction),
+    CommitmentTxIngressMessage(
+        CommitmentTransaction,
+        tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
+    ),
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<MempoolTxs>),
     TxExistenceQuery(
         H256,
@@ -706,7 +709,7 @@ impl Inner {
                 );
                 Ok(())
             }
-            MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx) => {
+            MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
                 //let commitment_tx = commitment_tx_msg.0.clone();
                 debug!(
                     "received commitment tx {:?}",
@@ -715,7 +718,10 @@ impl Inner {
 
                 // Early out if we already know about this transaction (invalid)
                 if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
-                    return Err(TxIngressError::Skipped);
+                    if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
+                        tracing::error!("response.send(tx_header) error: {:?}", e);
+                    };
+                    return Ok(());
                 }
 
                 // Check if the transaction already exists in valid transactions
@@ -725,7 +731,10 @@ impl Inner {
                     .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
 
                 if tx_exists {
-                    return Err(TxIngressError::Skipped);
+                    if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
+                        tracing::error!("response.send(tx_header) error: {:?}", e);
+                    };
+                    return Ok(());
                 }
 
                 // Validate the tx anchor
@@ -768,10 +777,14 @@ impl Inner {
                         for pledge_tx in pledges {
                             // Re-process each pledge now that its signer is staked
                             // No need to clone as we own the transaction objects
-                            self.handle(CommitmentTxIngressMessage(pledge_tx), ctx)
-                                .expect(
-                                    "Failed to process pending pledge for newly staked address",
-                                );
+                            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                            self.handle_message(MempoolServiceMessage::CommitmentTxIngressMessage(
+                                pledge_tx, oneshot_tx,
+                            ));
+
+                            let status = oneshot_rx
+                                .await
+                                .expect("to process pending pledge for newly staked address");
                         }
                     }
 
