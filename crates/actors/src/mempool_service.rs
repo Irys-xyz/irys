@@ -94,8 +94,8 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 pub enum MempoolServiceMessage {
     BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
     GetTransaction(
-        IrysTransactionHeader,
-        tokio::sync::oneshot::Sender<IrysTransactionHeader>,
+        H256,
+        tokio::sync::oneshot::Sender<Option<IrysTransactionHeader>>,
     ),
     ChunkIngressMessage(UnpackedChunk),
     CommitmentTxIngressMessage(CommitmentTransaction),
@@ -597,20 +597,21 @@ impl Inner {
         match msg {
             MempoolServiceMessage::GetTransaction(tx, response) => {
                 if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
-                    return Ok(Some(tx_header.clone()));
+                    if let Err(e) = response.send(Some(tx_header.clone())) {
+                        tracing::error!("response.send(tx_header) error: {:?}", e);
+                    };
+                    return Ok(());
                 }
 
                 let read_tx = mempool_state_guard
                     .irys_db
                     .as_ref()
                     .tx()
-                    .map_err(|_| TxIngressError::DatabaseError)?;
+                    .map_err(|_| TxIngressError::DatabaseError);
 
-                let txid = tx;
-                let tx_header = tx_header_by_txid(&read_tx, &txid)
-                    .map_err(|_| TxIngressError::DatabaseError)?;
+                let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
 
-                if let Err(e) = response.send(Ok(tx_header)) {
+                if let Err(e) = response.send(tx_header.clone()) {
                     tracing::error!("response.send(tx_header) error: {:?}", e);
                 };
             }
