@@ -100,7 +100,10 @@ pub enum MempoolServiceMessage {
     ChunkIngressMessage(UnpackedChunk),
     CommitmentTxIngressMessage(CommitmentTransaction),
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<VdfStepsReadGuard>),
-    TxExistenceQuery(H256, tokio::sync::oneshot::Sender<Result<bool>>),
+    TxExistenceQuery(
+        H256,
+        tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
+    ),
     TxIngressMessage(IrysTransactionHeader),
 }
 
