@@ -288,71 +288,6 @@ impl MempoolService {
             Err(TxIngressError::InvalidSignature)
         }
     }
-
-    async fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
-        let mempool_state = &self.inner.mempool_state.clone();
-        let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
-        // Check if already staked in the blockchain
-        let is_staked = mempool_state_guard
-            .commitment_state_guard
-            .is_staked(commitment_tx.signer);
-
-        // Most commitments are valid by default
-        // Only pledges require special validation when not already staked
-        let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
-        if !is_pledge || is_staked {
-            return CommitmentStatus::Accepted;
-        }
-
-        // For unstaked pledges, validate against cache and pending transactions
-        let commitment_cache = mempool_state_guard.service_senders.commitment_cache.clone();
-        let commitment_tx_clone = commitment_tx.clone();
-
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
-            commitment_tx: commitment_tx_clone,
-            response: oneshot_tx,
-        });
-        let cache_status = oneshot_rx
-            .await
-            .expect("to receive CommitmentStatus from GetCommitmentStatus message")
-
-        // Reject unsupported commitment types
-        if matches!(cache_status, CommitmentStatus::Unsupported) {
-            warn!(
-                "Commitment is unsupported: {}",
-                commitment_tx.id.0.to_base58()
-            );
-            return CommitmentStatus::Unsupported;
-        }
-
-        // For unstaked addresses, check for pending stake transactions
-        if matches!(cache_status, CommitmentStatus::Unstaked) {
-            // Get pending transactions for this address
-            if let Some(pending) = mempool_state_guard
-                .valid_commitment_tx
-                .get(&commitment_tx.signer)
-            {
-                // Check if there's at least one pending stake transaction
-                if pending
-                    .iter()
-                    .any(|c| c.commitment_type == CommitmentType::Stake)
-                {
-                    return CommitmentStatus::Accepted;
-                }
-            }
-
-            // No pending stakes found
-            warn!(
-                "Pledge Commitment is unstaked: {}",
-                commitment_tx.id.0.to_base58()
-            );
-            return CommitmentStatus::Unstaked;
-        }
-
-        // All other cases are valid
-        CommitmentStatus::Accepted
-    }
 }
 
 /// Message for when a new TX is discovered by the node, either though
@@ -673,7 +608,7 @@ impl Inner {
                 mempool_state_guard.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
 
                 // Check pending commitments and cached commitments and active commitments
-                let commitment_status = mempool_state_guard.get_commitment_status(&commitment_tx);
+                let commitment_status = self.get_commitment_status(&commitment_tx).await;
                 if commitment_status == CommitmentStatus::Accepted {
                     // Validate tx signature
                     mempool_state_guard.validate_signature(&commitment_tx)?;
@@ -1327,6 +1262,71 @@ impl Inner {
         }
 
         found
+    }
+
+    async fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
+        // Check if already staked in the blockchain
+        let is_staked = mempool_state_guard
+            .commitment_state_guard
+            .is_staked(commitment_tx.signer);
+
+        // Most commitments are valid by default
+        // Only pledges require special validation when not already staked
+        let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
+        if !is_pledge || is_staked {
+            return CommitmentStatus::Accepted;
+        }
+
+        // For unstaked pledges, validate against cache and pending transactions
+        let commitment_cache = mempool_state_guard.service_senders.commitment_cache.clone();
+        let commitment_tx_clone = commitment_tx.clone();
+
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
+            commitment_tx: commitment_tx_clone,
+            response: oneshot_tx,
+        });
+        let cache_status = oneshot_rx
+            .await
+            .expect("to receive CommitmentStatus from GetCommitmentStatus message")
+
+        // Reject unsupported commitment types
+        if matches!(cache_status, CommitmentStatus::Unsupported) {
+            warn!(
+                "Commitment is unsupported: {}",
+                commitment_tx.id.0.to_base58()
+            );
+            return CommitmentStatus::Unsupported;
+        }
+
+        // For unstaked addresses, check for pending stake transactions
+        if matches!(cache_status, CommitmentStatus::Unstaked) {
+            // Get pending transactions for this address
+            if let Some(pending) = mempool_state_guard
+                .valid_commitment_tx
+                .get(&commitment_tx.signer)
+            {
+                // Check if there's at least one pending stake transaction
+                if pending
+                    .iter()
+                    .any(|c| c.commitment_type == CommitmentType::Stake)
+                {
+                    return CommitmentStatus::Accepted;
+                }
+            }
+
+            // No pending stakes found
+            warn!(
+                "Pledge Commitment is unstaked: {}",
+                commitment_tx.id.0.to_base58()
+            );
+            return CommitmentStatus::Unstaked;
+        }
+
+        // All other cases are valid
+        CommitmentStatus::Accepted
     }
 }
 
