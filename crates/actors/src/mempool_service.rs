@@ -203,24 +203,6 @@ impl MempoolService {
         tracing::info!("shutting down Mempool service");
         Ok(())
     }
-
-    // Helper to verify signature
-    fn validate_signature<T: IrysTransactionCommon>(
-        &mut self,
-        tx: &T,
-    ) -> Result<(), TxIngressError> {
-        if tx.is_signature_valid() {
-            info!("Signature is valid");
-            Ok(())
-        } else {
-            let mempool_state = &self.inner.mempool_state.clone();
-            let mut mempool_state_guard =
-                mempool_state.write().expect("expected valid mempool state");
-            mempool_state_guard.invalid_tx.push(tx.id());
-            debug!("Signature is NOT valid");
-            Err(TxIngressError::InvalidSignature)
-        }
-    }
 }
 
 /// Message for when a new TX is discovered by the node, either though
@@ -544,7 +526,7 @@ impl Inner {
                 let commitment_status = self.get_commitment_status(&commitment_tx).await;
                 if commitment_status == CommitmentStatus::Accepted {
                     // Validate tx signature
-                    mempool_state_guard.validate_signature(&commitment_tx)?;
+                    self.validate_signature(&commitment_tx)?;
 
                     // Add the commitment tx to the valid tx list to be included in the next block
                     mempool_state_guard
@@ -1093,7 +1075,7 @@ impl Inner {
                 }
 
                 // Validate the transaction signature
-                mempool_state_guard.validate_signature(tx)?;
+                self.validate_signature(&tx)?;
                 mempool_state_guard.valid_tx.insert(tx.id, tx.clone());
                 mempool_state_guard.recent_valid_tx.insert(tx.id);
 
@@ -1327,6 +1309,24 @@ impl Inner {
         ))?;
 
         Ok(*latest_height)
+    }
+
+    // Helper to verify signature
+    fn validate_signature<T: IrysTransactionCommon>(
+        &mut self,
+        tx: &T,
+    ) -> Result<(), TxIngressError> {
+        if tx.is_signature_valid() {
+            info!("Signature is valid");
+            Ok(())
+        } else {
+            let mempool_state = &self.mempool_state.clone();
+            let mut mempool_state_guard =
+                mempool_state.write().expect("expected valid mempool state");
+            mempool_state_guard.invalid_tx.push(tx.id());
+            debug!("Signature is NOT valid");
+            Err(TxIngressError::InvalidSignature)
+        }
     }
 }
 
