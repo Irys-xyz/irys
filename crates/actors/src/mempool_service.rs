@@ -289,32 +289,6 @@ impl MempoolService {
         }
     }
 
-    // Helper to execute async operation in a synchronous handler
-    // TODO: This is actually bad, we spawn a thread to perform the async
-    // operation from a sync context, to fix the mempool service needs to be
-    // converted to a new style service with async handlers.
-    fn execute_async_operation<T, F, Fut>(&self, operation: F) -> Result<T, TxIngressError>
-    where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = T>,
-        T: Send + 'static,
-    {
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            let result = rt.block_on(operation());
-            tx.send(result)
-                .expect("Failed to send result back to handler thread");
-        });
-
-        Ok(rx.recv().expect("Failed to receive result from thread"))
-    }
-
     fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
         let mempool_state = &self.inner.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
