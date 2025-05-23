@@ -6,7 +6,9 @@ use base58::ToBase58;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
-    block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
+    block_index_service::{
+        BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage, TruncateMessage,
+    },
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
@@ -569,7 +571,22 @@ impl IrysNode {
             &node_config.reth_peer_info.peering_tcp_addr
         );
 
-        let latest_known_block_height = ctx.block_index_guard.read().latest_height();
+        let mut latest_known_block_height = ctx.block_index_guard.read().latest_height();
+        let chain_tip = ctx.block_tree_guard.read().tip;
+
+        if let Some(tip) = ctx.block_tree_guard.read().get_block(&chain_tip) {
+            let tip_height = tip.height;
+            if latest_known_block_height > tip_height {
+                ctx.actor_addresses
+                    .block_index
+                    .send(TruncateMessage {
+                        to: tip_height as usize,
+                    })
+                    .await?;
+                latest_known_block_height = tip_height;
+            }
+        }
+
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
         irys_p2p::sync_chain(

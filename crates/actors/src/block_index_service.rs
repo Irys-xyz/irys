@@ -242,3 +242,19 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexService {
         Some(bi.get_item(block_height)?.clone())
     }
 }
+
+/// Returns the current block height in the index
+#[derive(Message, Clone, Debug)]
+#[rtype(result = "()")]
+pub struct TruncateMessage {
+    pub to: usize,
+}
+
+impl Handler<TruncateMessage> for BlockIndexService {
+    type Result = ();
+    fn handle(&mut self, msg: TruncateMessage, _ctx: &mut Self::Context) -> Self::Result {
+        if let Some(block_index) = self.block_index.clone() {
+            block_index.write().unwrap().truncate(msg.to);
+        }
+    }
+}
