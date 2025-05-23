@@ -6,6 +6,7 @@ use actix::{
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::block_tree_service::{BlockTreeCache, BlockTreeReadGuard};
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::vdf_service::VdfServiceMessage;
 use irys_api_client::ApiClient;
@@ -13,6 +14,7 @@ use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tracing::{debug, error, info};
 
@@ -48,6 +50,7 @@ where
     pub(crate) vdf_service_sender: Option<UnboundedSender<VdfServiceMessage>>,
 
     sync_state: SyncState,
+    block_tree: BlockTreeReadGuard,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -66,6 +69,9 @@ where
             vdf_sender: None,
             vdf_service_sender: None,
             sync_state: SyncState::default(),
+            block_tree: BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTreeCache::new(
+                &IrysBlockHeader::default(),
+            )))),
         }
     }
 }
@@ -112,6 +118,7 @@ where
         vdf_sender: Option<Sender<BroadcastMiningSeed>>,
         sync_state: SyncState,
         vdf_service_sender: UnboundedSender<VdfServiceMessage>,
+        block_tree: BlockTreeReadGuard,
     ) -> Self {
         Self {
             db: Some(db),
@@ -122,6 +129,7 @@ where
             vdf_sender,
             sync_state,
             vdf_service_sender: Some(vdf_service_sender),
+            block_tree,
         }
     }
 
@@ -141,7 +149,6 @@ where
         let vdf_limiter_info = block_header.vdf_limiter_info.clone();
         let self_addr = ctx.address();
         let block_discovery = self.block_producer.clone();
-        let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
         let vdf_service_sender = self
             .vdf_service_sender
@@ -156,6 +163,7 @@ where
             .insert(current_block_hash, prev_block_hash);
 
         let sync_state = self.sync_state.clone();
+        let block_tree_guard = self.block_tree.clone();
 
         Box::pin(
             async move {
@@ -164,15 +172,12 @@ where
                     prev_block_hash.0.to_base58(),
                     current_block_hash.0.to_base58()
                 );
-                // Check if the previous block is in the db
-                let maybe_previous_block_header = db
-                    .as_ref()
-                    .ok_or(BlockPoolError::DatabaseError("Database is not connected".into()))?
-                    .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
-                    .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))?;
+                // Check if the previous block is in the tree
+
+                let previous_block_exists_in_tree = block_tree_guard.read().get_block(&prev_block_hash).is_some();
 
                 // If the parent block is in the db, process it
-                if let Some(_previous_block_header) = maybe_previous_block_header {
+                if previous_block_exists_in_tree {
                     info!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
@@ -248,7 +253,7 @@ where
                 }
 
                 debug!(
-                    "Parent block for block {} not found in db",
+                    "Parent block for block {} not found in the tree",
                     current_block_hash.0.to_base58()
                 );
 
@@ -475,15 +480,7 @@ where
             return Ok(self.orphaned_blocks_by_parent.contains_key(parent_hash));
         }
 
-        Ok(self
-            .db
-            .as_ref()
-            .ok_or(BlockPoolError::DatabaseError(
-                "Database is not connected".into(),
-            ))?
-            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
-            .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))?
-            .is_some())
+        Ok(self.block_tree.read().get_block(&block_hash).is_some())
     }
 }
 

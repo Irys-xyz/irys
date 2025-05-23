@@ -611,9 +611,9 @@ mod price_cache_context {
         let adjusted_index = chain_len
             .saturating_sub(diff_from_latest_height)
             .saturating_sub(1); // -1 because heights are zero based
-        let (hash, new_height, ..) = chain
-            .get(adjusted_index)
-            .ok_or_else(|| eyre::eyre!("block at index {adjusted_index} not found in the canonical chain"))?;
+        let (hash, new_height, ..) = chain.get(adjusted_index).ok_or_else(|| {
+            eyre::eyre!("block at index {adjusted_index} not found in the canonical chain")
+        })?;
         if height != *new_height {
             return Err(eyre::eyre!(
                 "height mismatch in canonical chain data: expected {height}, found {new_height}"
