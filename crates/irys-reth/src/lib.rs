@@ -38,7 +38,7 @@ use reth_transaction_pool::{
     metrics::MaintainPoolMetrics,
     BlockInfo, CanonicalStateUpdate, EthPoolTransaction, EthPooledTransaction,
     EthTransactionValidator, Pool, PoolTransaction, Priority, TransactionOrdering,
-    TransactionOrigin, TransactionValidator,
+    TransactionOrigin, TransactionPool, TransactionValidator,
 };
 use reth_transaction_pool::{
     maintain::MaintainPoolConfig, TransactionPoolExt, TransactionValidationOutcome,
@@ -98,7 +98,7 @@ impl IrysEthereumNode {
         EthereumConsensusBuilder,
     >
     where
-        Node: FullNodeTypes<Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>>,
+        Node: FullNodeTypes<Types = IrysEthereumNode>,
         <Node::Types as NodeTypes>::Payload: PayloadTypes<
             BuiltPayload = EthBuiltPayload,
             PayloadAttributes = EthPayloadAttributes,
@@ -182,13 +182,9 @@ pub struct CustomPoolBuilder {
 /// Implement the [`PoolBuilder`] trait for the custom pool builder
 ///
 /// This will be used to build the transaction pool and its maintenance tasks during launch.
-impl<Types, Node> PoolBuilder<Node> for CustomPoolBuilder
+impl<Node> PoolBuilder<Node> for CustomPoolBuilder
 where
-    Types: NodeTypes<
-        ChainSpec: EthereumHardforks,
-        Primitives: NodePrimitives<SignedTx = TransactionSigned>,
-    >,
-    Node: FullNodeTypes<Types = Types>,
+    Node: FullNodeTypes<Types = IrysEthereumNode>,
 {
     type Pool = Pool<
         TransactionValidationTaskExecutor<
@@ -296,19 +292,9 @@ where
             // spawn system txs maintenance task
             ctx.task_executor().spawn_critical(
                 "txpool system tx maintenance task",
-                maintain_system_txs(
-                    client.clone(),
+                maintain_system_txs::<Node, _>(
                     pool.clone(),
                     ctx.provider().canonical_state_stream(),
-                    ctx.task_executor().clone(),
-                    reth_transaction_pool::maintain::MaintainPoolConfig {
-                        max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
-                        no_local_exemptions: transaction_pool
-                            .config()
-                            .local_transactions_config
-                            .no_exemptions,
-                        ..Default::default()
-                    },
                 ),
             );
 
@@ -319,18 +305,18 @@ where
     }
 }
 
-pub async fn maintain_system_txs<N, Client, P, St, Tasks>(
-    client: Client,
-    pool: P,
+pub async fn maintain_system_txs<Node, St>(
+    pool: Pool<
+        TransactionValidationTaskExecutor<
+            IrysEthTransactionValidator<Node::Provider, EthPooledTransaction>,
+        >,
+        SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
+        DiskFileBlobStore,
+    >,
     mut events: St,
-    task_spawner: Tasks,
-    config: MaintainPoolConfig,
 ) where
-    N: NodePrimitives,
-    Client: StateProviderFactory + BlockReaderIdExt + ChainSpecProvider + Clone + 'static,
-    P: TransactionPoolExt<Transaction: PoolTransaction<Consensus = N::SignedTx>> + 'static,
-    St: Stream<Item = CanonStateNotification<N>> + Send + Unpin + 'static,
-    Tasks: TaskSpawner + 'static,
+    Node: FullNodeTypes<Types = IrysEthereumNode>,
+    St: Stream<Item = CanonStateNotification<EthPrimitives>> + Send + Unpin + 'static,
 {
     use futures::{Stream, StreamExt};
     loop {
@@ -339,7 +325,35 @@ pub async fn maintain_system_txs<N, Client, P, St, Tasks>(
             break;
         };
         match event {
-            CanonStateNotification::Commit { new } => {}
+            CanonStateNotification::Commit { new } => {
+                // Get the new block's number and parent hash
+                let new_tip_header = new.tip().sealed_block().header();
+                tracing::warn!(?new_tip_header);
+                let block_number = new_tip_header.number();
+                let parent_hash = new_tip_header.parent_hash();
+                let stale_system_txs = pool.queued_transactions();
+                tracing::warn!(?stale_system_txs);
+                let stale_system_txs = pool
+                    .all_transactions()
+                    .all()
+                    .filter_map(|tx| {
+                        tracing::warn!(?tx);
+                        let input = tx.inner().input();
+                        let Ok(system_tx) = SystemTransaction::decode(&mut &input[..]) else {
+                            return None;
+                        };
+
+                        // Remove if block number >= valid_for_block, or parent hash changed
+                        if block_number >= system_tx.valid_for_block
+                            || parent_hash != system_tx.parent_blockhash
+                        {
+                            return Some(*tx.hash());
+                        }
+                        None
+                    })
+                    .collect::<Vec<_>>();
+                pool.remove_transactions(stale_system_txs);
+            }
             CanonStateNotification::Reorg { old, new } => {}
         }
     }
@@ -364,6 +378,8 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
+        // todo reject system txs if the latest block (by the StateProviderFactory) has already drifted
+
         // Try to decode as a system transaction
         let input = transaction.input();
         let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
@@ -1092,6 +1108,7 @@ mod tests {
     use reth_engine_local::LocalPayloadAttributesBuilder;
     use reth_network::NetworkEventListenerProvider;
     use reth_transaction_pool::TransactionPool;
+    use tokio::time;
     use tracing::{span, Level};
 
     use crate::system_tx::{BalanceDecrement, SystemTransaction};
@@ -1222,6 +1239,71 @@ mod tests {
 
         // assert
         assert!(matches!(tx_res, Err(EthApiError::PoolError(_))));
+
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn stale_system_txs_get_dropped() -> eyre::Result<()> {
+        let wallets = Wallet::new(2).wallet_gen();
+        let block_producer = EthereumWallet::from(wallets[1].clone());
+        let block_producer = block_producer.default_signer();
+
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address(), block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+        let mut second_node = nodes.pop().unwrap();
+        let mut first_node = nodes.pop().unwrap();
+
+        let normal_tx = TransactionTestContext::transfer_tx(1, Wallet::default().inner)
+            .await
+            .encoded_2718()
+            .into();
+
+        // action
+        let normal_tx_hash = first_node.rpc.inject_tx(normal_tx).await?;
+        let system_tx = SystemTransaction {
+            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+                amount: U256::from(7000000000000000000u64),
+                target: block_producer.address(),
+            }),
+            valid_for_block: 1,
+            parent_blockhash: FixedBytes::random(),
+        };
+        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
+        let system_tx_hash = second_node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Private,
+                system_pooled_tx,
+            )
+            .await?;
+
+        // make the node advance
+        let payload = first_node.advance_block().await?;
+
+        let block_hash = payload.block().hash();
+        let block_number = payload.block().number;
+
+        // assert the block has been committed to the blockchain
+        first_node
+            .assert_new_block(normal_tx_hash, block_hash, block_number)
+            .await?;
+
+        // only send forkchoice update to second node
+        second_node
+            .update_forkchoice(block_hash, block_hash)
+            .await?;
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        // todo assert that the system tx is no longer inside the `first_node` mempool
+        panic!();
 
         Ok(())
     }
