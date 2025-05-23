@@ -402,6 +402,8 @@ impl Inner {
                 if let Err(e) = response.send(tx_header.clone()) {
                     tracing::error!("response.send(tx_header) error: {:?}", e);
                 };
+
+                Ok(())
             }
             MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
                 for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
@@ -973,6 +975,8 @@ impl Inner {
                 if let Err(e) = response.send(txns) {
                     tracing::error!("response.send(txns) error: {:?}", e);
                 };
+
+                Ok(())
             }
             MempoolServiceMessage::TxExistenceQuery(txid, response) => {
                 let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
@@ -1004,6 +1008,8 @@ impl Inner {
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send(bool) error: {:?}", e);
                 };
+
+                Ok(())
             }
             MempoolServiceMessage::TxIngressMessage(tx) => {
                 debug!(
@@ -1135,9 +1141,10 @@ impl Inner {
                         tracing::error!("Failed to send gossip data: {:?}", error);
                     }
                 });
+
+                Ok(())
             }
-        };
-        Ok(())
+        }
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
