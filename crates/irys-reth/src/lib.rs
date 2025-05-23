@@ -1,10 +1,11 @@
 use std::{marker::PhantomData, sync::Arc, time::SystemTime};
 
-use alloy_consensus::TxLegacy;
-use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_consensus::{BlockHeader, TxLegacy};
+use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, BlockNumberOrTag};
 use alloy_primitives::{Address, TxKind, U256};
 use alloy_rlp::{Decodable, Encodable};
 use evm::{CustomBlockAssembler, MyEthEvmFactory};
+use futures::Stream;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
     builder::{
@@ -14,9 +15,10 @@ use reth::{
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{EthPrimitives, InvalidTransactionError, SealedBlock},
     providers::{
-        providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage,
-        StateProviderFactory,
+        providers::ProviderFactoryBuilder, BlockReaderIdExt, CanonStateNotification,
+        CanonStateSubscriptions, EthStorage, StateProviderFactory,
     },
+    tasks::TaskSpawner,
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
@@ -29,16 +31,21 @@ use reth_node_ethereum::{
     },
     EthEngineTypes, EthEvmConfig,
 };
+use reth_primitives_traits::SealedHeader;
 use reth_tracing::tracing::{self};
-use reth_transaction_pool::TransactionValidationOutcome;
 use reth_transaction_pool::{
-    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering, TransactionOrigin, TransactionValidator,
+    blobstore::{BlobStoreCanonTracker, DiskFileBlobStore, DiskFileBlobStoreConfig},
+    metrics::MaintainPoolMetrics,
+    BlockInfo, CanonicalStateUpdate, EthPoolTransaction, EthPooledTransaction,
+    EthTransactionValidator, Pool, PoolTransaction, Priority, TransactionOrdering,
+    TransactionOrigin, TransactionValidator,
+};
+use reth_transaction_pool::{
+    maintain::MaintainPoolConfig, TransactionPoolExt, TransactionValidationOutcome,
 };
 use reth_trie_db::MerklePatriciaTrie;
 use std::sync::LazyLock;
-use system_tx::SystemTransaction;
+use system_tx::{SystemTransaction, TransactionPacket};
 use tracing::{debug, info};
 
 pub mod system_tx;
@@ -59,7 +66,6 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction
     tx_raw
 }
 
-// todo: write tests
 // todo - what is the `State root task returned incorrect state root`
 // todo: custom mempool - don't drop system txs if they dont have gas properties
 // todo: custom mempool - after each block, drop all system txs
@@ -241,7 +247,6 @@ where
         // spawn txpool maintenance task
         {
             let pool = transaction_pool.clone();
-            let chain_events = ctx.provider().canonical_state_stream();
             let client = ctx.provider().clone();
             // Only spawn backup task if not disabled
             if !ctx.config().txpool.disable_transactions_backup {
@@ -275,7 +280,26 @@ where
                 reth_transaction_pool::maintain::maintain_transaction_pool_future(
                     client.clone(),
                     pool.clone(),
-                    chain_events,
+                    ctx.provider().canonical_state_stream(),
+                    ctx.task_executor().clone(),
+                    reth_transaction_pool::maintain::MaintainPoolConfig {
+                        max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
+                        no_local_exemptions: transaction_pool
+                            .config()
+                            .local_transactions_config
+                            .no_exemptions,
+                        ..Default::default()
+                    },
+                ),
+            );
+
+            // spawn system txs maintenance task
+            ctx.task_executor().spawn_critical(
+                "txpool system tx maintenance task",
+                maintain_system_txs(
+                    client.clone(),
+                    pool.clone(),
+                    ctx.provider().canonical_state_stream(),
                     ctx.task_executor().clone(),
                     reth_transaction_pool::maintain::MaintainPoolConfig {
                         max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
@@ -292,6 +316,32 @@ where
         }
 
         Ok(transaction_pool)
+    }
+}
+
+pub async fn maintain_system_txs<N, Client, P, St, Tasks>(
+    client: Client,
+    pool: P,
+    mut events: St,
+    task_spawner: Tasks,
+    config: MaintainPoolConfig,
+) where
+    N: NodePrimitives,
+    Client: StateProviderFactory + BlockReaderIdExt + ChainSpecProvider + Clone + 'static,
+    P: TransactionPoolExt<Transaction: PoolTransaction<Consensus = N::SignedTx>> + 'static,
+    St: Stream<Item = CanonStateNotification<N>> + Send + Unpin + 'static,
+    Tasks: TaskSpawner + 'static,
+{
+    use futures::{Stream, StreamExt};
+    loop {
+        let event = events.next().await;
+        let Some(event) = event else {
+            break;
+        };
+        match event {
+            CanonStateNotification::Commit { new } => {}
+            CanonStateNotification::Reorg { old, new } => {}
+        }
     }
 }
 
@@ -386,8 +436,7 @@ where
         base_fee: u64,
     ) -> Priority<Self::PriorityValue> {
         let tx_envelope_input_buf = transaction.input();
-        let rlp_decoded_system_tx =
-            system_tx::SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
+        let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
         if rlp_decoded_system_tx.is_ok() {
             return Priority::Value(U256::MAX);
         }
@@ -512,18 +561,20 @@ mod evm {
         ) -> Result<u64, BlockExecutionError> {
             let tx_envelope = tx.tx();
             let tx_envelope_input_buf = tx_envelope.input();
-            let rlp_decoded_system_tx =
-                system_tx::SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
+            let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
 
             if let Ok(system_tx) = rlp_decoded_system_tx {
                 // Handle the signer nonce increment
                 self.increment_signer_nonce(&tx)?;
 
+                // todo ensure that parent block hashes match
+                // todo ensure that block heights match
+
                 // Process different system transaction types
-                let topic = system_tx.topic();
+                let topic = system_tx.inner.topic();
                 let target;
-                let new_account_state = match system_tx {
-                    system_tx::SystemTransaction::ReleaseStake(balance_increment) => {
+                let new_account_state = match system_tx.inner {
+                    system_tx::TransactionPacket::ReleaseStake(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
                             vec![topic],
@@ -536,7 +587,7 @@ mod evm {
                         let res = self.handle_balance_increment(log, balance_increment);
                         Ok(res)
                     }
-                    system_tx::SystemTransaction::BlockReward(balance_increment) => {
+                    system_tx::TransactionPacket::BlockReward(balance_increment) => {
                         let log = self.create_system_log(
                             balance_increment.target,
                             vec![topic],
@@ -549,7 +600,7 @@ mod evm {
                         let res = self.handle_balance_increment(log, balance_increment);
                         Ok(res)
                     }
-                    system_tx::SystemTransaction::Stake(balance_decrement) => {
+                    system_tx::TransactionPacket::Stake(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
                             vec![topic],
@@ -561,7 +612,7 @@ mod evm {
                         target = balance_decrement.target;
                         self.handle_balance_decrement(log, tx_envelope.hash(), balance_decrement)?
                     }
-                    system_tx::SystemTransaction::StorageFees(balance_decrement) => {
+                    system_tx::TransactionPacket::StorageFees(balance_decrement) => {
                         let log = self.create_system_log(
                             balance_decrement.target,
                             vec![topic],
@@ -1149,10 +1200,14 @@ mod tests {
         )
         .await?;
         let first_node = nodes.pop().unwrap();
-        let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
-            amount: U256::from(7000000000000000000u64), // 7 ETH
-            target: block_producer.address(),
-        });
+        let system_tx = SystemTransaction {
+            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+                amount: U256::from(7000000000000000000u64),
+                target: block_producer.address(),
+            }),
+            valid_for_block: 1,
+            parent_blockhash: FixedBytes::random(),
+        };
         let mut system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let signed_tx = target_account
             .sign_transaction(&mut system_tx_raw)
@@ -1191,10 +1246,14 @@ mod tests {
 
         let initial_balance = get_balance(&first_node.inner, block_producer.address());
 
-        let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
-            amount: U256::from(7000000000000000000u64), // 7 ETH
-            target: block_producer.address(),
-        });
+        let system_tx = SystemTransaction {
+            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+                amount: U256::from(7000000000000000000u64),
+                target: block_producer.address(),
+            }),
+            valid_for_block: 1,
+            parent_blockhash: FixedBytes::random(),
+        };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
         let system_tx_hash = first_node
@@ -1297,7 +1356,7 @@ mod tests {
         );
 
         // assert all txs have a corresponding log
-        asserst_topic_present_in_logs(block_execution, system_tx.topic().into(), tx_count);
+        asserst_topic_present_in_logs(block_execution, system_tx.inner.topic().into(), tx_count);
 
         // assert balance for signer_b is updated
         let signer_b_balance_after = get_balance(&node.inner, signer_b.address());
@@ -1378,7 +1437,7 @@ mod tests {
         );
 
         // assert all txs have a corresponding log
-        asserst_topic_present_in_logs(block_execution, system_tx.topic().into(), tx_count);
+        asserst_topic_present_in_logs(block_execution, system_tx.inner.topic().into(), tx_count);
 
         // assert balance for signer_b is updated
         let signer_b_balance_after = get_balance(&node.inner, signer_b.address());
@@ -1444,10 +1503,14 @@ mod tests {
         // Create and submit system transactions with lower gas price
         let system_tx_count = 2;
         let mut system_tx_hashes = Vec::new();
-        let system_tx = SystemTransaction::ReleaseStake(system_tx::BalanceIncrement {
-            amount: U256::ONE,
-            target: signer_b.address(),
-        });
+        let system_tx = SystemTransaction {
+            inner: TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: signer_b.address(),
+            }),
+            valid_for_block: 1,
+            parent_blockhash: FixedBytes::random(),
+        };
 
         for nonce in 0..system_tx_count {
             let tx_raw = compose_system_tx(nonce, 1, system_tx.clone());
@@ -1543,10 +1606,14 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create and submit a system transaction trying to decrement balance of non-existent account
-        let system_tx = SystemTransaction::Stake(BalanceDecrement {
-            amount: U256::ONE,
-            target: nonexistent_address,
-        });
+        let system_tx = SystemTransaction {
+            inner: TransactionPacket::Stake(BalanceDecrement {
+                amount: U256::ONE,
+                target: nonexistent_address,
+            }),
+            valid_for_block: 1,
+            parent_blockhash: FixedBytes::random(),
+        };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
         let system_tx_hash = node
@@ -1633,10 +1700,14 @@ mod tests {
 
         // Create a system tx that tries to decrement more than the balance
         let decrement_amount = funded_balance + U256::ONE;
-        let system_tx = SystemTransaction::Stake(BalanceDecrement {
-            amount: decrement_amount,
-            target: signer_a.address(),
-        });
+        let system_tx = SystemTransaction {
+            inner: TransactionPacket::Stake(BalanceDecrement {
+                amount: decrement_amount,
+                target: signer_a.address(),
+            }),
+            valid_for_block: 1,
+            parent_blockhash: FixedBytes::random(),
+        };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
         let system_tx_hash = node
@@ -1678,35 +1749,47 @@ mod tests {
     }
 
     fn release_stake(address: Address) -> SystemTransaction {
-        let system_tx = SystemTransaction::ReleaseStake(system_tx::BalanceIncrement {
-            amount: U256::ONE,
-            target: address,
-        });
-        system_tx
+        SystemTransaction {
+            inner: TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block: 0,
+            parent_blockhash: FixedBytes([0u8; 32]),
+        }
     }
 
     fn block_reward(address: Address) -> SystemTransaction {
-        let system_tx = SystemTransaction::BlockReward(system_tx::BalanceIncrement {
-            amount: U256::ONE,
-            target: address,
-        });
-        system_tx
+        SystemTransaction {
+            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block: 0,
+            parent_blockhash: FixedBytes([0u8; 32]),
+        }
     }
 
     fn stake(address: Address) -> SystemTransaction {
-        let system_tx = SystemTransaction::Stake(system_tx::BalanceDecrement {
-            amount: U256::ONE,
-            target: address,
-        });
-        system_tx
+        SystemTransaction {
+            inner: TransactionPacket::Stake(system_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block: 0,
+            parent_blockhash: FixedBytes([0u8; 32]),
+        }
     }
 
     fn storage_fees(address: Address) -> SystemTransaction {
-        let system_tx = SystemTransaction::StorageFees(system_tx::BalanceDecrement {
-            amount: U256::ONE,
-            target: address,
-        });
-        system_tx
+        SystemTransaction {
+            inner: TransactionPacket::StorageFees(system_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block: 0,
+            parent_blockhash: FixedBytes([0u8; 32]),
+        }
     }
 
     #[rstest::fixture]
