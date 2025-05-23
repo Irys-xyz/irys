@@ -289,7 +289,7 @@ impl MempoolService {
         }
     }
 
-    fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
+    async fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
         let mempool_state = &self.inner.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
         // Check if already staked in the blockchain
@@ -307,18 +307,15 @@ impl MempoolService {
         // For unstaked pledges, validate against cache and pending transactions
         let commitment_cache = mempool_state_guard.service_senders.commitment_cache.clone();
         let commitment_tx_clone = commitment_tx.clone();
-        let cache_status = self
-            .execute_async_operation(|| async move {
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
-                    commitment_tx: commitment_tx_clone,
-                    response: oneshot_tx,
-                });
-                oneshot_rx
-                    .await
-                    .expect("to receive CommitmentStatus from GetCommitmentStatus message")
-            })
-            .unwrap();
+
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
+            commitment_tx: commitment_tx_clone,
+            response: oneshot_tx,
+        });
+        let cache_status = oneshot_rx
+            .await
+            .expect("to receive CommitmentStatus from GetCommitmentStatus message")
 
         // Reject unsupported commitment types
         if matches!(cache_status, CommitmentStatus::Unsupported) {
