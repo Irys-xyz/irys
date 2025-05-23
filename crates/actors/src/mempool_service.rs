@@ -1319,12 +1319,14 @@ impl Inner {
         anchor: &H256,
     ) -> Result<IrysBlockHeader, TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
-        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+        let mempool_state_read_guard = mempool_state
+            .read()
+            .expect("expected valid mempool state read guard");
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
         let latest_height = self.get_latest_block_height()?;
-        let anchor_expiry_depth = mempool_state_guard
+        let anchor_expiry_depth = mempool_state_read_guard
             .config
             .node_config
             .consensus_config()
@@ -1332,8 +1334,8 @@ impl Inner {
             .anchor_expiry_depth as u64;
 
         // Allow transactions to use the txid of a transaction in the mempool
-        if mempool_state_guard.recent_valid_tx.contains(anchor) {
-            let (canonical_blocks, _) = mempool_state_guard
+        if mempool_state_read_guard.recent_valid_tx.contains(anchor) {
+            let (canonical_blocks, _) = mempool_state_read_guard
                 .block_tree_read_guard
                 .read()
                 .get_canonical_chain();
@@ -1348,13 +1350,18 @@ impl Inner {
             };
         }
 
+        drop(mempool_state_read_guard); // Release read lock before acquiring write lock
+
         match irys_database::block_header_by_hash(&read_tx, anchor, false) {
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
                 debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
                 Ok(hdr)
             }
             _ => {
-                mempool_state_guard.invalid_tx.push(tx_id.clone());
+                let mut mempool_state_write_guard = mempool_state
+                    .write()
+                    .expect("expected valid mempool write guard");
+                mempool_state_write_guard.invalid_tx.push(tx_id.clone());
                 warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                 Err(TxIngressError::InvalidAnchor)
             }
