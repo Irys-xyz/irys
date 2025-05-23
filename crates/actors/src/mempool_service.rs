@@ -515,7 +515,12 @@ impl Inner {
 
                 // Validate the tx anchor
                 if let Err(e) = self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor) {
-                    tracing::error!("Anchor {:?} for tx {:?} failure with error: {:?}", &commitment_tx.anchor, commitment_tx.id, e);
+                    tracing::error!(
+                        "Anchor {:?} for tx {:?} failure with error: {:?}",
+                        &commitment_tx.anchor,
+                        commitment_tx.id,
+                        e
+                    );
                     return Ok(());
                 }
 
@@ -524,7 +529,11 @@ impl Inner {
                 if commitment_status == CommitmentStatus::Accepted {
                     // Validate tx signature
                     if let Err(e) = self.validate_signature(&commitment_tx) {
-                        tracing::error!("Signature validation for commitment_tx {:?} failed with error: {:?}", &commitment_tx, e);
+                        tracing::error!(
+                            "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                            &commitment_tx,
+                            e
+                        );
                     }
 
                     // Add the commitment tx to the valid tx list to be included in the next block
@@ -690,7 +699,9 @@ impl Inner {
                 if data_size != chunk.data_size {
                     error!(
                         "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
-                        ChunkIngressError::InvalidDataSize, data_size, chunk.data_size
+                        ChunkIngressError::InvalidDataSize,
+                        data_size,
+                        chunk.data_size
                     );
                     return Ok(());
                 }
@@ -712,7 +723,7 @@ impl Inner {
                     .map_err(|_| ChunkIngressError::InvalidProof);
 
                 if let Err(e) = path_result {
-                    error!("error validating path: {:?}",e);
+                    error!("error validating path: {:?}", e);
                     return Ok(());
                 }
 
@@ -734,7 +745,9 @@ impl Inner {
                     if chunk_len != chunk_size {
                         error!(
                             "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
-                            ChunkIngressError::InvalidChunkSize, chunk.tx_offset, chunk_len
+                            ChunkIngressError::InvalidChunkSize,
+                            chunk.tx_offset,
+                            chunk_len
                         );
                         return Ok(());
                     }
@@ -743,7 +756,9 @@ impl Inner {
                     if chunk_len > chunk_size {
                         error!(
                             "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                            ChunkIngressError::InvalidChunkSize, chunk.tx_offset, chunk_len
+                            ChunkIngressError::InvalidChunkSize,
+                            chunk.tx_offset,
+                            chunk_len
                         );
                         return Ok(());
                     }
@@ -1047,10 +1062,7 @@ impl Inner {
                     .map_err(|_| TxIngressError::DatabaseError);
 
                 if let Err(e) = read_tx {
-                    error!(
-                        "{:?}",
-                        TxIngressError::DatabaseError
-                    );
+                    error!("{:?}", TxIngressError::DatabaseError);
                     return Ok(());
                 }
 
@@ -1180,7 +1192,9 @@ impl Inner {
     ///
     /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
     /// if the transaction could not be created. Logs an error if the transaction fails.
-    fn read_tx(&self) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, ChunkIngressError> {
+    fn read_tx(
+        &self,
+    ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, ChunkIngressError> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_read_guard = mempool_state.read().expect("expected valid mempool state");
 
@@ -1230,7 +1244,10 @@ impl Inner {
         found
     }
 
-    async fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
+    async fn get_commitment_status(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> CommitmentStatus {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
         // Check if already staked in the blockchain
@@ -1256,7 +1273,7 @@ impl Inner {
         });
         let cache_status = oneshot_rx
             .await
-            .expect("to receive CommitmentStatus from GetCommitmentStatus message")
+            .expect("to receive CommitmentStatus from GetCommitmentStatus message");
 
         // Reject unsupported commitment types
         if matches!(cache_status, CommitmentStatus::Unsupported) {
@@ -1304,8 +1321,7 @@ impl Inner {
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
 
-        let read_tx = self.read_tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
+        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
         let latest_height = self.get_latest_block_height()?;
         let anchor_expiry_depth = mempool_state_guard
