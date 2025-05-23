@@ -7,7 +7,7 @@ use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{
-        BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage, Truncate,
+        BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage, TruncateMessage,
     },
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
@@ -579,7 +579,7 @@ impl IrysNode {
             if latest_known_block_height > tip_height {
                 ctx.actor_addresses
                     .block_index
-                    .send(Truncate {
+                    .send(TruncateMessage {
                         to: tip_height as usize,
                     })
                     .await?;

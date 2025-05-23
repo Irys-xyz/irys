@@ -246,18 +246,15 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexService {
 /// Returns the current block height in the index
 #[derive(Message, Clone, Debug)]
 #[rtype(result = "()")]
-pub struct Truncate {
+pub struct TruncateMessage {
     pub to: usize,
 }
 
-impl Handler<Truncate> for BlockIndexService {
+impl Handler<TruncateMessage> for BlockIndexService {
     type Result = ();
-    fn handle(&mut self, msg: Truncate, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: TruncateMessage, _ctx: &mut Self::Context) -> Self::Result {
         if let Some(block_index) = self.block_index.clone() {
-            block_index
-                .write()
-                .unwrap()
-                .truncate(msg.to);
+            block_index.write().unwrap().truncate(msg.to);
         }
     }
 }
