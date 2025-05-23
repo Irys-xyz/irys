@@ -36,8 +36,8 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{
-    Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
-    UnpackedChunk,
+    Base64, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction, LedgerChunkOffset,
+    PackedChunk, UnpackedChunk,
 };
 use irys_types::{
     CommitmentTransaction, Config, IrysTransactionHeader, IrysTransactionId, NodeConfig, NodeMode,
@@ -418,6 +418,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx.set_partition_mining(false).await
     }
 
+    pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        self.mine_blocks(num_blocks).await?;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        Ok(())
+    }
+
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -529,6 +537,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             })
             .flatten()
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+    }
+
+    pub async fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+        self.node_ctx
+            .service_senders
+            .gossip_broadcast
+            .send(GossipData::Block((*block_header).clone()))?;
+
+        Ok(())
     }
 
     pub fn get_block_by_hash_on_chain(
