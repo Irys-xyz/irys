@@ -66,9 +66,9 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction
 
 /// Type configuration for an Irys-Ethereum node.
 #[derive(Debug, Default, Clone, Copy)]
-#[non_exhaustive]
+// #[non_exhaustive]
 pub struct IrysEthereumNode {
-    allowed_system_tx_origin: Address,
+    pub allowed_system_tx_origin: Address,
 }
 
 impl NodeTypes for IrysEthereumNode {
@@ -439,7 +439,7 @@ where
     }
 }
 
-mod evm {
+pub mod evm {
 
     use std::convert::Infallible;
 

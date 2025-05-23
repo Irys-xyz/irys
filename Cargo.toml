@@ -146,6 +146,9 @@ alloy-rpc-types-engine = { version = "0.15.10", default-features = false }
 alloy-signer = "1.0.6"
 alloy-signer-local = "1.0.6"
 
+revm = { version = "23.1.0", default-features = false }
+# revm = { version = "23.1.0", default-features = false }
+
 
 # reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
 # reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
@@ -214,11 +217,13 @@ reth-trie-db = { path = "./ext/reth/crates/trie/db" }
 reth-evm = { path = "./ext/reth/crates/evm/evm" }
 reth-chainspec = { path = "./ext/reth/crates/chainspec" }
 reth-primitives-traits = { path = "./ext/reth/crates/primitives-traits" }
+reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
+reth-engine-local = { path = "./ext/reth/crates/engine/local" }
 
-revm = { version = "23.1.0", default-features = false }
 
 [profile.dev]
 panic = "unwind"
+lto = "thin"
 
 [workspace.lints]
 rust.missing_debug_implementations = "warn"

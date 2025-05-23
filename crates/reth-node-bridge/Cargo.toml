@@ -22,6 +22,15 @@ strum = "0.26.3"
 thiserror = "1.0.61"
 tokio = "1.37.0"
 tokio-stream.workspace = true
+reth.workspace = true
+reth-db.workspace = true
+reth-chainspec.workspace = true
+reth-node-builder.workspace = true
+reth-provider.workspace = true
+irys-primitives.workspace = true
+# revm-primitives.workspace = true
+irys-reth.workspace = true
+reth-node-ethereum.workspace = true
 
 [features]
 default = ["jemalloc"]
