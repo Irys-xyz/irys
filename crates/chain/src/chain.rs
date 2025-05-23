@@ -3,11 +3,12 @@ use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;
-use irys_actors::block_index_service::Truncate;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
-    block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
+    block_index_service::{
+        BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage, Truncate,
+    },
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
@@ -578,7 +579,9 @@ impl IrysNode {
             if latest_known_block_height > tip_height {
                 ctx.actor_addresses
                     .block_index
-                    .send(Truncate { to: tip_height as usize })
+                    .send(Truncate {
+                        to: tip_height as usize,
+                    })
                     .await?;
                 latest_known_block_height = tip_height;
             }
