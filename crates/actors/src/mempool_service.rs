@@ -353,45 +353,6 @@ impl MempoolService {
         // All other cases are valid
         CommitmentStatus::Accepted
     }
-
-    /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
-    /// Returns true if the transaction was found and removed, false otherwise
-    fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
-        let mut found = false;
-
-        let mempool_state = &self.inner.mempool_state.clone();
-        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
-
-        mempool_state_guard.recent_valid_tx.remove(&txid);
-
-        // Create a vector of addresses to update to avoid borrowing issues
-        let addresses_to_check: Vec<Address> = mempool_state_guard
-            .valid_commitment_tx
-            .keys()
-            .cloned()
-            .collect();
-
-        for address in addresses_to_check {
-            if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
-                // Find the index of the transaction to remove
-                if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
-                    // Remove the transaction
-                    transactions.remove(index);
-                    found = true;
-
-                    // If the vector is now empty, remove the entry
-                    if transactions.is_empty() {
-                        mempool_state_guard.valid_commitment_tx.remove(&address);
-                    }
-
-                    // Exit early once we've found and removed the transaction
-                    break;
-                }
-            }
-        }
-
-        found
-    }
 }
 
 /// Message for when a new TX is discovered by the node, either though
@@ -608,7 +569,7 @@ impl Inner {
                 if let Some(commitment_ledger) = commitment_ledger {
                     for txid in commitment_ledger.tx_ids.iter() {
                         // Remove the commitment tx from the pending valid_tx pool
-                        mempool_state_guard.remove_commitment_tx(txid);
+                        self.remove_commitment_tx(txid);
                     }
                 }
 
@@ -1327,6 +1288,45 @@ impl Inner {
             }
         };
         Ok(())
+    }
+
+    /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
+    /// Returns true if the transaction was found and removed, false otherwise
+    fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
+        let mut found = false;
+
+        let mempool_state = &self.inner.mempool_state.clone();
+        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+
+        mempool_state_guard.recent_valid_tx.remove(&txid);
+
+        // Create a vector of addresses to update to avoid borrowing issues
+        let addresses_to_check: Vec<Address> = mempool_state_guard
+            .valid_commitment_tx
+            .keys()
+            .cloned()
+            .collect();
+
+        for address in addresses_to_check {
+            if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
+                // Find the index of the transaction to remove
+                if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
+                    // Remove the transaction
+                    transactions.remove(index);
+                    found = true;
+
+                    // If the vector is now empty, remove the entry
+                    if transactions.is_empty() {
+                        mempool_state_guard.valid_commitment_tx.remove(&address);
+                    }
+
+                    // Exit early once we've found and removed the transaction
+                    break;
+                }
+            }
+        }
+
+        found
     }
 }
 
