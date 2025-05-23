@@ -1036,13 +1036,31 @@ impl Inner {
                 {
                     return Err(TxIngressError::Skipped);
                 }
+
                 // Validate anchor
-                let hdr = self.validate_anchor(&tx.id, &tx.anchor)?;
+                let hdr = self.validate_anchor(&tx.id, &tx.anchor);
+                if let Err(e) = self.validate_anchor(&tx.id, &tx.anchor) {
+                    error!(
+                        "Validation failed: {:?} - mapped to: {:?}",
+                        e,
+                        TxIngressError::DatabaseError
+                    );
+                    return Ok(());
+                }
 
                 let read_tx = &mempool_state_guard
                     .irys_db
                     .tx()
-                    .map_err(|_| TxIngressError::DatabaseError)?;
+                    .map_err(|_| TxIngressError::DatabaseError);
+
+                if let Err(e) = read_tx {
+                    error!(
+                        "{:?}",
+                        TxIngressError::DatabaseError
+                    );
+                    return Ok(());
+                }
+
                 let read_reth_tx = &mempool_state_guard
                     .reth_db
                     .tx()
@@ -1139,7 +1157,13 @@ impl Inner {
                     // and the handlers become async
                     for chunk in chunks {
                         // Process each chunk with full ownership (no cloning needed)
-                        self.handle(ChunkIngressMessage(chunk), ctx)
+                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                        self.handle_message(MempoolServiceMessage::ChunkIngressMessage(
+                            chunk, oneshot_tx,
+                        ));
+
+                        let status = oneshot_rx
+                            .await
                             .expect("pending chunks should be processed by the mempool");
                     }
                 }
