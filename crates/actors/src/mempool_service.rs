@@ -137,7 +137,7 @@ impl MempoolService {
         rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
         service_senders: ServiceSenders,
-        //gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
+        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> JoinHandle<()> {
         let mempool_state = create_state(
             irys_db,
@@ -148,6 +148,7 @@ impl MempoolService {
             storage_modules_guard.clone(),
             config,
             service_senders,
+            gossip_tx,
         );
         exec.spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
@@ -1359,6 +1360,7 @@ pub fn create_state(
     storage_modules_guard: StorageModulesReadGuard,
     config: &Config,
     service_senders: ServiceSenders,
+    gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
 ) -> MempoolState {
     let mempool_config = &config.consensus.mempool;
     let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
