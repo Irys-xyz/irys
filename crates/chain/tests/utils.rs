@@ -37,7 +37,7 @@ use irys_types::{
 };
 use irys_types::{
     Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
-    UnpackedChunk,
+    PeerAddress, RethPeerInfo, UnpackedChunk,
 };
 use irys_types::{
     CommitmentTransaction, Config, IrysTransactionHeader, IrysTransactionId, NodeConfig, NodeMode,
@@ -444,6 +444,21 @@ impl IrysNodeTest<IrysNodeCtx> {
         } else {
             info!("transaction found in mempool after {} retries", &retries);
             Ok(())
+        }
+    }
+
+    pub fn peer_address(&self) -> PeerAddress {
+        let http = &self.node_ctx.config.node_config.http;
+        let gossip = &self.node_ctx.config.node_config.gossip;
+
+        PeerAddress {
+            api: format!("{}:{}", http.bind_ip, http.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("{}:{}", gossip.bind_ip, gossip.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
         }
     }
 
