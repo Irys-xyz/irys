@@ -360,8 +360,6 @@ impl StorageModule {
         let mut pa = self.partition_assignment.write().unwrap();
         *pa = Some(partition_assignment);
 
-        debug!("{:#?}", self.submodules);
-
         // Also update the packing params file in each submodule
         for (_, submodule) in self.submodules.iter() {
             let params = PackingParams {

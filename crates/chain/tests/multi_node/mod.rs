@@ -1,3 +1,4 @@
+pub mod fork_recovery;
 pub mod mempool_tests;
 pub mod peer_discovery;
 pub mod peer_mining;
