@@ -100,7 +100,7 @@ pub enum MempoolServiceMessage {
     ChunkIngressMessage(UnpackedChunk),
     CommitmentTxIngressMessage(CommitmentTransaction),
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<VdfStepsReadGuard>),
-    TxExistenceQuery(tokio::sync::oneshot::Sender<bool>),
+    TxExistenceQuery(H256, tokio::sync::oneshot::Sender<bool>),
     TxIngressMessage(IrysTransactionHeader),
 }
 
@@ -1176,31 +1176,27 @@ impl Inner {
                     tracing::error!("response.send(txns) error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::TxExistenceQuery(response) => {
-                if self.valid_tx.contains_key(&tx_msg.0) {
-                    return Ok(true);
-                }
+            MempoolServiceMessage::TxExistenceQuery(txid, response) => {
+                let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
+                    true
+                } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
+                    true
+                } else if mempool_state_guard.invalid_tx.contains(&txid) {
+                    // Still has it, just invalid
+                    true
+                } else {
+                    let read_tx = mempool_state_guard
+                        .irys_db
+                        .as_ref()
+                        .tx()
+                        .map_err(|_| TxIngressError::DatabaseError)?;
 
-                if self.recent_valid_tx.contains(&tx_msg.0) {
-                    return Ok(true);
-                }
+                    let tx_header = tx_header_by_txid(&read_tx, &txid)
+                        .map_err(|_| TxIngressError::DatabaseError)?;
+                    tx_header.is_some()
+                };
 
-                // Still has it, just invalid
-                if self.invalid_tx.contains(&tx_msg.0) {
-                    return Ok(true);
-                }
-
-                let read_tx = self
-                    .irys_db
-                    .as_ref()
-                    .tx()
-                    .map_err(|_| TxIngressError::DatabaseError)?;
-
-                let txid = tx_msg.0;
-                let tx_header = tx_header_by_txid(&read_tx, &txid)
-                    .map_err(|_| TxIngressError::DatabaseError)?;
-
-                if let Err(e) = response.send(tx_header.is_some()) {
+                if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send(bool) error: {:?}", e);
                 };
             }
