@@ -388,17 +388,12 @@ impl Inner {
                     return Ok(());
                 }
 
-                let read_tx = mempool_state_guard
-                    .irys_db
-                    .as_ref()
-                    .tx()
-                    .map_err(|_| TxIngressError::DatabaseError);
-
-                let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
-
-                if let Err(e) = response.send(tx_header.clone()) {
-                    tracing::error!("response.send(tx_header) error: {:?}", e);
-                };
+                if let Ok(read_tx) = self.read_tx() {
+                    let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
+                    if let Err(e) = response.send(tx_header.clone()) {
+                        tracing::error!("response.send(tx_header) error: {:?}", e);
+                    };
+                }
 
                 Ok(())
             }
@@ -634,15 +629,13 @@ impl Inner {
                 info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
                 // Check to see if we have a cached data_root for this chunk
-                let read_tx = mempool_state_guard
-                    .irys_db
-                    .tx()
-                    .map_err(|_| ChunkIngressError::DatabaseError);
-
-                if let Err(e) = read_tx {
-                    error!("database error reading tx: {:?}",e);
-                    return Ok(());
-                }
+                let read_tx = match self.read_tx() {
+                    Err(e) => {
+                        // todo: check this fits with error strategy for handler
+                        return Ok(());
+                    }
+                    Ok(v) => v,
+                };
 
                 let binding = mempool_state_guard.storage_modules_guard.read();
                 let candidate_sms = binding
@@ -1183,6 +1176,21 @@ impl Inner {
         }
     }
 
+    /// Opens a read-only database transaction from the Irys mempool state.
+    ///
+    /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
+    /// if the transaction could not be created. Logs an error if the transaction fails.
+    fn read_tx(&self) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, ChunkIngressError> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_read_guard = mempool_state.read().expect("expected valid mempool state");
+
+        mempool_state_read_guard
+            .irys_db
+            .tx()
+            .map_err(|_| ChunkIngressError::DatabaseError)
+            .inspect_err(|e| error!("database error reading tx: {:?}", e))
+    }
+
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
     fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
@@ -1296,9 +1304,7 @@ impl Inner {
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
 
-        let read_tx = mempool_state_guard
-            .irys_db
-            .tx()
+        let read_tx = self.read_tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         let latest_height = self.get_latest_block_height()?;
