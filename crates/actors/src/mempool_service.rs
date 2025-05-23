@@ -1145,7 +1145,7 @@ impl Inner {
     fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
 
-        let mempool_state = &self.inner.mempool_state.clone();
+        let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
 
         mempool_state_guard.recent_valid_tx.remove(&txid);
