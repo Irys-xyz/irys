@@ -100,7 +100,7 @@ pub enum MempoolServiceMessage {
     ChunkIngressMessage(UnpackedChunk),
     CommitmentTxIngressMessage(CommitmentTransaction),
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<VdfStepsReadGuard>),
-    TxExistenceQuery(H256, tokio::sync::oneshot::Sender<bool>),
+    TxExistenceQuery(H256, tokio::sync::oneshot::Sender<Result<bool>>),
     TxIngressMessage(IrysTransactionHeader),
 }
 
@@ -1178,22 +1178,29 @@ impl Inner {
             }
             MempoolServiceMessage::TxExistenceQuery(txid, response) => {
                 let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
-                    true
+                    Ok(true)
                 } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-                    true
+                    Ok(true)
                 } else if mempool_state_guard.invalid_tx.contains(&txid) {
                     // Still has it, just invalid
-                    true
+                    Ok(true)
                 } else {
-                    let read_tx = mempool_state_guard
-                        .irys_db
-                        .as_ref()
-                        .tx()
-                        .map_err(|_| TxIngressError::DatabaseError)?;
+                    let read_tx = mempool_state_guard.irys_db.as_ref().tx();
+                    let result = if read_tx.is_err() {
+                        Err(TxIngressError::DatabaseError)
+                    } else {
+                        let tx_header = tx_header_by_txid(
+                            &read_tx.expect("expected valid header from tx id"),
+                            &txid,
+                        );
+                        if tx_header.is_err() {
+                            Err(TxIngressError::DatabaseError)
+                        } else {
+                            Ok(tx_header.expect("exepected ").is_some())
+                        }
+                    };
 
-                    let tx_header = tx_header_by_txid(&read_tx, &txid)
-                        .map_err(|_| TxIngressError::DatabaseError)?;
-                    tx_header.is_some()
+                    result
                 };
 
                 if let Err(e) = response.send(response_value) {
