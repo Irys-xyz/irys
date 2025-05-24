@@ -10,7 +10,7 @@ use reth::{
     tasks::TaskManager,
 };
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
-use reth_db::{test_utils::TempDatabase, DatabaseEnv};
+use reth_db::DatabaseEnv;
 use reth_node_builder::{
     components::NodeComponentsBuilder, rpc::EthApiBuilderProvider, FullNodeTypesAdapter, Node,
     NodeAdapter, NodeAddOns, NodeComponents, NodeTypesWithDBAdapter, NodeTypesWithEngine,
@@ -117,21 +117,6 @@ where
         Wallet::default().with_chain_id(chain_spec.chain().into()),
     ))
 }
-
-// Type aliases
-
-type TmpDB = Arc<TempDatabase<DatabaseEnv>>;
-type TmpNodeAdapter<N> = FullNodeTypesAdapter<
-    NodeTypesWithDBAdapter<N, TmpDB>,
-    BlockchainProvider<NodeTypesWithDBAdapter<N, TmpDB>>,
->;
-
-type Adapter<N> = NodeAdapter<
-    RethFullAdapter<TmpDB, N>,
-    <<N as Node<TmpNodeAdapter<N>>>::ComponentsBuilder as NodeComponentsBuilder<
-        RethFullAdapter<TmpDB, N>,
-    >>::Components,
->;
 
 /// Type alias for a type of `NodeHelper`
 pub type NodeHelperType<N, AO> = RethNodeContext<Adapter<N>, AO>;

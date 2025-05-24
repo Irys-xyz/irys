@@ -16,8 +16,6 @@ awc.workspace = true
 socket2 = "0.5"
 base58.workspace = true
 tokio.workspace = true
-reth.workspace = true
-reth-db.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
 actix.workspace = true

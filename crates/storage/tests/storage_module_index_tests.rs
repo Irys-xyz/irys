@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use irys_database::{
-    cache_chunk, cached_chunk_by_chunk_offset, open_or_create_db,
+    cache_chunk, cached_chunk_by_chunk_offset,
+    db::IrysDatabaseExt as _,
+    open_or_create_db,
     submodule::{
         get_data_size_by_data_root, get_full_tx_path, get_path_hashes_by_offset,
         get_start_offsets_by_data_root,

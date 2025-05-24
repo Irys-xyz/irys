@@ -40,12 +40,15 @@ use atomic_write_file::AtomicWriteFile;
 use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{ensure, eyre, Context, OptionExt, Result};
-use irys_database::submodule::{
-    add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-    add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-    clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
-    get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
-    set_data_size_for_data_root, tables::RelativeStartOffsets,
+use irys_database::{
+    db::IrysDatabaseExt as _,
+    submodule::{
+        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
+        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
+        get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
+        set_data_size_for_data_root, tables::RelativeStartOffsets,
+    },
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{

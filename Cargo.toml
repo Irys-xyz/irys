@@ -1,32 +1,33 @@
 [workspace]
 exclude = ["ext/"]
 members = [
-    "crates/actors",
-    "crates/api-client",
-    "crates/c",
-    "crates/chain",
-    "crates/cli",
-    "crates/config",
-    "crates/database",
-    "crates/debug-utils",
-    "crates/efficient-sampling",
-    "crates/macros",
-    "crates/p2p",
-    "crates/packing",
-    "crates/price-oracle",
-    "crates/primitives",
-    "crates/reth-node-bridge",
-    "crates/reward-curve",
-    "crates/storage",
-    "crates/testing-utils",
-    "crates/types",
-    "xtask",
+  "crates/actors",
+  "crates/c",
+  "crates/chain",
+  "crates/primitives",
+  "crates/reth-node-bridge",
+  "crates/types",
+  "crates/packing",
+  "crates/database",
+  "crates/storage",
+  "crates/testing-utils",
+  "crates/config",
+  "crates/efficient-sampling",
+  "crates/macros",
+  "crates/debug-utils",
+  "xtask",
+  "crates/price-oracle",
+  "crates/cli",
+  "crates/p2p",
+  "crates/api-client",
+  "crates/reward-curve",
+  "crates/irys-reth",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
@@ -53,6 +54,7 @@ irys-reward-curve = { path = "./crates/reward-curve" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
 irys-p2p = { path = "./crates/p2p" }
+irys-reth = { path = "./crates/irys-reth" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -62,36 +64,10 @@ actix-http = "3.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
 tokio-stream = "0.1"
-lru = "0.14.0"
-alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }
-alloy-core = { path = "./ext/alloy-core/crates/core" }
-alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
-alloy-genesis = { path = "./ext/alloy/crates/genesis", default-features = false }
-alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = [
-    "arbitrary",
-] }
 rand = "0.8"
 hex = "0.4"
 base64-url = "2"
-alloy-rlp = "0.3.4"
-alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
-alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = [
-  "serde",
-] }
 clap = { version = "4", features = ["derive"] }
-alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
-reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
-alloy-serde = { path = "./ext/alloy/crates/serde", default-features = false }
-alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
-alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro", features = [
-  "json",
-] }
-alloy-sol-types = { path = "./ext/alloy-core/crates/sol-types" }
-alloy-contract = { path = "./ext/alloy/crates/contract" }
-alloy-provider = { path = "./ext/alloy/crates/provider", features = [
-  "trace-api",
-] }
-
 arbitrary = { version = "1.3", features = ["derive"] }
 rstest = "0.25"
 once_cell = "1"
@@ -100,24 +76,99 @@ bytes = "1.5"
 derive_more = { version = "1", features = ["full"] }
 eyre = "0.6"
 sha2 = "0.10"
+rayon = "1.8.0"
 color-eyre = "0.6"
 itertools = "0.13"
 futures = "0.3"
-rayon = "1.8.0"
 bytemuck = "1"
 futures-concurrency = "7"
 test-log = { version = "0.2", features = ["trace"] }
 pretty_assertions = "1"
-
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
 openssl = { version = "0.10", features = ["vendored"] }
 proptest-derive = "0.5"
+rust_decimal = "1"
+rust_decimal_macros = "1"
+serde = { version = "1", default-features = false }
+serde_json = "1"
+test-fuzz = "6"
+thiserror = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+toml = "0.8"
+derive-syn-parse = "0"
+proc-macro2 = "1"
+quote = "1"
+semver = { version = "1.0", features = ["serde"] }
+syn = { version = "2", features = ["full"] }
+tracing = "0.1.0"
+tracing-error = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+  "json",
+  "ansi",
+] }
+tempfile = "3"
+csv = "1"
+jsonrpsee = "0.24"
+jsonrpsee-core = "0.24"
+jsonrpsee-http-client = "0.24"
+jsonrpsee-types = "0.24"
+futures-util = "0.3"
+lru = "0.14.0"
+paste = "1.0.15"
+
+# reth & alloy deps
+alloy-dyn-abi = "1.1.0"
+alloy-evm = { version = "0.7.1", default-features = false }
+alloy-primitives = { version = "1.1.0", default-features = false, features = [
+  "map-foldhash",
+  "arbitrary",
+  "rlp",
+  "getrandom",
+] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = [
+  "core-net",
+] }
+alloy-consensus = { version = "0.15.10", default-features = false }
+alloy-eips = { version = "0.15.10", default-features = false }
+alloy-genesis = { version = "0.15.10", default-features = false }
+alloy-core = { version = "1.1.0", default-features = false }
+alloy-provider = { version = "0.15.10", default-features = false }
+alloy-network = { version = "0.15.10", default-features = false }
+alloy-sol-macro = { version = "1.1.0", default-features = false }
+alloy-rpc-types = { version = "0.15.10", features = [
+  "eth",
+], default-features = false }
+alloy-rpc-types-eth = { version = "0.15.10", default-features = false }
+alloy-rpc-types-engine = { version = "0.15.10", default-features = false }
+alloy-signer = "1.0.6"
+alloy-signer-local = "1.0.6"
+
+revm = { version = "23.1.0", default-features = false }
+# revm = { version = "23.1.0", default-features = false }
+
+
+# reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-network = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-codecs = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+# reth-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "a411d9334eeaec55" }
+
+
 reth = { path = "./ext/reth/bin/reth" }
 reth-auto-seal-consensus = { path = "./ext/reth/crates/consensus/auto-seal" }
 reth-beacon-consensus = { path = "./ext/reth/crates/consensus/beacon" }
 reth-blockchain-tree = { path = "./ext/reth/crates/blockchain-tree" }
-reth-chainspec = { path = "./ext/reth/crates/chainspec" }
 reth-cli = { path = "./ext/reth/crates/cli/cli" }
 reth-cli-commands = { path = "./ext/reth/crates/cli/commands" }
 reth-cli-runner = { path = "./ext/reth/crates/cli/runner" }
@@ -129,7 +180,6 @@ reth-config = { path = "./ext/reth/crates/config" }
 reth-static-file = { path = "./ext/reth/crates/static-file/static-file" }
 reth-prune = { path = "./ext/reth/crates/prune/prune" }
 reth-stages = { path = "./ext/reth/crates/stages/stages" }
-reth-evm = { path = "./ext/reth/crates/evm" }
 reth-downloaders = { path = "./ext/reth/crates/net/downloaders" }
 reth-consensus-debug-client = { path = "./ext/reth/crates/consensus/debug-client" }
 reth-db = { path = "./ext/reth/crates/storage/db" }
@@ -161,87 +211,19 @@ reth-tracing = { path = "./ext/reth/crates/tracing" }
 reth-rpc-types-compat = { path = "./ext/reth/crates/rpc/rpc-types-compat" }
 reth-transaction-pool = { path = "./ext/reth/crates/transaction-pool" }
 reth-stages-types = { path = "./ext/reth/crates/stages/types" }
-alloy-network = { path = "./ext/alloy/crates/network" }
-revm = { path = "./ext/revm/crates/revm", features = ["std", "serde-json"] }
-revm-primitives = { path = "./ext/revm/crates/primitives" }
-reth-payload-builder = { path = "./ext/reth/crates/payload/builder" }
-rust_decimal = "1"
-rust_decimal_macros = "1"
-serde = { version = "1", default-features = false }
-reth-rpc-layer = { path = "./ext/reth/crates/rpc/rpc-layer" }
-serde_json = "1"
-test-fuzz = "6"
-thiserror = "1"
-tokio = { version = "1", features = ["rt", "macros"] }
-toml = "0.8"
-derive-syn-parse = "0"
-proc-macro2 = "1"
-quote = "1"
-semver = "1.0"
-syn = { version = "2", features = ["full"] }
-tracing = "0.1.0"
-tracing-error = "0.2"
-tracing-subscriber = { version = "0.3", default-features = false, features = [
-  "env-filter",
-  "fmt",
-  "json",
-  "ansi",
-] }
-alloy-signer = { path = "./ext/alloy/crates/signer" }
-tempfile = "3"
-csv = "1"
-jsonrpsee = "0.24"
-jsonrpsee-core = "0.24"
-jsonrpsee-http-client = "0.24"
-jsonrpsee-types = "0.24"
-futures-util = "0.3"
+reth-ethereum-primitives = { path = "./ext/reth/crates/ethereum/primitives" }
+reth-evm-ethereum = { path = "./ext/reth/crates/ethereum/evm" }
+reth-trie-db = { path = "./ext/reth/crates/trie/db" }
+reth-evm = { path = "./ext/reth/crates/evm/evm" }
+reth-chainspec = { path = "./ext/reth/crates/chainspec" }
+reth-primitives-traits = { path = "./ext/reth/crates/primitives-traits" }
+reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
+reth-engine-local = { path = "./ext/reth/crates/engine/local" }
 
-[patch.crates-io]
-revm = { path = "./ext/revm/crates/revm" }
-revm-primitives = { path = "./ext/revm/crates/primitives" }
-
-# alloy
-alloy-consensus = { path = "./ext/alloy/crates/consensus" }
-alloy-contract = { path = "./ext/alloy/crates/contract" }
-alloy-eips = { path = "./ext/alloy/crates/eips" }
-alloy-genesis = { path = "./ext/alloy/crates/genesis" }
-alloy-json-rpc = { path = "./ext/alloy/crates/json-rpc" }
-alloy-network = { path = "./ext/alloy/crates/network" }
-alloy-network-primitives = { path = "./ext/alloy/crates/network-primitives" }
-alloy-provider = { path = "./ext/alloy/crates/provider" }
-alloy-pubsub = { path = "./ext/alloy/crates/pubsub" }
-alloy-rpc-client = { path = "./ext/alloy/crates/rpc-client" }
-alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
-alloy-rpc-types-admin = { path = "./ext/alloy/crates/rpc-types-admin" }
-alloy-rpc-types-anvil = { path = "./ext/alloy/crates/rpc-types-anvil" }
-alloy-rpc-types-beacon = { path = "./ext/alloy/crates/rpc-types-beacon" }
-alloy-rpc-types-debug = { path = "./ext/alloy/crates/rpc-types-debug" }
-alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine" }
-alloy-rpc-types-eth = { path = "./ext/alloy/crates/rpc-types-eth" }
-alloy-rpc-types-mev = { path = "./ext/alloy/crates/rpc-types-mev" }
-alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
-alloy-rpc-types-txpool = { path = "./ext/alloy/crates/rpc-types-txpool" }
-alloy-serde = { path = "./ext/alloy/crates/serde" }
-alloy-signer = { path = "./ext/alloy/crates/signer" }
-alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
-alloy-transport = { path = "./ext/alloy/crates/transport" }
-alloy-transport-http = { path = "./ext/alloy/crates/transport-http" }
-alloy-transport-ws = { path = "./ext/alloy/crates/transport-ws" }
-
-# alloy-core
-alloy-core = { path = "./ext/alloy-core/crates/core" }
-alloy-dyn-abi = { path = "./ext/alloy-core/crates/dyn-abi" }
-alloy-json-abi = { path = "./ext/alloy-core/crates/json-abi" }
-alloy-primitives = { path = "./ext/alloy-core/crates/primitives" }
-alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro" }
-alloy-sol-macro-expander = { path = "./ext/alloy-core/crates/sol-macro-expander" }
-alloy-sol-macro-input = { path = "./ext/alloy-core/crates/sol-macro-input" }
-alloy-sol-type-parser = { path = "./ext/alloy-core/crates/sol-type-parser" }
-alloy-sol-types = { path = "./ext/alloy-core/crates/sol-types" }
-syn-solidity = { path = "./ext/alloy-core/crates/syn-solidity" }
 
 [profile.dev]
 panic = "unwind"
+lto = "thin"
 
 [workspace.lints]
 rust.missing_debug_implementations = "warn"

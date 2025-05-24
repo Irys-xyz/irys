@@ -1,4 +1,4 @@
-use crate::db::RethDbWrapper;
+use crate::db::{IrysDatabaseExt as _, RethDbWrapper};
 use crate::reth_db::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},

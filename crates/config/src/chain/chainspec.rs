@@ -25,11 +25,10 @@ impl IrysChainSpecBuilder {
             ..IrysBlockHeader::new_mock_header()
         };
         Self {
-            reth_builder: ChainSpecBuilder {
-                chain: Some(config.consensus.reth.chain.clone()),
-                genesis: Some(config.consensus.reth.genesis.clone()),
-                hardforks: IRYS_TESTNET.hardforks.clone(),
-            },
+            reth_builder: ChainSpecBuilder::mainnet()
+                .chain(config.consensus.reth.chain.clone())
+                .genesis(config.consensus.reth.genesis.clone())
+                .with_forks(IRYS_TESTNET.hardforks.clone()),
             genesis,
         }
     }

@@ -10,8 +10,8 @@ use irys_types::{
 };
 use irys_types::{Address, Base64, CommitmentTransaction, PeerListItem};
 use reth_codecs::Compact;
-use reth_db::{table::DupSort, tables, DatabaseError};
-use reth_db::{HasName, HasTableType, TableType, TableViewer};
+use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
+use reth_db::{TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -58,7 +58,7 @@ macro_rules! impl_compression_for_compact {
 					impl Compress for $name {
 							type Compressed = Vec<u8>;
 
-							fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(self, buf: &mut B) {
+							fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
 									let _ = Compact::to_compact(&self, buf);
 							}
 					}
@@ -96,50 +96,93 @@ impl_compression_for_compact!(
     CompactBase64
 );
 
+use paste::paste;
+use reth_db::table::TableInfo;
+
 tables! {
     IrysTables;
-    /// Stores the header hashes belonging to the canonical chain.
-    table IrysBlockHeaders<Key = H256, Value = CompactIrysBlockHeader>;
+   /// Stores the header hashes belonging to the canonical chain.
+   table IrysBlockHeaders {
+    type Key = H256;
+    type Value = CompactIrysBlockHeader;
+}
 
-    /// Stores PoA chunks
-    table IrysPoAChunks<Key = H256, Value = CompactBase64>;
+/// Stores PoA chunks
+table IrysPoAChunks {
+    type Key = H256;
+    type Value = CompactBase64;
+}
 
-    /// Stores the tx header headers that have been confirmed
-    table IrysTxHeaders<Key = H256, Value = CompactTxHeader>;
+/// Stores the tx header headers that have been confirmed
+table IrysTxHeaders {
+    type Key = H256;
+    type Value = CompactTxHeader;
+}
 
-    /// Stores commitment transactions
-    table IrysCommitments<Key = H256, Value = CompactCommitment>;
+/// Stores commitment transactions
+table IrysCommitments {
+    type Key = H256;
+    type Value = CompactCommitment;
+}
 
-    /// Indexes the DataRoots currently in the cache
-    table CachedDataRoots<Key = DataRoot, Value = CachedDataRoot>;
+/// Indexes the DataRoots currently in the cache
+table CachedDataRoots {
+    type Key = DataRoot;
+    type Value = CachedDataRoot;
+}
 
-    /// Index mapping a data root to a set of ordered-by-index index entries, which contain the chunk path hash ('chunk id')
-    table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = u32>;
+/// Index mapping a data root to a set of ordered-by-index index entries, which contain the chunk path hash ('chunk id')
+table CachedChunksIndex {
+    type Key = DataRoot;
+    type Value = CachedChunkIndexEntry;
+    type SubKey = u32;
+}
 
-    /// Table mapping a chunk path hash to a cached chunk (with data)
-    table CachedChunks<Key = ChunkPathHash , Value = CachedChunk>;
+/// Table mapping a chunk path hash to a cached chunk (with data)
+table CachedChunks {
+    type Key = ChunkPathHash;
+    type Value = CachedChunk;
+}
 
-    /// Indexes Ingress proofs by their data_root
-    table IngressProofs<Key = DataRoot, Value = IngressProof>;
+/// Indexes Ingress proofs by their data_root
+table IngressProofs {
+    type Key = DataRoot;
+    type Value = IngressProof;
+}
 
-    /// Maps an ingress proof (by data_root) to the latest possible height it could be used at, given known transactions.
-    /// this value is updated every time we receive a valid to-be-promoted transaction to (<height of anchor block> + ANCHOR_EXPIRY_DEPTH)
-    /// and is pruned if value > <current_height>
-    table DataRootLRU<Key = DataRoot, Value = DataRootLRUEntry>;
+/// Maps an ingress proof (by data_root) to the latest possible height it could be used at, given known transactions.
+/// this value is updated every time we receive a valid to-be-promoted transaction to (<height of anchor block> + ANCHOR_EXPIRY_DEPTH)
+/// and is pruned if value > <current_height>
+table DataRootLRU {
+    type Key = DataRoot;
+    type Value = DataRootLRUEntry;
+}
 
-    /// Maps a global (perm) chunk offset to the last block height it was used by a transaction
-    /// this acts as an LRU cache for PD chunks, to reduce the bandwidth requirements for frequently used chunks
-    table ProgrammableDataLRU<Key = GlobalChunkOffset, Value =u64 >;
+/// Maps a global (perm) chunk offset to the last block height it was used by a transaction
+/// this acts as an LRU cache for PD chunks, to reduce the bandwidth requirements for frequently used chunks
+table ProgrammableDataLRU {
+    type Key = GlobalChunkOffset;
+    type Value = u64;
+}
 
-    /// Maps a global offset to a cached chunk
-    table ProgrammableDataCache<Key = GlobalChunkOffset, Value = CachedChunk>;
+/// Maps a global offset to a cached chunk
+table ProgrammableDataCache {
+    type Key = GlobalChunkOffset;
+    type Value = CachedChunk;
+}
 
-    /// Tracks the peer list of known peers as well as their reputation score.
-    /// While the node maintains connections to a subset of these peers - the
-    /// ones with high reputation - the PeerListEntries contain all the peers
-    /// that the node is aware of and is periodically updated via peer discovery
-    table PeerListItems<Key = Address, Value = CompactPeerListItem>;
+/// Tracks the peer list of known peers as well as their reputation score.
+/// While the node maintains connections to a subset of these peers - the
+/// ones with high reputation - the PeerListEntries contain all the peers
+/// that the node is aware of and is periodically updated via peer discovery
+table PeerListItems {
+    type Key = Address;
+    type Value = CompactPeerListItem;
+}
 
-    /// Table to store various metadata, such as the current db schema version
-    table Metadata<Key = MetadataKey, Value = Vec<u8>>;
+/// Table to store various metadata, such as the current db schema version
+table Metadata {
+    type Key = MetadataKey;
+    type Value = Vec<u8>;
+}
 }

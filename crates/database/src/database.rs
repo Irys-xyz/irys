@@ -16,23 +16,23 @@ use irys_types::{
 };
 use reth_db::cursor::DbDupCursorRO;
 
-use reth_db::table::Table;
+use reth_db::mdbx::init_db_for;
+use reth_db::table::{Table, TableInfo};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::{
-    create_db as reth_create_db,
     cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
-use reth_db::{HasName, HasTableType, PlainAccountState};
+use reth_db::{PlainAccountState, TableSet};
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
-pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
+pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
     args: Option<DatabaseArguments>,
@@ -47,12 +47,13 @@ pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
     // Register the prometheus recorder before creating the database,
     // because irys_database init needs it to register metrics.
     let _ = install_prometheus_recorder();
-    let db = reth_create_db(path, args)?.with_metrics_and_tables(tables);
+    let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
+    /* reth_create_db(path, args)?.with_metrics_and_tables(tables); */
 
     Ok(db)
 }
 
-pub fn open_or_create_cache_db<P: AsRef<Path>, T: HasName + HasTableType>(
+pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
     args: Option<DatabaseArguments>,
@@ -321,8 +322,8 @@ mod tests {
     use reth_db::Database;
 
     use crate::{
-        block_header_by_hash, commitment_tx_by_txid, config::get_data_dir, insert_commitment_tx,
-        tables::IrysTables,
+        block_header_by_hash, commitment_tx_by_txid, config::get_data_dir,
+        db::IrysDatabaseExt as _, insert_commitment_tx, tables::IrysTables,
     };
 
     use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
