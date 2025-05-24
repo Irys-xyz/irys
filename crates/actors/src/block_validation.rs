@@ -38,11 +38,7 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None =>
-        // This should be impossible as block poa was generated in block_producer
-        {
-            return Err(eyre::eyre!("Missing PoA chunk to be pre validated"))
-        }
+        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
     };
 
     if block.chunk_hash != sha::sha256(&poa_chunk).into() {
@@ -141,6 +137,16 @@ pub async fn prevalidate_block(
     ensure!(
         reward.amount == block.reward_amount,
         "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
+    );
+
+    // After pre-validating a bunch of quick checks we validate the signature
+    // TODO: We may want to further check if the signer is a staked address
+    // this is a little more advanced though as it requires knowing what the
+    // commitment states looked like when this block was produced. For now
+    // we just accept any valid signature.
+    ensure!(
+        block.is_signature_valid() == true,
+        "block signature is not valid"
     );
 
     Ok(())

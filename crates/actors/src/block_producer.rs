@@ -365,11 +365,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
 
-            // TODO: Hash the block signature to create a block_hash
-            // Generate a very stupid block_hash right now which is just
-            // the hash of the timestamp
-            let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
-
             // Use the partition hash to figure out what ledger it belongs to
             let ledger_id = epoch_service
                 .send(GetPartitionAssignmentMessage(solution.partition_hash))
@@ -428,7 +423,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // build a new block header
             let mut irys_block = IrysBlockHeader {
-                block_hash,
+                block_hash: H256::zero(), // block_hash is initialized after signing
                 height: block_height,
                 diff,
                 cumulative_diff: cumulative_difficulty,
@@ -443,7 +438,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 reward_address: config.node_config.reward_address,
                 reward_amount: reward_amount.amount,
                 miner_address: solution.mining_address,
-                signature: Signature::test_signature().into(),
+                signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer
                 timestamp: current_timestamp,
                 system_ledgers,
                 data_ledgers: vec![
@@ -589,6 +584,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             irys_block.evm_block_hash = evm_block_hash;
 
+            // Now that all fields are initialized, Sign the block and initialize its block_hash
+            let block_signer = config.irys_signer();
+            block_signer.sign_block_header(&mut irys_block)?;
+            
 
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
@@ -683,11 +682,4 @@ pub struct BlockFinalizedMessage {
     pub block_header: Arc<IrysBlockHeader>,
     /// Include all the blocks transaction headers [Submit, Publish]
     pub all_txs: Arc<Vec<IrysTransactionHeader>>,
-}
-
-/// SHA256 hash the message parameter
-fn hash_sha256(message: &[u8]) -> H256 {
-    let mut hasher = sha::Sha256::new();
-    hasher.update(message);
-    H256::from(hasher.finish())
 }
