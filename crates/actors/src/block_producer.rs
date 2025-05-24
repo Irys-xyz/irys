@@ -587,7 +587,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Now that all fields are initialized, Sign the block and initialize its block_hash
             let block_signer = config.irys_signer();
             block_signer.sign_block_header(&mut irys_block)?;
-            
 
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
