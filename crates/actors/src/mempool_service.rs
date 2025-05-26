@@ -799,8 +799,13 @@ impl Inner {
                         .is_empty()
                     {
                         info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
-                        sm.write_data_chunk(&chunk)
-                            .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
+                        let result = sm
+                            .write_data_chunk(&chunk)
+                            .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()));
+                        if let Err(e) = result {
+                            error!("Internal error: {:?}", e);
+                            return Ok(());
+                        }
                     }
                 }
 
@@ -811,18 +816,25 @@ impl Inner {
                 // if we have, update it's expiry height
 
                 //  TODO: hook into whatever manages ingress proofs
-                if read_tx
+                match read_tx
                     .get::<IngressProofs>(root_hash)
-                    .map_err(|_| ChunkIngressError::DatabaseError)?
-                    .is_some()
+                    .map_err(|_| ChunkIngressError::DatabaseError)
                 {
-                    info!(
-                        "We've already generated an ingress proof for data root {}",
-                        &root_hash
-                    );
+                    Err(e) => {
+                        error!("Database error: {:?}", e);
+                        return Ok(());
+                    }
+                    Ok(v) => {
+                        if v.is_some() {
+                            info!(
+                                "We've already generated an ingress proof for data root {}",
+                                &root_hash
+                            );
 
-                    return Ok(());
-                };
+                            return Ok(());
+                        };
+                    }
+                }
 
                 // check if we have all the chunks for this tx
                 let read_tx = mempool_state_guard
