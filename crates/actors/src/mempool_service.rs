@@ -716,13 +716,15 @@ impl Inner {
                     chunk.tx_offset, chunk.data_size, target_offset
                 );
 
-                let path_result = validate_path(root_hash, path_buff, target_offset)
-                    .map_err(|_| ChunkIngressError::InvalidProof);
-
-                if let Err(e) = path_result {
-                    error!("error validating path: {:?}", e);
-                    return Ok(());
-                }
+                let path_result = match validate_path(root_hash, path_buff, target_offset)
+                    .map_err(|_| ChunkIngressError::InvalidProof)
+                {
+                    Err(e) => {
+                        error!("error validating path: {:?}", e);
+                        return Ok(());
+                    }
+                    Ok(v) => v,
+                };
 
                 // Use data_size to identify and validate that only the last chunk
                 // can be less than chunk_size
