@@ -96,6 +96,7 @@ pub enum MempoolServiceMessage {
         tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
     ),
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<MempoolTxs>),
+    /// Confirm if tx exists in database
     TxExistenceQuery(
         H256,
         tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,

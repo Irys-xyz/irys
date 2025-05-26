@@ -40,7 +40,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool_service::{GetBestMempoolTxs, MempoolService},
+    mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     vdf_service::VdfStepsReadGuard,
@@ -59,8 +59,6 @@ pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
-    /// Address of the mempool actor
-    pub mempool_addr: Addr<MempoolService>,
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
@@ -152,7 +150,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let Self {
             db,
-            mempool_addr,
             block_discovery_addr,
             epoch_service,
             service_senders,
@@ -262,13 +259,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions
-            let mempool_tx =
-                mempool_addr.send(GetBestMempoolTxs).await.unwrap();
-            let submit_txs = mempool_tx.storage_tx;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(tx)).expect("to send MempoolServiceMessage");
+            let submit_txs = rx.await.expect("to receive txns");
 
-            let submit_chunks_added = calculate_chunks_added(&submit_txs, config.consensus.chunk_size);
+            let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
-            let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
+            let submit_txids = submit_txs.storage_tx.iter().map(|h| h.id).collect::<Vec<H256>>();
 
             // Commitment Transactions
             let block_height = prev_block_header.height + 1;
@@ -300,7 +297,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let tx = db.tx_mut().unwrap();
                 let mut txids = H256List::new();
 
-                for tx_item in mempool_tx.commitment_tx.iter() {
+                for tx_item in submit_txs.commitment_tx.iter() {
                     // Only include successfully inserted transactions
                     if insert_commitment_tx(&tx, tx_item).is_ok() {
                         debug!("New commitment persisted: {}", tx_item.id.0.to_base58());
@@ -456,7 +453,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     // Term Submit Ledger
                     DataTransactionLedger {
                         ledger_id: DataLedger::Submit.into(),
-                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
+                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs.storage_tx).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
@@ -480,7 +477,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
             let mut context =  RethNodeContext::new(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
-            let shadows = submit_txs
+            let shadows = submit_txs.storage_tx
                     .iter()
                     // add data transaction shadows
                     .map(|header| ShadowTx {
