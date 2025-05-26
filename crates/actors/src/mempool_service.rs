@@ -1394,9 +1394,11 @@ impl Inner {
             Ok(())
         } else {
             let mempool_state = &self.mempool_state.clone();
-            let mut mempool_state_guard =
-                mempool_state.write().expect("expected valid mempool state");
-            mempool_state_guard.invalid_tx.push(tx.id());
+            mempool_state
+                .write()
+                .expect("expected valid mempool state")
+                .invalid_tx
+                .push(tx.id());
             debug!("Signature is NOT valid");
             Err(TxIngressError::InvalidSignature)
         }
