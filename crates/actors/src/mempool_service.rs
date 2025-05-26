@@ -30,9 +30,12 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
     pin::pin,
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
-use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
+use tokio::{
+    sync::{mpsc::UnboundedReceiver, RwLock},
+    task::JoinHandle,
+};
 use tracing::{debug, error, info, warn};
 
 impl From<MailboxError> for TxIngressError {
@@ -378,9 +381,7 @@ impl Inner {
 
         match msg {
             MempoolServiceMessage::GetTransaction(tx, response) => {
-                let mempool_state_guard = mempool_state
-                    .read()
-                    .expect("expected valid mempool state readguard");
+                let mempool_state_guard = mempool_state.read().await;
                 if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
                     if let Err(e) = response.send(Some(tx_header.clone())) {
                         tracing::error!("response.send(tx_header) error: {:?}", e);
@@ -388,7 +389,7 @@ impl Inner {
                     return Ok(());
                 }
 
-                if let Ok(read_tx) = self.read_tx() {
+                if let Ok(read_tx) = self.read_tx().await {
                     let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
                     if let Err(e) = response.send(tx_header.clone()) {
                         tracing::error!("response.send(tx_header) error: {:?}", e);
@@ -398,9 +399,7 @@ impl Inner {
                 Ok(())
             }
             MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
-                let mut mempool_state_guard = mempool_state
-                    .write()
-                    .expect("expected valid mempool state write guard");
+                let mut mempool_state_guard = mempool_state.write().await;
                 for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                     // Remove the submit tx from the pending valid_tx pool
                     mempool_state_guard.valid_tx.remove(txid);
@@ -489,9 +488,7 @@ impl Inner {
                 Ok(())
             }
             MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
-                let mut mempool_state_guard = mempool_state
-                    .write()
-                    .expect("expected valid mempool state write guard");
+                let mut mempool_state_guard = mempool_state.write().await;
                 //let commitment_tx = commitment_tx_msg.0.clone();
                 debug!(
                     "received commitment tx {:?}",
@@ -520,7 +517,10 @@ impl Inner {
                 }
 
                 // Validate the tx anchor
-                if let Err(e) = self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor) {
+                if let Err(e) = self
+                    .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
+                    .await
+                {
                     tracing::error!(
                         "Anchor {:?} for tx {:?} failure with error: {:?}",
                         &commitment_tx.anchor,
@@ -534,7 +534,7 @@ impl Inner {
                 let commitment_status = self.get_commitment_status(&commitment_tx).await;
                 if commitment_status == CommitmentStatus::Accepted {
                     // Validate tx signature
-                    if let Err(e) = self.validate_signature(&commitment_tx) {
+                    if let Err(e) = self.validate_signature(&commitment_tx).await {
                         tracing::error!(
                             "Signature validation for commitment_tx {:?} failed with error: {:?}",
                             &commitment_tx,
@@ -576,7 +576,8 @@ impl Inner {
                             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                             self.handle_message(MempoolServiceMessage::CommitmentTxIngressMessage(
                                 pledge_tx, oneshot_tx,
-                            ));
+                            ))
+                            .await;
 
                             let status = oneshot_rx
                                 .await
@@ -632,9 +633,7 @@ impl Inner {
                 }
             }
             MempoolServiceMessage::ChunkIngressMessage(chunk) => {
-                let mempool_state_guard = mempool_state
-                    .write()
-                    .expect("expected valid mempool state write guard");
+                let mempool_state_guard = mempool_state.write().await;
                 // TODO: maintain a shared read transaction so we have read isolation
                 let max_chunks_per_item = mempool_state_guard
                     .config
@@ -645,7 +644,7 @@ impl Inner {
                 info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
                 // Check to see if we have a cached data_root for this chunk
-                let read_tx = match self.read_tx() {
+                let read_tx = match self.read_tx().await {
                     Err(e) => {
                         // todo: check this fits with error strategy for handler
                         return Ok(());
@@ -683,9 +682,7 @@ impl Inner {
                 let data_size = match data_size {
                     Some(ds) => ds,
                     None => {
-                        let mut mempool_state_write_guard = mempool_state
-                            .write()
-                            .expect("expected valid mempool state write guard");
+                        let mut mempool_state_write_guard = mempool_state.write().await;
                         // We don't have a data_root for this chunk but possibly the transaction containing this
                         // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
                         if let Some(chunks_map) = mempool_state_write_guard
@@ -719,9 +716,7 @@ impl Inner {
                     return Ok(());
                 }
 
-                let mempool_state_guard = mempool_state
-                    .read()
-                    .expect("expected valid mempool state guard");
+                let mempool_state_guard = mempool_state.read().await;
 
                 // Next validate the data_path/proof for the chunk, linking
                 // data_root->chunk_hash
@@ -862,6 +857,7 @@ impl Inner {
                 // check if we have all the chunks for this tx
                 let read_tx = self
                     .read_tx()
+                    .await
                     .map_err(|_| ChunkIngressError::DatabaseError)
                     .unwrap();
 
@@ -929,6 +925,7 @@ impl Inner {
                 }
 
                 let gossip_sender = mempool_state_guard.gossip_tx.clone();
+                drop(mempool_state_guard);
                 let gossip_data = GossipData::Chunk(chunk);
 
                 if let Err(error) = gossip_sender.send(gossip_data).await {
@@ -938,9 +935,7 @@ impl Inner {
                 Ok(())
             }
             MempoolServiceMessage::GetBestMempoolTxs(response) => {
-                let mempool_state_guard = mempool_state
-                    .read()
-                    .expect("expected valid mempool state read guard");
+                let mempool_state_guard = mempool_state.read().await;
                 let reth_db = mempool_state_guard.reth_db.clone();
                 let mut fees_spent_per_address = HashMap::new();
                 let mut commitment_tx = Vec::new();
@@ -1053,9 +1048,7 @@ impl Inner {
                 Ok(())
             }
             MempoolServiceMessage::TxExistenceQuery(txid, response) => {
-                let mempool_state_guard = mempool_state
-                    .read()
-                    .expect("expected valid mempool state read guard");
+                let mempool_state_guard = mempool_state.read().await;
                 let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
                     Ok(true)
                 } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
@@ -1064,7 +1057,7 @@ impl Inner {
                     // Still has it, just invalid
                     Ok(true)
                 } else {
-                    let read_tx = self.read_tx();
+                    let read_tx = self.read_tx().await;
                     let result = if read_tx.is_err() {
                         Err(TxIngressError::DatabaseError)
                     } else {
@@ -1096,9 +1089,7 @@ impl Inner {
                     &tx.data_root.0.to_base58()
                 );
 
-                let mempool_state_read_guard = mempool_state
-                    .read()
-                    .expect("expected valid mempool state read guard");
+                let mempool_state_read_guard = mempool_state.read().await;
 
                 let gossip_sender = mempool_state_read_guard.gossip_tx.clone();
 
@@ -1111,7 +1102,7 @@ impl Inner {
                 }
 
                 // Validate anchor
-                let hdr = match self.validate_anchor(&tx.id, &tx.anchor) {
+                let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
                     Err(e) => {
                         error!(
                             "Validation failed: {:?} - mapped to: {:?}",
@@ -1123,7 +1114,7 @@ impl Inner {
                     Ok(v) => v,
                 };
 
-                let read_tx = self.read_tx().unwrap();
+                let read_tx = self.read_tx().await.unwrap();
 
                 let read_reth_tx = &mempool_state_read_guard
                     .reth_db
@@ -1132,9 +1123,7 @@ impl Inner {
                     .unwrap();
 
                 drop(mempool_state_read_guard);
-                let mut mempool_state_write_guard = mempool_state
-                    .write()
-                    .expect("expected valid mempool state write guard");
+                let mut mempool_state_write_guard = mempool_state.write().await;
 
                 // Update any associated ingress proofs
                 if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
@@ -1185,7 +1174,7 @@ impl Inner {
                 }
 
                 // Validate the transaction signature
-                self.validate_signature(&tx).unwrap();
+                self.validate_signature(&tx).await;
                 mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
                 mempool_state_write_guard.recent_valid_tx.insert(tx.id);
 
@@ -1261,11 +1250,11 @@ impl Inner {
     ///
     /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
     /// if the transaction could not be created. Logs an error if the transaction fails.
-    fn read_tx(
+    async fn read_tx(
         &self,
     ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, ChunkIngressError> {
         let mempool_state = &self.mempool_state.clone();
-        let mempool_state_read_guard = mempool_state.read().expect("expected valid mempool state");
+        let mempool_state_read_guard = mempool_state.read().await;
 
         mempool_state_read_guard
             .irys_db
@@ -1276,11 +1265,11 @@ impl Inner {
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
-    fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
+    async fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
 
         let mempool_state = &self.mempool_state.clone();
-        let mut mempool_state_guard = mempool_state.write().expect("expected valid mempool state");
+        let mut mempool_state_guard = mempool_state.write().await;
 
         mempool_state_guard.recent_valid_tx.remove(&txid);
 
@@ -1318,7 +1307,7 @@ impl Inner {
         commitment_tx: &CommitmentTransaction,
     ) -> CommitmentStatus {
         let mempool_state = &self.mempool_state.clone();
-        let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
+        let mempool_state_guard = mempool_state.read().await;
         // Check if already staked in the blockchain
         let is_staked = mempool_state_guard
             .commitment_state_guard
@@ -1382,19 +1371,20 @@ impl Inner {
     }
 
     // Helper to validate anchor
-    fn validate_anchor(
+    async fn validate_anchor(
         &mut self,
         tx_id: &IrysTransactionId,
         anchor: &H256,
     ) -> Result<IrysBlockHeader, TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
-        let mempool_state_read_guard = mempool_state
-            .read()
-            .expect("expected valid mempool state read guard");
+        let mempool_state_read_guard = mempool_state.read().await;
 
-        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
+        let read_tx = self
+            .read_tx()
+            .await
+            .map_err(|_| TxIngressError::DatabaseError)?;
 
-        let latest_height = self.get_latest_block_height()?;
+        let latest_height = self.get_latest_block_height().await?;
         let anchor_expiry_depth = mempool_state_read_guard
             .config
             .node_config
@@ -1427,9 +1417,7 @@ impl Inner {
                 Ok(hdr)
             }
             _ => {
-                let mut mempool_state_write_guard = mempool_state
-                    .write()
-                    .expect("expected valid mempool write guard");
+                let mut mempool_state_write_guard = mempool_state.write().await;
                 mempool_state_write_guard.invalid_tx.push(tx_id.clone());
                 warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                 Err(TxIngressError::InvalidAnchor)
@@ -1438,9 +1426,9 @@ impl Inner {
     }
 
     // Helper to get the canonical chain and latest height
-    fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
+    async fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
-        let mempool_state_read_guard = mempool_state.read().expect("expected valid mempool state");
+        let mempool_state_read_guard = mempool_state.read().await;
         let canon_chain = mempool_state_read_guard
             .block_tree_read_guard
             .read()
@@ -1454,7 +1442,7 @@ impl Inner {
     }
 
     // Helper to verify signature
-    fn validate_signature<T: IrysTransactionCommon>(
+    async fn validate_signature<T: IrysTransactionCommon>(
         &mut self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
@@ -1463,11 +1451,7 @@ impl Inner {
             Ok(())
         } else {
             let mempool_state = &self.mempool_state.clone();
-            mempool_state
-                .write()
-                .expect("expected valid mempool state")
-                .invalid_tx
-                .push(tx.id());
+            mempool_state.write().await.invalid_tx.push(tx.id());
             debug!("Signature is NOT valid");
             Err(TxIngressError::InvalidSignature)
         }
