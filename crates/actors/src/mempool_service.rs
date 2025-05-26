@@ -839,18 +839,22 @@ impl Inner {
                 // check if we have all the chunks for this tx
                 let read_tx = self
                     .read_tx()
-                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+                    .map_err(|_| ChunkIngressError::DatabaseError)
+                    .unwrap();
 
                 let mut cursor = read_tx
                     .cursor_dup_read::<CachedChunksIndex>()
-                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+                    .map_err(|_| ChunkIngressError::DatabaseError)
+                    .unwrap();
                 // get the number of dupsort values (aka the number of chunks)
                 // this ASSUMES that the index isn't corrupt (no double values etc)
                 // the ingress proof generation task does a more thorough check
                 let chunk_count = cursor
                     .dup_count(root_hash)
-                    .map_err(|_| ChunkIngressError::DatabaseError)?
-                    .ok_or(ChunkIngressError::DatabaseError)?;
+                    .map_err(|_| ChunkIngressError::DatabaseError)
+                    .unwrap()
+                    .ok_or(ChunkIngressError::DatabaseError)
+                    .unwrap();
 
                 // data size is the offset of the last chunk
                 // add one as index is 0-indexed
@@ -868,7 +872,8 @@ impl Inner {
                     let (_, latest_height, _, _) = canon_chain
                         .0
                         .last()
-                        .ok_or(ChunkIngressError::ServiceUninitialized)?;
+                        .ok_or(ChunkIngressError::ServiceUninitialized)
+                        .unwrap();
 
                     let db = mempool_state_guard.irys_db.clone();
                     let signer = mempool_state_guard.config.irys_signer();
@@ -1079,15 +1084,13 @@ impl Inner {
 
                 let read_tx = self.read_tx();
 
-                if let Err(e) = read_tx {
-                    error!("{:?}", TxIngressError::DatabaseError);
-                    return Ok(());
-                }
+                let read_tx = self.read_tx().unwrap();
 
                 let read_reth_tx = &mempool_state_guard
                     .reth_db
                     .tx()
-                    .map_err(|_| TxIngressError::DatabaseError)?;
+                    .map_err(|_| TxIngressError::DatabaseError)
+                    .unwrap();
 
                 // Update any associated ingress proofs
                 if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
@@ -1111,14 +1114,16 @@ impl Inner {
                                 &tx.data_root, &e
                             );
                             TxIngressError::DatabaseError
-                        })?
+                        })
+                        .unwrap()
                         .map_err(|e| {
                             error!(
                                 "Error updating ingress proof expiry for {} - {}",
                                 &tx.data_root, &e
                             );
                             TxIngressError::DatabaseError
-                        })?;
+                        })
+                        .unwrap();
                 }
 
                 // Check account balance
@@ -1134,7 +1139,7 @@ impl Inner {
                 }
 
                 // Validate the transaction signature
-                self.validate_signature(&tx)?;
+                self.validate_signature(&tx).unwrap();
                 mempool_state_guard.valid_tx.insert(tx.id, tx.clone());
                 mempool_state_guard.recent_valid_tx.insert(tx.id);
 
