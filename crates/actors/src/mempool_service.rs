@@ -1,7 +1,7 @@
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
-use actix::{Addr, Context, Handler, MailboxError, Message, MessageResponse};
+use actix::{MailboxError, Message, MessageResponse};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -30,12 +30,9 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
     pin::pin,
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::{Arc, RwLock},
 };
-use tokio::{
-    sync::mpsc::{Sender, UnboundedReceiver},
-    task::JoinHandle,
-};
+use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 use tracing::{debug, error, info, warn};
 
 impl From<MailboxError> for TxIngressError {

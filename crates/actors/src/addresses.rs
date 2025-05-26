@@ -2,9 +2,8 @@ use actix::Addr;
 
 use crate::{
     block_discovery::BlockDiscoveryActor, block_index_service::BlockIndexService,
-    block_producer::BlockProducerActor, mempool_service::MempoolService,
-    mining::PartitionMiningActor, packing::PackingActor, reth_service::RethServiceActor,
-    EpochServiceActor,
+    block_producer::BlockProducerActor, mining::PartitionMiningActor, packing::PackingActor,
+    reth_service::RethServiceActor, EpochServiceActor,
 };
 
 /// Serves as a kind of app state that can be passed into actix web to allow
