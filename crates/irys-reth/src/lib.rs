@@ -2231,10 +2231,14 @@ mod tests {
                 to: TxKind::Call(recipient),
                 ..Default::default()
             };
-            let signed_normal = normal_signer.sign_transaction(&mut normal_tx_raw).await.unwrap();
-            let normal_tx = EthereumTxEnvelope::<TxEip4844>::Legacy(normal_tx_raw.into_signed(signed_normal))
-                .try_into_recovered()
+            let signed_normal = normal_signer
+                .sign_transaction(&mut normal_tx_raw)
+                .await
                 .unwrap();
+            let normal_tx =
+                EthereumTxEnvelope::<TxEip4844>::Legacy(normal_tx_raw.into_signed(signed_normal))
+                    .try_into_recovered()
+                    .unwrap();
             let normal_pooled_tx = EthPooledTransaction::new(normal_tx.clone(), 300);
             let normal_tx_hash = node
                 .inner
@@ -2257,12 +2261,24 @@ mod tests {
                 .iter()
                 .map(|tx| *tx.hash())
                 .collect();
-            assert!(block_txs.contains(&system_tx_hash), "System tx not found in block {block_number}");
-            assert!(block_txs.contains(&normal_tx_hash), "Normal tx not found in block {block_number}");
+            assert!(
+                block_txs.contains(&system_tx_hash),
+                "System tx not found in block {block_number}"
+            );
+            assert!(
+                block_txs.contains(&normal_tx_hash),
+                "Normal tx not found in block {block_number}"
+            );
         }
 
         // Assert that the current block is the latest block
-        let latest_block = node.inner.provider.consistent_provider().unwrap().best_block_number().unwrap();
+        let latest_block = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .best_block_number()
+            .unwrap();
         assert_eq!(latest_block, 5, "Latest block is not 5");
 
         Ok(())
@@ -2275,7 +2291,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn system_tx_with_invalid_parent_blockhash_is_rejected() -> eyre::Result<()> {
         use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
-        use alloy_primitives::{TxKind, FixedBytes};
+        use alloy_primitives::{FixedBytes, TxKind};
         use std::collections::HashSet;
 
         // Setup wallets and node
@@ -2319,10 +2335,14 @@ mod tests {
             to: TxKind::Call(recipient),
             ..Default::default()
         };
-        let signed_normal = normal_signer.sign_transaction(&mut normal_tx_raw).await.unwrap();
-        let normal_tx = EthereumTxEnvelope::<TxEip4844>::Legacy(normal_tx_raw.into_signed(signed_normal))
-            .try_into_recovered()
+        let signed_normal = normal_signer
+            .sign_transaction(&mut normal_tx_raw)
+            .await
             .unwrap();
+        let normal_tx =
+            EthereumTxEnvelope::<TxEip4844>::Legacy(normal_tx_raw.into_signed(signed_normal))
+                .try_into_recovered()
+                .unwrap();
         let normal_pooled_tx = EthPooledTransaction::new(normal_tx.clone(), 300);
         let normal_tx_hash = node
             .inner
@@ -2362,7 +2382,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn system_tx_with_invalid_block_number_is_rejected() -> eyre::Result<()> {
         use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
-        use alloy_primitives::{TxKind};
+        use alloy_primitives::TxKind;
         use std::collections::HashSet;
 
         // Setup wallets and node
@@ -2393,7 +2413,11 @@ mod tests {
         let invalid_block_number = 2u64;
 
         // Create a system tx with the valid parent blockhash but invalid block number
-        let system_tx = block_reward(block_producer.address(), invalid_block_number, parent_blockhash);
+        let system_tx = block_reward(
+            block_producer.address(),
+            invalid_block_number,
+            parent_blockhash,
+        );
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
         let system_tx_hash = node
@@ -2416,10 +2440,14 @@ mod tests {
             to: TxKind::Call(recipient),
             ..Default::default()
         };
-        let signed_normal = normal_signer.sign_transaction(&mut normal_tx_raw).await.unwrap();
-        let normal_tx = EthereumTxEnvelope::<TxEip4844>::Legacy(normal_tx_raw.into_signed(signed_normal))
-            .try_into_recovered()
+        let signed_normal = normal_signer
+            .sign_transaction(&mut normal_tx_raw)
+            .await
             .unwrap();
+        let normal_tx =
+            EthereumTxEnvelope::<TxEip4844>::Legacy(normal_tx_raw.into_signed(signed_normal))
+                .try_into_recovered()
+                .unwrap();
         let normal_pooled_tx = EthPooledTransaction::new(normal_tx.clone(), 300);
         let normal_tx_hash = node
             .inner
