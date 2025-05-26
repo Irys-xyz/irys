@@ -1070,7 +1070,7 @@ impl Inner {
                 if mempool_state_guard.invalid_tx.contains(&tx.id)
                     || mempool_state_guard.recent_valid_tx.contains(&tx.id)
                 {
-                    error!("error: {:?}", Err(TxIngressError::Skipped));
+                    error!("error: {:?}", TxIngressError::Skipped);
                     return Ok(());
                 }
 
@@ -1139,7 +1139,7 @@ impl Inner {
                         "unfunded balance from irys_database::get_account_balance({:?})",
                         tx.signer
                     );
-                    error!("error: {:?}", Err(TxIngressError::Unfunded));
+                    error!("error: {:?}", TxIngressError::Unfunded);
                     return Ok(());
                 }
 
