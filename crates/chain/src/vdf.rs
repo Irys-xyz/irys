@@ -7,7 +7,7 @@ use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U2
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{Receiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info};
 
 pub fn run_vdf(
@@ -15,7 +15,7 @@ pub fn run_vdf(
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
-    mut new_seed_listener: Receiver<BroadcastMiningSeed>,
+    mut new_seed_listener: UnboundedReceiver<BroadcastMiningSeed>,
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
@@ -197,7 +197,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
-        let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
+        let (_, new_seed_rx) = mpsc::unbounded_channel::<BroadcastMiningSeed>();
         let (_, mining_state_rx) = mpsc::channel::<bool>(1);
 
         let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;

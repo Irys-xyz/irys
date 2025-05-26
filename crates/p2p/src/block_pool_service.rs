@@ -46,7 +46,7 @@ where
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
-    pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+    pub(crate) vdf_sender: Option<UnboundedSender<BroadcastMiningSeed>>,
     pub(crate) vdf_service_sender: Option<UnboundedSender<VdfServiceMessage>>,
 
     sync_state: SyncState,
@@ -115,7 +115,7 @@ where
         db: DatabaseProvider,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
-        vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+        vdf_sender: Option<UnboundedSender<BroadcastMiningSeed>>,
         sync_state: SyncState,
         vdf_service_sender: UnboundedSender<VdfServiceMessage>,
         block_tree: BlockTreeReadGuard,

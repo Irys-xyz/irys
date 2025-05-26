@@ -161,7 +161,7 @@ impl P2PService {
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
-        vdf_sender: Sender<BroadcastMiningSeed>,
+        vdf_sender: UnboundedSender<BroadcastMiningSeed>,
         listener: TcpListener,
         vdf_service_sender: UnboundedSender<VdfServiceMessage>,
         block_tree_guard: BlockTreeReadGuard,

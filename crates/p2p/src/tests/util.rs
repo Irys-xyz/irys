@@ -30,6 +30,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+use irys_actors::block_tree_service::{BlockTreeCache, BlockTreeReadGuard};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
@@ -375,7 +376,7 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
-        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::unbounded_channel::<BroadcastMiningSeed>();
         let (vdf_service_tx, _vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
@@ -389,6 +390,7 @@ impl GossipServiceTestFixture {
                 vdf_tx,
                 gossip_listener,
                 vdf_service_tx,
+                BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTreeCache::new(&IrysBlockHeader::default()))))
             )
             .expect("failed to run gossip service");
 
