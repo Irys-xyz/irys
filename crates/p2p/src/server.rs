@@ -15,7 +15,6 @@ use actix_web::{
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
     Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,

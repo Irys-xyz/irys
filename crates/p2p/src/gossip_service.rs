@@ -23,7 +23,6 @@ use base58::ToBase58;
 use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
     block_production::Seed, Address, BlockIndexItem, BlockIndexQuery, DatabaseProvider, GossipData,

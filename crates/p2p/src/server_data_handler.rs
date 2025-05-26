@@ -8,7 +8,7 @@ use actix::{Actor, Addr, Context, Handler};
 use base58::ToBase58;
 use core::net::SocketAddr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade};
+use irys_actors::mempool_service::ChunkIngressError;
 use irys_api_client::ApiClient;
 use irys_types::{
     CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
