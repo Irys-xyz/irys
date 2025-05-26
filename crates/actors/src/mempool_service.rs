@@ -783,10 +783,14 @@ impl Inner {
                 // TODO: fix all these unwraps!
                 // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
 
-                mempool_state_guard
+                if let Err(e) = mempool_state_guard
                     .irys_db
                     .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+                    .map_err(|_| ChunkIngressError::DatabaseError)
+                {
+                    error!("Database error: {:?}", e);
+                    return Ok(());
+                }
 
                 for sm in mempool_state_guard.storage_modules_guard.read().iter() {
                     if !sm
