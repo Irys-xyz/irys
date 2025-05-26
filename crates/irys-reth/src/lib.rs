@@ -2203,7 +2203,7 @@ mod tests {
             .unwrap();
 
         for block_number in 1..=5 {
-            // --- Block reward system tx ---
+            // Block reward system tx
             let system_tx = block_reward(block_producer.address(), block_number, parent_blockhash);
             let system_tx_raw = compose_system_tx(block_number - 1, 1, system_tx.clone());
             let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
@@ -2216,7 +2216,7 @@ mod tests {
                 )
                 .await?;
 
-            // --- Normal tx ---
+            // Normal tx
             let mut normal_tx_raw = TxLegacy {
                 gas_limit: 99000,
                 value: U256::from(1234u64),
@@ -2241,11 +2241,11 @@ mod tests {
                 )
                 .await?;
 
-            // --- Mine block ---
+            // Mine block
             let block_payload = node.advance_block().await?;
             parent_blockhash = block_payload.block().hash();
 
-            // --- Assert both txs are present ---
+            // Assert both txs are present
             let block_txs: HashSet<_> = block_payload
                 .block()
                 .body()
@@ -2257,10 +2257,93 @@ mod tests {
             assert!(block_txs.contains(&normal_tx_hash), "Normal tx not found in block {block_number}");
         }
 
-        // --- Assert that the current block is the latest block ---
+        // Assert that the current block is the latest block
         let latest_block = node.inner.provider.consistent_provider().unwrap().best_block_number().unwrap();
         assert_eq!(latest_block, 5, "Latest block is not 5");
 
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn system_tx_with_invalid_parent_blockhash_is_rejected() -> eyre::Result<()> {
+        use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
+        use alloy_primitives::{TxKind, FixedBytes};
+        use std::collections::HashSet;
+
+        // Setup wallets and node
+        let wallets = Wallet::new(3).wallet_gen();
+        let block_producer = EthereumWallet::from(wallets[0].clone()).default_signer();
+        let normal_signer = EthereumWallet::from(wallets[1].clone()).default_signer();
+        let recipient = Address::from(wallets[2].address());
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+        let mut node = nodes.pop().unwrap();
+
+        // Use a random blockhash instead of the real parent
+        let invalid_parent_blockhash = FixedBytes::random();
+
+        // Create a system tx with the invalid parent blockhash
+        let system_tx = block_reward(block_producer.address(), 1, invalid_parent_blockhash);
+        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
+        let system_tx_hash = node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Private,
+                system_pooled_tx,
+            )
+            .await?;
+
+        // Create and submit a normal user tx
+        let mut normal_tx_raw = TxLegacy {
+            gas_limit: 99000,
+            value: U256::from(1234u64),
+            nonce: 0,
+            gas_price: 2_000_000_000u128, // 2 Gwei
+            chain_id: Some(1),
+            input: vec![].into(),
+            to: TxKind::Call(recipient),
+            ..Default::default()
+        };
+        let signed_normal = normal_signer.sign_transaction(&mut normal_tx_raw).await.unwrap();
+        let normal_tx = EthereumTxEnvelope::<TxEip4844>::Legacy(normal_tx_raw.into_signed(signed_normal))
+            .try_into_recovered()
+            .unwrap();
+        let normal_pooled_tx = EthPooledTransaction::new(normal_tx.clone(), 300);
+        let normal_tx_hash = node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Local,
+                normal_pooled_tx,
+            )
+            .await?;
+
+        // Mine a block
+        let block_payload = node.advance_block().await?;
+
+        // Assert that the system tx is NOT present in the block
+        let block_txs: HashSet<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+        assert!(
+            !block_txs.contains(&system_tx_hash),
+            "System tx with invalid parent blockhash should not be included in the block"
+        );
+        assert!(
+            block_txs.contains(&normal_tx_hash),
+            "Normal user tx should be included in the block"
+        );
         Ok(())
     }
 }
