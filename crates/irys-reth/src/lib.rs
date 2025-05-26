@@ -61,7 +61,9 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction
 
 // todo - what is the `State root task returned incorrect state root`
 // todo: custom mempool - don't drop system txs if they dont have gas properties
-// todo: custom mempool - after each block, drop all system txs
+// todo: add evm precompile
+// todo: add system tx metadata checks for praent blockhash and for block heights (tx execution)
+// todo: add system tx metadata checks for praent blockhash and for block heights (incoming tx validator)
 
 /// Type configuration for an Irys-Ethereum node.
 #[derive(Debug, Default, Clone, Copy)]
