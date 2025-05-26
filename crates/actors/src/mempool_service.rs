@@ -652,7 +652,7 @@ impl Inner {
                     .collect::<Vec<_>>();
 
                 let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-                    .map_err(|_| ChunkIngressError::DatabaseError)?
+                    .map_err(|_| ChunkIngressError::DatabaseError).unwrap()
                     .map(|cdr| cdr.data_size)
                     .or_else(|| {
                         debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
