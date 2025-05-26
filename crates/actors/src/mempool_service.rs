@@ -1072,17 +1072,17 @@ impl Inner {
                 }
 
                 // Validate anchor
-                let hdr = self.validate_anchor(&tx.id, &tx.anchor);
-                if let Err(e) = self.validate_anchor(&tx.id, &tx.anchor) {
-                    error!(
-                        "Validation failed: {:?} - mapped to: {:?}",
-                        e,
-                        TxIngressError::DatabaseError
-                    );
-                    return Ok(());
-                }
-
-                let read_tx = self.read_tx();
+                let hdr = match self.validate_anchor(&tx.id, &tx.anchor) {
+                    Err(e) => {
+                        error!(
+                            "Validation failed: {:?} - mapped to: {:?}",
+                            e,
+                            TxIngressError::DatabaseError
+                        );
+                        return Ok(());
+                    }
+                    Ok(v) => v,
+                };
 
                 let read_tx = self.read_tx().unwrap();
 
