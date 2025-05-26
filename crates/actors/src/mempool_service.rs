@@ -618,7 +618,7 @@ impl Inner {
                         }
                         Ok(())
                     } else {
-                        error!("error: {:?}", Err(TxIngressError::Skipped));
+                        error!("error: {:?}", TxIngressError::Skipped);
                         Ok(())
                     }
                 }
