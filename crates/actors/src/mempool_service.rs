@@ -1371,11 +1371,12 @@ impl Inner {
     // Helper to get the canonical chain and latest height
     fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
-        let mempool_state_guard = mempool_state.read().expect("expected valid mempool state");
-        let canon_chain = mempool_state_guard
+        let mempool_state_read_guard = mempool_state.read().expect("expected valid mempool state");
+        let canon_chain = mempool_state_read_guard
             .block_tree_read_guard
             .read()
             .get_canonical_chain();
+        drop(mempool_state_read_guard);
         let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
