@@ -5,7 +5,7 @@ use actix::{MailboxError, Message, MessageResponse};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
-use futures::future::Either;
+use futures::future::{BoxFuture, Either};
 use irys_database::{
     db::RethDbWrapper,
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
@@ -376,874 +376,895 @@ pub fn generate_ingress_proof(
 
 impl Inner {
     #[tracing::instrument(skip_all, err)]
-    async fn handle_message(&mut self, msg: MempoolServiceMessage) -> eyre::Result<()> {
-        let mempool_state = &self.mempool_state.clone();
+    fn handle_message<'a>(
+        &'a mut self,
+        msg: MempoolServiceMessage,
+    ) -> BoxFuture<'a, eyre::Result<()>> {
+        Box::pin(async move {
+            let mempool_state = &self.mempool_state.clone();
 
-        match msg {
-            MempoolServiceMessage::GetTransaction(tx, response) => {
-                let mempool_state_guard = mempool_state.read().await;
-                if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
-                    if let Err(e) = response.send(Some(tx_header.clone())) {
-                        tracing::error!("response.send(tx_header) error: {:?}", e);
-                    };
-                    return Ok(());
-                }
-
-                if let Ok(read_tx) = self.read_tx().await {
-                    let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
-                    if let Err(e) = response.send(tx_header.clone()) {
-                        tracing::error!("response.send(tx_header) error: {:?}", e);
-                    };
-                }
-
-                Ok(())
-            }
-            MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
-                let mut mempool_state_guard = mempool_state.write().await;
-                for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-                    // Remove the submit tx from the pending valid_tx pool
-                    mempool_state_guard.valid_tx.remove(txid);
-                    mempool_state_guard.recent_valid_tx.remove(txid);
-                }
-
-                // Is there a commitment ledger in this block?
-                let commitment_ledger = block
-                    .system_ledgers
-                    .iter()
-                    .find(|b| b.ledger_id == SystemLedger::Commitment);
-
-                if let Some(commitment_ledger) = commitment_ledger {
-                    for txid in commitment_ledger.tx_ids.iter() {
-                        // Remove the commitment tx from the pending valid_tx pool
-                        self.remove_commitment_tx(txid);
-                    }
-                }
-
-                let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
-
-                // Loop though the promoted transactions and remove their ingress proofs
-                // from the mempool. In the future on a multi node network we may keep
-                // ingress proofs around longer to account for re-orgs, but for now
-                // we just remove them.
-                if !published_txids.is_empty() {
-                    let mut_tx = mempool_state_guard
-                        .irys_db
-                        .tx_mut()
-                        .map_err(|e| {
-                            error!("Failed to create mdbx transaction: {}", e);
-                        })
-                        .unwrap();
-
-                    for (i, txid) in block.data_ledgers[DataLedger::Publish]
-                        .tx_ids
-                        .0
-                        .iter()
-                        .enumerate()
-                    {
-                        // Retrieve the promoted transactions header
-                        let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
-                            Ok(Some(header)) => header,
-                            Ok(None) => {
-                                error!("No transaction header found for txid: {}", txid);
-                                continue;
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Error fetching transaction header for txid {}: {}",
-                                    txid, e
-                                );
-                                continue;
-                            }
+            match msg {
+                MempoolServiceMessage::GetTransaction(tx, response) => {
+                    let mempool_state_guard = mempool_state.read().await;
+                    if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+                        if let Err(e) = response.send(Some(tx_header.clone())) {
+                            tracing::error!("response.send(tx_header) error: {:?}", e);
                         };
-
-                        // TODO: In a single node world there is only one ingress proof
-                        // per promoted tx, but in the future there will be multiple proofs.
-                        let proofs = block.data_ledgers[DataLedger::Publish]
-                            .proofs
-                            .as_ref()
-                            .unwrap();
-                        let proof = proofs.0[i].clone();
-                        tx_header.ingress_proofs = Some(proof);
-
-                        // Update the header record in the database to include the ingress
-                        // proof, indicating it is promoted
-                        if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
-                            error!(
-                            "Could not update transactions with ingress proofs - txid: {} err: {}",
-                            txid, err
-                        );
-                        }
-
-                        info!("Promoted tx:\n{:?}", tx_header);
+                        return Ok(());
                     }
 
-                    let _ = mut_tx.commit();
-                }
-
-                info!(
-                    "Removing confirmed tx - Block height: {} num tx: {}",
-                    block.height,
-                    all_txs.len()
-                );
-                Ok(())
-            }
-            MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
-                let mut mempool_state_guard = mempool_state.write().await;
-                //let commitment_tx = commitment_tx_msg.0.clone();
-                debug!(
-                    "received commitment tx {:?}",
-                    &commitment_tx.id.0.to_base58()
-                );
-
-                // Early out if we already know about this transaction (invalid)
-                if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
-                    if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
-                        tracing::error!("response.send(tx_header) error: {:?}", e);
-                    };
-                    return Ok(());
-                }
-
-                // Check if the transaction already exists in valid transactions
-                let tx_exists = mempool_state_guard
-                    .valid_commitment_tx
-                    .get(&commitment_tx.signer)
-                    .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
-
-                if tx_exists {
-                    if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
-                        tracing::error!("response.send(tx_header) error: {:?}", e);
-                    };
-                    return Ok(());
-                }
-
-                // Validate the tx anchor
-                if let Err(e) = self
-                    .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
-                    .await
-                {
-                    tracing::error!(
-                        "Anchor {:?} for tx {:?} failure with error: {:?}",
-                        &commitment_tx.anchor,
-                        commitment_tx.id,
-                        e
-                    );
-                    return Ok(());
-                }
-
-                // Check pending commitments and cached commitments and active commitments
-                let commitment_status = self.get_commitment_status(&commitment_tx).await;
-                if commitment_status == CommitmentStatus::Accepted {
-                    // Validate tx signature
-                    if let Err(e) = self.validate_signature(&commitment_tx).await {
-                        tracing::error!(
-                            "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                            &commitment_tx,
-                            e
-                        );
-                    }
-
-                    // Add the commitment tx to the valid tx list to be included in the next block
-                    mempool_state_guard
-                        .valid_commitment_tx
-                        .entry(commitment_tx.signer)
-                        .or_default()
-                        .push(commitment_tx.clone());
-
-                    mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
-
-                    // Process any pending pledges for this newly staked address
-                    // ------------------------------------------------------
-                    // When a stake transaction is accepted, we can now process any pledge
-                    // transactions from the same address that arrived earlier but were
-                    // waiting for the stake. This effectively resolves the dependency
-                    // order for address-based validation.
-                    if let Some(pledges_lru) = mempool_state_guard
-                        .pending_pledges
-                        .pop(&commitment_tx.signer)
-                    {
-                        // Extract all pending pledges as a vector of owned transactions
-                        let pledges: Vec<_> = pledges_lru
-                            .into_iter()
-                            .map(|(_, pledge_tx)| pledge_tx)
-                            .collect();
-
-                        // PERFORMANCE NOTE: Processing all pending pledges synchronously
-                        // If an address has accumulated many pending pledges, this could
-                        // potentially block the actor for a significant time.
-                        for pledge_tx in pledges {
-                            // Re-process each pledge now that its signer is staked
-                            // No need to clone as we own the transaction objects
-                            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                            self.handle_message(MempoolServiceMessage::CommitmentTxIngressMessage(
-                                pledge_tx, oneshot_tx,
-                            ))
-                            .await;
-
-                            let status = oneshot_rx
-                                .await
-                                .expect("to process pending pledge for newly staked address");
-                        }
-                    }
-
-                    // Gossip transaction
-                    // TODO is gossip sender not in the senders struct?
-                    let gossip_sender = mempool_state_guard.gossip_tx.clone();
-                    let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
-
-                    if let Err(e) = gossip_sender.send(gossip_data).await {
-                        tracing::error!("Failed to send gossip data: {:?}", e);
+                    if let Ok(read_tx) = self.read_tx().await {
+                        let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
+                        if let Err(e) = response.send(tx_header.clone()) {
+                            tracing::error!("response.send(tx_header) error: {:?}", e);
+                        };
                     }
 
                     Ok(())
-                } else {
-                    if commitment_status == CommitmentStatus::Unstaked {
-                        // For unstaked pledges, we cache them in a 2-level LRU structure:
-                        // Level 1: Keyed by signer address (allows tracking multiple addresses)
-                        // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
+                }
+                MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
+                    let mut mempool_state_guard = mempool_state.write().await;
+                    for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
+                        // Remove the submit tx from the pending valid_tx pool
+                        mempool_state_guard.valid_tx.remove(txid);
+                        mempool_state_guard.recent_valid_tx.remove(txid);
+                    }
 
-                        if let Some(pledges_cache) = mempool_state_guard
-                            .pending_pledges
-                            .get_mut(&commitment_tx.signer)
-                        {
-                            // Address already exists in cache - add this pledge transaction to its lru cache
-                            pledges_cache.put(commitment_tx.id, commitment_tx.clone());
-                        } else {
-                            // First pledge from this address - create a new nested lru cache
-                            let max_pending_pledge_items = mempool_state_guard
-                                .config
-                                .consensus
-                                .mempool
-                                .max_pending_pledge_items;
-                            let mut new_address_cache =
-                                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+                    // Is there a commitment ledger in this block?
+                    let commitment_ledger = block
+                        .system_ledgers
+                        .iter()
+                        .find(|b| b.ledger_id == SystemLedger::Commitment);
 
-                            // Add the pledge transaction to the new lru cache for the address
-                            new_address_cache.put(commitment_tx.id, commitment_tx.clone());
-
-                            // Add the address cache to the primary lru cache
-                            mempool_state_guard
-                                .pending_pledges
-                                .put(commitment_tx.signer, new_address_cache);
+                    if let Some(commitment_ledger) = commitment_ledger {
+                        for txid in commitment_ledger.tx_ids.iter() {
+                            // Remove the commitment tx from the pending valid_tx pool
+                            self.remove_commitment_tx(txid).await;
                         }
+                    }
+
+                    let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+
+                    // Loop though the promoted transactions and remove their ingress proofs
+                    // from the mempool. In the future on a multi node network we may keep
+                    // ingress proofs around longer to account for re-orgs, but for now
+                    // we just remove them.
+                    if !published_txids.is_empty() {
+                        let mut_tx = mempool_state_guard
+                            .irys_db
+                            .tx_mut()
+                            .map_err(|e| {
+                                error!("Failed to create mdbx transaction: {}", e);
+                            })
+                            .unwrap();
+
+                        for (i, txid) in block.data_ledgers[DataLedger::Publish]
+                            .tx_ids
+                            .0
+                            .iter()
+                            .enumerate()
+                        {
+                            // Retrieve the promoted transactions header
+                            let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
+                                Ok(Some(header)) => header,
+                                Ok(None) => {
+                                    error!("No transaction header found for txid: {}", txid);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Error fetching transaction header for txid {}: {}",
+                                        txid, e
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // TODO: In a single node world there is only one ingress proof
+                            // per promoted tx, but in the future there will be multiple proofs.
+                            let proofs = block.data_ledgers[DataLedger::Publish]
+                                .proofs
+                                .as_ref()
+                                .unwrap();
+                            let proof = proofs.0[i].clone();
+                            tx_header.ingress_proofs = Some(proof);
+
+                            // Update the header record in the database to include the ingress
+                            // proof, indicating it is promoted
+                            if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
+                                error!(
+                                "Could not update transactions with ingress proofs - txid: {} err: {}",
+                                txid, err
+                            );
+                            }
+
+                            info!("Promoted tx:\n{:?}", tx_header);
+                        }
+
+                        let _ = mut_tx.commit();
+                    }
+
+                    info!(
+                        "Removing confirmed tx - Block height: {} num tx: {}",
+                        block.height,
+                        all_txs.len()
+                    );
+                    Ok(())
+                }
+                MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
+                    let mut mempool_state_guard = mempool_state.write().await;
+                    //let commitment_tx = commitment_tx_msg.0.clone();
+                    debug!(
+                        "received commitment tx {:?}",
+                        &commitment_tx.id.0.to_base58()
+                    );
+
+                    // Early out if we already know about this transaction (invalid)
+                    if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
+                        if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
+                            tracing::error!("response.send(tx_header) error: {:?}", e);
+                        };
+                        return Ok(());
+                    }
+
+                    // Check if the transaction already exists in valid transactions
+                    let tx_exists = mempool_state_guard
+                        .valid_commitment_tx
+                        .get(&commitment_tx.signer)
+                        .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
+
+                    if tx_exists {
+                        if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
+                            tracing::error!("response.send(tx_header) error: {:?}", e);
+                        };
+                        return Ok(());
+                    }
+
+                    // Validate the tx anchor
+                    if let Err(e) = self
+                        .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
+                        .await
+                    {
+                        tracing::error!(
+                            "Anchor {:?} for tx {:?} failure with error: {:?}",
+                            &commitment_tx.anchor,
+                            commitment_tx.id,
+                            e
+                        );
+                        return Ok(());
+                    }
+
+                    // Check pending commitments and cached commitments and active commitments
+                    let commitment_status = self.get_commitment_status(&commitment_tx).await;
+                    if commitment_status == CommitmentStatus::Accepted {
+                        // Validate tx signature
+                        if let Err(e) = self.validate_signature(&commitment_tx).await {
+                            tracing::error!(
+                                "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                                &commitment_tx,
+                                e
+                            );
+                        }
+
+                        // Add the commitment tx to the valid tx list to be included in the next block
+                        mempool_state_guard
+                            .valid_commitment_tx
+                            .entry(commitment_tx.signer)
+                            .or_default()
+                            .push(commitment_tx.clone());
+
+                        mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
+
+                        // Process any pending pledges for this newly staked address
+                        // ------------------------------------------------------
+                        // When a stake transaction is accepted, we can now process any pledge
+                        // transactions from the same address that arrived earlier but were
+                        // waiting for the stake. This effectively resolves the dependency
+                        // order for address-based validation.
+                        if let Some(pledges_lru) = mempool_state_guard
+                            .pending_pledges
+                            .pop(&commitment_tx.signer)
+                        {
+                            // Extract all pending pledges as a vector of owned transactions
+                            let pledges: Vec<_> = pledges_lru
+                                .into_iter()
+                                .map(|(_, pledge_tx)| pledge_tx)
+                                .collect();
+
+                            // PERFORMANCE NOTE: Processing all pending pledges synchronously
+                            // If an address has accumulated many pending pledges, this could
+                            // potentially block the actor for a significant time.
+                            for pledge_tx in pledges {
+                                // Re-process each pledge now that its signer is staked
+                                // No need to clone as we own the transaction objects
+                                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                                // todo switch _ to actually handle the result
+                                let _ = self
+                                    .handle_message(
+                                        MempoolServiceMessage::CommitmentTxIngressMessage(
+                                            pledge_tx, oneshot_tx,
+                                        ),
+                                    )
+                                    .await;
+
+                                let status = oneshot_rx
+                                    .await
+                                    .expect("to process pending pledge for newly staked address");
+                            }
+                        }
+
+                        // Gossip transaction
+                        // TODO is gossip sender not in the senders struct?
+                        let gossip_sender = mempool_state_guard.gossip_tx.clone();
+                        let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
+
+                        if let Err(e) = gossip_sender.send(gossip_data).await {
+                            tracing::error!("Failed to send gossip data: {:?}", e);
+                        }
+
                         Ok(())
                     } else {
-                        error!("error: {:?}", TxIngressError::Skipped);
-                        Ok(())
-                    }
-                }
-            }
-            MempoolServiceMessage::ChunkIngressMessage(chunk) => {
-                let mempool_state_guard = mempool_state.write().await;
-                // TODO: maintain a shared read transaction so we have read isolation
-                let max_chunks_per_item = mempool_state_guard
-                    .config
-                    .consensus
-                    .mempool
-                    .max_chunks_per_item;
+                        if commitment_status == CommitmentStatus::Unstaked {
+                            // For unstaked pledges, we cache them in a 2-level LRU structure:
+                            // Level 1: Keyed by signer address (allows tracking multiple addresses)
+                            // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
 
-                info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
+                            if let Some(pledges_cache) = mempool_state_guard
+                                .pending_pledges
+                                .get_mut(&commitment_tx.signer)
+                            {
+                                // Address already exists in cache - add this pledge transaction to its lru cache
+                                pledges_cache.put(commitment_tx.id, commitment_tx.clone());
+                            } else {
+                                // First pledge from this address - create a new nested lru cache
+                                let max_pending_pledge_items = mempool_state_guard
+                                    .config
+                                    .consensus
+                                    .mempool
+                                    .max_pending_pledge_items;
+                                let mut new_address_cache = LruCache::new(
+                                    NonZeroUsize::new(max_pending_pledge_items).unwrap(),
+                                );
 
-                // Check to see if we have a cached data_root for this chunk
-                let read_tx = match self.read_tx().await {
-                    Err(e) => {
-                        // todo: check this fits with error strategy for handler
-                        return Ok(());
-                    }
-                    Ok(v) => v,
-                };
+                                // Add the pledge transaction to the new lru cache for the address
+                                new_address_cache.put(commitment_tx.id, commitment_tx.clone());
 
-                let binding = mempool_state_guard.storage_modules_guard.read().clone();
-                drop(mempool_state_guard);
-                let candidate_sms = binding
-                    .iter()
-                    .filter_map(|sm| {
-                        sm.get_writeable_offsets(&chunk)
-                            .ok()
-                            .map(|write_offsets| (sm, write_offsets))
-                    })
-                    .collect::<Vec<_>>();
-
-                let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-                    .map_err(|_| ChunkIngressError::DatabaseError).unwrap()
-                    .map(|cdr| cdr.data_size)
-                    .or_else(|| {
-                        debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
-                        candidate_sms.iter().find_map(|(sm, write_offsets)| {
-                            write_offsets.iter().find_map(|wo| {
-                                sm.query_submodule_db_by_offset(*wo, |tx| {
-                                    get_data_size_by_data_root(tx, chunk.data_root)
-                                })
-                                .ok()
-                                .flatten()
-                            })
-                        })
-                    });
-
-                let data_size = match data_size {
-                    Some(ds) => ds,
-                    None => {
-                        let mut mempool_state_write_guard = mempool_state.write().await;
-                        // We don't have a data_root for this chunk but possibly the transaction containing this
-                        // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
-                        if let Some(chunks_map) = mempool_state_write_guard
-                            .pending_chunks
-                            .get_mut(&chunk.data_root)
-                        {
-                            chunks_map.put(chunk.tx_offset, chunk.clone());
+                                // Add the address cache to the primary lru cache
+                                mempool_state_guard
+                                    .pending_pledges
+                                    .put(commitment_tx.signer, new_address_cache);
+                            }
+                            Ok(())
                         } else {
-                            // If there's no entry for this data_root yet, create one
-                            let mut new_lru_cache =
-                                LruCache::new(NonZeroUsize::new(max_chunks_per_item).unwrap());
-                            new_lru_cache.put(chunk.tx_offset, chunk.clone());
-                            mempool_state_write_guard
-                                .pending_chunks
-                                .put(chunk.data_root, new_lru_cache);
+                            error!("error: {:?}", TxIngressError::Skipped);
+                            Ok(())
                         }
-                        drop(mempool_state_write_guard);
+                    }
+                }
+                MempoolServiceMessage::ChunkIngressMessage(chunk) => {
+                    let mempool_state_guard = mempool_state.write().await;
+                    // TODO: maintain a shared read transaction so we have read isolation
+                    let max_chunks_per_item = mempool_state_guard
+                        .config
+                        .consensus
+                        .mempool
+                        .max_chunks_per_item;
+
+                    info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
+
+                    // Check to see if we have a cached data_root for this chunk
+                    let read_tx = match self.read_tx().await {
+                        Err(e) => {
+                            // todo: check this fits with error strategy for handler
+                            return Ok(());
+                        }
+                        Ok(v) => v,
+                    };
+
+                    let binding = mempool_state_guard.storage_modules_guard.read().clone();
+                    drop(mempool_state_guard);
+                    let candidate_sms = binding
+                        .iter()
+                        .filter_map(|sm| {
+                            sm.get_writeable_offsets(&chunk)
+                                .ok()
+                                .map(|write_offsets| (sm, write_offsets))
+                        })
+                        .collect::<Vec<_>>();
+
+                    let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+                        .map_err(|_| ChunkIngressError::DatabaseError).unwrap()
+                        .map(|cdr| cdr.data_size)
+                        .or_else(|| {
+                            debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
+                            candidate_sms.iter().find_map(|(sm, write_offsets)| {
+                                write_offsets.iter().find_map(|wo| {
+                                    sm.query_submodule_db_by_offset(*wo, |tx| {
+                                        get_data_size_by_data_root(tx, chunk.data_root)
+                                    })
+                                    .ok()
+                                    .flatten()
+                                })
+                            })
+                        });
+
+                    let data_size = match data_size {
+                        Some(ds) => ds,
+                        None => {
+                            let mut mempool_state_write_guard = mempool_state.write().await;
+                            // We don't have a data_root for this chunk but possibly the transaction containing this
+                            // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
+                            if let Some(chunks_map) = mempool_state_write_guard
+                                .pending_chunks
+                                .get_mut(&chunk.data_root)
+                            {
+                                chunks_map.put(chunk.tx_offset, chunk.clone());
+                            } else {
+                                // If there's no entry for this data_root yet, create one
+                                let mut new_lru_cache =
+                                    LruCache::new(NonZeroUsize::new(max_chunks_per_item).unwrap());
+                                new_lru_cache.put(chunk.tx_offset, chunk.clone());
+                                mempool_state_write_guard
+                                    .pending_chunks
+                                    .put(chunk.data_root, new_lru_cache);
+                            }
+                            drop(mempool_state_write_guard);
+                            return Ok(());
+                        }
+                    };
+
+                    // Validate that the data_size for this chunk matches the data_size
+                    // recorded in the transaction header.
+                    if data_size != chunk.data_size {
+                        error!(
+                            "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
+                            ChunkIngressError::InvalidDataSize,
+                            data_size,
+                            chunk.data_size
+                        );
                         return Ok(());
                     }
-                };
 
-                // Validate that the data_size for this chunk matches the data_size
-                // recorded in the transaction header.
-                if data_size != chunk.data_size {
-                    error!(
-                        "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
-                        ChunkIngressError::InvalidDataSize,
-                        data_size,
-                        chunk.data_size
+                    let mempool_state_guard = mempool_state.read().await;
+
+                    // Next validate the data_path/proof for the chunk, linking
+                    // data_root->chunk_hash
+                    let root_hash = chunk.data_root.0;
+                    let target_offset = u128::from(
+                        chunk.end_byte_offset(mempool_state_guard.config.consensus.chunk_size),
                     );
-                    return Ok(());
-                }
+                    let path_buff = &chunk.data_path;
 
-                let mempool_state_guard = mempool_state.read().await;
+                    info!(
+                        "chunk_offset:{} data_size:{} offset:{}",
+                        chunk.tx_offset, chunk.data_size, target_offset
+                    );
 
-                // Next validate the data_path/proof for the chunk, linking
-                // data_root->chunk_hash
-                let root_hash = chunk.data_root.0;
-                let target_offset = u128::from(
-                    chunk.end_byte_offset(mempool_state_guard.config.consensus.chunk_size),
-                );
-                let path_buff = &chunk.data_path;
+                    let path_result = match validate_path(root_hash, path_buff, target_offset)
+                        .map_err(|_| ChunkIngressError::InvalidProof)
+                    {
+                        Err(e) => {
+                            error!("error validating path: {:?}", e);
+                            return Ok(());
+                        }
+                        Ok(v) => v,
+                    };
 
-                info!(
-                    "chunk_offset:{} data_size:{} offset:{}",
-                    chunk.tx_offset, chunk.data_size, target_offset
-                );
+                    // Use data_size to identify and validate that only the last chunk
+                    // can be less than chunk_size
+                    let chunk_len = chunk.bytes.len() as u64;
 
-                let path_result = match validate_path(root_hash, path_buff, target_offset)
-                    .map_err(|_| ChunkIngressError::InvalidProof)
-                {
-                    Err(e) => {
-                        error!("error validating path: {:?}", e);
-                        return Ok(());
+                    // TODO: Mark the data_root as invalid if the chunk is an incorrect size
+                    // Someone may have created a data_root that seemed valid, but if the
+                    // data_path is valid but the chunk size doesn't mach the protocols
+                    // consensus size, then the data_root is actually invalid and no future
+                    // chunks from that data_root should be ingressed.
+                    let chunk_size = mempool_state_guard.config.consensus.chunk_size;
+
+                    // Is this chunk index any of the chunks before the last in the tx?
+                    let num_chunks_in_tx = data_size.div_ceil(chunk_size);
+                    if u64::from(*chunk.tx_offset) < num_chunks_in_tx - 1 {
+                        // Ensure prefix chunks are all exactly chunk_size
+                        if chunk_len != chunk_size {
+                            error!(
+                                "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
+                                ChunkIngressError::InvalidChunkSize,
+                                chunk.tx_offset,
+                                chunk_len
+                            );
+                            return Ok(());
+                        }
+                    } else {
+                        // Ensure the last chunk is no larger than chunk_size
+                        if chunk_len > chunk_size {
+                            error!(
+                                "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
+                                ChunkIngressError::InvalidChunkSize,
+                                chunk.tx_offset,
+                                chunk_len
+                            );
+                            return Ok(());
+                        }
                     }
-                    Ok(v) => v,
-                };
 
-                // Use data_size to identify and validate that only the last chunk
-                // can be less than chunk_size
-                let chunk_len = chunk.bytes.len() as u64;
-
-                // TODO: Mark the data_root as invalid if the chunk is an incorrect size
-                // Someone may have created a data_root that seemed valid, but if the
-                // data_path is valid but the chunk size doesn't mach the protocols
-                // consensus size, then the data_root is actually invalid and no future
-                // chunks from that data_root should be ingressed.
-                let chunk_size = mempool_state_guard.config.consensus.chunk_size;
-
-                // Is this chunk index any of the chunks before the last in the tx?
-                let num_chunks_in_tx = data_size.div_ceil(chunk_size);
-                if u64::from(*chunk.tx_offset) < num_chunks_in_tx - 1 {
-                    // Ensure prefix chunks are all exactly chunk_size
-                    if chunk_len != chunk_size {
-                        error!(
-                            "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
-                            ChunkIngressError::InvalidChunkSize,
-                            chunk.tx_offset,
-                            chunk_len
-                        );
-                        return Ok(());
-                    }
-                } else {
-                    // Ensure the last chunk is no larger than chunk_size
-                    if chunk_len > chunk_size {
-                        error!(
-                            "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                            ChunkIngressError::InvalidChunkSize,
-                            chunk.tx_offset,
-                            chunk_len
-                        );
-                        return Ok(());
-                    }
-                }
-
-                // Check that the leaf hash on the data_path matches the chunk_hash
-                match hash_sha256(&chunk.bytes.0).map_err(|_| ChunkIngressError::InvalidDataHash) {
-                    Err(e) => {
-                        error!(
-                            "{:?}: hashed chunk_bytes hash_sha256() errored!",
-                            ChunkIngressError::InvalidDataHash,
-                        );
-                        return Ok(());
-                    }
-                    Ok(hash_256) => {
-                        if path_result.leaf_hash != hash_256 {
-                            warn!(
-                                "{:?}: leaf_hash does not match hashed chunk_bytes",
+                    // Check that the leaf hash on the data_path matches the chunk_hash
+                    match hash_sha256(&chunk.bytes.0)
+                        .map_err(|_| ChunkIngressError::InvalidDataHash)
+                    {
+                        Err(e) => {
+                            error!(
+                                "{:?}: hashed chunk_bytes hash_sha256() errored!",
                                 ChunkIngressError::InvalidDataHash,
                             );
                             return Ok(());
                         }
-                    }
-                }
-
-                // TODO: fix all these unwraps!
-                // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-
-                if let Err(e) = mempool_state_guard
-                    .irys_db
-                    .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-                    .map_err(|_| ChunkIngressError::DatabaseError)
-                {
-                    error!("Database error: {:?}", e);
-                    return Ok(());
-                }
-
-                for sm in mempool_state_guard.storage_modules_guard.read().iter() {
-                    if !sm
-                        .get_writeable_offsets(&chunk)
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
-                        let result = sm
-                            .write_data_chunk(&chunk)
-                            .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()));
-                        if let Err(e) = result {
-                            error!("Internal error: {:?}", e);
-                            return Ok(());
+                        Ok(hash_256) => {
+                            if path_result.leaf_hash != hash_256 {
+                                warn!(
+                                    "{:?}: leaf_hash does not match hashed chunk_bytes",
+                                    ChunkIngressError::InvalidDataHash,
+                                );
+                                return Ok(());
+                            }
                         }
                     }
-                }
 
-                // ==== INGRESS PROOFS ====
-                let root_hash: H256 = root_hash.into();
+                    // TODO: fix all these unwraps!
+                    // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
 
-                // check if we have generated an ingress proof for this tx already
-                // if we have, update it's expiry height
-
-                //  TODO: hook into whatever manages ingress proofs
-                match read_tx
-                    .get::<IngressProofs>(root_hash)
-                    .map_err(|_| ChunkIngressError::DatabaseError)
-                {
-                    Err(e) => {
+                    if let Err(e) = mempool_state_guard
+                        .irys_db
+                        .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
+                        .map_err(|_| ChunkIngressError::DatabaseError)
+                    {
                         error!("Database error: {:?}", e);
                         return Ok(());
                     }
-                    Ok(v) => {
-                        if v.is_some() {
-                            info!(
-                                "We've already generated an ingress proof for data root {}",
-                                &root_hash
-                            );
 
-                            return Ok(());
-                        };
+                    for sm in mempool_state_guard.storage_modules_guard.read().iter() {
+                        if !sm
+                            .get_writeable_offsets(&chunk)
+                            .unwrap_or_default()
+                            .is_empty()
+                        {
+                            info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
+                            let result = sm
+                                .write_data_chunk(&chunk)
+                                .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()));
+                            if let Err(e) = result {
+                                error!("Internal error: {:?}", e);
+                                return Ok(());
+                            }
+                        }
                     }
-                }
 
-                // check if we have all the chunks for this tx
-                let read_tx = self
-                    .read_tx()
-                    .await
-                    .map_err(|_| ChunkIngressError::DatabaseError)
-                    .unwrap();
+                    // ==== INGRESS PROOFS ====
+                    let root_hash: H256 = root_hash.into();
 
-                let mut cursor = read_tx
-                    .cursor_dup_read::<CachedChunksIndex>()
-                    .map_err(|_| ChunkIngressError::DatabaseError)
-                    .unwrap();
-                // get the number of dupsort values (aka the number of chunks)
-                // this ASSUMES that the index isn't corrupt (no double values etc)
-                // the ingress proof generation task does a more thorough check
-                let chunk_count = cursor
-                    .dup_count(root_hash)
-                    .map_err(|_| ChunkIngressError::DatabaseError)
-                    .unwrap()
-                    .ok_or(ChunkIngressError::DatabaseError)
-                    .unwrap();
+                    // check if we have generated an ingress proof for this tx already
+                    // if we have, update it's expiry height
 
-                // data size is the offset of the last chunk
-                // add one as index is 0-indexed
-                let expected_chunk_count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
+                    //  TODO: hook into whatever manages ingress proofs
+                    match read_tx
+                        .get::<IngressProofs>(root_hash)
+                        .map_err(|_| ChunkIngressError::DatabaseError)
+                    {
+                        Err(e) => {
+                            error!("Database error: {:?}", e);
+                            return Ok(());
+                        }
+                        Ok(v) => {
+                            if v.is_some() {
+                                info!(
+                                    "We've already generated an ingress proof for data root {}",
+                                    &root_hash
+                                );
 
-                if chunk_count == expected_chunk_count {
-                    // we *should* have all the chunks
-                    // dispatch a ingress proof task
+                                return Ok(());
+                            };
+                        }
+                    }
 
-                    let canon_chain = mempool_state_guard
-                        .block_tree_read_guard
-                        .read()
-                        .get_canonical_chain();
-
-                    let (_, latest_height, _, _) = canon_chain
-                        .0
-                        .last()
-                        .ok_or(ChunkIngressError::ServiceUninitialized)
+                    // check if we have all the chunks for this tx
+                    let read_tx = self
+                        .read_tx()
+                        .await
+                        .map_err(|_| ChunkIngressError::DatabaseError)
                         .unwrap();
 
-                    let db = mempool_state_guard.irys_db.clone();
-                    let signer = mempool_state_guard.config.irys_signer();
-                    let latest_height = *latest_height;
-                    mempool_state_guard
-                        .task_exec
-                        .clone()
-                        .spawn_blocking(async move {
-                            generate_ingress_proof(
-                                db.clone(),
-                                root_hash,
-                                data_size,
-                                chunk_size,
-                                signer,
-                            )
-                            // TODO: handle results instead of unwrapping
+                    let mut cursor = read_tx
+                        .cursor_dup_read::<CachedChunksIndex>()
+                        .map_err(|_| ChunkIngressError::DatabaseError)
+                        .unwrap();
+                    // get the number of dupsort values (aka the number of chunks)
+                    // this ASSUMES that the index isn't corrupt (no double values etc)
+                    // the ingress proof generation task does a more thorough check
+                    let chunk_count = cursor
+                        .dup_count(root_hash)
+                        .map_err(|_| ChunkIngressError::DatabaseError)
+                        .unwrap()
+                        .ok_or(ChunkIngressError::DatabaseError)
+                        .unwrap();
+
+                    // data size is the offset of the last chunk
+                    // add one as index is 0-indexed
+                    let expected_chunk_count =
+                        data_size_to_chunk_count(data_size, chunk_size).unwrap();
+
+                    if chunk_count == expected_chunk_count {
+                        // we *should* have all the chunks
+                        // dispatch a ingress proof task
+
+                        let canon_chain = mempool_state_guard
+                            .block_tree_read_guard
+                            .read()
+                            .get_canonical_chain();
+
+                        let (_, latest_height, _, _) = canon_chain
+                            .0
+                            .last()
+                            .ok_or(ChunkIngressError::ServiceUninitialized)
                             .unwrap();
-                            db.update(|wtx| {
-                                wtx.put::<DataRootLRU>(
+
+                        let db = mempool_state_guard.irys_db.clone();
+                        let signer = mempool_state_guard.config.irys_signer();
+                        let latest_height = *latest_height;
+                        mempool_state_guard
+                            .task_exec
+                            .clone()
+                            .spawn_blocking(async move {
+                                generate_ingress_proof(
+                                    db.clone(),
                                     root_hash,
-                                    DataRootLRUEntry {
-                                        last_height: latest_height,
-                                        ingress_proof: true,
-                                    },
+                                    data_size,
+                                    chunk_size,
+                                    signer,
                                 )
-                            })
-                            .unwrap()
-                            .unwrap();
-                        });
-                }
-
-                let gossip_sender = mempool_state_guard.gossip_tx.clone();
-                drop(mempool_state_guard);
-                let gossip_data = GossipData::Chunk(chunk);
-
-                if let Err(error) = gossip_sender.send(gossip_data).await {
-                    tracing::error!("Failed to send gossip data: {:?}", error);
-                }
-
-                Ok(())
-            }
-            MempoolServiceMessage::GetBestMempoolTxs(response) => {
-                let mempool_state_guard = mempool_state.read().await;
-                let reth_db = mempool_state_guard.reth_db.clone();
-                let mut fees_spent_per_address = HashMap::new();
-                let mut commitment_tx = Vec::new();
-                let mut unfunded_address = HashSet::new();
-
-                // Helper function that verifies transaction funding and tracks cumulative fees
-                // Returns true if the transaction can be funded based on current account balance
-                // and previously included transactions in this block
-                let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
-                    let signer = tx.signer();
-
-                    // Skip transactions from addresses with previously unfunded transactions
-                    // This ensures we don't include any transactions (including pledges) from
-                    // addresses that couldn't afford their stake commitments
-                    if unfunded_address.contains(&signer) {
-                        return false;
+                                // TODO: handle results instead of unwrapping
+                                .unwrap();
+                                db.update(|wtx| {
+                                    wtx.put::<DataRootLRU>(
+                                        root_hash,
+                                        DataRootLRUEntry {
+                                            last_height: latest_height,
+                                            ingress_proof: true,
+                                        },
+                                    )
+                                })
+                                .unwrap()
+                                .unwrap();
+                            });
                     }
 
-                    let fee = tx.total_fee();
-                    let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
+                    let gossip_sender = mempool_state_guard.gossip_tx.clone();
+                    drop(mempool_state_guard);
+                    let gossip_data = GossipData::Chunk(chunk);
 
-                    // Calculate total required balance including previously selected transactions
-                    let tx_ref = &reth_db.tx().unwrap();
-                    let has_funds = irys_database::get_account_balance(tx_ref, signer).unwrap()
-                        >= U256::from(current_spent + fee);
-
-                    // Track fees for this address regardless of whether this specific transaction is included
-                    fees_spent_per_address
-                        .entry(signer)
-                        .and_modify(|val| *val += fee)
-                        .or_insert(fee);
-
-                    // If transaction cannot be funded, mark the entire address as unfunded
-                    // Since stakes are processed before pledges, this prevents inclusion of
-                    // pledge commitments when their associated stake commitment is unfunded
-                    if !has_funds {
-                        unfunded_address.insert(signer);
-                        return false;
+                    if let Err(error) = gossip_sender.send(gossip_data).await {
+                        tracing::error!("Failed to send gossip data: {:?}", error);
                     }
 
-                    has_funds
-                };
+                    Ok(())
+                }
+                MempoolServiceMessage::GetBestMempoolTxs(response) => {
+                    let mempool_state_guard = mempool_state.read().await;
+                    let reth_db = mempool_state_guard.reth_db.clone();
+                    let mut fees_spent_per_address = HashMap::new();
+                    let mut commitment_tx = Vec::new();
+                    let mut unfunded_address = HashSet::new();
 
-                // Process commitments in priority order (stakes then pledges)
-                // This order ensures stake transactions are processed before pledges
-                for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
-                    // Gather all commitments of current type from all addresses
-                    let mut sorted_commitments: Vec<_> = mempool_state_guard
-                        .valid_commitment_tx
-                        .values()
-                        .flat_map(|txs| {
-                            txs.iter()
-                                .filter(|tx| tx.commitment_type == *commitment_type)
-                                .map(|tx| tx.clone())
-                        })
-                        .collect();
+                    // Helper function that verifies transaction funding and tracks cumulative fees
+                    // Returns true if the transaction can be funded based on current account balance
+                    // and previously included transactions in this block
+                    let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
+                        let signer = tx.signer();
 
-                    // Sort commitments by fee (highest first) to maximize network revenue
-                    sorted_commitments.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
-
-                    // Select fundable commitments in fee-priority order
-                    for tx in sorted_commitments {
-                        if check_funding(&tx) {
-                            commitment_tx.push(tx);
+                        // Skip transactions from addresses with previously unfunded transactions
+                        // This ensures we don't include any transactions (including pledges) from
+                        // addresses that couldn't afford their stake commitments
+                        if unfunded_address.contains(&signer) {
+                            return false;
                         }
-                    }
-                }
 
-                // Prepare storage transactions for inclusion after commitments
-                let mut all_storage_txs: Vec<_> =
-                    mempool_state_guard.valid_tx.values().cloned().collect();
+                        let fee = tx.total_fee();
+                        let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
 
-                // Sort storage transactions by fee (highest first) to maximize revenue
-                all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+                        // Calculate total required balance including previously selected transactions
+                        let tx_ref = &reth_db.tx().unwrap();
+                        let has_funds = irys_database::get_account_balance(tx_ref, signer).unwrap()
+                            >= U256::from(current_spent + fee);
 
-                // Apply block size constraint and funding checks to storage transactions
-                let mut storage_tx = Vec::new();
-                let max_txs = mempool_state_guard
-                    .config
-                    .node_config
-                    .consensus_config()
-                    .mempool
-                    .max_data_txs_per_block
-                    .try_into()
-                    .expect("max_data_txs_per_block to fit into usize");
+                        // Track fees for this address regardless of whether this specific transaction is included
+                        fees_spent_per_address
+                            .entry(signer)
+                            .and_modify(|val| *val += fee)
+                            .or_insert(fee);
 
-                drop(mempool_state_guard);
-
-                // Select storage transactions in fee-priority order, respecting funding limits
-                // and maximum transaction count per block
-                for tx in all_storage_txs {
-                    if check_funding(&tx) {
-                        storage_tx.push(tx);
-                        if storage_tx.len() >= max_txs {
-                            break;
+                        // If transaction cannot be funded, mark the entire address as unfunded
+                        // Since stakes are processed before pledges, this prevents inclusion of
+                        // pledge commitments when their associated stake commitment is unfunded
+                        if !has_funds {
+                            unfunded_address.insert(signer);
+                            return false;
                         }
-                    }
-                }
 
-                let txns = MempoolTxs {
-                    commitment_tx,
-                    storage_tx,
-                };
-
-                // Return selected transactions grouped by type
-                if let Err(e) = response.send(txns) {
-                    tracing::error!("response.send(txns) error: {:?}", e);
-                };
-
-                Ok(())
-            }
-            MempoolServiceMessage::TxExistenceQuery(txid, response) => {
-                let mempool_state_guard = mempool_state.read().await;
-                let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
-                    Ok(true)
-                } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-                    Ok(true)
-                } else if mempool_state_guard.invalid_tx.contains(&txid) {
-                    // Still has it, just invalid
-                    Ok(true)
-                } else {
-                    let read_tx = self.read_tx().await;
-                    let result = if read_tx.is_err() {
-                        Err(TxIngressError::DatabaseError)
-                    } else {
-                        let tx_header = tx_header_by_txid(
-                            &read_tx.expect("expected valid header from tx id"),
-                            &txid,
-                        );
-                        if tx_header.is_err() {
-                            Err(TxIngressError::DatabaseError)
-                        } else {
-                            Ok(tx_header.expect("exepected ").is_some())
-                        }
+                        has_funds
                     };
 
-                    result
-                };
-                drop(mempool_state_guard);
+                    // Process commitments in priority order (stakes then pledges)
+                    // This order ensures stake transactions are processed before pledges
+                    for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+                        // Gather all commitments of current type from all addresses
+                        let mut sorted_commitments: Vec<_> = mempool_state_guard
+                            .valid_commitment_tx
+                            .values()
+                            .flat_map(|txs| {
+                                txs.iter()
+                                    .filter(|tx| tx.commitment_type == *commitment_type)
+                                    .map(|tx| tx.clone())
+                            })
+                            .collect();
 
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!("response.send(bool) error: {:?}", e);
-                };
+                        // Sort commitments by fee (highest first) to maximize network revenue
+                        sorted_commitments.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
 
-                Ok(())
-            }
-            MempoolServiceMessage::TxIngressMessage(tx) => {
-                debug!(
-                    "received tx {:?} (data_root {:?})",
-                    &tx.id.0.to_base58(),
-                    &tx.data_root.0.to_base58()
-                );
-
-                let mempool_state_read_guard = mempool_state.read().await;
-
-                let gossip_sender = mempool_state_read_guard.gossip_tx.clone();
-
-                // Early out if we already know about this transaction
-                if mempool_state_read_guard.invalid_tx.contains(&tx.id)
-                    || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
-                {
-                    error!("error: {:?}", TxIngressError::Skipped);
-                    return Ok(());
-                }
-
-                // Validate anchor
-                let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
-                    Err(e) => {
-                        error!(
-                            "Validation failed: {:?} - mapped to: {:?}",
-                            e,
-                            TxIngressError::DatabaseError
-                        );
-                        return Ok(());
+                        // Select fundable commitments in fee-priority order
+                        for tx in sorted_commitments {
+                            if check_funding(&tx) {
+                                commitment_tx.push(tx);
+                            }
+                        }
                     }
-                    Ok(v) => v,
-                };
 
-                let read_tx = self.read_tx().await.unwrap();
+                    // Prepare storage transactions for inclusion after commitments
+                    let mut all_storage_txs: Vec<_> =
+                        mempool_state_guard.valid_tx.values().cloned().collect();
 
-                let read_reth_tx = &mempool_state_read_guard
-                    .reth_db
-                    .tx()
-                    .map_err(|_| TxIngressError::DatabaseError)
-                    .unwrap();
+                    // Sort storage transactions by fee (highest first) to maximize revenue
+                    all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
 
-                drop(mempool_state_read_guard);
-                let mut mempool_state_write_guard = mempool_state.write().await;
-
-                // Update any associated ingress proofs
-                if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-                    let anchor_expiry_depth = mempool_state_write_guard
+                    // Apply block size constraint and funding checks to storage transactions
+                    let mut storage_tx = Vec::new();
+                    let max_txs = mempool_state_guard
                         .config
                         .node_config
                         .consensus_config()
                         .mempool
-                        .anchor_expiry_depth as u64;
-                    let new_expiry = hdr.height + anchor_expiry_depth;
-                    debug!(
-                        "Updating ingress proof for data root {} expiry from {} -> {}",
-                        &tx.data_root, &old_expiry.last_height, &new_expiry
-                    );
-                    mempool_state_write_guard
-                        .irys_db
-                        .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
-                        .map_err(|e| {
-                            error!(
-                                "Error updating ingress proof expiry for {} - {}",
-                                &tx.data_root, &e
-                            );
-                            TxIngressError::DatabaseError
-                        })
-                        .unwrap()
-                        .map_err(|e| {
-                            error!(
-                                "Error updating ingress proof expiry for {} - {}",
-                                &tx.data_root, &e
-                            );
-                            TxIngressError::DatabaseError
-                        })
-                        .unwrap();
-                }
+                        .max_data_txs_per_block
+                        .try_into()
+                        .expect("max_data_txs_per_block to fit into usize");
 
-                // Check account balance
-                if irys_database::get_account_balance(read_reth_tx, tx.signer)
-                    .map_err(|_| TxIngressError::DatabaseError)
-                    .unwrap()
-                    < U256::from(tx.total_fee())
-                {
-                    error!(
-                        "unfunded balance from irys_database::get_account_balance({:?})",
-                        tx.signer
-                    );
-                    error!("error: {:?}", TxIngressError::Unfunded);
-                    return Ok(());
-                }
+                    drop(mempool_state_guard);
 
-                // Validate the transaction signature
-                self.validate_signature(&tx).await;
-                mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
-                mempool_state_write_guard.recent_valid_tx.insert(tx.id);
+                    // Select storage transactions in fee-priority order, respecting funding limits
+                    // and maximum transaction count per block
+                    for tx in all_storage_txs {
+                        if check_funding(&tx) {
+                            storage_tx.push(tx);
+                            if storage_tx.len() >= max_txs {
+                                break;
+                            }
+                        }
+                    }
 
-                // Cache the data_root in the database
-                match mempool_state_write_guard.irys_db.update_eyre(|db_tx| {
-                    irys_database::cache_data_root(db_tx, &tx)?;
-                    // TODO: tx headers should not immediately be added to the database
-                    // this is a work around until the mempool can persist its state
-                    // during shutdown. Currently this has the potential to create
-                    // orphaned tx headers in the database with expired anchors and
-                    // not linked to any blocks.
-                    irys_database::insert_tx_header(db_tx, &tx)?;
+                    let txns = MempoolTxs {
+                        commitment_tx,
+                        storage_tx,
+                    };
+
+                    // Return selected transactions grouped by type
+                    if let Err(e) = response.send(txns) {
+                        tracing::error!("response.send(txns) error: {:?}", e);
+                    };
+
                     Ok(())
-                }) {
-                    Ok(()) => {
-                        info!(
-                            "Successfully cached data_root {:?} for tx {:?}",
-                            tx.data_root,
-                            tx.id.0.to_base58()
-                        );
+                }
+                MempoolServiceMessage::TxExistenceQuery(txid, response) => {
+                    let mempool_state_guard = mempool_state.read().await;
+                    let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
+                        Ok(true)
+                    } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
+                        Ok(true)
+                    } else if mempool_state_guard.invalid_tx.contains(&txid) {
+                        // Still has it, just invalid
+                        Ok(true)
+                    } else {
+                        let read_tx = self.read_tx().await;
+                        let result = if read_tx.is_err() {
+                            Err(TxIngressError::DatabaseError)
+                        } else {
+                            let tx_header = tx_header_by_txid(
+                                &read_tx.expect("expected valid header from tx id"),
+                                &txid,
+                            );
+                            if tx_header.is_err() {
+                                Err(TxIngressError::DatabaseError)
+                            } else {
+                                Ok(tx_header.expect("exepected ").is_some())
+                            }
+                        };
+
+                        result
+                    };
+                    drop(mempool_state_guard);
+
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send(bool) error: {:?}", e);
+                    };
+
+                    Ok(())
+                }
+                MempoolServiceMessage::TxIngressMessage(tx) => {
+                    debug!(
+                        "received tx {:?} (data_root {:?})",
+                        &tx.id.0.to_base58(),
+                        &tx.data_root.0.to_base58()
+                    );
+
+                    let mempool_state_read_guard = mempool_state.read().await;
+
+                    let gossip_sender = mempool_state_read_guard.gossip_tx.clone();
+
+                    // Early out if we already know about this transaction
+                    if mempool_state_read_guard.invalid_tx.contains(&tx.id)
+                        || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
+                    {
+                        error!("error: {:?}", TxIngressError::Skipped);
+                        return Ok(());
                     }
-                    Err(db_error) => {
+
+                    // Validate anchor
+                    let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
+                        Err(e) => {
+                            error!(
+                                "Validation failed: {:?} - mapped to: {:?}",
+                                e,
+                                TxIngressError::DatabaseError
+                            );
+                            return Ok(());
+                        }
+                        Ok(v) => v,
+                    };
+
+                    let read_tx = self.read_tx().await.unwrap();
+
+                    let read_reth_tx = &mempool_state_read_guard
+                        .reth_db
+                        .tx()
+                        .map_err(|_| TxIngressError::DatabaseError)
+                        .unwrap();
+
+                    drop(mempool_state_read_guard);
+                    let mut mempool_state_write_guard = mempool_state.write().await;
+
+                    // Update any associated ingress proofs
+                    if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
+                        let anchor_expiry_depth = mempool_state_write_guard
+                            .config
+                            .node_config
+                            .consensus_config()
+                            .mempool
+                            .anchor_expiry_depth
+                            as u64;
+                        let new_expiry = hdr.height + anchor_expiry_depth;
+                        debug!(
+                            "Updating ingress proof for data root {} expiry from {} -> {}",
+                            &tx.data_root, &old_expiry.last_height, &new_expiry
+                        );
+                        mempool_state_write_guard
+                            .irys_db
+                            .update(|write_tx| {
+                                write_tx.put::<DataRootLRU>(tx.data_root, old_expiry)
+                            })
+                            .map_err(|e| {
+                                error!(
+                                    "Error updating ingress proof expiry for {} - {}",
+                                    &tx.data_root, &e
+                                );
+                                TxIngressError::DatabaseError
+                            })
+                            .unwrap()
+                            .map_err(|e| {
+                                error!(
+                                    "Error updating ingress proof expiry for {} - {}",
+                                    &tx.data_root, &e
+                                );
+                                TxIngressError::DatabaseError
+                            })
+                            .unwrap();
+                    }
+
+                    // Check account balance
+                    if irys_database::get_account_balance(read_reth_tx, tx.signer)
+                        .map_err(|_| TxIngressError::DatabaseError)
+                        .unwrap()
+                        < U256::from(tx.total_fee())
+                    {
                         error!(
-                            "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                            tx.data_root,
-                            tx.id.0.to_base58(),
-                            db_error
+                            "unfunded balance from irys_database::get_account_balance({:?})",
+                            tx.signer
                         );
+                        error!("error: {:?}", TxIngressError::Unfunded);
+                        return Ok(());
                     }
-                };
 
-                // Process any chunks that arrived before their parent transaction
-                // These were temporarily stored in the pending_chunks cache
-                if let Some(chunks_map) =
-                    mempool_state_write_guard.pending_chunks.pop(&tx.data_root)
-                {
-                    // Extract owned chunks from the map to process them
-                    let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
+                    // Validate the transaction signature
+                    // check the result and error handle
+                    let _ = self.validate_signature(&tx).await;
+                    mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
+                    mempool_state_write_guard.recent_valid_tx.insert(tx.id);
 
-                    // PERFORMANCE CONSIDERATION:
-                    // This is executing in a synchronous actor context. If this transaction has
-                    // many pending chunks (hundreds or thousands), processing them
-                    // all here could block the actor for a significant time, delaying other messages.
-                    // This should be addressed when the mempool_service is converted to a tokio service
-                    // and the handlers become async
-                    for chunk in chunks {
-                        // Process each chunk with full ownership (no cloning needed)
-                        //let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                        self.handle_message(MempoolServiceMessage::ChunkIngressMessage(
-                            chunk, //, oneshot_tx,
-                        ));
+                    // Cache the data_root in the database
+                    match mempool_state_write_guard.irys_db.update_eyre(|db_tx| {
+                        irys_database::cache_data_root(db_tx, &tx)?;
+                        // TODO: tx headers should not immediately be added to the database
+                        // this is a work around until the mempool can persist its state
+                        // during shutdown. Currently this has the potential to create
+                        // orphaned tx headers in the database with expired anchors and
+                        // not linked to any blocks.
+                        irys_database::insert_tx_header(db_tx, &tx)?;
+                        Ok(())
+                    }) {
+                        Ok(()) => {
+                            info!(
+                                "Successfully cached data_root {:?} for tx {:?}",
+                                tx.data_root,
+                                tx.id.0.to_base58()
+                            );
+                        }
+                        Err(db_error) => {
+                            error!(
+                                "Failed to cache data_root {:?} for tx {:?}: {:?}",
+                                tx.data_root,
+                                tx.id.0.to_base58(),
+                                db_error
+                            );
+                        }
+                    };
 
-                        /*let status = oneshot_rx
-                        .await
-                        .expect("pending chunks should be processed by the mempool");*/
+                    // Process any chunks that arrived before their parent transaction
+                    // These were temporarily stored in the pending_chunks cache
+                    if let Some(chunks_map) =
+                        mempool_state_write_guard.pending_chunks.pop(&tx.data_root)
+                    {
+                        // Extract owned chunks from the map to process them
+                        let chunks: Vec<_> =
+                            chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
+
+                        // PERFORMANCE CONSIDERATION:
+                        // This is executing in a synchronous actor context. If this transaction has
+                        // many pending chunks (hundreds or thousands), processing them
+                        // all here could block the actor for a significant time, delaying other messages.
+                        // This should be addressed when the mempool_service is converted to a tokio service
+                        // and the handlers become async
+                        for chunk in chunks {
+                            // Process each chunk with full ownership (no cloning needed)
+                            //let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                            //todo check the value rather than _
+                            let _ = self
+                                .handle_message(MempoolServiceMessage::ChunkIngressMessage(
+                                    chunk, //, oneshot_tx,
+                                ))
+                                .await;
+
+                            /*let status = oneshot_rx
+                            .await
+                            .expect("pending chunks should be processed by the mempool");*/
+                        }
                     }
+                    drop(mempool_state_write_guard);
+
+                    // Gossip transaction
+                    let gossip_data = GossipData::Transaction(tx.clone());
+
+                    if let Err(error) = gossip_sender.send(gossip_data).await {
+                        tracing::error!("Failed to send gossip data: {:?}", error);
+                    }
+
+                    Ok(())
                 }
-                drop(mempool_state_write_guard);
-
-                // Gossip transaction
-                let gossip_data = GossipData::Transaction(tx.clone());
-
-                if let Err(error) = gossip_sender.send(gossip_data).await {
-                    tracing::error!("Failed to send gossip data: {:?}", error);
-                }
-
-                Ok(())
             }
-        }
+        })
     }
 
     /// Opens a read-only database transaction from the Irys mempool state.
