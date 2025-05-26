@@ -62,7 +62,6 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction
 // todo - what is the `State root task returned incorrect state root`
 // todo: custom mempool - don't drop system txs if they dont have gas properties
 // todo: add evm precompile
-// todo: add system tx metadata checks for praent blockhash and for block heights (tx execution)
 // todo: add system tx metadata checks for praent blockhash and for block heights (incoming tx validator)
 
 /// Type configuration for an Irys-Ethereum node.
@@ -344,6 +343,10 @@ pub async fn maintain_system_txs<Node, St>(
                         None
                     })
                     .collect::<Vec<_>>();
+                if stale_system_txs.is_empty() {
+                    continue;
+                }
+
                 tracing::warn!(?stale_system_txs, "dropping stale system transactions");
                 pool.remove_transactions(stale_system_txs);
             }
