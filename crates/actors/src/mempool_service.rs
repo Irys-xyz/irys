@@ -763,13 +763,25 @@ impl Inner {
                     }
                 }
 
-                if path_result.leaf_hash
-                    != hash_sha256(&chunk.bytes.0)
-                        .map_err(|_| ChunkIngressError::InvalidDataHash)?
-                {
-                    return Err(ChunkIngressError::InvalidDataHash);
-                }
                 // Check that the leaf hash on the data_path matches the chunk_hash
+                match hash_sha256(&chunk.bytes.0).map_err(|_| ChunkIngressError::InvalidDataHash) {
+                    Err(e) => {
+                        error!(
+                            "{:?}: hashed chunk_bytes hash_sha256() errored!",
+                            ChunkIngressError::InvalidDataHash,
+                        );
+                        return Ok(());
+                    }
+                    Ok(hash_256) => {
+                        if path_result.leaf_hash != hash_256 {
+                            warn!(
+                                "{:?}: leaf_hash does not match hashed chunk_bytes",
+                                ChunkIngressError::InvalidDataHash,
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
 
                 // TODO: fix all these unwraps!
                 // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
