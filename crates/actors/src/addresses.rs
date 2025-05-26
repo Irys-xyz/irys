@@ -15,7 +15,6 @@ pub struct ActorAddresses {
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     pub block_producer: Addr<BlockProducerActor>,
     pub packing: Addr<PackingActor>,
-    pub mempool: Addr<MempoolService>,
     pub block_index: Addr<BlockIndexService>,
     pub epoch_service: Addr<EpochServiceActor>,
     pub reth: Addr<RethServiceActor>,
