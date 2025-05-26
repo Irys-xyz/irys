@@ -7,10 +7,9 @@ use std::{
 use crate::{
     block_discovery::BlockPreValidatedMessage,
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
-    block_producer::BlockConfirmedMessage,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaServiceMessage,
-    mempool_service::MempoolService,
+    mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::{RequestValidationMessage, ValidationService},
@@ -195,8 +194,13 @@ impl BlockTreeService {
                 &tip_hash, &e
             )
         }
-        let msg = BlockConfirmedMessage(confirmed_block.clone(), all_tx);
-        MempoolService::from_registry().do_send(msg);
+        self.service_senders
+            .mempool
+            .send(MempoolServiceMessage::BlockConfirmedMessage(
+                confirmed_block.clone(),
+                all_tx,
+            ))
+            .expect("mempool service has unexpectedly become unreachable");
         self.service_senders
             .ema
             .send(EmaServiceMessage::BlockConfirmed)
