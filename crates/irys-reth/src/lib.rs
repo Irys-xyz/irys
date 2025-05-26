@@ -374,11 +374,9 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        // todo reject system txs if the latest block (by the StateProviderFactory) has already drifted
-
         // Try to decode as a system transaction
         let input = transaction.input();
-        let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
+        let Ok(system_tx) = SystemTransaction::decode(&mut &input[..]) else {
             tracing::trace!(hash = ?transaction.hash(), "non system tx, passing to eth validator");
             return self.inner.validate_one(origin, transaction);
         };
@@ -398,6 +396,35 @@ where
 
         if !matches!(origin, TransactionOrigin::Private) {
             tracing::warn!("system txs can only be generated via private origin");
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::SignerAccountHasBytecode,
+                ),
+            );
+        }
+
+        // Assert that the system tx has not already drifted away from the latest canonical state
+        let client = self.inner.client().latest().unwrap();
+        let parent_block_hash = client
+            .block_hash(system_tx.valid_for_block_height.saturating_sub(1))
+            .unwrap()
+            .unwrap();
+        if parent_block_hash != system_tx.parent_blockhash {
+            tracing::warn!(
+                "system tx parent block hash does not match the latest canonical chain "
+            );
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::SignerAccountHasBytecode,
+                ),
+            );
+        }
+
+        let parent_block_hash = client.block_hash(system_tx.valid_for_block_height).unwrap();
+        if parent_block_hash.is_some() {
+            tracing::warn!("system tx provided for a block that has already been mined");
             return TransactionValidationOutcome::Invalid(
                 transaction,
                 reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
@@ -1283,6 +1310,14 @@ mod tests {
             .await
             .encoded_2718()
             .into();
+        let genesis_blockhash = first_node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
 
         // action
         let normal_tx_hash = first_node.rpc.inject_tx(normal_tx).await?;
@@ -1292,7 +1327,7 @@ mod tests {
                 target: block_producer.address(),
             }),
             valid_for_block_height: 1,
-            parent_blockhash: FixedBytes::random(),
+            parent_blockhash: genesis_blockhash,
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
@@ -1765,6 +1800,14 @@ mod tests {
         .await?;
 
         let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let genesis_blockhash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
 
         // Create a random address that has never existed on chain
         let nonexistent_address = Address::random();
@@ -1784,7 +1827,7 @@ mod tests {
                 target: nonexistent_address,
             }),
             valid_for_block_height: 1,
-            parent_blockhash: FixedBytes::random(),
+            parent_blockhash: genesis_blockhash,
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
