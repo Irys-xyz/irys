@@ -617,7 +617,8 @@ impl Inner {
                         }
                         Ok(())
                     } else {
-                        Err(TxIngressError::Skipped)
+                        error!("error: {:?}", Err(TxIngressError::Skipped));
+                        Ok(())
                     }
                 }
             }
@@ -1068,7 +1069,8 @@ impl Inner {
                 if mempool_state_guard.invalid_tx.contains(&tx.id)
                     || mempool_state_guard.recent_valid_tx.contains(&tx.id)
                 {
-                    return Err(TxIngressError::Skipped);
+                    error!("error: {:?}", Err(TxIngressError::Skipped));
+                    return Ok(());
                 }
 
                 // Validate anchor
@@ -1135,7 +1137,8 @@ impl Inner {
                         "unfunded balance from irys_database::get_account_balance({:?})",
                         tx.signer
                     );
-                    return Err(TxIngressError::Unfunded);
+                    error!("error: {:?}", Err(TxIngressError::Unfunded));
+                    return Ok(());
                 }
 
                 // Validate the transaction signature
