@@ -837,9 +837,8 @@ impl Inner {
                 }
 
                 // check if we have all the chunks for this tx
-                let read_tx = mempool_state_guard
-                    .irys_db
-                    .tx()
+                let read_tx = self
+                    .read_tx()
                     .map_err(|_| ChunkIngressError::DatabaseError)?;
 
                 let mut cursor = read_tx
@@ -1029,7 +1028,7 @@ impl Inner {
                     // Still has it, just invalid
                     Ok(true)
                 } else {
-                    let read_tx = mempool_state_guard.irys_db.as_ref().tx();
+                    let read_tx = self.read_tx();
                     let result = if read_tx.is_err() {
                         Err(TxIngressError::DatabaseError)
                     } else {
@@ -1078,10 +1077,7 @@ impl Inner {
                     return Ok(());
                 }
 
-                let read_tx = &mempool_state_guard
-                    .irys_db
-                    .tx()
-                    .map_err(|_| TxIngressError::DatabaseError);
+                let read_tx = self.read_tx();
 
                 if let Err(e) = read_tx {
                     error!("{:?}", TxIngressError::DatabaseError);
