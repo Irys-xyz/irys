@@ -1119,7 +1119,7 @@ mod tests {
         api::{FullNodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
         builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
-        providers::AccountReader,
+        providers::{AccountReader, BlockHashReader},
         rpc::{api::eth::helpers::EthTransactions, server_types::eth::EthApiError},
         tasks::TaskManager,
     };
@@ -1364,7 +1364,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn block_gest_broadcasted_between_peers() -> eyre::Result<()> {
+    async fn block_gets_broadcasted_between_peers() -> eyre::Result<()> {
         let wallets = Wallet::new(2).wallet_gen();
         let trget_account = EthereumWallet::from(wallets[0].clone());
         let target_account = trget_account.default_signer();
@@ -1380,6 +1380,14 @@ mod tests {
         .await?;
         let mut second_node = nodes.pop().unwrap();
         let mut first_node = nodes.pop().unwrap();
+        let genesis_blockhash = first_node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
 
         let initial_balance = get_balance(&first_node.inner, block_producer.address());
 
@@ -1389,7 +1397,7 @@ mod tests {
                 target: block_producer.address(),
             }),
             valid_for_block_height: 1,
-            parent_blockhash: FixedBytes::random(),
+            parent_blockhash: genesis_blockhash,
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
@@ -1442,7 +1450,7 @@ mod tests {
     #[case::block_reward(block_reward, signer_b())]
     #[case::block_reward_init_no_balance(block_reward, signer_random())]
     async fn incr_system_txs(
-        #[case] system_tx: impl Fn(Address) -> SystemTransaction,
+        #[case] system_tx: impl Fn(Address, u64, FixedBytes<32>) -> SystemTransaction,
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         // setup
@@ -1458,11 +1466,19 @@ mod tests {
         .await?;
 
         let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let genesis_blockhash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
         let signer_b_balance = get_balance(&node.inner, signer_b.address());
         let block_producer_balance = get_balance(&node.inner, block_producer.address());
 
         let tx_count = 5;
-        let system_tx = system_tx(signer_b.address());
+        let system_tx = system_tx(signer_b.address(), 1, genesis_blockhash);
         let pooled_txs = (0..tx_count)
             .map(|nonce| compose_system_tx(nonce, 1, system_tx.clone()))
             .map(|tx| sign_tx(tx, &block_producer))
@@ -1518,7 +1534,7 @@ mod tests {
     #[case::stake(stake, signer_b())]
     #[case::storage_fees(storage_fees, signer_b())]
     async fn decr_system_txs(
-        #[case] system_tx: impl Fn(Address) -> SystemTransaction,
+        #[case] system_tx: impl Fn(Address, u64, FixedBytes<32>) -> SystemTransaction,
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         // setup
@@ -1534,11 +1550,19 @@ mod tests {
         .await?;
 
         let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let genesis_blockhash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
         let signer_b_balance = get_balance(&node.inner, signer_b.address());
         let block_producer_balance = get_balance(&node.inner, block_producer.address());
         let tx_count = 2;
 
-        let system_tx = system_tx(signer_b.address());
+        let system_tx = system_tx(signer_b.address(), 1, genesis_blockhash);
         let pooled_txs = (0..tx_count)
             .map(|nonce| compose_system_tx(nonce, 1, system_tx.clone()))
             .map(|tx| sign_tx(tx, &block_producer))
@@ -1613,6 +1637,14 @@ mod tests {
         .await?;
 
         let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let genesis_blockhash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
 
         // Create and submit normal transactions with high gas price
         let normal_tx_count = 3;
@@ -1646,7 +1678,7 @@ mod tests {
                 target: signer_b.address(),
             }),
             valid_for_block_height: 1,
-            parent_blockhash: FixedBytes::random(),
+            parent_blockhash: genesis_blockhash,
         };
 
         for nonce in 0..system_tx_count {
@@ -1828,6 +1860,14 @@ mod tests {
         .await?;
 
         let mut node = nodes.pop().ok_or_eyre("no node")?;
+        let genesis_blockhash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
         let funded_balance = get_balance(&node.inner, signer_a.address());
 
         assert!(
@@ -1843,7 +1883,7 @@ mod tests {
                 target: signer_a.address(),
             }),
             valid_for_block_height: 1,
-            parent_blockhash: FixedBytes::random(),
+            parent_blockhash: genesis_blockhash,
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
@@ -1885,47 +1925,63 @@ mod tests {
         Ok(())
     }
 
-    fn release_stake(address: Address) -> SystemTransaction {
+    fn release_stake(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
         SystemTransaction {
             inner: TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height: 0,
-            parent_blockhash: FixedBytes([0u8; 32]),
+            valid_for_block_height,
+            parent_blockhash,
         }
     }
 
-    fn block_reward(address: Address) -> SystemTransaction {
+    fn block_reward(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
         SystemTransaction {
             inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height: 0,
-            parent_blockhash: FixedBytes([0u8; 32]),
+            valid_for_block_height,
+            parent_blockhash,
         }
     }
 
-    fn stake(address: Address) -> SystemTransaction {
+    fn stake(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
         SystemTransaction {
             inner: TransactionPacket::Stake(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height: 0,
-            parent_blockhash: FixedBytes([0u8; 32]),
+            valid_for_block_height,
+            parent_blockhash,
         }
     }
 
-    fn storage_fees(address: Address) -> SystemTransaction {
+    fn storage_fees(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
         SystemTransaction {
             inner: TransactionPacket::StorageFees(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height: 0,
-            parent_blockhash: FixedBytes([0u8; 32]),
+            valid_for_block_height,
+            parent_blockhash,
         }
     }
 
