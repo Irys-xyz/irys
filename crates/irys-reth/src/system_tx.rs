@@ -11,7 +11,7 @@ use alloy_rlp::{RlpDecodable, RlpEncodable};
 )]
 pub struct SystemTransaction {
     /// the system is only valid for a single block
-    pub valid_for_block: u64,
+    pub valid_for_block_height: u64,
     /// Ensure that the system tx does not land on an invalid block
     pub parent_blockhash: FixedBytes<32>,
     /// the actual system transaction packet

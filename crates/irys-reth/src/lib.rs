@@ -336,7 +336,7 @@ pub async fn maintain_system_txs<Node, St>(
                         };
 
                         // Remove if block number >= valid_for_block, or parent hash changed
-                        if block_number >= system_tx.valid_for_block
+                        if block_number >= system_tx.valid_for_block_height
                             || parent_hash != system_tx.parent_blockhash
                         {
                             return Some(*tx.hash());
@@ -437,8 +437,6 @@ where
     type Transaction = T;
 
     /// Source: <https://github.com/ethereum/go-ethereum/blob/7f756dc1185d7f1eeeacb1d12341606b7135f9ea/core/txpool/legacypool/list.go#L469-L482>.
-    ///
-    /// NOTE: The implementation is incomplete for missing base fee.
     fn priority(
         &self,
         transaction: &Self::Transaction,
@@ -535,7 +533,9 @@ mod evm {
     use revm::inspector::NoOpInspector;
     use revm::precompile::{PrecompileSpecId, Precompiles};
     use revm::state::{Account, EvmStorageSlot};
+    use revm::Database as _;
     use revm::{DatabaseCommit, MainBuilder, MainContext};
+    use tracing::error_span;
 
     use super::*;
 
@@ -571,11 +571,56 @@ mod evm {
             let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
 
             if let Ok(system_tx) = rlp_decoded_system_tx {
+                // Validate system tx metadata
+                let block_number = self.inner.evm().block().number;
+                let block_hash = self
+                    .inner
+                    .evm_mut()
+                    .db_mut()
+                    .block_hash(block_number.saturating_sub(1))
+                    .map_err(|_err| {
+                        BlockExecutionError::Internal(
+                            reth_evm::block::InternalBlockExecutionError::msg(
+                                "could not retrieve block by this hash",
+                            ),
+                        )
+                    })?;
+                let span = error_span!(
+                    "system_tx_processing",
+                    "parent_block_hash" = block_hash.to_string(),
+                    "block_number" = block_number,
+                    "allowed_parent_block_hash" = system_tx.parent_blockhash.to_string(),
+                    "allowed_block_height" = system_tx.valid_for_block_height
+                );
+                let guard = span.enter();
+
+                // ensure that parent block hashes match.
+                // This check ensures that a system tx does not get executed for an off-case fork of the desired chain.
+                if system_tx.parent_blockhash != block_hash {
+                    tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
+                    return Err(BlockExecutionError::Validation(
+                        BlockValidationError::InvalidTx {
+                            hash: *tx_envelope.hash(),
+                            error: Box::new(InvalidTransaction::PriorityFeeGreaterThanMaxFee),
+                        },
+                    ));
+                }
+
+                // ensure that block heights match.
+                // This ensures that the system tx does not leak into future blocks.
+                if system_tx.valid_for_block_height != block_number {
+                    tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
+                    return Err(BlockExecutionError::Validation(
+                        BlockValidationError::InvalidTx {
+                            hash: *tx_envelope.hash(),
+                            error: Box::new(InvalidTransaction::PriorityFeeGreaterThanMaxFee),
+                        },
+                    ));
+                }
+                drop(guard);
+
                 // Handle the signer nonce increment
                 self.increment_signer_nonce(&tx)?;
-
-                // todo ensure that parent block hashes match
-                // todo ensure that block heights match
 
                 // Process different system transaction types
                 let topic = system_tx.inner.topic();
@@ -1194,7 +1239,7 @@ mod tests {
                 amount: U256::from(7000000000000000000u64),
                 target: block_producer.address(),
             }),
-            valid_for_block: 1,
+            valid_for_block_height: 1,
             parent_blockhash: FixedBytes::random(),
         };
         let mut system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
@@ -1243,7 +1288,7 @@ mod tests {
                 amount: U256::from(7000000000000000000u64),
                 target: block_producer.address(),
             }),
-            valid_for_block: 1,
+            valid_for_block_height: 1,
             parent_blockhash: FixedBytes::random(),
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
@@ -1343,7 +1388,7 @@ mod tests {
                 amount: U256::from(7000000000000000000u64),
                 target: block_producer.address(),
             }),
-            valid_for_block: 1,
+            valid_for_block_height: 1,
             parent_blockhash: FixedBytes::random(),
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
@@ -1600,7 +1645,7 @@ mod tests {
                 amount: U256::ONE,
                 target: signer_b.address(),
             }),
-            valid_for_block: 1,
+            valid_for_block_height: 1,
             parent_blockhash: FixedBytes::random(),
         };
 
@@ -1703,7 +1748,7 @@ mod tests {
                 amount: U256::ONE,
                 target: nonexistent_address,
             }),
-            valid_for_block: 1,
+            valid_for_block_height: 1,
             parent_blockhash: FixedBytes::random(),
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
@@ -1797,7 +1842,7 @@ mod tests {
                 amount: decrement_amount,
                 target: signer_a.address(),
             }),
-            valid_for_block: 1,
+            valid_for_block_height: 1,
             parent_blockhash: FixedBytes::random(),
         };
         let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
@@ -1846,7 +1891,7 @@ mod tests {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block: 0,
+            valid_for_block_height: 0,
             parent_blockhash: FixedBytes([0u8; 32]),
         }
     }
@@ -1857,7 +1902,7 @@ mod tests {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block: 0,
+            valid_for_block_height: 0,
             parent_blockhash: FixedBytes([0u8; 32]),
         }
     }
@@ -1868,7 +1913,7 @@ mod tests {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block: 0,
+            valid_for_block_height: 0,
             parent_blockhash: FixedBytes([0u8; 32]),
         }
     }
@@ -1879,7 +1924,7 @@ mod tests {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block: 0,
+            valid_for_block_height: 0,
             parent_blockhash: FixedBytes([0u8; 32]),
         }
     }
