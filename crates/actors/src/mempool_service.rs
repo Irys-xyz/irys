@@ -1130,7 +1130,8 @@ impl Inner {
 
                 // Check account balance
                 if irys_database::get_account_balance(read_reth_tx, tx.signer)
-                    .map_err(|_| TxIngressError::DatabaseError)?
+                    .map_err(|_| TxIngressError::DatabaseError)
+                    .unwrap()
                     < U256::from(tx.total_fee())
                 {
                     error!(
