@@ -4,7 +4,7 @@ use actix_web::{
     HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage};
+use irys_actors::mempool_service::{ChunkIngressError, MempoolServiceMessage, TxIngressError};
 use irys_types::UnpackedChunk;
 use tracing::{info, warn};
 
@@ -24,8 +24,13 @@ pub async fn post_chunk(
     info!(?data_root, ?number, "Received chunk");
 
     // Create an actor message and send it
-    let chunk_ingress_message = ChunkIngressMessage(chunk);
-    let msg_result = state.mempool.send(chunk_ingress_message).await;
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let tx_ingress_msg = MempoolServiceMessage::ChunkIngressMessage(chunk, oneshot_tx);
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(format!("Failed to deliver chunk: {:?}", err)));
+    }
+    let msg_result = oneshot_rx.await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
@@ -34,7 +39,7 @@ pub async fn post_chunk(
     }
 
     // If message delivery succeeded, check for validation errors within the response
-    let inner_result = msg_result.unwrap();
+    let inner_result: Result<(), ChunkIngressError> = msg_result.unwrap();
     if let Err(err) = inner_result {
         warn!(?data_root, ?number, "Error processing chunk: {:?}", &err);
         return match err {

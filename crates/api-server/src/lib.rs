@@ -11,6 +11,7 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::ema_service::EmaServiceMessage;
+use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
@@ -32,7 +33,7 @@ use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub mempool: Addr<MempoolService>,
+    pub mempool_service: UnboundedSender<MempoolServiceMessage>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub ema_service: UnboundedSender<EmaServiceMessage>,
     pub peer_list: PeerListServiceFacade,

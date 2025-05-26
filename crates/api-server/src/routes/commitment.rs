@@ -4,7 +4,7 @@ use actix_web::{
     HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::{CommitmentTxIngressMessage, TxIngressError};
+use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_types::CommitmentTransaction;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
@@ -19,8 +19,13 @@ pub async fn post_commitment_tx(
     let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
-    let tx_ingress_msg = CommitmentTxIngressMessage(tx);
-    let msg_result = state.mempool.send(tx_ingress_msg).await;
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let tx_ingress_msg = MempoolServiceMessage::CommitmentTxIngressMessage(tx, oneshot_tx);
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(format!("Failed to deliver transaction: {:?}", err)));
+    }
+    let msg_result = oneshot_rx.await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {

@@ -33,7 +33,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    sync::{mpsc::UnboundedReceiver, RwLock},
+    sync::{mpsc::UnboundedReceiver, mpsc::UnboundedSender, RwLock},
     task::JoinHandle,
 };
 use tracing::{debug, error, info, warn};
@@ -53,6 +53,84 @@ impl From<MailboxError> for ChunkIngressError {
             "Failed to send a message to MempoolService: {:?}",
             value
         ))
+    }
+}
+
+#[async_trait::async_trait]
+pub trait MempoolFacade: Clone + Send + Sync + 'static {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_commitment_transaction(
+        &self,
+        tx_header: CommitmentTransaction,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
+    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct MempoolServiceFacadeImpl {
+    service: UnboundedSender<MempoolServiceMessage>,
+}
+
+impl From<UnboundedSender<MempoolServiceMessage>> for MempoolServiceFacadeImpl {
+    fn from(value: UnboundedSender<MempoolServiceMessage>) -> Self {
+        Self { service: value }
+    }
+}
+
+#[async_trait::async_trait]
+impl MempoolFacade for MempoolServiceFacadeImpl {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        self.service
+            .send(MempoolServiceMessage::TxIngressMessage(tx_header))
+            .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))
+    }
+
+    async fn handle_commitment_transaction(
+        &self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::CommitmentTxIngressMessage(
+                commitment_tx,
+                oneshot_tx,
+            ))
+            .map_err(|_| {
+                TxIngressError::Other("Error sending CommitmentTxIngressMessage ".to_owned())
+            })?;
+
+        oneshot_rx
+            .await
+            .expect("to process CommitmentTxIngressMessage")
+    }
+
+    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::ChunkIngressMessage(
+                chunk, oneshot_tx,
+            ))
+            .map_err(|_| {
+                ChunkIngressError::Other("Error sending ChunkIngressMessage ".to_owned())
+            })?;
+
+        oneshot_rx.await.expect("to process ChunkIngressMessage")
+    }
+
+    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))
+            .map_err(|_| TxIngressError::Other("Error sending TxExistenceQuery ".to_owned()))?;
+
+        oneshot_rx.await.expect("to process TxExistenceQuery")
     }
 }
 
@@ -88,15 +166,19 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 /// Messages that the Mempool Service supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
+    /// TODO: comments
     BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
     GetTransaction(
         H256,
         tokio::sync::oneshot::Sender<Option<IrysTransactionHeader>>,
     ),
-    ChunkIngressMessage(UnpackedChunk),
+    ChunkIngressMessage(
+        UnpackedChunk,
+        tokio::sync::oneshot::Sender<Result<(), ChunkIngressError>>,
+    ),
     CommitmentTxIngressMessage(
         CommitmentTransaction,
-        tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
+        tokio::sync::oneshot::Sender<Result<(), TxIngressError>>,
     ),
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<MempoolTxs>),
     /// Confirm if tx exists in database
@@ -493,7 +575,6 @@ impl Inner {
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
                     let mut mempool_state_guard = mempool_state.write().await;
-                    //let commitment_tx = commitment_tx_msg.0.clone();
                     debug!(
                         "received commitment tx {:?}",
                         &commitment_tx.id.0.to_base58()
@@ -641,7 +722,7 @@ impl Inner {
                         }
                     }
                 }
-                MempoolServiceMessage::ChunkIngressMessage(chunk) => {
+                MempoolServiceMessage::ChunkIngressMessage(chunk, response) => {
                     let mempool_state_guard = mempool_state.write().await;
                     // TODO: maintain a shared read transaction so we have read isolation
                     let max_chunks_per_item = mempool_state_guard
@@ -944,6 +1025,12 @@ impl Inner {
                         tracing::error!("Failed to send gossip data: {:?}", error);
                     }
 
+                    let response_value = Ok(());
+
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send(bool) error: {:?}", e);
+                    };
+
                     Ok(())
                 }
                 MempoolServiceMessage::GetBestMempoolTxs(response) => {
@@ -1239,17 +1326,17 @@ impl Inner {
                         // and the handlers become async
                         for chunk in chunks {
                             // Process each chunk with full ownership (no cloning needed)
-                            //let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                             //todo check the value rather than _
                             let _ = self
                                 .handle_message(MempoolServiceMessage::ChunkIngressMessage(
-                                    chunk, //, oneshot_tx,
+                                    chunk, oneshot_tx,
                                 ))
                                 .await;
 
-                            /*let status = oneshot_rx
-                            .await
-                            .expect("pending chunks should be processed by the mempool");*/
+                            let status = oneshot_rx
+                                .await
+                                .expect("pending chunks should be processed by the mempool");
                         }
                     }
                     drop(mempool_state_write_guard);

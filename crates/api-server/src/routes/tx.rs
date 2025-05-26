@@ -5,7 +5,7 @@ use actix_web::{
     HttpResponse, Result,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_database::database;
 use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
@@ -27,8 +27,13 @@ pub async fn post_tx(
     let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
-    let tx_ingress_msg = TxIngressMessage(tx);
-    let msg_result = state.mempool.send(tx_ingress_msg).await;
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let tx_ingress_msg = MempoolServiceMessage::TxExistenceQuery(tx.id, oneshot_tx);
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(format!("Failed to deliver chunk: {:?}", err)));
+    }
+    let msg_result = oneshot_rx.await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
