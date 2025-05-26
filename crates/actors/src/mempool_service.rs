@@ -580,12 +580,9 @@ impl Inner {
                     let gossip_sender = mempool_state_guard.gossip_tx.clone();
                     let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
 
-                    //todo fix this to be async!
-                    let _ = tokio::task::spawn(async move {
-                        if let Err(error) = gossip_sender.send(gossip_data).await {
-                            tracing::error!("Failed to send gossip data: {:?}", error);
-                        }
-                    });
+                    if let Err(e) = gossip_sender.send(gossip_data).await {
+                        tracing::error!("Failed to send gossip data: {:?}", e);
+                    }
 
                     Ok(())
                 } else {
