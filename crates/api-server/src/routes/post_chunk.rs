@@ -23,23 +23,32 @@ pub async fn post_chunk(
     let number = chunk.tx_offset;
     info!(?data_root, ?number, "Received chunk");
 
-    // Create an actor message and send it
+    // Create a message and send it
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let tx_ingress_msg = MempoolServiceMessage::ChunkIngressMessage(chunk, oneshot_tx);
+
+    // Handle failure to deliver the message (e.g., channel closed)
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        tracing::error!("Failed to send to mempool channel: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver chunk: {:?}", err)));
-    }
-    let msg_result = oneshot_rx.await;
-
-    // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
-    if let Err(err) = msg_result {
-        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver chunk: {:?}", err)));
+            .body(format!("Failed to send to mempool channel: {:?}", err)));
     }
 
-    // If message delivery succeeded, check for validation errors within the response
-    let inner_result: Result<(), ChunkIngressError> = msg_result.unwrap();
+    // Handle errors in reading the oneshot response
+    let msg_result = match oneshot_rx.await {
+        Err(err) => {
+            return Ok(
+                HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR).body(format!(
+                    "Errors reading the mempool oneshot response: {:?}",
+                    err
+                )),
+            );
+        }
+        Ok(v) => v,
+    };
+
+    // If we recieved a response, check for validation errors within the response
+    let inner_result: Result<(), ChunkIngressError> = msg_result;
     if let Err(err) = inner_result {
         warn!(?data_root, ?number, "Error processing chunk: {:?}", &err);
         return match err {
