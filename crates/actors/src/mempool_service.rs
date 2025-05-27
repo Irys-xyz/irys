@@ -212,7 +212,7 @@ impl MempoolService {
     /// Spawn a new Mempool service
     pub fn spawn_service(
         exec: &TaskExecutor,
-        irys_db: DatabaseProvider,
+        irys_db: &DatabaseProvider,
         reth_db: RethDbWrapper,
         storage_modules_guard: &StorageModulesReadGuard,
         block_tree_guard: &BlockTreeReadGuard,
@@ -1569,7 +1569,7 @@ impl Inner {
 /// Create a new instance of the mempool state passing in a reference
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
 pub fn create_state(
-    irys_db: DatabaseProvider,
+    irys_db: &DatabaseProvider,
     reth_db: RethDbWrapper,
     task_exec: TaskExecutor,
     block_tree_guard: BlockTreeReadGuard,
@@ -1583,7 +1583,7 @@ pub fn create_state(
     let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
     let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
     MempoolState {
-        irys_db,
+        irys_db: irys_db.clone(),
         reth_db,
         valid_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),

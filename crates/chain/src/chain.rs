@@ -866,7 +866,7 @@ impl IrysNode {
         // Spawn mempool service
         let _mempool_handle = MempoolService::spawn_service(
             &task_exec,
-            irys_db,
+            &irys_db,
             reth_db,
             &storage_modules_guard,
             &block_tree_guard,
