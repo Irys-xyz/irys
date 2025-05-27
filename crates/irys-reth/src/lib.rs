@@ -1185,12 +1185,18 @@ mod tests {
     use alloy_primitives::{FixedBytes, Signature, TxKind};
     use alloy_signer_local::PrivateKeySigner;
     use eyre::OptionExt;
+    use reth::builder::{EngineNodeLauncher, NodeBuilder, NodeHandle};
+    use reth::providers::providers::BlockchainProvider;
+    use reth::tasks::TaskManager;
     use reth::{
         providers::{AccountReader, BlockHashReader, BlockNumReader},
         rpc::server_types::eth::EthApiError,
     };
     use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
+    use reth_node_ethereum::node::EthereumPoolBuilder;
+    use reth_node_ethereum::EthereumNode;
     use reth_transaction_pool::TransactionPool;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     #[test_log::test(tokio::test)]
@@ -2061,25 +2067,37 @@ mod tests {
     /// Expects only valid txs to be mined.
     /// Ensures parent blockhash check is enforced for system txs.
     #[test_log::test(tokio::test)]
-    #[ignore = "will be fixed later"]
-    async fn system_tx_with_invalid_parent_blockhash_is_rejected() -> eyre::Result<()> {
-        use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
-        use alloy_primitives::{FixedBytes, TxKind};
-        use std::collections::HashSet;
+    async fn system_tx_with_invalid_parent_blockhash_is_rejected_by_custom_executor(
+    ) -> eyre::Result<()> {
+        let tasks = TaskManager::current();
+        let exec = tasks.executor();
 
         // Setup wallets and node
         let wallets = Wallet::new(3).wallet_gen();
         let block_producer = EthereumWallet::from(wallets[0].clone()).default_signer();
         let normal_signer = EthereumWallet::from(wallets[1].clone()).default_signer();
         let recipient = Address::from(wallets[2].address());
-        let (mut nodes, _tasks, ..) = setup_irys_reth(
-            &[block_producer.address()],
-            custom_chain(),
-            false,
-            eth_payload_attributes,
+        let chain_spec = custom_chain();
+
+        // spawn an ethereum node except force it to use our custom evm executor
+        let NodeHandle {
+            node,
+            node_exit_future: _f,
+        } = NodeBuilder::new(
+            reth::builder::NodeConfig::new(chain_spec.clone())
+                .with_unused_ports()
+                .set_dev(false)
+                .clone(),
         )
+        .testing_node(exec)
+        .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
+        .with_components(EthereumNode::components().executor(CustomEthereumExecutorBuilder))
+        .with_add_ons(EthereumAddOns::default())
+        .launch()
         .await?;
-        let mut node = nodes.pop().unwrap();
+
+        let mut node =
+            reth_e2e_test_utils::node::NodeTestContext::new(node, eth_payload_attributes).await?;
 
         // Use a random blockhash instead of the real parent
         let invalid_parent_blockhash = FixedBytes::random();
@@ -2130,7 +2148,7 @@ mod tests {
         let block_payload = node.advance_block().await?;
 
         // Assert that the system tx is NOT present in the block
-        let block_txs: HashSet<_> = block_payload
+        let block_txs: std::collections::HashSet<_> = block_payload
             .block()
             .body()
             .transactions
@@ -2153,25 +2171,36 @@ mod tests {
     /// Expects only valid txs to be mined.
     /// Ensures block number check is enforced for system txs.
     #[test_log::test(tokio::test)]
-    #[ignore = "will be fixed later"]
-    async fn system_tx_with_invalid_block_number_is_rejected() -> eyre::Result<()> {
-        use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
-        use alloy_primitives::TxKind;
-        use std::collections::HashSet;
+    async fn system_tx_with_invalid_block_number_is_rejected_by_custom_executor() -> eyre::Result<()>
+    {
+        let tasks = TaskManager::current();
+        let exec = tasks.executor();
 
         // Setup wallets and node
         let wallets = Wallet::new(3).wallet_gen();
         let block_producer = EthereumWallet::from(wallets[0].clone()).default_signer();
         let normal_signer = EthereumWallet::from(wallets[1].clone()).default_signer();
         let recipient = Address::from(wallets[2].address());
-        let (mut nodes, _tasks, ..) = setup_irys_reth(
-            &[block_producer.address()],
-            custom_chain(),
-            false,
-            eth_payload_attributes,
+        let chain_spec = custom_chain();
+
+        // spawn an ethereum node except force it to use our custom evm executor
+        let NodeHandle {
+            node,
+            node_exit_future: _f,
+        } = NodeBuilder::new(
+            reth::builder::NodeConfig::new(chain_spec.clone())
+                .with_unused_ports()
+                .set_dev(false)
+                .clone(),
         )
+        .testing_node(exec)
+        .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
+        .with_components(EthereumNode::components().executor(CustomEthereumExecutorBuilder))
+        .with_add_ons(EthereumAddOns::default())
+        .launch()
         .await?;
-        let mut node = nodes.pop().unwrap();
+        let mut node =
+            reth_e2e_test_utils::node::NodeTestContext::new(node, eth_payload_attributes).await?;
 
         // Get the correct parent block hash for block 1
         let parent_blockhash = node
@@ -2356,88 +2385,8 @@ pub mod test_utils {
     use reth_transaction_pool::TransactionPool;
     use tracing::{span, Level};
 
-    pub type IrysTestNode = NodeTestContext<
-        NodeAdapter<
-            reth::api::FullNodeTypesAdapter<
-                IrysEthereumNode,
-                Arc<TempDatabase<DatabaseEnv>>,
-                reth::providers::providers::BlockchainProvider<
-                    NodeTypesWithDBAdapter<IrysEthereumNode, Arc<TempDatabase<DatabaseEnv>>>,
-                >,
-            >,
-            reth::builder::components::Components<
-                reth::api::FullNodeTypesAdapter<
-                    IrysEthereumNode,
-                    Arc<TempDatabase<DatabaseEnv>>,
-                    reth::providers::providers::BlockchainProvider<
-                        NodeTypesWithDBAdapter<IrysEthereumNode, Arc<TempDatabase<DatabaseEnv>>>,
-                    >,
-                >,
-                reth_network::NetworkHandle,
-                Pool<
-                    TransactionValidationTaskExecutor<
-                        IrysEthTransactionValidator<
-                            reth::providers::providers::BlockchainProvider<
-                                NodeTypesWithDBAdapter<
-                                    IrysEthereumNode,
-                                    Arc<TempDatabase<DatabaseEnv>>,
-                                >,
-                            >,
-                            EthPooledTransaction,
-                        >,
-                    >,
-                    SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
-                    DiskFileBlobStore,
-                >,
-                evm::CustomEvmConfig,
-                Arc<dyn FullConsensus<EthPrimitives, Error = reth::consensus::ConsensusError>>,
-            >,
-        >,
-        EthereumAddOns<
-            NodeAdapter<
-                reth::api::FullNodeTypesAdapter<
-                    IrysEthereumNode,
-                    Arc<TempDatabase<DatabaseEnv>>,
-                    reth::providers::providers::BlockchainProvider<
-                        NodeTypesWithDBAdapter<IrysEthereumNode, Arc<TempDatabase<DatabaseEnv>>>,
-                    >,
-                >,
-                reth::builder::components::Components<
-                    reth::api::FullNodeTypesAdapter<
-                        IrysEthereumNode,
-                        Arc<TempDatabase<DatabaseEnv>>,
-                        reth::providers::providers::BlockchainProvider<
-                            NodeTypesWithDBAdapter<
-                                IrysEthereumNode,
-                                Arc<TempDatabase<DatabaseEnv>>,
-                            >,
-                        >,
-                    >,
-                    reth_network::NetworkHandle,
-                    Pool<
-                        TransactionValidationTaskExecutor<
-                            IrysEthTransactionValidator<
-                                reth::providers::providers::BlockchainProvider<
-                                    NodeTypesWithDBAdapter<
-                                        IrysEthereumNode,
-                                        Arc<TempDatabase<DatabaseEnv>>,
-                                    >,
-                                >,
-                                EthPooledTransaction,
-                            >,
-                        >,
-                        SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
-                        DiskFileBlobStore,
-                    >,
-                    evm::CustomEvmConfig,
-                    Arc<dyn FullConsensus<EthPrimitives, Error = reth::consensus::ConsensusError>>,
-                >,
-            >,
-        >,
-    >;
-
     pub async fn advance_blocks(
-        node: &mut IrysTestNode,
+        node: &mut NodeHelperType<IrysEthereumNode>,
         start_block: u64,
         num_blocks: u64,
         sys_txs_per_block: u64,
