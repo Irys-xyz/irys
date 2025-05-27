@@ -2,7 +2,7 @@ use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use base58::ToBase58;
-use irys_actors::mempool_service::GetBestMempoolTxs;
+use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
@@ -87,13 +87,12 @@ async fn external_api() -> eyre::Result<()> {
     info!("waiting for tx header...");
 
     let recv_tx = loop {
-        let txs = node
-            .node_ctx
-            .actor_addresses
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        node.node_ctx
+            .service_senders
             .mempool
-            .send(GetBestMempoolTxs)
-            .await;
-        match txs {
+            .send(MempoolServiceMessage::GetBestMempoolTxs(oneshot_tx));
+        match oneshot_rx.await {
             Ok(mempool_tx) if !mempool_tx.storage_tx.is_empty() => {
                 break mempool_tx.storage_tx[0].clone();
             }

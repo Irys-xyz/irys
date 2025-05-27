@@ -1,4 +1,3 @@
-use actix::MailboxError;
 use actix_http::Request;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
@@ -15,7 +14,7 @@ use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
     block_validation,
-    mempool_service::{MempoolServiceMessage, TxIngressError, TxIngressMessage},
+    mempool_service::{MempoolServiceMessage, TxIngressError},
     packing::wait_for_packing,
     vdf_service::VdfStepsReadGuard,
     SetTestBlocksRemainingMessage,
@@ -52,7 +51,7 @@ use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
-use tokio::time::sleep;
+use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -164,7 +163,7 @@ pub async fn random_port() -> eyre::Result<u16> {
 pub enum AddTxError {
     CreateTx(eyre::Report),
     TxIngress(TxIngressError),
-    Mailbox(MailboxError),
+    Mailbox(RecvError),
 }
 
 // TODO: add an "name" field for debug logging

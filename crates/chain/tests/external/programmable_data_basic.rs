@@ -5,7 +5,7 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use base58::ToBase58;
-use irys_actors::mempool_service::GetBestMempoolTxs;
+use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
@@ -139,13 +139,12 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     info!("waiting for tx header...");
 
     let recv_tx = loop {
-        let txs = node
-            .node_ctx
-            .actor_addresses
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        node.node_ctx
+            .service_senders
             .mempool
-            .send(GetBestMempoolTxs)
-            .await;
-        match txs {
+            .send(MempoolServiceMessage::GetBestMempoolTxs(oneshot_tx));
+        match oneshot_rx.await {
             Ok(mempool_tx) if !mempool_tx.storage_tx.is_empty() => {
                 break mempool_tx.storage_tx[0].clone();
             }

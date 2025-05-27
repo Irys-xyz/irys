@@ -284,6 +284,7 @@ pub async fn sync_state_from_peers(
 
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(
                     match fetch_txn(&peer.api, &client, *tx)
                         .await
@@ -294,6 +295,7 @@ pub async fn sync_state_from_peers(
                         }
                         IrysTransactionResponse::Storage(s) => s,
                     },
+                    oneshot_tx,
                 );
                 if let Err(e) = mempool_addr.send(tx_ingress_msg) {
                     error!("Error sending txn {:?} to mempool: {}", tx, e);
