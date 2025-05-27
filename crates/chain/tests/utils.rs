@@ -36,8 +36,9 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{
-    Base64, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction, LedgerChunkOffset,
-    PackedChunk, UnpackedChunk,
+    Base64, Base64, DatabaseProvider, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysBlockHeader, IrysTransaction, IrysTransaction, LedgerChunkOffset, LedgerChunkOffset,
+    PackedChunk, PackedChunk, PeerAddress, RethPeerInfo, UnpackedChunk, UnpackedChunk,
 };
 use irys_types::{
     CommitmentTransaction, Config, IrysTransactionHeader, IrysTransactionId, NodeConfig, NodeMode,
@@ -452,6 +453,21 @@ impl IrysNodeTest<IrysNodeCtx> {
         } else {
             info!("transaction found in mempool after {} retries", &retries);
             Ok(())
+        }
+    }
+
+    pub fn peer_address(&self) -> PeerAddress {
+        let http = &self.node_ctx.config.node_config.http;
+        let gossip = &self.node_ctx.config.node_config.gossip;
+
+        PeerAddress {
+            api: format!("{}:{}", http.bind_ip, http.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("{}:{}", gossip.bind_ip, gossip.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
         }
     }
 

@@ -177,7 +177,9 @@ impl Drop for StopGuard {
     fn drop(&mut self) {
         // Only check if this is the last reference to the guard
         if Arc::strong_count(&self.0) == 1 && !self.is_stopped() && !thread::panicking() {
-            panic!("IrysNodeCtx must be stopped before all instances are dropped");
+            error!("\x1b[1;31m============================================================\x1b[0m");
+            error!("\x1b[1;31mIrysNodeCtx must be stopped before all instances are dropped\x1b[0m");
+            error!("\x1b[1;31m============================================================\x1b[0m");
         }
     }
 }

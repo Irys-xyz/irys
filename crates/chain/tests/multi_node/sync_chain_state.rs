@@ -41,44 +41,28 @@ pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttribu
 
 #[actix_web::test]
 async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
-    let config = Config::new(NodeConfig::testnet());
-    let account1 = IrysSigner::random_signer(&config.consensus);
-    let genesis = start_genesis_node(&config.node_config, &account1).await;
+    let mut genesis_config = NodeConfig::testnet();
+    let peer_account = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_account]);
+
+    let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_config = genesis.testnet_peer_with_signer(&peer_account);
+    let peer1 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER1")
+        .await;
+    let peer2 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER2")
+        .await;
+
     tracing::info!(
         "peer info: {:?}",
         &genesis.node_ctx.config.node_config.reth_peer_info
     );
-    let genesis_peer_address = PeerAddress {
-        gossip: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.gossip.bind_ip,
-            genesis.node_ctx.config.node_config.gossip.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        api: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.http.bind_ip,
-            genesis.node_ctx.config.node_config.http.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        execution: genesis.node_ctx.config.node_config.reth_peer_info,
-    };
-
-    let (peer1, peer2) = start_peer_nodes(
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &account1,
-    )
-    .await;
 
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
@@ -140,41 +124,23 @@ async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
-    let config = Config::new(NodeConfig::testnet());
-    let account1 = IrysSigner::random_signer(&config.consensus);
-    let genesis = start_genesis_node(&config.node_config, &account1).await;
+    let mut genesis_config = NodeConfig::testnet();
+    let peer_account = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_account]);
 
-    let genesis_peer_address = PeerAddress {
-        gossip: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.gossip.bind_ip,
-            genesis.node_ctx.config.node_config.gossip.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        api: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.http.bind_ip,
-            genesis.node_ctx.config.node_config.http.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        execution: genesis.node_ctx.config.node_config.reth_peer_info,
-    };
+    let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
 
-    let (peer1, peer2) = start_peer_nodes(
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &account1,
-    )
-    .await;
+    let peer_config = genesis.testnet_peer_with_signer(&peer_account);
+    let peer1 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER1")
+        .await;
+    let peer2 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER2")
+        .await;
 
     info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
