@@ -40,6 +40,7 @@ async fn heavy_api_end_to_end_test_256kb() {
 
 async fn api_end_to_end_test(chunk_size: usize) {
     let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (mempool_tx, _mempool_rx) = tokio::sync::mpsc::unbounded_channel();
     let entropy_packing_iterations = 1_000;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
@@ -71,7 +72,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        mempool_service: mempool_tx,
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),

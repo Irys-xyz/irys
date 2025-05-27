@@ -21,6 +21,7 @@ use tracing::{debug, info};
 #[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
     let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (mempool_tx, _mempool_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().chunk_migration_depth = 32;
@@ -62,7 +63,7 @@ async fn heavy_data_promotion_test() {
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        mempool_service: mempool_tx,
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),

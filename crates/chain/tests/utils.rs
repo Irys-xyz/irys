@@ -327,7 +327,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
     ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
         let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-        let api_state = self.node_ctx.get_api_state(ema_tx);
+        let (mempool_tx, _mempool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let api_state = self.node_ctx.get_api_state(ema_tx, mempool_tx);
 
         actix_web::test::init_service(
             App::new()
