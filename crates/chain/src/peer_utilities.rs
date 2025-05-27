@@ -244,7 +244,7 @@ pub async fn fetch_block_index(
 pub async fn sync_state_from_peers(
     trusted_peers: Vec<PeerAddress>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
-    mempool_addr: Addr<MempoolService>,
+    mempool_addr: UnboundedSender<MempoolServiceMessage>,
     peer_service_addr: PeerListServiceFacade,
     vdf_seed_sender: Sender<BroadcastMiningSeed>,
     vdf_service_sender: UnboundedSender<VdfServiceMessage>,

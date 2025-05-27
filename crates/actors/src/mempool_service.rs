@@ -214,13 +214,13 @@ impl MempoolService {
         exec: &TaskExecutor,
         irys_db: DatabaseProvider,
         reth_db: RethDbWrapper,
-        storage_modules_guard: StorageModulesReadGuard,
-        block_tree_guard: BlockTreeReadGuard,
-        commitment_state_guard: CommitmentStateReadGuard,
+        storage_modules_guard: &StorageModulesReadGuard,
+        block_tree_guard: &BlockTreeReadGuard,
+        commitment_state_guard: &CommitmentStateReadGuard,
         rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
-        service_senders: ServiceSenders,
-        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
+        service_senders: &ServiceSenders,
+        gossip_tx: &tokio::sync::mpsc::Sender<GossipData>,
     ) -> JoinHandle<()> {
         let mempool_state = create_state(
             irys_db,
@@ -1576,8 +1576,8 @@ pub fn create_state(
     commitment_state_guard: CommitmentStateReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
     config: &Config,
-    service_senders: ServiceSenders,
-    gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
+    service_senders: &ServiceSenders,
+    gossip_tx: &tokio::sync::mpsc::Sender<GossipData>,
 ) -> MempoolState {
     let mempool_config = &config.consensus.mempool;
     let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
@@ -1593,8 +1593,8 @@ pub fn create_state(
         storage_modules_guard,
         block_tree_read_guard: block_tree_guard,
         commitment_state_guard,
-        service_senders,
-        gossip_tx,
+        service_senders: service_senders.clone(),
+        gossip_tx: gossip_tx.clone(),
         recent_valid_tx: HashSet::new(),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
