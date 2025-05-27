@@ -3,7 +3,7 @@ use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::{MempoolService, TxIngressMessage},
+    mempool_service::MempoolServiceMessage,
     vdf_service::VdfServiceMessage,
 };
 use irys_p2p::PeerListServiceFacade;
@@ -284,7 +284,7 @@ pub async fn sync_state_from_peers(
 
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-                let tx_ingress_msg = TxIngressMessage(
+                let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(
                     match fetch_txn(&peer.api, &client, *tx)
                         .await
                         .expect("valid txn from http GET")
@@ -295,7 +295,7 @@ pub async fn sync_state_from_peers(
                         IrysTransactionResponse::Storage(s) => s,
                     },
                 );
-                if let Err(e) = mempool_addr.send(tx_ingress_msg).await {
+                if let Err(e) = mempool_addr.send(tx_ingress_msg) {
                     error!("Error sending txn {:?} to mempool: {}", tx, e);
                 }
             }
