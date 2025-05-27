@@ -876,7 +876,7 @@ impl IrysNode {
             &service_senders,
             &gossip_tx.clone(),
         );
-        let mempool_facade = MempoolServiceFacadeImpl::from(mempool_service.clone());
+        let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
 
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
