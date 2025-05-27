@@ -1,8 +1,8 @@
 use crate::{
     block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock},
-    cache::{GossipCache, GossipCacheKey, GossipClient, GossipError, GossipResult},
-    gossip_service::SyncState,
+    cache::{GossipCache, GossipCacheKey},
     peer_list::PeerListFacade,
+    sync::SyncState,
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };

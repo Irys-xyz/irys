@@ -23,7 +23,7 @@ use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade, broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::MempoolFacade, irys_actors::vdf_service::VdfServiceMessage,
+    mempool_service::MempoolFacade, vdf_service::VdfServiceMessage,
 };
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};

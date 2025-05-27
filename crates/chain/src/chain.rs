@@ -877,7 +877,6 @@ impl IrysNode {
             receivers.mempool,
             &config,
             &service_senders,
-            &gossip_tx.clone(),
         );
         let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
 

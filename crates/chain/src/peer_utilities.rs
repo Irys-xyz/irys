@@ -5,10 +5,9 @@ use irys_actors::{
     mempool_service::MempoolServiceMessage,
     vdf_service::VdfServiceMessage,
 };
-use irys_p2p::PeerListServiceFacade;
-use irys_types::block::CombinedBlockHeader;
-use irys_p2p::fast_forward_vdf_steps_from_block;
 use irys_api_client::{ApiClient, IrysApiClient};
+use irys_p2p::fast_forward_vdf_steps_from_block;
+use irys_p2p::PeerListServiceFacade;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
