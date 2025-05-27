@@ -15,7 +15,7 @@ use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
     block_validation,
-    mempool_service::{TxExistenceQuery, TxIngressError, TxIngressMessage},
+    mempool_service::{MempoolServiceMessage, TxIngressError, TxIngressMessage},
     packing::wait_for_packing,
     vdf_service::VdfStepsReadGuard,
     SetTestBlocksRemainingMessage,
@@ -413,15 +413,24 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx_id: IrysTransactionId,
         seconds_to_wait: u64,
     ) -> eyre::Result<()> {
-        let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
 
-        while mempool_service
-            .send(TxExistenceQuery(tx_id))
-            .await?
-            .is_ok_and(|f| f == false)
-        {
+        for _ in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            mempool_service.send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))?;
+
+            //if transaction exists
+            if true
+                == oneshot_rx
+                    .await
+                    .expect("to process ChunkIngressMessage")
+                    .expect("boolean response to transaction existance")
+            {
+                break;
+            }
+
             sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
