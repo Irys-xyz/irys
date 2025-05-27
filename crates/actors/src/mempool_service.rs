@@ -87,9 +87,14 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::TxIngressMessage(tx_header))
-            .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))
+            .send(MempoolServiceMessage::TxIngressMessage(
+                tx_header, oneshot_tx,
+            ))
+            .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
+
+        oneshot_rx.await.expect("to process TxIngressMessage")
     }
 
     async fn handle_commitment_transaction(
@@ -186,7 +191,10 @@ pub enum MempoolServiceMessage {
         H256,
         tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
     ),
-    TxIngressMessage(IrysTransactionHeader),
+    TxIngressMessage(
+        IrysTransactionHeader,
+        tokio::sync::oneshot::Sender<Result<(), TxIngressError>>,
+    ),
 }
 
 #[derive(Debug)]
@@ -1181,7 +1189,7 @@ impl Inner {
 
                     Ok(())
                 }
-                MempoolServiceMessage::TxIngressMessage(tx) => {
+                MempoolServiceMessage::TxIngressMessage(tx, response) => {
                     debug!(
                         "received tx {:?} (data_root {:?})",
                         &tx.id.0.to_base58(),
@@ -1268,10 +1276,13 @@ impl Inner {
                         < U256::from(tx.total_fee())
                     {
                         error!(
-                            "unfunded balance from irys_database::get_account_balance({:?})",
+                            "{:?}: unfunded balance from irys_database::get_account_balance({:?})",
+                            TxIngressError::Unfunded,
                             tx.signer
                         );
-                        error!("error: {:?}", TxIngressError::Unfunded);
+                        if let Err(e) = response.send(Err(TxIngressError::Unfunded)) {
+                            tracing::error!("response.send(Ok(())) error: {:?}", e);
+                        };
                         return Ok(());
                     }
 
@@ -1347,6 +1358,10 @@ impl Inner {
                     if let Err(error) = gossip_sender.send(gossip_data).await {
                         tracing::error!("Failed to send gossip data: {:?}", error);
                     }
+
+                    if let Err(e) = response.send(Ok(())) {
+                        tracing::error!("response.send(Ok(())) error: {:?}", e);
+                    };
 
                     Ok(())
                 }

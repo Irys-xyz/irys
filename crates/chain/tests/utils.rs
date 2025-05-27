@@ -456,13 +456,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             .map_err(AddTxError::CreateTx)?;
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
-        match self
-            .node_ctx
-            .actor_addresses
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
             .mempool
-            .send(TxIngressMessage(tx.header.clone()))
-            .await
-        {
+            .send(MempoolServiceMessage::TxIngressMessage(
+                tx.header.clone(),
+                oneshot_tx,
+            ));
+
+        match oneshot_rx.await {
             Ok(Ok(())) => return Ok(tx),
             Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
             Err(e) => return Err(AddTxError::Mailbox(e)),
