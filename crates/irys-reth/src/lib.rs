@@ -1172,122 +1172,26 @@ mod evm {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
+    use super::*;
+    use crate::system_tx::{BalanceDecrement, SystemTransaction, TransactionPacket};
+    use crate::test_utils::{
+        advance_blocks, block_reward, custom_chain, eth_payload_attributes, get_balance,
+        release_stake, setup_irys_reth, sign_tx, stake, storage_fees,
+    };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844, TxLegacy};
     use alloy_eips::Encodable2718;
-    use alloy_genesis::Genesis;
     use alloy_network::{EthereumWallet, TxSigner};
     use alloy_primitives::Address;
-    use alloy_primitives::{FixedBytes, Signature, TxKind, B256};
-
-    use alloy_rpc_types::engine::PayloadAttributes;
+    use alloy_primitives::{FixedBytes, Signature, TxKind};
     use alloy_signer_local::PrivateKeySigner;
     use eyre::OptionExt;
     use reth::{
-        api::{FullNodePrimitives, NodeTypesWithDBAdapter, PayloadAttributesBuilder},
-        args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
-        builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
-        consensus::FullConsensus,
         providers::{AccountReader, BlockHashReader, BlockNumReader},
-        rpc::{api::eth::helpers::EthTransactions, server_types::eth::EthApiError},
-        tasks::TaskManager,
+        rpc::server_types::eth::EthApiError,
     };
-    use reth_db::{test_utils::TempDatabase, DatabaseEnv};
-    use reth_e2e_test_utils::{
-        node::NodeTestContext, transaction::TransactionTestContext, wallet::Wallet, NodeHelperType,
-    };
-    use reth_engine_local::LocalPayloadAttributesBuilder;
-
+    use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
     use reth_transaction_pool::TransactionPool;
-
-    use tracing::{span, Level};
-
-    use crate::system_tx::{BalanceDecrement, SystemTransaction, TransactionPacket};
-
-    use super::*;
-
-    pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
-        let attributes = PayloadAttributes {
-            timestamp,
-            prev_randao: B256::ZERO,
-            suggested_fee_recipient: Address::ZERO,
-            withdrawals: Some(vec![]),
-            parent_beacon_block_root: Some(B256::ZERO),
-        };
-        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
-    }
-
-    /// Creates the initial setup with `num_nodes` started and interconnected.
-    pub(crate) async fn setup_irys_reth(
-        num_nodes: &[Address],
-        chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
-        is_dev: bool,
-        attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Copy + 'static,
-    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
-    where
-        LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
-            PayloadAttributesBuilder<
-                <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
-            >,
-    {
-        let tasks = TaskManager::current();
-        let exec = tasks.executor();
-
-        let network_config = NetworkArgs {
-            discovery: DiscoveryArgs {
-                disable_discovery: true,
-                ..DiscoveryArgs::default()
-            },
-            ..NetworkArgs::default()
-        };
-
-        // Create nodes and peer them
-        let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
-
-        for (idx, allowed_system_tx_origin) in num_nodes.iter().enumerate() {
-            let node_config = NodeConfig::new(chain_spec.clone())
-                .with_network(network_config.clone())
-                .with_unused_ports()
-                .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
-                .set_dev(is_dev);
-
-            let span = span!(Level::INFO, "node", idx);
-            let _enter = span.enter();
-            let NodeHandle {
-                node,
-                node_exit_future: _,
-            } = NodeBuilder::new(node_config.clone())
-                .testing_node(exec.clone())
-                .node(IrysEthereumNode {
-                    allowed_system_tx_origin: *allowed_system_tx_origin,
-                })
-                .launch()
-                .await?;
-
-            let mut node = NodeTestContext::new(node, attributes_generator).await?;
-
-            // Connect each node in a chain.
-            if let Some(previous_node) = nodes.last_mut() {
-                previous_node.connect(&mut node).await;
-            }
-
-            // Connect last node with the first if there are more than two
-            if idx + 1 == num_nodes.len() && num_nodes.len() > 2 {
-                if let Some(first_node) = nodes.first_mut() {
-                    node.connect(first_node).await;
-                }
-            }
-
-            nodes.push(node);
-        }
-
-        Ok((
-            nodes,
-            tasks,
-            Wallet::default().with_chain_id(chain_spec.chain().into()),
-        ))
-    }
+    use std::time::Duration;
 
     #[test_log::test(tokio::test)]
     async fn external_users_cannot_submit_system_txs() -> eyre::Result<()> {
@@ -1533,6 +1437,8 @@ mod tests {
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         // setup
+
+        use crate::test_utils::asserst_topic_present_in_logs;
         let wallets = Wallet::new(2).wallet_gen();
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
@@ -1617,6 +1523,8 @@ mod tests {
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         // setup
+
+        use crate::test_utils::asserst_topic_present_in_logs;
         let wallets = Wallet::new(2).wallet_gen();
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
@@ -2012,66 +1920,6 @@ mod tests {
         Ok(())
     }
 
-    fn release_stake(
-        address: Address,
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-    ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
-                amount: U256::ONE,
-                target: address,
-            }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
-    }
-
-    fn block_reward(
-        address: Address,
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-    ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
-                amount: U256::ONE,
-                target: address,
-            }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
-    }
-
-    fn stake(
-        address: Address,
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-    ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::Stake(system_tx::BalanceDecrement {
-                amount: U256::ONE,
-                target: address,
-            }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
-    }
-
-    fn storage_fees(
-        address: Address,
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-    ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::StorageFees(system_tx::BalanceDecrement {
-                amount: U256::ONE,
-                target: address,
-            }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
-    }
-
     #[rstest::fixture]
     fn signer_b() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
         let wallets = Wallet::new(2).wallet_gen();
@@ -2096,169 +1944,6 @@ mod tests {
             .map(|tx| *tx.hash())
             .collect()
     }
-
-    fn asserst_topic_present_in_logs(
-        block_execution: reth::providers::ExecutionOutcome,
-        storage_fees_topic: [u8; 32],
-        desired_repetitions: u64,
-    ) {
-        let receipts = &block_execution.receipts;
-        let mut storage_fees_receipt_count = 0;
-        for block_receipt in receipts {
-            for receipt in block_receipt {
-                if receipt.logs.iter().any(|log| {
-                    log.data
-                        .topics()
-                        .iter()
-                        .any(|topic| topic == &storage_fees_topic)
-                }) {
-                    storage_fees_receipt_count += 1;
-                }
-            }
-        }
-        assert!(
-            storage_fees_receipt_count >= desired_repetitions,
-            "Expected at least {desired_repetitions} receipts, found {storage_fees_receipt_count}",
-        );
-    }
-
-    fn get_balance<N, AddOns>(
-        node: &FullNode<N, AddOns>,
-        addr: Address,
-    ) -> alloy_primitives::Uint<256, 4>
-    where
-        N: FullNodeComponents<Provider: CanonStateSubscriptions>,
-        AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
-        N::Types: NodeTypes<Primitives: FullNodePrimitives>,
-    {
-        let signer_balance = node
-            .provider
-            .basic_account(&addr)
-            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
-            .unwrap_or_else(|err| {
-                tracing::warn!("Failed to get signer_b balance: {}", err);
-                U256::ZERO
-            });
-        signer_balance
-    }
-
-    async fn sign_tx(
-        mut tx_raw: TxLegacy,
-        new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
-    ) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
-        let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
-        let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
-            .try_into_recovered()
-            .unwrap();
-
-        let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
-
-        return pooled_tx;
-    }
-
-    fn custom_chain() -> Arc<ChainSpec> {
-        let custom_genesis = r#"
-{
-  "config": {
-    "chainId": 1,
-    "homesteadBlock": 0,
-    "daoForkSupport": true,
-    "eip150Block": 0,
-    "eip155Block": 0,
-    "eip158Block": 0,
-    "byzantiumBlock": 0,
-    "constantinopleBlock": 0,
-    "petersburgBlock": 0,
-    "istanbulBlock": 0,
-    "muirGlacierBlock": 0,
-    "berlinBlock": 0,
-    "londonBlock": 0,
-    "arrowGlacierBlock": 0,
-    "grayGlacierBlock": 0,
-    "shanghaiTime": 0,
-    "cancunTime": 0,
-    "terminalTotalDifficulty": "0x0",
-    "terminalTotalDifficultyPassed": true
-  },
-  "nonce": "0x0",
-  "timestamp": "0x0",
-  "extraData": "0x00",
-  "gasLimit": "0x1c9c380",
-  "difficulty": "0x0",
-  "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "coinbase": "0x0000000000000000000000000000000000000000",
-  "alloc": {
-    "0x14dc79964da2c08b23698b3d3cc7ca32193d9955": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x1cbd3b2770909d4e10f157cabc84c7264073c9ec": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x2546bcd3c84621e976d8185a91a922ae77ecec30": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x71be63f3384f5fb98995898a86b02fb2426c5788": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x8626f6940e2eb28930efb4cef49b2d1f2c9c1199": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x90f79bf6eb2c4f870365e785982e1f101e93b906": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x976ea74026e726554db657fa54763abd0c3a0aa9": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0x9c41de96b2088cdc640c6182dfcf5491dc574a57": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xa0ee7a142d267c1f36714e4a8f75612f20a79720": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xbcd4042de499d14e55001ccbb24a551f3b954096": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xbda5747bfd65f08deb54cb465eb87d40e51b197e": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xcd3b766ccdd6ae721141f452c550ca635964ce71": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xdd2fd4581271e230360230f9337d5c0430bf44c0": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xdf3e18d64bc6a983f673ab319ccae4f1a57c7097": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
-      "balance": "0xd3c21bcecceda1000000"
-    },
-    "0xfabb0ac9d68b0b445fb7357272ff202c5651694a": {
-      "balance": "0xd3c21bcecceda1000000"
-    }
-  },
-  "number": "0x0"
-}
-"#;
-        let genesis: Genesis = serde_json::from_str(custom_genesis).unwrap();
-        Arc::new(genesis.into())
-    }
-
     /// Mines 5 blocks, each with a system (block reward) and a normal tx.
     /// Asserts both txs are present in every block.
     /// Verifies sequential block production and tx inclusion.
@@ -2644,44 +2329,32 @@ mod tests {
 
         Ok(())
     }
+}
 
-    async fn advance_blocks(
-        node: &mut IrysTestNode,
-        start_block: u64,
-        num_blocks: u64,
-        sys_txs_per_block: u64,
-        wallets: &Arc<dyn TxSigner<Signature> + Send + Sync>,
-    ) -> Result<Vec<FixedBytes<32>>, eyre::Error> {
-        let mut parent_blockhash = node
-            .inner
-            .provider
-            .consistent_provider()
-            .unwrap()
-            .block_hash(0)
-            .unwrap()
-            .unwrap();
-        let mut block_hashes = vec![parent_blockhash];
-        let mut nonce = 0;
-        for block_number in start_block..(start_block + num_blocks) {
-            for _tx_idx in 0..sys_txs_per_block {
-                let system_tx = block_reward(wallets.address(), block_number, parent_blockhash);
-                let system_tx_raw = compose_system_tx(nonce, 1, system_tx.clone());
-                nonce += 1;
-                let system_pooled_tx = sign_tx(system_tx_raw, wallets).await;
-                node.inner
-                    .pool
-                    .add_transaction(
-                        reth_transaction_pool::TransactionOrigin::Private,
-                        system_pooled_tx,
-                    )
-                    .await?;
-            }
-            let payload = node.advance_block().await?;
-            parent_blockhash = payload.block().hash();
-            block_hashes.push(parent_blockhash);
-        }
-        Ok::<_, eyre::Error>(block_hashes)
-    }
+#[cfg(any(feature = "test-utils", test))]
+pub mod test_utils {
+    use super::*;
+    use crate::system_tx::{SystemTransaction, TransactionPacket};
+    use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_genesis::Genesis;
+    use alloy_network::TxSigner;
+    use alloy_primitives::Address;
+    use alloy_primitives::{FixedBytes, Signature, B256};
+    use alloy_rpc_types::engine::PayloadAttributes;
+    use reth::{
+        api::{FullNodePrimitives, NodeTypesWithDBAdapter, PayloadAttributesBuilder},
+        args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
+        builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
+        consensus::FullConsensus,
+        providers::{AccountReader, BlockHashReader},
+        rpc::api::eth::helpers::EthTransactions,
+        tasks::TaskManager,
+    };
+    use reth_db::{test_utils::TempDatabase, DatabaseEnv};
+    use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
+    use reth_engine_local::LocalPayloadAttributesBuilder;
+    use reth_transaction_pool::TransactionPool;
+    use tracing::{span, Level};
 
     pub type IrysTestNode = NodeTestContext<
         NodeAdapter<
@@ -2762,4 +2435,346 @@ mod tests {
             >,
         >,
     >;
+
+    pub async fn advance_blocks(
+        node: &mut IrysTestNode,
+        start_block: u64,
+        num_blocks: u64,
+        sys_txs_per_block: u64,
+        wallets: &Arc<dyn TxSigner<Signature> + Send + Sync>,
+    ) -> Result<Vec<FixedBytes<32>>, eyre::Error> {
+        let mut parent_blockhash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
+        let mut block_hashes = vec![parent_blockhash];
+        let mut nonce = 0;
+        for block_number in start_block..(start_block + num_blocks) {
+            for _tx_idx in 0..sys_txs_per_block {
+                let system_tx = block_reward(wallets.address(), block_number, parent_blockhash);
+                let system_tx_raw = compose_system_tx(nonce, 1, system_tx.clone());
+                nonce += 1;
+                let system_pooled_tx = sign_tx(system_tx_raw, wallets).await;
+                node.inner
+                    .pool
+                    .add_transaction(
+                        reth_transaction_pool::TransactionOrigin::Private,
+                        system_pooled_tx,
+                    )
+                    .await?;
+            }
+            let payload = node.advance_block().await?;
+            parent_blockhash = payload.block().hash();
+            block_hashes.push(parent_blockhash);
+        }
+        Ok::<_, eyre::Error>(block_hashes)
+    }
+
+    pub fn release_stake(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
+        SystemTransaction {
+            inner: TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block_height,
+            parent_blockhash,
+        }
+    }
+
+    pub fn block_reward(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
+        SystemTransaction {
+            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block_height,
+            parent_blockhash,
+        }
+    }
+
+    pub fn stake(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
+        SystemTransaction {
+            inner: TransactionPacket::Stake(system_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block_height,
+            parent_blockhash,
+        }
+    }
+
+    pub fn storage_fees(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
+        SystemTransaction {
+            inner: TransactionPacket::StorageFees(system_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+            valid_for_block_height,
+            parent_blockhash,
+        }
+    }
+
+    pub fn asserst_topic_present_in_logs(
+        block_execution: reth::providers::ExecutionOutcome,
+        storage_fees_topic: [u8; 32],
+        desired_repetitions: u64,
+    ) {
+        let receipts = &block_execution.receipts;
+        let mut storage_fees_receipt_count = 0;
+        for block_receipt in receipts {
+            for receipt in block_receipt {
+                if receipt.logs.iter().any(|log| {
+                    log.data
+                        .topics()
+                        .iter()
+                        .any(|topic| topic == &storage_fees_topic)
+                }) {
+                    storage_fees_receipt_count += 1;
+                }
+            }
+        }
+        assert!(
+            storage_fees_receipt_count >= desired_repetitions,
+            "Expected at least {desired_repetitions} receipts, found {storage_fees_receipt_count}",
+        );
+    }
+
+    pub fn get_balance<N, AddOns>(
+        node: &FullNode<N, AddOns>,
+        addr: Address,
+    ) -> alloy_primitives::Uint<256, 4>
+    where
+        N: FullNodeComponents<Provider: CanonStateSubscriptions>,
+        AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
+        N::Types: NodeTypes<Primitives: FullNodePrimitives>,
+    {
+        let signer_balance = node
+            .provider
+            .basic_account(&addr)
+            .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get signer_b balance: {}", err);
+                U256::ZERO
+            });
+        signer_balance
+    }
+
+    pub async fn sign_tx(
+        mut tx_raw: TxLegacy,
+        new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
+    ) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
+        let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
+        let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
+            .try_into_recovered()
+            .unwrap();
+
+        let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
+
+        return pooled_tx;
+    }
+
+    pub fn custom_chain() -> Arc<ChainSpec> {
+        let custom_genesis = r#"
+{
+  "config": {
+    "chainId": 1,
+    "homesteadBlock": 0,
+    "daoForkSupport": true,
+    "eip150Block": 0,
+    "eip155Block": 0,
+    "eip158Block": 0,
+    "byzantiumBlock": 0,
+    "constantinopleBlock": 0,
+    "petersburgBlock": 0,
+    "istanbulBlock": 0,
+    "muirGlacierBlock": 0,
+    "berlinBlock": 0,
+    "londonBlock": 0,
+    "arrowGlacierBlock": 0,
+    "grayGlacierBlock": 0,
+    "shanghaiTime": 0,
+    "cancunTime": 0,
+    "terminalTotalDifficulty": "0x0",
+    "terminalTotalDifficultyPassed": true
+  },
+  "nonce": "0x0",
+  "timestamp": "0x0",
+  "extraData": "0x00",
+  "gasLimit": "0x1c9c380",
+  "difficulty": "0x0",
+  "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "alloc": {
+    "0x14dc79964da2c08b23698b3d3cc7ca32193d9955": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x1cbd3b2770909d4e10f157cabc84c7264073c9ec": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x2546bcd3c84621e976d8185a91a922ae77ecec30": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x71be63f3384f5fb98995898a86b02fb2426c5788": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x8626f6940e2eb28930efb4cef49b2d1f2c9c1199": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x90f79bf6eb2c4f870365e785982e1f101e93b906": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x976ea74026e726554db657fa54763abd0c3a0aa9": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x9c41de96b2088cdc640c6182dfcf5491dc574a57": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xa0ee7a142d267c1f36714e4a8f75612f20a79720": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xbcd4042de499d14e55001ccbb24a551f3b954096": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xbda5747bfd65f08deb54cb465eb87d40e51b197e": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xcd3b766ccdd6ae721141f452c550ca635964ce71": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xdd2fd4581271e230360230f9337d5c0430bf44c0": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xdf3e18d64bc6a983f673ab319ccae4f1a57c7097": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0xfabb0ac9d68b0b445fb7357272ff202c5651694a": {
+      "balance": "0xd3c21bcecceda1000000"
+    }
+  },
+  "number": "0x0"
+}
+"#;
+        let genesis: Genesis = serde_json::from_str(custom_genesis).unwrap();
+        Arc::new(genesis.into())
+    }
+
+    pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
+        let attributes = PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::ZERO),
+        };
+        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+    }
+
+    /// Creates the initial setup with `num_nodes` started and interconnected.
+    pub async fn setup_irys_reth(
+        num_nodes: &[Address],
+        chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
+        is_dev: bool,
+        attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Copy + 'static,
+    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
+    where
+        LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
+            PayloadAttributesBuilder<
+                <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+            >,
+    {
+        let tasks = TaskManager::current();
+        let exec = tasks.executor();
+
+        let network_config = NetworkArgs {
+            discovery: DiscoveryArgs {
+                disable_discovery: true,
+                ..DiscoveryArgs::default()
+            },
+            ..NetworkArgs::default()
+        };
+
+        // Create nodes and peer them
+        let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
+
+        for (idx, allowed_system_tx_origin) in num_nodes.iter().enumerate() {
+            let node_config = NodeConfig::new(chain_spec.clone())
+                .with_network(network_config.clone())
+                .with_unused_ports()
+                .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
+                .set_dev(is_dev);
+
+            let span = span!(Level::INFO, "node", idx);
+            let _enter = span.enter();
+            let NodeHandle {
+                node,
+                node_exit_future: _,
+            } = NodeBuilder::new(node_config.clone())
+                .testing_node(exec.clone())
+                .node(IrysEthereumNode {
+                    allowed_system_tx_origin: *allowed_system_tx_origin,
+                })
+                .launch()
+                .await?;
+
+            let mut node = NodeTestContext::new(node, attributes_generator).await?;
+
+            // Connect each node in a chain.
+            if let Some(previous_node) = nodes.last_mut() {
+                previous_node.connect(&mut node).await;
+            }
+
+            // Connect last node with the first if there are more than two
+            if idx + 1 == num_nodes.len() && num_nodes.len() > 2 {
+                if let Some(first_node) = nodes.first_mut() {
+                    node.connect(first_node).await;
+                }
+            }
+
+            nodes.push(node);
+        }
+
+        Ok((
+            nodes,
+            tasks,
+            Wallet::default().with_chain_id(chain_spec.chain().into()),
+        ))
+    }
 }
