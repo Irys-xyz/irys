@@ -4,7 +4,7 @@ use actix_web::{
     HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolServiceMessage, TxIngressError};
+use irys_actors::mempool_service::{ChunkIngressError, MempoolServiceMessage};
 use irys_types::UnpackedChunk;
 use tracing::{info, warn};
 
