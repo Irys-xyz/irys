@@ -2284,6 +2284,85 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
+    async fn system_tx_with_invalid_parent_blockhash_is_rejected_by_pool_validator(
+    ) -> eyre::Result<()> {
+        // Setup wallets and node
+        let wallets = Wallet::new(3).wallet_gen();
+        let block_producer = EthereumWallet::from(wallets[0].clone()).default_signer();
+
+        // spawn an ethereum node except force it to use our custom evm executor
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+        let mut node = nodes.pop().unwrap();
+
+        // Use a random blockhash instead of the real parent
+        let invalid_parent_blockhash = FixedBytes::random();
+
+        // Create a system tx with the invalid parent blockhash
+        let system_tx = block_reward(block_producer.address(), 1, invalid_parent_blockhash);
+        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
+        let res = node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Private,
+                system_pooled_tx,
+            )
+            .await;
+        assert!(res.is_err());
+
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn system_tx_with_invalid_height_is_rejected_by_pool_validator() -> eyre::Result<()> {
+        // Setup wallets and node
+        let wallets = Wallet::new(3).wallet_gen();
+        let block_producer = EthereumWallet::from(wallets[0].clone()).default_signer();
+
+        // spawn an ethereum node except force it to use our custom evm executor
+        let (mut nodes, _tasks, ..) = setup_irys_reth(
+            &[block_producer.address()],
+            custom_chain(),
+            false,
+            eth_payload_attributes,
+        )
+        .await?;
+        let node = nodes.pop().unwrap();
+        let parent_blockhash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
+        let invalid_height = 0;
+
+        // Create a system tx with the invalid parent blockhash
+        let system_tx = block_reward(block_producer.address(), invalid_height, parent_blockhash);
+        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
+        let res = node
+            .inner
+            .pool
+            .add_transaction(
+                reth_transaction_pool::TransactionOrigin::Private,
+                system_pooled_tx,
+            )
+            .await;
+        assert!(res.is_err());
+
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
     async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
         // Setup wallets and nodes (same block producer for both)
         let wallets = Wallet::new(1).wallet_gen();
