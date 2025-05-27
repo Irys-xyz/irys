@@ -53,6 +53,9 @@ pub fn run_vdf(
                 );
                 hash = proposed_ff_to_mining_seed.seed.0;
                 global_step_number = proposed_ff_to_mining_seed.global_step;
+                if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
+                    panic!("Unable to send new Seed to VDF service: {:?}", e);
+                }
             } else {
                 debug!(
                     "Fastforward Step {} is not ahead of {}",
