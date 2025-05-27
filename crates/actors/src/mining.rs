@@ -233,8 +233,12 @@ impl Actor for PartitionMiningActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let broadcaster = BroadcastMiningService::from_registry();
         broadcaster.do_send(Subscribe(ctx.address()));
+        debug!("Partition Mining Actor Started");
     }
 
     fn stopping(&mut self, ctx: &mut Context<Self>) -> Running {
@@ -254,6 +258,11 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
+            return;
+        }
+
+        if self.storage_module.partition_assignment().is_none() {
+            debug!("No partition assigned - skipping seed {:?}", seed);
             return;
         }
 
@@ -526,7 +535,7 @@ mod tests {
 
         let _ = storage_module.sync_pending_chunks();
 
-        let mining_broadcaster = BroadcastMiningService::new();
+        let mining_broadcaster = BroadcastMiningService::new(None);
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
         let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;

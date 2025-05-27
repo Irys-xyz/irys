@@ -32,7 +32,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Span};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -84,6 +84,8 @@ pub struct BlockProducerActor {
     /// before mining can be stopped after the first solution. This guard prevents
     /// producing extra blocks that would cause non-deterministic test behavior.
     pub blocks_remaining_for_test: Option<u64>,
+    /// Tracing span
+    pub span: Span,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -121,7 +123,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         Self,
         eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>,
     >;
-
     #[tracing::instrument(skip_all, fields(
         minting_address = ?msg.0.mining_address,
         partition_hash = ?msg.0.partition_hash,
@@ -130,6 +131,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         chunk = ?msg.0.chunk.len(),
     ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
+        let span = self.span.clone();
+        let _span = span.enter();
         let solution = msg.0;
         info!(
             "BlockProducerActor solution received: solution_hash={}",
@@ -359,11 +362,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
 
-            // TODO: Hash the block signature to create a block_hash
-            // Generate a very stupid block_hash right now which is just
-            // the hash of the timestamp
-            let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
-
             // Use the partition hash to figure out what ledger it belongs to
             let ledger_id = epoch_service
                 .send(GetPartitionAssignmentMessage(solution.partition_hash))
@@ -422,7 +420,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // build a new block header
             let mut irys_block = IrysBlockHeader {
-                block_hash,
+                block_hash: H256::zero(), // block_hash is initialized after signing
                 height: block_height,
                 diff,
                 cumulative_diff: cumulative_difficulty,
@@ -437,7 +435,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 reward_address: config.node_config.reward_address,
                 reward_amount: reward_amount.amount,
                 miner_address: solution.mining_address,
-                signature: Signature::test_signature().into(),
+                signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer
                 timestamp: current_timestamp,
                 system_ledgers,
                 data_ledgers: vec![
@@ -515,12 +513,35 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }).await??;
 
             // try to get block by hash
-            let parent = context
-            .rpc
-            .inner
-            .eth_api()
-            .block_by_hash(prev_block_header.evm_block_hash, false)
-            .await?.expect("Should be able to get the parent EVM block");
+            // let parent = context
+            // .rpc
+            // .inner
+            // .eth_api()
+            // .block_by_hash(prev_block_header.evm_block_hash, false)
+            // .await?.expect("Should be able to get the parent EVM block");
+            let parent = {
+                let mut attempts = 0;
+                loop {
+                    if attempts > 50 {
+                        break None;
+                    }
+
+                    let result = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_hash(prev_block_header.evm_block_hash, false)
+                        .await?;
+
+                    match result {
+                        Some(block) => break Some(block),
+                        None => {
+                            attempts += 1;
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }.expect("Should be able to get the parent EVM block");
 
             assert!(parent.header.hash == prev_block_header.evm_block_hash);
 
@@ -560,6 +581,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             irys_block.evm_block_hash = evm_block_hash;
 
+            // Now that all fields are initialized, Sign the block and initialize its block_hash
+            let block_signer = config.irys_signer();
+            block_signer.sign_block_header(&mut irys_block)?;
 
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
@@ -654,11 +678,4 @@ pub struct BlockFinalizedMessage {
     pub block_header: Arc<IrysBlockHeader>,
     /// Include all the blocks transaction headers [Submit, Publish]
     pub all_txs: Arc<Vec<IrysTransactionHeader>>,
-}
-
-/// SHA256 hash the message parameter
-fn hash_sha256(message: &[u8]) -> H256 {
-    let mut hasher = sha::Sha256::new();
-    hasher.update(message);
-    H256::from(hasher.finish())
 }

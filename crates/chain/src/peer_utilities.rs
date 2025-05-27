@@ -1,4 +1,3 @@
-use actix::Addr;
 use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -8,30 +7,17 @@ use irys_actors::{
 };
 use irys_p2p::PeerListServiceFacade;
 use irys_types::block::CombinedBlockHeader;
-
 use irys_p2p::fast_forward_vdf_steps_from_block;
+use irys_api_client::{ApiClient, IrysApiClient};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-
-use irys_api_client::{ApiClient, IrysApiClient};
+use irys_types::block::CombinedBlockHeader;
 use irys_types::{
-    BlockIndexItem, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionResponse,
-    PeerAddress, H256,
+    BlockIndexItem, CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, H256,
 };
-use std::{
-    collections::{HashSet, VecDeque},
-    net::SocketAddr,
-    sync::Arc,
-};
-use tokio::{
-    sync::{
-        mpsc::{Sender, UnboundedSender},
-        Mutex,
-    },
-    time::{sleep, Duration},
-};
-use tracing::{error, info, warn};
+use std::net::SocketAddr;
+use tracing::{info, warn};
 
 pub async fn client_request(
     url: &str,
@@ -74,12 +60,6 @@ pub async fn peer_list_endpoint_request(
     address: &str,
 ) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     client_request(&format!("{}{}", &address, "/v1/peer_list")).await
-}
-
-pub async fn version_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/version")).await
 }
 
 pub async fn fetch_genesis_block(
@@ -191,229 +171,4 @@ pub async fn fetch_block(
             None
         }
     }
-}
-
-/// Fetches a slice starting at `height` of size `limit` of the block index from a remote peer over HTTP.
-pub async fn fetch_block_index(
-    peer: &SocketAddr,
-    client: &awc::Client,
-    block_index: Arc<Mutex<VecDeque<BlockIndexItem>>>,
-    height: u64,
-    limit: u32,
-) -> u64 {
-    let url = format!(
-        "http://{}/v1/block_index?height={}&limit={}",
-        peer, height, limit
-    );
-
-    match client.get(url.clone()).send().await {
-        Ok(mut response) => {
-            if response.status().is_success() {
-                match response.json::<Vec<BlockIndexItem>>().await {
-                    Ok(remote_block_index) => {
-                        info!("Got block_index {},{} from {}", height, limit, &url);
-                        let new_block_count = remote_block_index
-                            .len()
-                            .try_into()
-                            .expect("try into should succeed as u64");
-                        let mut index = block_index.lock().await;
-                        index.extend(remote_block_index.into_iter());
-                        return new_block_count;
-                    }
-                    Err(e) => {
-                        warn!("Error reading body from {}: {}", &url, e);
-                    }
-                }
-            } else {
-                warn!(
-                    "fetch_block_index Non-success from {}: {}",
-                    &url,
-                    response.status()
-                );
-            }
-        }
-        Err(e) => {
-            warn!("Request to {} failed: {}", &url, e);
-        }
-    }
-    0
-}
-
-//TODO url paths as ENUMS? Could update external api tests too
-//#[tracing::instrument(err)]
-pub async fn sync_state_from_peers(
-    trusted_peers: Vec<PeerAddress>,
-    block_discovery_addr: Addr<BlockDiscoveryActor>,
-    mempool_addr: UnboundedSender<MempoolServiceMessage>,
-    peer_service_addr: PeerListServiceFacade,
-    vdf_seed_sender: Sender<BroadcastMiningSeed>,
-    vdf_service_sender: UnboundedSender<VdfServiceMessage>,
-) -> eyre::Result<()> {
-    let client = awc::Client::default();
-    let peers = Arc::new(Mutex::new(trusted_peers.clone()));
-
-    //initialize queue
-    let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
-
-    info!("Discovering peers...");
-    peer_service_addr.wait_for_active_peers().await?;
-
-    info!("Downloading block index...");
-    let peers_guard = peers.lock().await;
-    let peer = peers_guard.first().expect("at least one peer");
-    let mut height = 1; // start at height 1 as we already have the genesis block
-    let limit = 50;
-    loop {
-        let fetched =
-            fetch_block_index(&peer.api, &client, block_queue.clone(), height, limit).await;
-        if fetched == 0 {
-            break; // no more blocks
-        } else {
-            info!("fetched {fetched} block index items");
-        }
-        height += fetched;
-    }
-
-    info!("Fetching latest blocks...and corresponding txns");
-    let peer = peers_guard.first().expect("at least one peer");
-    while let Some(block_index_item) = block_queue.lock().await.pop_front() {
-        if let Some(irys_block) = fetch_block(&peer.api, &client, &block_index_item).await {
-            let block = Arc::new(irys_block);
-            let block_discovery_addr = block_discovery_addr.clone();
-
-            //add txns from block to txn db
-            for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(
-                    match fetch_txn(&peer.api, &client, *tx)
-                        .await
-                        .expect("valid txn from http GET")
-                    {
-                        IrysTransactionResponse::Commitment(_c) => {
-                            panic!("not implemented commitment txns")
-                        }
-                        IrysTransactionResponse::Storage(s) => s,
-                    },
-                    oneshot_tx,
-                );
-                if let Err(e) = mempool_addr.send(tx_ingress_msg) {
-                    error!("Error sending txn {:?} to mempool: {}", tx, e);
-                }
-            }
-
-            fast_forward_vdf_steps_from_block(
-                block.vdf_limiter_info.clone(),
-                vdf_seed_sender.clone(),
-            )
-            .await;
-
-            // wait to be sure the FF steps are saved to VdfState before we try to discover the block that requires them
-            let desired_step = block.vdf_limiter_info.global_step_number;
-            if let Err(e) = wait_for_vdf_step(vdf_service_sender.clone(), desired_step).await {
-                panic!("Error when waiting for desired step {:?}", e);
-            }
-
-            // allow block to be discovered by block discovery actor
-            if let Err(e) = block_discovery_addr
-                .send(BlockDiscoveredMessage(block.clone()))
-                .await?
-            {
-                error!(
-                    "Peer Sync: Error sending BlockDiscoveredMessage for block {}: {:?}\nOFFENDING BLOCK evm_block_hash: {}",
-                    block_index_item.block_hash.0.to_base58(),
-                    e,
-                    block.clone().evm_block_hash,
-                );
-            }
-        }
-    }
-
-    info!("Sync complete.");
-    Ok(())
-}
-
-/// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
-pub async fn fetch_and_update_peers(
-    peers: Arc<tokio::sync::Mutex<Vec<PeerAddress>>>,
-    client: &awc::Client,
-    peers_to_ask: Vec<PeerAddress>,
-) -> Option<u64> {
-    let futures = peers_to_ask.into_iter().map(|peer| {
-        let client = client.clone();
-        let peers = peers.clone();
-        let url = format!("http://{}/v1/peer_list", peer.api);
-
-        async move {
-            match client.get(url.clone()).send().await {
-                Ok(mut response) if response.status().is_success() => {
-                    let Ok(new_peers) = response.json::<Vec<PeerAddress>>().await else {
-                        warn!("Invalid JSON {:?} from {}", response.body().await, &url);
-                        return 0;
-                    };
-
-                    info!("fetched {:?} peers from {url}: ", new_peers);
-
-                    let mut peers_guard = peers.lock().await;
-                    let existing: HashSet<_> = peers_guard.iter().cloned().collect();
-                    let mut added = 0;
-                    for p in new_peers {
-                        if existing.contains(&p) {
-                            continue;
-                        }
-                        peers_guard.push(p);
-                        added += 1;
-                    }
-                    error!("Got {} peers from {}", &added, peer.api);
-                    added
-                }
-                Ok(response) => {
-                    warn!(
-                        "fetch_and_update_peers Non-success from {}: {}",
-                        &url,
-                        response.status()
-                    );
-                    0
-                }
-                Err(e) => {
-                    warn!("Request to {} failed: {}", &url, e);
-                    0
-                }
-            }
-        }
-    });
-    let results = futures::future::join_all(futures).await;
-    Some(results.iter().sum())
-}
-
-/// Polls VDF service for `VdfState` until `global_step` >= `desired_step`, with a 30s timeout.
-async fn wait_for_vdf_step(
-    vdf_service_sender: UnboundedSender<VdfServiceMessage>,
-    desired_step: u64,
-) -> eyre::Result<()> {
-    let seconds_to_wait = 30;
-    let retries_per_second = 20;
-    let total_retries = seconds_to_wait * retries_per_second;
-    for _ in 0..total_retries {
-        tracing::trace!("looping waiting for step {}", desired_step);
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            tracing::error!(
-                "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
-                e
-            );
-        };
-        let vdf_steps_guard = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
-        if vdf_steps_guard.read().global_step >= desired_step {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(1000 / retries_per_second)).await;
-    }
-    Err(eyre::eyre!(
-        "timed out after {seconds_to_wait}s waiting for VDF step {desired_step}"
-    ))
 }

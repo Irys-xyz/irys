@@ -81,14 +81,16 @@ pub struct VDFLimiterInfo {
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
 pub struct IrysBlockHeader {
+    /// The block identifier.
+    /// Excluded from RLP encoding as it's derived from the signature hash.
     #[rlp(skip)]
     #[rlp(default)]
-    /// The block identifier.
     pub block_hash: BlockHash,
 
+    /// The block signature.
+    /// Excluded from RLP encoding as signatures are computed over the RLP-encoded data.
     #[rlp(skip)]
     #[rlp(default)]
-    /// The block signature
     pub signature: IrysSignature,
 
     /// The block height.

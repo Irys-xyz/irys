@@ -1,6 +1,6 @@
 use crate::{
     block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock},
-    cache::{GossipCache, GossipCacheKey},
+    cache::{GossipCache, GossipCacheKey, GossipClient, GossipError, GossipResult},
     gossip_service::SyncState,
     peer_list::PeerListFacade,
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},
@@ -239,7 +239,7 @@ where
         );
 
         if self.sync_state.is_syncing()
-            && block_header.height > (self.sync_state.sync_height() + 1) as u64
+            && block_header.height > (self.sync_state.sync_target_height() + 1) as u64
         {
             debug!(
                 "Node {}: Block {} is out of the sync range, skipping",

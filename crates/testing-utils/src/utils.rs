@@ -3,11 +3,16 @@ pub use tempfile;
 use tempfile::TempDir;
 use tokio::time::Sleep;
 use tracing::debug;
-use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    fmt::{self, SubscriberBuilder},
+    util::SubscriberInitExt,
+    EnvFilter,
+};
 
 pub fn initialize_tracing() {
     let _ = SubscriberBuilder::default()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
         .finish()
         .try_init();
 }
@@ -24,6 +29,7 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     // TODO: expose tracing configuration
     let _ = SubscriberBuilder::default()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
         .finish()
         .try_init();
 

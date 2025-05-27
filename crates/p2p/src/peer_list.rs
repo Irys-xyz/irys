@@ -145,6 +145,13 @@ where
             .await?)
     }
 
+    /// Gets the top trusted peer
+    pub async fn top_trusted_peer(
+        &self,
+    ) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError> {
+        Ok(self.addr.send(TrustedPeersRequest).await?)
+    }
+
     /// Waits for at least one active connection to appear
     pub async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError> {
         Ok(self.addr.send(WaitForActivePeer).await?)
@@ -648,7 +655,7 @@ where
             .post_version(api_address, version_request)
             .await
             .map_err(|e| {
-                error!(
+                warn!(
                     "Failed to announce yourself to address {}: {:?}",
                     api_address, e
                 );
@@ -716,7 +723,7 @@ where
         {
             Ok(()) => {}
             Err(e) => {
-                error!(
+                warn!(
                     "Failed to announce yourself to address {}: {:?}",
                     api_address, e
                 );
@@ -751,7 +758,7 @@ where
                     }
                 }
                 Err(e) => {
-                    error!(
+                    warn!(
                         "Failed to announce yourself to address {}: {:?}",
                         peer.api, e
                     );
@@ -863,6 +870,36 @@ where
                 }
             }
         }
+    }
+}
+
+/// Get the list of active trusted peers
+#[derive(Message, Debug)]
+#[rtype(result = "Vec<(Address, PeerListItem)>")]
+pub struct TrustedPeersRequest;
+
+impl<A, R> Handler<TrustedPeersRequest> for PeerListServiceWithClient<A, R>
+where
+    A: ApiClient,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    type Result = Vec<(Address, PeerListItem)>;
+
+    fn handle(&mut self, _msg: TrustedPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
+        let mut peers: Vec<(Address, PeerListItem)> = self
+            .peer_list_cache
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
+
+        peers.retain(|(_miner_address, peer)| {
+            self.trusted_peers_api_addresses.contains(&peer.address.api)
+        });
+
+        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
+        peers.reverse();
+
+        peers
     }
 }
 
@@ -1130,8 +1167,15 @@ where
 
     fn handle(&mut self, msg: AnnounceFinished, ctx: &mut Self::Context) -> Self::Result {
         if !msg.success && msg.retry {
+            self.currently_running_announcements
+                .remove(&msg.peer_api_address);
             let message = NewPotentialPeer::new(msg.peer_api_address);
+            debug!(
+                "Waiting for {:?} to try to announce yourself again",
+                PEER_HANDSHAKE_RETRY_INTERVAL
+            );
             ctx.run_later(PEER_HANDSHAKE_RETRY_INTERVAL, move |service, ctx| {
+                debug!("Trying to run an announcement again");
                 let address = ctx.address();
                 ctx.spawn(send_message_and_print_error(message, address).into_actor(service));
             });

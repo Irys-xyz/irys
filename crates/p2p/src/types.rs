@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum GossipError {
     #[error("Network error: {0}")]
     Network(String),
@@ -77,7 +77,7 @@ impl GossipError {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum InvalidDataError {
     #[error("Invalid transaction signature")]
     TransactionSignature,
@@ -97,7 +97,7 @@ pub enum InvalidDataError {
     InvalidBlock(String),
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum InternalGossipError {
     #[error("Unknown internal error: {0}")]
     Unknown(String),

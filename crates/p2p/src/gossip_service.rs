@@ -16,26 +16,22 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
+    SyncState,
 };
 use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
-use base58::ToBase58;
 use core::time::Duration;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade, broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::MempoolFacade,
+    mempool_service::MempoolFacade, irys_actors::vdf_service::VdfServiceMessage,
 };
 use irys_api_client::ApiClient;
-use irys_types::{
-    block_production::Seed, Address, BlockIndexItem, BlockIndexQuery, DatabaseProvider, GossipData,
-    H256List, PeerListItem, RethPeerInfo, VDFLimiterInfo,
-};
+use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
-use std::collections::VecDeque;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -111,71 +107,14 @@ impl ServiceHandleWithShutdownSignal {
 }
 
 #[derive(Debug)]
-pub struct GossipService {
+pub struct P2PService {
     cache: Arc<GossipCache>,
-    mempool_data_receiver: Option<Receiver<GossipData>>,
+    mempool_data_receiver: Option<UnboundedReceiver<GossipData>>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct SyncState {
-    syncing: Arc<AtomicBool>,
-    sync_height: Arc<AtomicUsize>,
-}
-
-impl SyncState {
-    /// Creates a new SyncState with given syncing flag and sync_height = 0
-    pub fn new(is_syncing: bool) -> Self {
-        Self {
-            syncing: Arc::new(AtomicBool::new(is_syncing)),
-            sync_height: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    pub fn store(&self, is_syncing: bool) {
-        self.syncing.store(is_syncing, Ordering::Relaxed);
-    }
-
-    /// Returns whether the gossip service is currently syncing
-    pub fn is_syncing(&self) -> bool {
-        self.syncing.load(Ordering::Relaxed)
-    }
-
-    pub async fn wait_for_sync(&self) {
-        // If already synced, return immediately
-        if !self.is_syncing() {
-            return;
-        }
-
-        // Create a future that polls the sync state
-        let syncing = Arc::clone(&self.syncing);
-        tokio::spawn(async move {
-            while syncing.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("Sync checking task failed");
-    }
-
-    /// Sets the current sync height
-    pub fn set_sync_height(&self, height: usize) {
-        self.sync_height.store(height, Ordering::Relaxed);
-    }
-
-    /// Returns the current sync height
-    pub fn sync_height(&self) -> usize {
-        self.sync_height.load(Ordering::Relaxed)
-    }
-
-    /// Increments sync height by 1 and returns the new height
-    pub fn increment_sync_height(&self) -> usize {
-        self.sync_height.fetch_add(1, Ordering::Relaxed) + 1
-    }
-}
-
-impl GossipService {
+impl P2PService {
     /// Returns whether the gossip service is currently syncing
     pub fn is_syncing(&self) -> bool {
         self.sync_state.is_syncing()
@@ -183,28 +122,27 @@ impl GossipService {
 
     /// Waits until the gossip service has completed syncing
     pub async fn wait_for_sync(&self) {
-        self.sync_state.wait_for_sync().await;
+        self.sync_state.wait_for_sync().await
     }
 
-    /// Create a new gossip service. To run the service, use the [`GossipService::run`] method.
+    /// Create a new gossip service. To run the service, use the [`P2PService::run`] method.
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
-    pub fn new(mining_address: Address) -> (Self, Sender<GossipData>) {
+    pub fn new(
+        mining_address: Address,
+        broadcast_data_receiver: UnboundedReceiver<GossipData>,
+    ) -> Self {
         let cache = Arc::new(GossipCache::new());
-        let (trusted_data_tx, trusted_data_rx) = channel(1000);
 
         let client_timeout = Duration::from_secs(5);
         let client = GossipClient::new(client_timeout, mining_address);
 
-        (
-            Self {
-                client,
-                cache,
-                mempool_data_receiver: Some(trusted_data_rx),
-                sync_state: SyncState::new(true),
-            },
-            trusted_data_tx,
-        )
+        Self {
+            client,
+            cache,
+            mempool_data_receiver: Some(broadcast_data_receiver),
+            sync_state: SyncState::new(true),
+        }
     }
 
     /// Spawns all gossip tasks and returns a handle to the service. The service will run until
@@ -224,23 +162,21 @@ impl GossipService {
         db: DatabaseProvider,
         vdf_sender: Sender<BroadcastMiningSeed>,
         listener: TcpListener,
-        needs_catching_up: bool,
-        latest_known_height: usize,
+        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
         debug!("Staring gossip service");
-        self.sync_state.store(needs_catching_up);
-        self.sync_state.set_sync_height(latest_known_height);
 
-        // TODO: get the db
         let block_pool_service = BlockPoolService::new_with_client(
             db,
             peer_list.clone(),
             block_discovery.clone(),
             Some(vdf_sender),
+            self.sync_state.clone(),
+            vdf_service_sender,
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =
@@ -268,7 +204,6 @@ impl GossipService {
                 ))?;
 
         let cache = Arc::clone(&self.cache);
-        let sync_state = self.sync_state.clone();
 
         let cache_pruning_task_handle = spawn_cache_pruning_task(cache, task_executor);
 
@@ -278,14 +213,6 @@ impl GossipService {
             task_executor,
             peer_list.clone(),
         );
-
-        if needs_catching_up {
-            task_executor.spawn(async move {
-                if let Err(error) = catch_up_task(sync_state, api_client.clone(), peer_list).await {
-                    error!("Failed to catch up: {}", error);
-                }
-            });
-        }
 
         let gossip_service_handle = spawn_watcher_task(
             server,
@@ -426,8 +353,8 @@ fn spawn_cache_pruning_task(
 }
 
 fn spawn_broadcast_task<R, A>(
-    mut mempool_data_receiver: Receiver<GossipData>,
-    service: GossipService,
+    mut mempool_data_receiver: UnboundedReceiver<GossipData>,
+    service: P2PService,
     task_executor: &TaskExecutor,
     peer_list_service: PeerListFacade<A, R>,
 ) -> ServiceHandleWithShutdownSignal
@@ -540,297 +467,4 @@ fn spawn_watcher_task(
         },
         task_executor,
     )
-}
-
-async fn catch_up_task<
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
->(
-    sync_state: SyncState,
-    api_client: A,
-    peer_list_service: PeerListFacade<A, R>,
-) -> Result<(), GossipError> {
-    debug!("Sync task: Starting gossip service sync task, waiting for active peers");
-    peer_list_service.wait_for_active_peers().await?;
-    debug!(
-        "Sync task: Gossip service sync task started. Syncing blocks starting from height {}",
-        sync_state.sync_height()
-    );
-
-    let limit = 10;
-
-    let mut block_queue = VecDeque::new();
-    let block_index = get_block_index(
-        &peer_list_service,
-        &api_client,
-        sync_state.sync_height(),
-        limit,
-        5,
-    )
-    .await?;
-
-    let mut blocks_left_to_process = block_index.len();
-    block_queue.extend(block_index);
-
-    while let Some(block) = block_queue.pop_front() {
-        debug!(
-            "Sync task: Requesting block {} (height {}) from the network",
-            block.block_hash.0.to_base58(),
-            sync_state.sync_height()
-        );
-        match peer_list_service
-            .request_block_from_the_network(block.block_hash)
-            .await
-        {
-            Ok(()) => {
-                sync_state.increment_sync_height();
-                info!(
-                    "Successfully requested block {} (height {}) from the network",
-                    block.block_hash.0.to_base58(),
-                    sync_state.sync_height()
-                );
-            }
-            Err(err) => {
-                error!(
-                    "Failed to request block {} (height {}) from the network: {}",
-                    block.block_hash.0.to_base58(),
-                    sync_state.sync_height(),
-                    err
-                );
-            }
-        }
-
-        blocks_left_to_process -= 1;
-        if blocks_left_to_process == 0 {
-            block_queue.extend(
-                get_block_index(
-                    &peer_list_service,
-                    &api_client,
-                    sync_state.sync_height(),
-                    limit,
-                    5,
-                )
-                .await?,
-            );
-            blocks_left_to_process = block_queue.len();
-            if blocks_left_to_process == 0 {
-                break;
-            }
-        }
-    }
-
-    sync_state.store(false);
-    info!("Gossip service sync completed");
-    Ok(())
-}
-
-async fn get_block_index<
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
->(
-    peer_list_service: &PeerListFacade<A, R>,
-    api_client: &A,
-    start: usize,
-    limit: usize,
-    retries: usize,
-) -> GossipResult<Vec<BlockIndexItem>> {
-    let top_peers = peer_list_service.top_active_peers(Some(5), None).await?;
-
-    if top_peers.is_empty() {
-        return Err(GossipError::Network("No peers available".to_string()));
-    }
-
-    for _ in 0..retries {
-        let (miner_address, top_peer) = top_peers
-            .choose(&mut rand::thread_rng())
-            .ok_or(GossipError::Network("No peers available".to_string()))?;
-        match api_client
-            .get_block_index(
-                top_peer.address.api,
-                BlockIndexQuery {
-                    height: start,
-                    limit,
-                },
-            )
-            .await
-            .map_err(|network_error| GossipError::Network(network_error.to_string()))
-        {
-            Ok(index) => {
-                debug!(
-                    "Fetched block index from peer {:?}: {:?}",
-                    miner_address, index
-                );
-                return Ok(index);
-            }
-            Err(error) => {
-                error!(
-                    "Failed to fetch block index from peer {:?}: {:?}",
-                    miner_address, error
-                );
-                continue;
-            }
-        }
-    }
-
-    Err(GossipError::Network(
-        "Failed to fetch block index from peer".to_string(),
-    ))
-}
-
-/// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
-pub async fn fast_forward_vdf_steps_from_block(
-    vdf_limiter_info: VDFLimiterInfo,
-    vdf_sender: Sender<BroadcastMiningSeed>,
-) {
-    let block_end_step = vdf_limiter_info.global_step_number;
-    let len = vdf_limiter_info.steps.len();
-    let block_start_step = block_end_step - len as u64;
-    tracing::trace!(
-        "VDF FF: block start-end step: {}-{}",
-        block_start_step,
-        block_end_step
-    );
-    for (i, hash) in vdf_limiter_info.steps.iter().enumerate() {
-        //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-        let mining_seed = BroadcastMiningSeed {
-            seed: Seed { 0: *hash },
-            global_step: block_start_step + i as u64,
-            checkpoints: H256List::new(),
-        };
-
-        if let Err(e) = vdf_sender.send(mining_seed).await {
-            error!("VDF FF: VDF Send Error: {:?}", e);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
-    use irys_types::BlockHash;
-
-    mod catch_up_task {
-        use super::*;
-        use crate::peer_list::PeerListServiceWithClient;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-        use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-        use irys_types::{Config, NodeConfig, PeerAddress, PeerScore};
-        use std::sync::Mutex;
-
-        #[actix_web::test]
-        async fn should_sync_and_change_status() -> eyre::Result<()> {
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
-            let mut node_config = NodeConfig::testnet();
-            node_config.trusted_peers = vec![];
-            let config = Config::new(node_config);
-
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-                    .expect("can't open temp dir"),
-            ));
-
-            let block_requests = Arc::new(Mutex::new(vec![]));
-            let block_requests_clone = block_requests.clone();
-            let fake_gossip_server = FakeGossipServer::new();
-            fake_gossip_server.set_on_block_data_request(move |block_hash| {
-                let mut block_requests = block_requests.lock().unwrap();
-                let requests_len = block_requests.len();
-                block_requests.push(block_hash);
-
-                // Simulating one false response so the block gets requested again
-                if requests_len == 0 {
-                    false
-                } else {
-                    true
-                }
-            });
-            let fake_gossip_address = fake_gossip_server.spawn();
-
-            let sync_state = SyncState::new(true);
-
-            let api_client_stub = ApiClientStub::new();
-            let calls = Arc::new(Mutex::new(vec![]));
-            let block_index_requests = calls.clone();
-            api_client_stub.set_block_index_handler(move |query| {
-                let mut calls_ref = calls.lock().unwrap();
-                let calls_len = calls_ref.len();
-                calls_ref.push(query);
-
-                // Simulate process needing to make two calls
-                if calls_len == 0 {
-                    Ok(vec![BlockIndexItem {
-                        block_hash: BlockHash::repeat_byte(1),
-                        num_ledgers: 0,
-                        ledgers: vec![],
-                    }])
-                } else if calls_len == 1 {
-                    Ok(vec![BlockIndexItem {
-                        block_hash: BlockHash::repeat_byte(2),
-                        num_ledgers: 0,
-                        ledgers: vec![],
-                    }])
-                } else {
-                    Ok(vec![])
-                }
-            });
-
-            let reth_mock = MockRethServiceActor {};
-            let reth_mock_addr = reth_mock.start();
-            let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
-                db,
-                &config,
-                api_client_stub.clone(),
-                reth_mock_addr.clone(),
-            );
-            let peer_list = PeerListFacade::new(peer_list_service.start());
-            peer_list
-                .add_peer(
-                    Address::repeat_byte(2),
-                    PeerListItem {
-                        reputation_score: PeerScore::new(100),
-                        response_time: 0,
-                        address: PeerAddress {
-                            gossip: fake_gossip_address,
-                            api: fake_gossip_address,
-                            execution: Default::default(),
-                        },
-                        last_seen: 0,
-                        is_online: true,
-                    },
-                )
-                .await
-                .expect("to add peer");
-
-            // Check that the sync status is syncing
-            assert!(sync_state.is_syncing());
-            sync_state.set_sync_height(10);
-
-            catch_up_task(sync_state.clone(), api_client_stub.clone(), peer_list)
-                .await
-                .expect("to finish catching up");
-
-            // There should be three calls total: two that got items and one that didn't
-            let data_requests = block_index_requests.lock().unwrap();
-            assert_eq!(data_requests.len(), 3);
-            assert_eq!(data_requests[0].height, 10);
-            assert_eq!(data_requests[1].height, 11);
-            assert_eq!(data_requests[0].limit, 10);
-            assert_eq!(data_requests[1].limit, 10);
-            assert_eq!(data_requests[2].height, 12);
-            assert_eq!(data_requests[2].limit, 10);
-
-            // Check that the sync status has changed to synced
-            assert!(!sync_state.is_syncing());
-
-            let block_requests = block_requests_clone.lock().unwrap();
-            assert_eq!(block_requests.len(), 3);
-            assert_eq!(block_requests[0], BlockHash::repeat_byte(1));
-            // As the first call didn't return anything, the peer tries to fetch it once again
-            assert_eq!(block_requests[1], BlockHash::repeat_byte(1));
-            assert_eq!(block_requests[2], BlockHash::repeat_byte(2));
-
-            Ok(())
-        }
-    }
 }

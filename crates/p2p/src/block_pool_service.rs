@@ -1,5 +1,5 @@
-use crate::gossip_service::fast_forward_vdf_steps_from_block;
 use crate::peer_list::{PeerListFacade, PeerListFacadeError};
+use crate::{fast_forward_vdf_steps_from_block, wait_for_vdf_step, SyncState};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
     WrapFuture,
@@ -7,19 +7,20 @@ use actix::{
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
+use irys_actors::vdf_service::VdfServiceMessage;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tracing::{debug, error, info};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BlockPoolError {
-    DatabaseError(eyre::Error),
+    DatabaseError(String),
     OtherInternal(String),
-    BlockError(eyre::Error),
+    BlockError(String),
 }
 
 impl From<PeerListFacadeError> for BlockPoolError {
@@ -44,6 +45,9 @@ where
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
     pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+    pub(crate) vdf_service_sender: Option<UnboundedSender<VdfServiceMessage>>,
+
+    sync_state: SyncState,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -60,6 +64,8 @@ where
             block_producer: None,
             peer_list: None,
             vdf_sender: None,
+            vdf_service_sender: None,
+            sync_state: SyncState::default(),
         }
     }
 }
@@ -104,6 +110,8 @@ where
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
         vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+        sync_state: SyncState,
+        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
     ) -> Self {
         Self {
             db: Some(db),
@@ -112,6 +120,8 @@ where
             peer_list: Some(peer_list),
             block_producer: Some(block_producer_addr),
             vdf_sender,
+            sync_state,
+            vdf_service_sender: Some(vdf_service_sender),
         }
     }
 
@@ -125,6 +135,7 @@ where
             block_header.block_hash.0.to_base58(),
             block_header.height
         );
+        let current_block_height = block_header.height;
         let prev_block_hash = block_header.previous_block_hash;
         let current_block_hash = block_header.block_hash;
         let vdf_limiter_info = block_header.vdf_limiter_info.clone();
@@ -132,6 +143,10 @@ where
         let block_discovery = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
+        let vdf_service_sender = self
+            .vdf_service_sender
+            .clone()
+            .expect("valid vdf service sender");
 
         // Adding the block to the pool, so if a block depending on that block arrives,
         // this block won't be requested from the network
@@ -139,6 +154,8 @@ where
             .insert(prev_block_hash, block_header.clone());
         self.block_hash_to_parent_hash
             .insert(current_block_hash, prev_block_hash);
+
+        let sync_state = self.sync_state.clone();
 
         Box::pin(
             async move {
@@ -150,11 +167,9 @@ where
                 // Check if the previous block is in the db
                 let maybe_previous_block_header = db
                     .as_ref()
-                    .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
-                        "Database is not connected"
-                    )))?
+                    .ok_or(BlockPoolError::DatabaseError("Database is not connected".into()))?
                     .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
-                    .map_err(|db_error| BlockPoolError::DatabaseError(db_error))?;
+                    .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))?;
 
                 // If the parent block is in the db, process it
                 if let Some(_previous_block_header) = maybe_previous_block_header {
@@ -167,7 +182,21 @@ where
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
 
                     info!(
-                        "FF VDF Steps for block for block {} completed",
+                        "FF VDF Steps for block for block {} completed. Waiting for FF VDF Steps to be saved to VdfState",
+                        current_block_hash.0.to_base58()
+                    );
+
+                    // wait to be sure the FF steps are saved to VdfState before we try to discover the block that requires them
+                    let desired_step = block_header.vdf_limiter_info.global_step_number;
+                    if let Err(vdf_error) = wait_for_vdf_step(vdf_service_sender, desired_step).await {
+                        self_addr.do_send(RemoveBlockFromPool {
+                            block_hash: block_header.block_hash,
+                        });
+                        return Err(BlockPoolError::OtherInternal(format!("Can't process VDF steps for block: {:?}", vdf_error)))
+                    }
+
+                    info!(
+                        "VDF Steps for block {} saved. Starting block validation",
                         current_block_hash.0.to_base58()
                     );
 
@@ -186,13 +215,14 @@ where
                             self_addr.do_send(RemoveBlockFromPool {
                                 block_hash: block_header.block_hash,
                             });
-                            return Err(BlockPoolError::BlockError(block_discovery_error))
+                            return Err(BlockPoolError::BlockError(format!("{:?}", block_discovery_error)))
                     }
 
                     info!(
                         "Block pool: Block {} has been processed",
                         current_block_hash.0.to_base58()
                     );
+                    sync_state.mark_processed(current_block_height as usize);
                     self_addr.do_send(RemoveBlockFromPool {
                         block_hash: block_header.block_hash,
                     });
@@ -415,11 +445,11 @@ where
 
         self.db
             .as_ref()
-            .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
-                "Database is not connected"
-            )))?
+            .ok_or(BlockPoolError::DatabaseError(
+                "Database is not connected".into(),
+            ))?
             .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
-            .map_err(|db_error| BlockPoolError::DatabaseError(db_error))
+            .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
     }
 }
 
@@ -448,11 +478,11 @@ where
         Ok(self
             .db
             .as_ref()
-            .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
-                "Database is not connected"
-            )))?
+            .ok_or(BlockPoolError::DatabaseError(
+                "Database is not connected".into(),
+            ))?
             .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
-            .map_err(|db_error| BlockPoolError::DatabaseError(db_error))?
+            .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))?
             .is_some())
     }
 }

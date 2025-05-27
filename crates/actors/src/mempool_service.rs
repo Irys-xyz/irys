@@ -163,7 +163,6 @@ pub struct MempoolState {
 
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
-    gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -231,6 +230,11 @@ impl MempoolService {
         gossip_tx: &tokio::sync::mpsc::Sender<GossipData>,
     ) -> JoinHandle<()> {
         let mempool_state = create_state(
+        info!("mempool service spawned");
+        let mempool_config = &config.consensus.mempool;
+        let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
+        let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
+        Self {
             irys_db,
             reth_db,
             exec.clone(),
@@ -257,6 +261,16 @@ impl MempoolService {
                     .expect("Mempool service encountered an irrecoverable error")
             },
         )
+    }
+    
+    // Helper to get the canonical chain and latest height
+    fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
+        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
+            "unable to get canonical chain from block tree".to_owned(),
+        ))?;
+
+        Ok(*latest_height)
     }
 
     async fn start(mut self) -> eyre::Result<()> {
@@ -417,6 +431,14 @@ pub fn generate_ingress_proof(
         let (root_hash2, index_entry) = entry?;
         // make sure we haven't traversed into the wrong key
         assert_eq!(data_root, root_hash2);
+      
+        // Gossip transaction
+        let gossip_sender = self.service_senders.gossip_broadcast.clone();
+        let gossip_data = GossipData::Transaction(tx.clone());
+
+        if let Err(error) = gossip_sender.send(gossip_data) {
+            tracing::error!("Failed to send gossip data: {:?}", error);
+        }
 
         let chunk_path_hash = index_entry.meta.chunk_path_hash;
         if set.contains(&chunk_path_hash) {
@@ -927,11 +949,19 @@ impl Inner {
                         }
                     }
 
+
                     // ==== INGRESS PROOFS ====
                     let root_hash: H256 = root_hash.into();
 
                     // check if we have generated an ingress proof for this tx already
                     // if we have, update it's expiry height
+
+                    let gossip_sender = self.service_senders.gossip_broadcast.clone();
+                    let gossip_data = GossipData::Chunk(chunk);
+
+                    if let Err(error) = gossip_sender.send(gossip_data) {
+                        tracing::error!("Failed to send gossip data: {:?}", error);
+                    }
 
                     //  TODO: hook into whatever manages ingress proofs
                     match read_tx
