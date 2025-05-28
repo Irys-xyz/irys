@@ -58,7 +58,7 @@ reth-db-api.workspace=true
 alloy-signer.workspace=true
 alloy-core.workspace=true
 alloy-signer-local.workspace=true
-alloy-rpc-types-engine.workspace=true
+reth.workspace=true
 
 [dev-dependencies]
 test-fuzz.workspace = true

@@ -9,6 +9,7 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::reth_db::Database;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;

@@ -23,11 +23,10 @@ use std::{
 
 use tracing::{debug, error, trace, warn};
 
+use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
 use crate::services::ServiceSenders;
 use crate::StorageModuleServiceMessage;
-
-use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]

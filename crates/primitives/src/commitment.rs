@@ -1,3 +1,4 @@
+use alloy_primitives::wrap_fixed_bytes;
 use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use bytes::Buf;
 use reth_codecs::Compact;
@@ -37,76 +38,78 @@ use reth_codecs::Compact;
 // //     Unstake = 5,
 // // }
 
-// #[derive(
-//     PartialEq,
-//     Debug,
-//     Default,
-//     Eq,
-//     Clone,
-//     Copy,
-//     Hash,
-//     Compact,
-//     serde::Serialize,
-//     serde::Deserialize,
-//     arbitrary::Arbitrary,
-// )]
+// TODO: these need to be redone!
 
-// pub enum CommitmentStatus {
-//     #[default]
-//     /// Stake is pending epoch activation
-//     Pending = 1,
-//     /// Stake is active
-//     Active = 2,
-//     /// Stake is pending epoch removal
-//     Inactive = 3,
-//     /// Stake is pending slash epoch removal
-//     Slashed = 4,
-// }
+#[derive(
+    PartialEq,
+    Debug,
+    Default,
+    Eq,
+    Clone,
+    Copy,
+    Hash,
+    Compact,
+    serde::Serialize,
+    serde::Deserialize,
+    arbitrary::Arbitrary,
+)]
 
-// #[derive(thiserror::Error, Debug)]
-// pub enum CommitmentStatusDecodeError {
-//     #[error("unknown reserved Commitment status: {0}")]
-//     UnknownCommitmentStatus(u8),
-// }
+pub enum CommitmentStatus {
+    #[default]
+    /// Stake is pending epoch activation
+    Pending = 0,
+    /// Stake is active
+    Active = 1,
+    /// Stake is pending epoch removal
+    Inactive = 2,
+    /// Stake is pending slash epoch removal
+    Slashed = 3,
+}
 
-// impl TryFrom<u8> for CommitmentStatus {
-//     type Error = CommitmentStatusDecodeError;
-//     fn try_from(id: u8) -> Result<Self, Self::Error> {
-//         match id {
-//             1 => Ok(CommitmentStatus::Pending),
-//             2 => Ok(CommitmentStatus::Active),
-//             3 => Ok(CommitmentStatus::Inactive),
-//             4 => Ok(CommitmentStatus::Slashed),
-//             _ => Err(CommitmentStatusDecodeError::UnknownCommitmentStatus(id)),
-//         }
-//     }
-// }
+#[derive(thiserror::Error, Debug)]
+pub enum CommitmentStatusDecodeError {
+    #[error("unknown reserved Commitment status: {0}")]
+    UnknownCommitmentStatus(u8),
+}
 
-// impl Encodable for CommitmentStatus {
-//     fn encode(&self, out: &mut dyn bytes::BufMut) {
-//         match self {
-//             CommitmentStatus::Pending => out.put_u8(CommitmentStatus::Pending as u8),
-//             CommitmentStatus::Active => out.put_u8(CommitmentStatus::Active as u8),
-//             CommitmentStatus::Inactive => out.put_u8(CommitmentStatus::Inactive as u8),
-//             CommitmentStatus::Slashed => out.put_u8(CommitmentStatus::Slashed as u8),
-//         };
-//     }
-//     fn length(&self) -> usize {
-//         1
-//     }
-// }
+impl TryFrom<u8> for CommitmentStatus {
+    type Error = CommitmentStatusDecodeError;
+    fn try_from(id: u8) -> Result<Self, Self::Error> {
+        match id {
+            0 => Ok(CommitmentStatus::Pending),
+            1 => Ok(CommitmentStatus::Active),
+            2 => Ok(CommitmentStatus::Inactive),
+            3 => Ok(CommitmentStatus::Slashed),
+            _ => Err(CommitmentStatusDecodeError::UnknownCommitmentStatus(id)),
+        }
+    }
+}
 
-// impl Decodable for CommitmentStatus {
-//     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-//         let _v = buf.to_vec();
-//         let enc_stake_status = u8::decode(&mut &buf[..])?;
-//         buf.advance(1);
-//         let id = CommitmentStatus::try_from(enc_stake_status)
-//             .or(Err(RlpError::Custom("unknown stake status id")))?;
-//         let _v2 = buf.to_vec();
-//         Ok(id)
-//     }
-// }
+impl Encodable for CommitmentStatus {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        match self {
+            CommitmentStatus::Pending => out.put_u8(CommitmentStatus::Pending as u8),
+            CommitmentStatus::Active => out.put_u8(CommitmentStatus::Active as u8),
+            CommitmentStatus::Inactive => out.put_u8(CommitmentStatus::Inactive as u8),
+            CommitmentStatus::Slashed => out.put_u8(CommitmentStatus::Slashed as u8),
+        };
+    }
+    fn length(&self) -> usize {
+        1
+    }
+}
+
+impl Decodable for CommitmentStatus {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let _v = buf.to_vec();
+        let enc_stake_status = u8::decode(&mut &buf[..])?;
+        buf.advance(1);
+        let id = CommitmentStatus::try_from(enc_stake_status)
+            .or(Err(RlpError::Custom("unknown stake status id")))?;
+        let _v2 = buf.to_vec();
+        Ok(id)
+    }
+}
 
 // TODO: these need to be redone!
 #[derive(
@@ -125,10 +128,10 @@ use reth_codecs::Compact;
 
 pub enum CommitmentType {
     #[default]
-    Stake = 2,
-    Pledge = 3,
-    Unpledge = 4,
-    Unstake = 5,
+    Stake = 0,
+    Pledge = 1,
+    Unpledge = 2,
+    Unstake = 3,
 }
 
 // TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
@@ -143,10 +146,10 @@ impl TryFrom<u8> for CommitmentType {
     type Error = CommitmentTypeDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            2 => Ok(CommitmentType::Stake),
-            3 => Ok(CommitmentType::Pledge),
-            4 => Ok(CommitmentType::Unpledge),
-            5 => Ok(CommitmentType::Unstake),
+            0 => Ok(CommitmentType::Stake),
+            1 => Ok(CommitmentType::Pledge),
+            2 => Ok(CommitmentType::Unpledge),
+            3 => Ok(CommitmentType::Unstake),
             _ => Err(CommitmentTypeDecodeError::UnknownCommitmentType(id)),
         }
     }
@@ -305,25 +308,25 @@ impl Decodable for CommitmentType {
 //     }
 // }
 
-// wrap_fixed_bytes!(
-//     extra_derives: [],
-//     pub struct IrysTxId<32>;
-// );
+wrap_fixed_bytes!(
+    extra_derives: [],
+    pub struct IrysTxId<32>;
+);
 
-// // from storage/codecs/src/lib.rs, line 328, impl_compact_for_wrapped_bytes! macro
-// // this is done "manually" here to prevent acyclic deps, which is why these structs are defined here in the first place...
-// impl Compact for IrysTxId {
-//     #[inline]
-//     fn to_compact<B>(&self, buf: &mut B) -> usize
-//     where
-//         B: bytes::BufMut + AsMut<[u8]>,
-//     {
-//         self.0.to_compact(buf)
-//     }
+// from storage/codecs/src/lib.rs, line 328, impl_compact_for_wrapped_bytes! macro
+// this is done "manually" here to prevent acyclic deps, which is why these structs are defined here in the first place...
+impl Compact for IrysTxId {
+    #[inline]
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.0.to_compact(buf)
+    }
 
-//     #[inline]
-//     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-//         let (v, buf) = <[u8; core::mem::size_of::<IrysTxId>()]>::from_compact(buf, len);
-//         (Self::from(v), buf)
-//     }
-// }
+    #[inline]
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (v, buf) = <[u8; core::mem::size_of::<IrysTxId>()]>::from_compact(buf, len);
+        (Self::from(v), buf)
+    }
+}

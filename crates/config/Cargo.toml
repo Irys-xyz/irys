@@ -10,8 +10,6 @@ test-utils = ["irys-types/test-utils"]
 [dependencies]
 irys-types.workspace = true
 eyre.workspace = true
-irys-primitives.workspace = true
-once_cell.workspace = true
 tracing.workspace = true
 serde.workspace = true
 toml.workspace = true

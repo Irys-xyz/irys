@@ -1,6 +1,7 @@
 use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
@@ -9,7 +10,6 @@ use irys_database::tables::IngressProofs;
 use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
-use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};

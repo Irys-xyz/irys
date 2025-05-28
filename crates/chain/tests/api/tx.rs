@@ -3,16 +3,16 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_database::database;
+use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse,
     NodeConfig, H256,
 };
 use reth_db::Database;
-use reth_primitives::GenesisAccount;
 use tokio::time::Duration;
 use tracing::{error, info};
 

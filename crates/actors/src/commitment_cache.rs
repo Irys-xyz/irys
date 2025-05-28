@@ -18,11 +18,11 @@ use crate::CommitmentStateReadGuard;
 pub enum CommitmentCacheMessage {
     GetCommitmentStatus {
         commitment_tx: CommitmentTransaction,
-        response: oneshot::Sender<CommitmentStatus>,
+        response: oneshot::Sender<CommitmentCacheStatus>,
     },
     AddCommitment {
         commitment_tx: CommitmentTransaction,
-        response: oneshot::Sender<CommitmentStatus>,
+        response: oneshot::Sender<CommitmentCacheStatus>,
     },
     RollbackCommitments {
         commitment_txs: H256List,
@@ -37,7 +37,7 @@ pub enum CommitmentCacheMessage {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum CommitmentStatus {
+pub enum CommitmentCacheStatus {
     Accepted,    // The commitment is valid and was added to the cache
     Unknown,     // The commitment is unknown to the cache & has no status
     Unsupported, // The commitment is an unsupported type (pledge/unpledge)
@@ -73,7 +73,10 @@ impl CommitmentCacheInner {
     }
 
     /// Checks and returns the status of a commitment transaction
-    pub fn get_commitment_status(&self, commitment_tx: CommitmentTransaction) -> CommitmentStatus {
+    pub fn get_commitment_status(
+        &self,
+        commitment_tx: CommitmentTransaction,
+    ) -> CommitmentCacheStatus {
         debug!("GetCommitmentStatus message received");
 
         let commitment_type = commitment_tx.commitment_type;
@@ -89,7 +92,7 @@ impl CommitmentCacheInner {
                 "CommitmentStatus is Rejected: unsupported type: {:?}",
                 commitment_type
             );
-            return CommitmentStatus::Unsupported;
+            return CommitmentCacheStatus::Unsupported;
         }
 
         // Check if we have commitments for this miner address
@@ -101,29 +104,29 @@ impl CommitmentCacheInner {
                 if let Some(commitments) = &commitments {
                     // Check for duplicate stake transaction
                     if commitments.stake.as_ref().is_some_and(|s| s.id == txid) {
-                        CommitmentStatus::Accepted
+                        CommitmentCacheStatus::Accepted
                     } else {
-                        CommitmentStatus::Unknown
+                        CommitmentCacheStatus::Unknown
                     }
                 } else {
                     // No commitments for this address yet
-                    CommitmentStatus::Unknown
+                    CommitmentCacheStatus::Unknown
                 }
             }
             CommitmentType::Pledge => {
                 if let Some(commitments) = &commitments {
                     // Check for duplicate pledge transaction
                     if commitments.pledges.iter().any(|p| p.id == txid) {
-                        CommitmentStatus::Accepted
+                        CommitmentCacheStatus::Accepted
                     } else if commitments.stake.is_none() {
                         // Require existing stake for pledges
-                        CommitmentStatus::Unstaked
+                        CommitmentCacheStatus::Unstaked
                     } else {
-                        CommitmentStatus::Unknown
+                        CommitmentCacheStatus::Unknown
                     }
                 } else {
                     // No commitments for this address, so no stake exists
-                    CommitmentStatus::Unstaked
+                    CommitmentCacheStatus::Unstaked
                 }
             }
             _ => unreachable!(), // We already handled unsupported types
@@ -134,14 +137,17 @@ impl CommitmentCacheInner {
     }
 
     /// Adds a new commitment transaction to the cache and validates its acceptance
-    pub fn add_commitment(&mut self, commitment_tx: CommitmentTransaction) -> CommitmentStatus {
+    pub fn add_commitment(
+        &mut self,
+        commitment_tx: CommitmentTransaction,
+    ) -> CommitmentCacheStatus {
         debug!("AddCommitment message received");
         let signer = &commitment_tx.signer;
         let tx_type = commitment_tx.commitment_type;
 
         // Early return for unsupported commitment types
         if !matches!(tx_type, CommitmentType::Stake | CommitmentType::Pledge) {
-            return CommitmentStatus::Unsupported;
+            return CommitmentCacheStatus::Unsupported;
         }
 
         // Check if address is already staked in current epoch
@@ -156,7 +162,7 @@ impl CommitmentCacheInner {
             // Check existing commitments in epoch service
             if is_staked_in_epoch {
                 // Already staked in current epoch, no need to add again
-                return CommitmentStatus::Accepted;
+                return CommitmentCacheStatus::Accepted;
             }
 
             // Get or create miner commitments entry
@@ -167,12 +173,12 @@ impl CommitmentCacheInner {
 
             // Check if already has pending stake
             if miner_commitments.stake.is_some() {
-                return CommitmentStatus::Accepted;
+                return CommitmentCacheStatus::Accepted;
             }
 
             // Store new stake commitment
             miner_commitments.stake = Some(commitment_tx.clone());
-            return CommitmentStatus::Accepted;
+            return CommitmentCacheStatus::Accepted;
         } else {
             // Handle pledge commitments - only accept if address has a stake
 
@@ -185,7 +191,7 @@ impl CommitmentCacheInner {
                     .or_insert_with(MinerCommitments::default);
 
                 miner_commitments.pledges.push(commitment_tx.clone());
-                return CommitmentStatus::Accepted;
+                return CommitmentCacheStatus::Accepted;
             }
 
             // Next check if there's a pending stake in the local cache
@@ -193,12 +199,12 @@ impl CommitmentCacheInner {
                 if miner_commitments.stake.is_some() {
                     // Has pending stake, can add pledge
                     miner_commitments.pledges.push(commitment_tx.clone());
-                    return CommitmentStatus::Accepted;
+                    return CommitmentCacheStatus::Accepted;
                 }
             }
 
             // No stake found, reject pledge
-            return CommitmentStatus::Unstaked;
+            return CommitmentCacheStatus::Unstaked;
         }
     }
 

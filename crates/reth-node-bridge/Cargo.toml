@@ -4,34 +4,24 @@ name = "irys-reth-node-bridge"
 version = "0.1.0"
 
 [dependencies]
-irys-packing.workspace = true
 irys-storage.workspace = true
 irys-database.workspace = true
 irys-types.workspace = true
 tracing.workspace = true
-futures.workspace = true
-clap = "4.5.4"
 eyre = "0.6.12"
-futures-util.workspace = true
-jsonrpsee = { version = "0.24", features = ["client", "macros", "server"] }
-jsonrpsee-core = "0.24"
-jsonrpsee-types = "0.24"
-serde = "1.0.203"
-serde_json = "1.0.117"
-strum = "0.26.3"
-thiserror = "1.0.61"
 tokio = "1.37.0"
-tokio-stream.workspace = true
 reth.workspace = true
 reth-db.workspace = true
 reth-chainspec.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
-irys-primitives.workspace = true
-# revm-primitives.workspace = true
+reth-tasks.workspace = true
 irys-reth.workspace = true
 reth-node-ethereum.workspace = true
-
-[features]
-default = ["jemalloc"]
-jemalloc = []
+reth-e2e-test-utils.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+reth-node-api.workspace = true
+reth-rpc-eth-api.workspace = true
+reth-payload-builder.workspace = true

@@ -1,24 +1,5 @@
 use actix::Addr;
 use base58::ToBase58;
-use irys_actors::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::{MempoolService, TxIngressMessage},
-    vdf_service::VdfServiceMessage,
-};
-use irys_p2p::PeerListServiceFacade;
-use irys_types::block::CombinedBlockHeader;
-
-use irys_p2p::fast_forward_vdf_steps_from_block;
-pub use irys_reth_node_bridge::node::{
-    RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
-};
-
-use irys_api_client::{ApiClient, IrysApiClient};
-use irys_types::{
-    BlockIndexItem, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionResponse,
-    PeerAddress, H256,
-};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -32,6 +13,22 @@ use tokio::{
     time::{sleep, Duration},
 };
 use tracing::{error, info, warn};
+
+use irys_actors::{
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    broadcast_mining_service::BroadcastMiningSeed,
+    mempool_service::{MempoolService, TxIngressMessage},
+    vdf_service::VdfServiceMessage,
+};
+use irys_api_client::{ApiClient, IrysApiClient};
+use irys_p2p::fast_forward_vdf_steps_from_block;
+use irys_p2p::PeerListServiceFacade;
+pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
+use irys_types::block::CombinedBlockHeader;
+use irys_types::{
+    BlockIndexItem, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionResponse,
+    PeerAddress, H256,
+};
 
 pub async fn client_request(
     url: &str,

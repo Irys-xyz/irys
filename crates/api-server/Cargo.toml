@@ -12,6 +12,8 @@ irys-storage.workspace = true
 irys-types.workspace = true
 irys-p2p.workspace = true
 
+reth.workspace = true
+reth-db.workspace = true
 awc.workspace = true
 socket2 = "0.5"
 base58.workspace = true

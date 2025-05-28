@@ -5,13 +5,17 @@ use crate::{
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
     vdf_service::VdfStepsReadGuard,
-    CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
+    CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
+    GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
 use base58::ToBase58;
 use eyre::eyre;
-use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, SystemLedger};
+use irys_database::{
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
+    SystemLedger,
+};
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
@@ -278,7 +282,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .await
                             .expect("to receive CommitmentStatus from AddCommitment message");
 
-                        if matches!(status, CommitmentStatus::Accepted) == false {
+                        if matches!(status, CommitmentCacheStatus::Accepted) == false {
                             // Something went wrong with the commitments validation, it's time to roll back
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             let _ = commitment_cache_sender.send(
@@ -328,7 +332,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                             // Reject the entire epoch block if any commitment is invalid
                             // This ensures only verified commitments are finalized at epoch boundaries
-                            if status != CommitmentStatus::Accepted {
+                            if status != CommitmentCacheStatus::Accepted {
                                 return Err(eyre::eyre!("Invalid commitments in epoch block"));
                             }
                         }

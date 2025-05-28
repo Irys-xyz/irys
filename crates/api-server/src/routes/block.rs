@@ -5,7 +5,7 @@ use actix_web::{
     Result,
 };
 use base58::FromBase58 as _;
-use irys_database::database;
+use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
 use reth::{providers::BlockReader, revm::primitives::alloy_primitives::TxHash};
 use reth_db::Database;
@@ -96,7 +96,7 @@ fn get_block_by_hash(
         .body
         .transactions
         .iter()
-        .map(|tx| tx.hash())
+        .map(|tx| tx.hash().clone())
         .collect::<Vec<TxHash>>();
 
     let cbh = CombinedBlockHeader {

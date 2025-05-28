@@ -1,5 +1,6 @@
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
@@ -9,11 +10,11 @@ use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
+use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
-use reth_primitives::{irys_primitives::precompile::IrysPrecompileOffsets, GenesisAccount};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -86,16 +87,13 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
     let wallet = EthereumWallet::from(signer);
 
-    let alloy_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http(
-            format!(
-                "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.node_config.http.bind_port
-            )
-            .parse()?,
-        );
+    let alloy_provider = ProviderBuilder::new().wallet(wallet).on_http(
+        format!(
+            "http://127.0.0.1:{}/v1/execution-rpc",
+            node.node_ctx.config.node_config.http.bind_port
+        )
+        .parse()?,
+    );
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);

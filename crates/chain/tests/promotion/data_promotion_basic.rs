@@ -13,7 +13,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
-use reth_primitives::GenesisAccount;
+use alloy_genesis::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};

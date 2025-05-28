@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_api_client::ApiClient;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::reth_db::Database;
 use irys_database::{block_header_by_hash, insert_block_header};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;

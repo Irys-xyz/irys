@@ -1,12 +1,16 @@
+use alloy_rpc_types_engine::PayloadAttributes;
+use irys_database::db::RethDbWrapper;
 use irys_reth::{IrysEthTransactionValidator, IrysEthereumNode, SystemTxsCoinbaseTipOrdering};
 use irys_storage::reth_provider::IrysRethProvider;
-use irys_types::{Address, Config};
+use irys_types::Address;
 use reth::{
     args::DatabaseArgs,
     consensus::{ConsensusError, FullConsensus},
     network::NetworkHandle,
+    payload::EthPayloadBuilderAttributes,
     primitives::EthPrimitives,
     prometheus_exporter::install_prometheus_recorder,
+    revm::primitives::B256,
     rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
     transaction_pool::{
@@ -20,27 +24,30 @@ use reth_node_builder::{
     NodeTypesWithDBAdapter,
 };
 use reth_provider::providers::BlockchainProvider;
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, fmt::Formatter, sync::Arc};
+use std::{fmt::Debug, ops::Deref};
 
-pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddons>;
+pub use reth_e2e_test_utils::node::NodeTestContext;
+
+pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
 pub type RethNodeAdapter = NodeAdapter<
     FullNodeTypesAdapter<
         IrysEthereumNode,
-        Arc<DatabaseEnv>,
-        BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, Arc<DatabaseEnv>>>,
+        RethDbWrapper,
+        BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
     >,
     reth_node_builder::components::Components<
         FullNodeTypesAdapter<
             IrysEthereumNode,
-            Arc<DatabaseEnv>,
-            BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, Arc<DatabaseEnv>>>,
+            RethDbWrapper,
+            BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
         >,
         NetworkHandle,
         reth::transaction_pool::Pool<
             TransactionValidationTaskExecutor<
                 IrysEthTransactionValidator<
-                    BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, Arc<DatabaseEnv>>>,
+                    BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
             >,
@@ -52,9 +59,43 @@ pub type RethNodeAdapter = NodeAdapter<
     >,
 >;
 
-pub type RethNodeAddons = reth_node_ethereum::node::EthereumAddOns<RethNodeAdapter>;
+pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<RethNodeAdapter>;
 
-pub type RethNode = FullNode<RethNodeAdapter, RethNodeAddons>;
+pub type RethNode = FullNode<RethNodeAdapter, RethNodeAddOns>;
+
+pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
+    let attributes = PayloadAttributes {
+        timestamp,
+        prev_randao: B256::ZERO,
+        suggested_fee_recipient: Address::ZERO,
+        withdrawals: Some(vec![]),
+        parent_beacon_block_root: Some(B256::ZERO),
+    };
+    EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+}
+
+#[derive(Clone)]
+pub struct RethNodeProvider(pub Arc<RethNode>);
+
+impl Debug for RethNodeProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RethNodeProvider")
+    }
+}
+
+impl Deref for RethNodeProvider {
+    type Target = Arc<RethNode>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<RethNodeProvider> for RethNode {
+    fn from(val: RethNodeProvider) -> Self {
+        val.0.as_ref().clone()
+    }
+}
 
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
@@ -93,7 +134,8 @@ pub async fn run_node(
     let db_path = data_dir.db();
 
     tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-    let database = Arc::new(init_db(db_path.clone(), db_args.database_args())?.with_metrics());
+    let database =
+        RethDbWrapper::new(init_db(db_path.clone(), db_args.database_args())?.with_metrics());
 
     if random_ports {
         reth_config = reth_config.with_unused_ports();

@@ -1,6 +1,27 @@
 use std::{future::Future, pin::pin};
 
+use reth::tasks::TaskManager;
 use tracing::trace;
+
+/// Runs the given future to completion or until a critical task panicked.
+///
+/// Returns the error if a task panicked, or the given future returned an error.
+pub async fn run_to_completion_or_panic<F, E>(tasks: &mut TaskManager, fut: F) -> Result<(), E>
+where
+    F: Future<Output = Result<(), E>>,
+    E: Send + Sync + From<reth_tasks::PanickedTaskError> + 'static,
+{
+    {
+        let fut = pin!(fut);
+        tokio::select! {
+            err = tasks => {
+                return Err(err.into())
+            },
+            res = fut => res?,
+        }
+    }
+    Ok(())
+}
 
 /// Runs the future to completion or until:
 /// - `ctrl-c` is received.

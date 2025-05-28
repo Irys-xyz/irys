@@ -3,14 +3,15 @@ use actix::{
     SystemService, WrapFuture,
 };
 use eyre::{eyre, OptionExt};
-use irys_database::database;
-use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
+use irys_database::{database, db::IrysDatabaseExt as _};
+use irys_reth_node_bridge::{
+    ext::IrysRethTestContextExt as _, new_reth_context, node::RethNodeProvider,
+};
 use irys_types::{DatabaseProvider, RethPeerInfo, H256};
 use reth::{
     network::{NetworkInfo as _, Peers},
-    primitives::BlockNumberOrTag,
     revm::primitives::B256,
-    rpc::eth::EthApiServer as _,
+    rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
 };
 use reth_db::Database as _;
 use tracing::{debug, error, info};
@@ -166,12 +167,11 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                     &head_hash, &confirmed_hash, &finalized_hash
                 );
 
-                let context = RethNodeContext::new(handle.into())
+                let context = new_reth_context(handle.into())
                     .await
                     .map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
                 context
-                    .engine_api
                     .update_forkchoice_full(head_hash, confirmed_hash, finalized_hash)
                     .await
                     .map_err(|e| {

@@ -27,7 +27,7 @@ irys-price-oracle.workspace = true
 irys-p2p.workspace = true
 irys-api-client.workspace = true
 irys-reward-curve.workspace = true
-
+irys-primitives.workspace = true
 base58.workspace = true
 color-eyre.workspace = true
 tracing-error.workspace = true
@@ -56,6 +56,17 @@ k256 = { version = "0.13", default-features = false, features = [
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-provider.workspace = true
 core_affinity = "0.8.1"
+reth-db.workspace = true
+reth.workspace = true
+alloy-core.workspace = true
+alloy-genesis.workspace = true
+alloy-eips.workspace = true
+alloy-network.workspace = true
+alloy-signer-local.workspace = true
+alloy-sol-types.workspace = true
+reth-tracing.workspace = true
+alloy-consensus.workspace = true
+alloy-contract.workspace = true
 
 [dev-dependencies]
 assert_matches = "1.5.0"

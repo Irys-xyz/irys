@@ -45,6 +45,9 @@ use irys_p2p::{
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::node::RethNode;
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
+use irys_reth_node_bridge::signal::{
+    run_to_completion_or_panic, run_until_ctrl_c_or_channel_message,
+};
 use irys_reward_curve::HalvingCurve;
 use irys_storage::StorageModulesReadGuard;
 use irys_storage::{
@@ -60,10 +63,8 @@ use irys_types::{
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
-    core::irys_ext::NodeExitReason,
     tasks::{TaskExecutor, TaskManager},
 };
-use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::Database as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
@@ -195,10 +196,10 @@ async fn start_reth_node(
     task_executor: TaskExecutor,
     chainspec: ChainSpec,
     config: Config,
-    sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
+    sender: oneshot::Sender<RethNode>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
-) -> eyre::Result<NodeExitReason> {
+) -> eyre::Result<()> {
     let random_ports = config.node_config.reth.use_random_ports;
     let node_handle = match irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
@@ -509,8 +510,7 @@ impl IrysNode {
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<()>(1);
         let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel(1);
-        let (reth_handle_sender, reth_handle_receiver) =
-            oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
+        let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
 
         let irys_provider = irys_storage::reth_provider::create_provider();
@@ -593,7 +593,7 @@ impl IrysNode {
         mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
         vdf_shutdown_sender: mpsc::Sender<()>,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
+        reth_handle_receiver: oneshot::Receiver<RethNode>,
         irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
         irys_provider: &Arc<RwLock<Option<IrysRethProviderInner>>>,
         task_exec: TaskExecutor,
@@ -689,7 +689,7 @@ impl IrysNode {
         config: Config,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<()>,
-        reth_handle_sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
+        reth_handle_sender: oneshot::Sender<RethNode>,
         actor_main_thread_handle: JoinHandle<RethNodeProvider>,
         irys_provider: IrysRethProvider,
         reth_chainspec: ChainSpec,
@@ -756,7 +756,7 @@ impl IrysNode {
         config: &Config,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
         vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
-        reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
+        reth_handle_receiver: oneshot::Receiver<RethNode>,
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
         irys_provider: IrysRethProvider,
@@ -1545,7 +1545,7 @@ fn init_reth_service(
 }
 
 async fn init_reth_db(
-    reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
+    reth_handle_receiver: oneshot::Receiver<RethNode>,
 ) -> Result<(RethNodeProvider, irys_database::db::RethDbWrapper), eyre::Error> {
     let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
     let reth_db = reth_node.provider.database.db.clone();

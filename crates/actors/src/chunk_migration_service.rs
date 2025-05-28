@@ -2,6 +2,7 @@ use actix::prelude::*;
 use eyre::eyre;
 use irys_database::{
     cached_chunk_by_chunk_offset,
+    db::IrysDatabaseExt as _,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     BlockIndex,
 };

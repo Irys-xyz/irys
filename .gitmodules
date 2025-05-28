@@ -1,6 +1,3 @@
-[submodule "ext/revm"]
-	path = ext/revm
-	url = https://github.com/Irys-xyz/revm
 [submodule "ext/reth"]
 	path = ext/reth
 	url = https://github.com/Irys-xyz/reth

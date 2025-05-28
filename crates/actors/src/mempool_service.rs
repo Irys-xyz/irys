@@ -1,7 +1,7 @@
 use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
-use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
+use crate::{CommitmentCacheMessage, CommitmentCacheStatus, CommitmentStateReadGuard};
 use actix::{
     Actor, Addr, Context, Handler, MailboxError, Message, MessageResponse, Supervised,
     SystemService,
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
-use irys_database::db::RethDbWrapper;
+use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _, RethDbWrapper};
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::db_cache::DataRootLRUEntry;
 use irys_database::submodule::get_data_size_by_data_root;
@@ -286,7 +286,10 @@ impl MempoolService {
         Ok(rx.recv().expect("Failed to receive result from thread"))
     }
 
-    fn get_commitment_status(&self, commitment_tx: &CommitmentTransaction) -> CommitmentStatus {
+    fn get_commitment_status(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> CommitmentCacheStatus {
         // Check if already staked in the blockchain
         let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
 
@@ -294,7 +297,7 @@ impl MempoolService {
         // Only pledges require special validation when not already staked
         let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
         if !is_pledge || is_staked {
-            return CommitmentStatus::Accepted;
+            return CommitmentCacheStatus::Accepted;
         }
 
         // For unstaked pledges, validate against cache and pending transactions
@@ -314,17 +317,17 @@ impl MempoolService {
             .unwrap();
 
         // Reject unsupported commitment types
-        if matches!(cache_status, CommitmentStatus::Unsupported) {
+        if matches!(cache_status, CommitmentCacheStatus::Unsupported) {
             warn!(
                 "Commitment is unsupported: {}",
                 commitment_tx.id.0.to_base58()
             );
-            return CommitmentStatus::Unsupported;
+            return CommitmentCacheStatus::Unsupported;
         }
 
         // For unstaked addresses, check for pending stake transactions
         // For unstaked addresses, check for pending stake transactions
-        if matches!(cache_status, CommitmentStatus::Unstaked) {
+        if matches!(cache_status, CommitmentCacheStatus::Unstaked) {
             // Get pending transactions for this address
             if let Some(pending) = self.valid_commitment_tx.get(&commitment_tx.signer) {
                 // Check if there's at least one pending stake transaction
@@ -332,7 +335,7 @@ impl MempoolService {
                     .iter()
                     .any(|c| c.commitment_type == CommitmentType::Stake)
                 {
-                    return CommitmentStatus::Accepted;
+                    return CommitmentCacheStatus::Accepted;
                 }
             }
 
@@ -341,11 +344,11 @@ impl MempoolService {
                 "Pledge Commitment is unstaked: {}",
                 commitment_tx.id.0.to_base58()
             );
-            return CommitmentStatus::Unstaked;
+            return CommitmentCacheStatus::Unstaked;
         }
 
         // All other cases are valid
-        CommitmentStatus::Accepted
+        CommitmentCacheStatus::Accepted
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -639,7 +642,7 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
 
         // Check pending commitments and cached commitments and active commitments
         let commitment_status = self.get_commitment_status(&commitment_tx);
-        if commitment_status == CommitmentStatus::Accepted {
+        if commitment_status == CommitmentCacheStatus::Accepted {
             // Validate tx signature
             self.validate_signature(&commitment_tx)?;
 
@@ -687,7 +690,7 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
 
             Ok(())
         } else {
-            if commitment_status == CommitmentStatus::Unstaked {
+            if commitment_status == CommitmentCacheStatus::Unstaked {
                 // For unstaked pledges, we cache them in a 2-level LRU structure:
                 // Level 1: Keyed by signer address (allows tracking multiple addresses)
                 // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
