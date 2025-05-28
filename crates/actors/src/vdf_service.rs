@@ -25,6 +25,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::block_index_service::BlockIndexReadGuard;
+use crate::broadcast_mining_service::BroadcastMiningSeed;
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -368,29 +369,30 @@ pub fn vdf_steps_are_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
     vdf_steps_guard: VdfStepsReadGuard,
-) -> eyre::Result<()> {
+) -> eyre::Result<Vec<BroadcastMiningSeed>> {
     info!(
         "Checking seed {:?} reset_seed {:?}",
         vdf_info.prev_output, vdf_info.seed
     );
 
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
-    let end: u64 = vdf_info.global_step_number;
+    // let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
+    // let end: u64 = vdf_info.global_step_number;
 
-    match vdf_steps_guard.read().get_steps(ii(start, end)) {
-        Ok(steps) => {
-            tracing::debug!("Validating VDF steps from VdfStepsReadGuard!");
-            if steps != vdf_info.steps {
-                warn_mismatches(&steps, &vdf_info.steps);
-                return Err(eyre::eyre!("VDF steps are invalid!"));
-            } else {
-                // Do not need to check last step checkpoints here, were checked in pre validation
-                return Ok(())
-            }
-        },
-        Err(err) =>
-            tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)
-    };
+    // TODO: the steps are going to be populated by this check, can't check it here
+    // match vdf_steps_guard.read().get_steps(ii(start, end)) {
+    //     Ok(steps) => {
+    //         tracing::debug!("Validating VDF steps from VdfStepsReadGuard!");
+    //         if steps != vdf_info.steps {
+    //             warn_mismatches(&steps, &vdf_info.steps);
+    //             return Err(eyre::eyre!("VDF steps are invalid!"));
+    //         } else {
+    //             // Do not need to check last step checkpoints here, were checked in pre validation
+    //             return Ok(())
+    //         }
+    //     },
+    //     Err(err) =>
+    //         tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)
+    // };
 
     let reset_seed = vdf_info.seed;
 
@@ -414,25 +416,22 @@ pub fn vdf_steps_are_valid(
         .num_threads(config.parallel_verification_thread_limit)
         .build()
         .unwrap();
-    let test: Vec<(H256, Option<H256List>)> = pool.install(|| {
+
+    // Vec of Seed, Checkpoints (seed is the last checkpoint)
+    let test: Vec<(H256, Option<H256List>, u64)> = pool.install(|| {
         (0..steps.len() - 1)
             .into_par_iter()
             .map(|i| {
                 let mut hasher = Sha256::new();
-                let mut salt = U256::from(step_number_to_salt_number(
-                    config,
-                    start_step_number + i as u64,
-                ));
+                let step_number = start_step_number + i as u64;
+                let mut salt = U256::from(step_number_to_salt_number(config, step_number));
                 let mut seed = steps[i];
                 let mut checkpoints: Vec<H256> =
                     vec![H256::default(); config.num_checkpoints_in_vdf_step];
-                if start_step_number + i as u64 > 0
-                    && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
-                {
+                if step_number > 0 && (step_number) % config.reset_frequency as u64 == 0 {
                     info!(
                         "Applying reset seed {:?} to step number {}",
-                        reset_seed,
-                        start_step_number + i as u64
+                        reset_seed, step_number
                     );
                     seed = apply_reset_seed(seed, reset_seed);
                 }
@@ -446,19 +445,32 @@ pub fn vdf_steps_are_valid(
                 );
                 (
                     *checkpoints.last().unwrap(),
-                    if i == steps.len() - 2 {
-                        // If this is the last step, return the last checkpoint
-                        Some(H256List(checkpoints))
-                    } else {
-                        // Otherwise, return just the seed for the next step
-                        None
-                    },
+                    Some(H256List(checkpoints)),
+                    // if i == steps.len() - 2 {
+                    //     // If this is the last step, return the last checkpoint
+                    //     Some(H256List(checkpoints))
+                    // } else {
+                    //     // Otherwise, return just the seed for the next step
+                    //     None
+                    // },
+                    step_number,
                 )
             })
             .collect()
     });
 
     let last_step_checkpoints = test.last().unwrap().1.clone();
+    let res = test
+        .iter()
+        .enumerate()
+        .map(
+            |(index, (seed, checkpoints, step_number))| BroadcastMiningSeed {
+                seed: Seed(*seed),
+                checkpoints: checkpoints.clone().unwrap_or_default(),
+                global_step: *step_number,
+            },
+        )
+        .collect();
     let test: H256List = H256List(test.into_iter().map(|par| par.0).collect());
 
     let steps_are_valid = test == vdf_info.steps;
@@ -481,7 +493,7 @@ pub fn vdf_steps_are_valid(
         return Err(eyre::eyre!("VDF last step checkpoints are invalid!"));
     }
 
-    Ok(())
+    Ok(res)
 }
 
 pub mod test_helpers {

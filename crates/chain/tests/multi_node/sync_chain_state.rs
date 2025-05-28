@@ -517,16 +517,6 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     .await
     .expect("expected many mined blocks");
 
-    // TODO WE could possibly add a check here to see if genesis really did mine the block and the index height has increased...
-    let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.http.bind_port),
-        0,
-        (required_blocks_height + 1 + additional_blocks_for_gossip_test)
-            .try_into()
-            .expect("expected required_blocks_height to be valid u64"),
-    )
-    .await;
-
     let result_peer1 = poll_until_fetch_at_block_index_height(
         "peer1".to_owned(),
         &ctx_peer1_node.node_ctx,
@@ -534,6 +524,16 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
         2000,
+    )
+    .await;
+
+    // TODO WE could possibly add a check here to see if genesis really did mine the block and the index height has increased...
+    let mut result_genesis = block_index_endpoint_request(
+        &local_test_url(&testnet_config_genesis.http.bind_port),
+        0,
+        (required_blocks_height + 1 + additional_blocks_for_gossip_test)
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
     )
     .await;
 
@@ -567,6 +567,7 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await
         .expect("expected a valid json deserialize");
 
+    tracing::debug!("{}, {}", block_index_genesis.len(), block_index_peer1.len());
     assert_eq!(
         block_index_genesis, block_index_peer1,
         "expecting json from genesis node {:?} to match json from peer1 {:?}",

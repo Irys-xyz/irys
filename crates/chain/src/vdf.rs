@@ -15,7 +15,7 @@ pub fn run_vdf(
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
-    mut new_seed_listener: Receiver<BroadcastMiningSeed>,
+    mut fast_forward_listener: Receiver<BroadcastMiningSeed>,
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
@@ -44,7 +44,7 @@ pub fn run_vdf(
         };
 
         // check for VDF fast forward step
-        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
+        if let Ok(proposed_ff_to_mining_seed) = fast_forward_listener.try_recv() {
             // if the step number is ahead of local nodes vdf steps
             if global_step_number < proposed_ff_to_mining_seed.global_step {
                 debug!(
@@ -53,6 +53,20 @@ pub fn run_vdf(
                 );
                 hash = proposed_ff_to_mining_seed.seed.0;
                 global_step_number = proposed_ff_to_mining_seed.global_step;
+
+                atomic_vdf_global_step.store(
+                    proposed_ff_to_mining_seed.global_step,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+
+                if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(
+                    proposed_ff_to_mining_seed.seed.clone(),
+                )) {
+                    panic!("Unable to send new Seed to VDF service: {:?}", e);
+                }
+
+                broadcast_mining_service.do_send(proposed_ff_to_mining_seed);
+                debug!("VDF fast forwarded");
             } else {
                 debug!(
                     "Fastforward Step {} is not ahead of {}",
