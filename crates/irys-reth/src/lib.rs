@@ -2331,11 +2331,13 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
-        // Setup wallets and nodes (same block producer for both)
-        let wallets = Wallet::new(1).wallet_gen();
-        let wallets = EthereumWallet::from(wallets[0].clone()).default_signer();
+        // Setup wallets and nodes
+        let wallets = Wallet::new(2).wallet_gen();
+        let block_producer_a = EthereumWallet::from(wallets[0].clone()).default_signer();
+        let block_producer_b = EthereumWallet::from(wallets[1].clone()).default_signer();
+        assert_ne!(block_producer_b.address(), block_producer_a.address());
         let (mut nodes, _tasks, ..) = setup_irys_reth(
-            &[wallets.address(), wallets.address()],
+            &[block_producer_a.address(), block_producer_b.address()],
             custom_chain(),
             false,
             eth_payload_attributes,
@@ -2343,21 +2345,25 @@ mod tests {
         .await?;
         let mut node_b = nodes.pop().unwrap();
         let mut node_a = nodes.pop().unwrap();
+        let reward_address = Address::random();
 
         // Node A: advance 3 blocks, 2 system txs per block
-        let _block_hashes_a = advance_blocks(&mut node_a, 1, 3, 2, &wallets).await?;
+        let _block_hashes_a =
+            advance_blocks(&mut node_a, reward_address, 1, 3, 2, &block_producer_a).await?;
         let consistent_provider_a = node_a.inner.provider.consistent_provider().unwrap();
         let account_a_on_fork = consistent_provider_a
-            .basic_account(&wallets.address())
+            .basic_account(&block_producer_a.address())
             .unwrap()
             .unwrap();
+        let node_a_rewrad_balance = get_balance(&node_a.inner, reward_address);
         // Node B: advance 4 blocks, 1 system tx per block
-        let _block_hashes_b = advance_blocks(&mut node_b, 1, 4, 1, &wallets).await?;
+        let _block_hashes_b =
+            advance_blocks(&mut node_b, reward_address, 1, 4, 1, &block_producer_b).await?;
 
         // Record Node B's state after 4 blocks
         let consistent_provider_b = node_b.inner.provider.consistent_provider().unwrap();
         let account_b = consistent_provider_b
-            .basic_account(&wallets.address())
+            .basic_account(&block_producer_b.address())
             .unwrap()
             .unwrap();
         let best_block_b = consistent_provider_b.best_block_number().unwrap();
@@ -2365,6 +2371,7 @@ mod tests {
             .block_hash(best_block_b)
             .unwrap()
             .unwrap();
+        let node_b_rewrad_balance = get_balance(&node_b.inner, reward_address);
 
         // Node A switches forkchoice to Node B's latest block
         node_a.sync_to(block_hash_b).await?;
@@ -2372,32 +2379,36 @@ mod tests {
         // Node A's state should match Node B's
         let consistent_provider_a = node_a.inner.provider.consistent_provider().unwrap();
         let account_a = consistent_provider_a
-            .basic_account(&wallets.address())
+            .basic_account(&block_producer_a.address())
             .unwrap()
             .unwrap();
         let best_block_a = consistent_provider_a.best_block_number().unwrap();
         let block_hash_a = consistent_provider_a.block_hash(4).unwrap().unwrap();
+        let node_a_rewrad_balance_post_switch = get_balance(&node_a.inner, reward_address);
         assert_eq!(best_block_b, 4);
         assert_eq!(best_block_a, 4);
-        assert_eq!(block_hash_a, block_hash_b);
+        assert_eq!(
+            block_hash_a, block_hash_b,
+            "block hashes after sync must be equal"
+        );
         assert_ne!(
-            account_a_on_fork.balance, account_a.balance,
-            "balances for account a pre fork and post fork should be different!"
+            node_a_rewrad_balance, node_b_rewrad_balance,
+            "initial rewards differ on forks produced by each chain"
+        );
+        assert_eq!(
+            node_a_rewrad_balance_post_switch, node_b_rewrad_balance,
+            "post FCU, node a has the same state as node b"
         );
         assert_ne!(
             account_a_on_fork.nonce, account_a.nonce,
             "balances for account a pre fork and post fork should be different!"
         );
         assert_eq!(
-            account_a.balance, account_b.balance,
-            "Balance should match after forkchoice switch"
+            account_b.nonce, 4,
+            "Nonces should be different for each block producer account"
         );
         assert_eq!(
-            account_a.nonce, account_b.nonce,
-            "Nonce should match after forkchoice switch"
-        );
-        assert_eq!(
-            account_a.nonce, 4,
+            account_a.nonce, 0,
             "Nonce should match after forkchoice switch"
         );
         assert_eq!(
@@ -2480,7 +2491,6 @@ mod tests {
                 )
                 .await?;
             parent_blockhash = new_blockhash;
-            // nonce += 1;
             block_hashes.push(new_blockhash);
         }
 
@@ -2593,6 +2603,7 @@ pub mod test_utils {
 
     pub async fn advance_blocks(
         node: &mut NodeHelperType<IrysEthereumNode>,
+        reward_to: Address,
         start_block: u64,
         num_blocks: u64,
         sys_txs_per_block: u64,
@@ -2610,7 +2621,7 @@ pub mod test_utils {
         let mut nonce = 0;
         for block_number in start_block..(start_block + num_blocks) {
             for _tx_idx in 0..sys_txs_per_block {
-                let system_tx = block_reward(wallets.address(), block_number, parent_blockhash);
+                let system_tx = block_reward(reward_to, block_number, parent_blockhash);
                 let system_tx_raw = compose_system_tx(nonce, 1, system_tx.clone());
                 nonce += 1;
                 let system_pooled_tx = sign_tx(system_tx_raw, wallets).await;
