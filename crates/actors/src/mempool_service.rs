@@ -1264,7 +1264,9 @@ impl Inner {
 
         // Process any chunks that arrived before their parent transaction
         // These were temporarily stored in the pending_chunks cache
-        if let Some(chunks_map) = mempool_state_write_guard.pending_chunks.pop(&tx.data_root) {
+        let option_chunks_map = mempool_state_write_guard.pending_chunks.pop(&tx.data_root);
+        drop(mempool_state_write_guard);
+        if let Some(chunks_map) = option_chunks_map {
             // Extract owned chunks from the map to process them
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
 
@@ -1289,7 +1291,6 @@ impl Inner {
                     .expect("pending chunks should be processed by the mempool");
             }
         }
-        drop(mempool_state_write_guard);
 
         // Gossip transaction
         let gossip_data = GossipData::Transaction(tx.clone());
