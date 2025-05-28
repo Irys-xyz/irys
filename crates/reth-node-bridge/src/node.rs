@@ -1,3 +1,4 @@
+use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{IrysEthTransactionValidator, IrysEthereumNode, SystemTxsCoinbaseTipOrdering};
@@ -24,10 +25,14 @@ use reth_node_builder::{
     NodeTypesWithDBAdapter,
 };
 use reth_provider::providers::BlockchainProvider;
+use reth_rpc_eth_api::EthApiServer as _;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
+use tracing::error;
 
 pub use reth_e2e_test_utils::node::NodeTestContext;
+
+use crate::{new_reth_context, unwind::unwind_to};
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
@@ -101,13 +106,12 @@ pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
-    // reth_config: NodeConfig<<IrysEthereumNode as NodeTypes>::ChainSpec>,
     provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
 ) -> eyre::Result<RethNodeHandle> {
     // let logs = LogArgs::default()
-    let mut reth_config = NodeConfig::new(chainspec);
+    let mut reth_config = NodeConfig::new(chainspec.clone());
 
     reth_config.network.discovery.disable_discovery = true;
     reth_config.rpc.http = true;
@@ -119,6 +123,8 @@ pub async fn run_node(
     reth_config.network.discovery.port = node_config.reth_peer_info.peering_tcp_addr.port();
     reth_config.datadir.datadir = node_config.reth_data_dir().into();
     reth_config.rpc.http_corsdomain = Some("*".to_string());
+    reth_config.engine.persistence_threshold = 0;
+    reth_config.engine.memory_block_buffer_target = 0;
 
     // if let Some(chain_spec) = self.command.chain_spec() {
     //     self.logs.log_file_directory =
@@ -142,12 +148,8 @@ pub async fn run_node(
     }
 
     let builder = NodeBuilder::new(reth_config)
-        .with_database(database)
-        .with_launch_context(task_executor);
-
-    // LAUNCHER
-
-    //let handle =
+        .with_database(database.clone())
+        .with_launch_context(task_executor.clone());
 
     let handle = builder
         .node(IrysEthereumNode {
@@ -156,12 +158,27 @@ pub async fn run_node(
         .launch_with_debug_capabilities()
         .await?;
 
+    let context = new_reth_context(handle.node.clone()).await?;
+
+    // check that the latest height lines up with the expected latest height from irys
+
+    let latest = context
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_number(BlockNumberOrTag::Latest, false)
+        .await?
+        .expect("latest block should be Some");
+
+    if latest.header.number > latest_block {
+        error!("\x1b[1;31m!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth head is {}, Irys head is {}\x1b[0m", &latest.header.number, &latest_block);
+        database.close(); // important! otherwise we get MDBX error 11
+        drop(context);
+        drop(handle);
+
+        unwind_to(node_config, chainspec.clone(), latest_block).await?;
+        return Err(eyre::eyre!("Unwound blocks"));
+    };
+
     Ok(handle)
-
-    // let NodeHandle {
-    //     node,
-    //     node_exit_future,
-    // } = handle;
-
-    // Ok(node)
 }

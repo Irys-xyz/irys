@@ -88,15 +88,21 @@ async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
     let (block_hash, block_number) = {
-        let payload = genctx.advance_block(/* vec![], eth_payload_attributes */).await?;
+        // make the node advance
+        let payload = genctx.advance_block_irys().await?;
+
         (payload.block().hash(), payload.block().number)
     };
 
-    genctx.assert_new_block2(block_hash, block_number).await?;
+    genctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
     p1ctx.update_forkchoice(block_hash, block_hash).await?;
 
-    p1ctx.assert_new_block2(block_hash, block_number).await?;
+    p1ctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
     // sleep(Duration::from_millis(2_000)).await;
 
@@ -191,11 +197,11 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
             prev_randao: B256::ZERO,
             suggested_fee_recipient: Address::ZERO,
             withdrawals: None,
-            parent_beacon_block_root: None,
+            parent_beacon_block_root: Some(B256::ZERO), // this is required now (Cancun fork activation)
         };
 
         let built = genctx
-            .new_payload_irys2(p1_latest.header.hash, payload_attrs)/* p1_latest.header.hash, payload_attrs */
+            .new_payload_irys(p1_latest.header.hash, payload_attrs)/* p1_latest.header.hash, payload_attrs */
             .await?;
 
         let block_hash = genctx.submit_payload(built.clone()).await?;
@@ -207,14 +213,18 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     };
 
     // assert the block has been committed to the blockchain
-    genctx.assert_new_block2(block_hash, block_number).await?;
+    genctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
     // only send forkchoice update to second node
     p1ctx.update_forkchoice(block_hash, block_hash).await?;
 
     // expect second node advanced via p2p gossip
 
-    p1ctx.assert_new_block2(block_hash, block_number).await?;
+    p1ctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
     let a2 = p1ctx
         .rpc
@@ -726,7 +736,7 @@ fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner
     irys_node_config.consensus.extend_genesis_accounts(vec![(
         account.address(),
         GenesisAccount {
-            balance: U256::from(1000),
+            balance: U256::from(42_000_000_000_000_000_u64),
             ..Default::default()
         },
     )]);

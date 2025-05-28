@@ -1,7 +1,7 @@
 use crate::node::{RethNodeAdapter, RethNodeAddOns};
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{BlockNumber, B256, U256};
-use alloy_rpc_types_engine::ForkchoiceState;
+use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes};
 use irys_reth::IrysEthereumNode;
 use irys_types::Address;
 use reth_chainspec::EthereumHardforks;
@@ -9,26 +9,26 @@ use reth_e2e_test_utils::{
     node::NodeTestContext, payload::PayloadTestContext, rpc::RpcTestContext,
 };
 use reth_node_api::{
-    BlockTy, EngineApiMessageVersion, FullNodeComponents, NodeTypes, PayloadTypes,
+    BlockTy, EngineApiMessageVersion, FullNodeComponents, NodeTypes, PayloadKind, PayloadTypes,
 };
-use reth_payload_builder::EthPayloadBuilderAttributes;
+use reth_payload_builder::{EthPayloadBuilderAttributes, PayloadId};
 use reth_provider::{BlockReader, BlockReaderIdExt as _};
 use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, TraceExt};
 
 // TODO: async_trait
 pub trait IrysRethTestContextExt {
-    async fn assert_new_block2(
+    async fn assert_new_block_irys(
         &self,
         block_hash: B256,
         block_number: BlockNumber,
     ) -> eyre::Result<()>;
 
-    async fn advance_block2(
+    async fn advance_block_irys(
         &mut self,
         // aaaaaa
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>;
 
-    async fn new_payload_irys2(
+    async fn new_payload_irys(
         &mut self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
@@ -40,6 +40,12 @@ pub trait IrysRethTestContextExt {
         confirmed_block_hash: Option<B256>,
         finalized_block_hash: Option<B256>,
     ) -> eyre::Result<()>;
+
+    async fn build_submit_payload_irys(
+        &mut self,
+        parent: B256,
+        attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+    ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>;
 }
 
 impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns> {
@@ -47,7 +53,7 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
     /// and the tx has been included in the block.
     ///
     /// Does NOT work for pipeline since there's no stream notification!
-    async fn assert_new_block2(
+    async fn assert_new_block_irys(
         &self,
         block_hash: B256,
         block_number: BlockNumber,
@@ -77,12 +83,23 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
         Ok(())
     }
 
-    async fn advance_block2(
+    async fn advance_block_irys(
         &mut self,
-        // aaaaaa
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
-        let payload = self.build_and_submit_payload().await?;
+        let attrs = self.payload.new_attributes()?;
+        let payload = self
+            .build_submit_payload_irys(
+                attrs.parent,
+                PayloadAttributes {
+                    timestamp: attrs.timestamp,
+                    prev_randao: attrs.prev_randao,
+                    suggested_fee_recipient: attrs.suggested_fee_recipient,
+                    withdrawals: Some(attrs.withdrawals.to_vec()),
+                    parent_beacon_block_root: attrs.parent_beacon_block_root,
+                },
+            )
+            .await?;
 
         // trigger forkchoice update via engine api to commit the block to the blockchain
         self.update_forkchoice(payload.block().hash(), payload.block().hash())
@@ -91,22 +108,27 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
         Ok(payload)
     }
 
-    async fn new_payload_irys2(
+    async fn new_payload_irys(
         &mut self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
         let attributes = EthPayloadBuilderAttributes::new(parent, attributes);
-        self.payload.new_payload2(attributes.clone()).await?;
+        self.payload
+            .build_new_payload_irys(attributes.clone())
+            .await?;
         // first event is the payload attributes
 
         self.payload.expect_attr_event(attributes.clone()).await?;
         // wait for the payload builder to have finished building
 
+        // self.payload
+        //     .wait_for_built_payload(attributes.payload_id())
+        //     .await;
         self.payload
-            .wait_for_built_payload(attributes.payload_id())
-            .await;
+            .wait_for_built_payload_irys(attributes.payload_id())
+            .await?;
 
         Ok(self.payload.expect_built_payload().await?)
     }
@@ -137,19 +159,43 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
 
         Ok(())
     }
+
+    async fn build_submit_payload_irys(
+        &mut self,
+        parent: B256,
+        attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+    ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
+    {
+        let payload = self.new_payload_irys(parent, attributes).await?;
+
+        self.submit_payload(payload.clone()).await?;
+
+        Ok(payload)
+    }
 }
 
 pub trait IrysRethPayloadTestContextExt {
-    async fn new_payload2(
+    async fn build_new_payload_irys(
         &mut self,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes,
     ) -> eyre::Result<()>;
+
+    async fn wait_for_built_payload_irys(
+        &self,
+        payload_id: PayloadId,
+    ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>;
+
+    fn new_attributes(
+        &mut self,
+    ) -> eyre::Result<
+        <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes,
+    >;
 }
 
 impl IrysRethPayloadTestContextExt
     for PayloadTestContext<<IrysEthereumNode as NodeTypes>::Payload>
 {
-    async fn new_payload2(
+    async fn build_new_payload_irys(
         &mut self,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes,
     ) -> eyre::Result<()> {
@@ -158,6 +204,28 @@ impl IrysRethPayloadTestContextExt
             .await
             .unwrap()?;
         Ok(())
+    }
+
+    async fn wait_for_built_payload_irys(
+        &self,
+        payload_id: PayloadId,
+    ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
+    {
+        Ok(self
+            .payload_builder
+            .resolve_kind(payload_id, PayloadKind::WaitForPending)
+            .await
+            .unwrap()?)
+    }
+
+    fn new_attributes(
+        &mut self,
+    ) -> eyre::Result<
+        <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes,
+    > {
+        self.timestamp += 1;
+        let attributes = (self.attributes_generator)(self.timestamp);
+        Ok(attributes)
     }
 }
 

@@ -54,16 +54,18 @@ use reth_codecs::Compact;
     arbitrary::Arbitrary,
 )]
 
+// these do NOT start with 0, as RLP does not like "leading zeros"
+
 pub enum CommitmentStatus {
     #[default]
     /// Stake is pending epoch activation
-    Pending = 0,
+    Pending = 1,
     /// Stake is active
-    Active = 1,
+    Active = 2,
     /// Stake is pending epoch removal
-    Inactive = 2,
+    Inactive = 3,
     /// Stake is pending slash epoch removal
-    Slashed = 3,
+    Slashed = 4,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -76,10 +78,10 @@ impl TryFrom<u8> for CommitmentStatus {
     type Error = CommitmentStatusDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            0 => Ok(CommitmentStatus::Pending),
-            1 => Ok(CommitmentStatus::Active),
-            2 => Ok(CommitmentStatus::Inactive),
-            3 => Ok(CommitmentStatus::Slashed),
+            1 => Ok(CommitmentStatus::Pending),
+            2 => Ok(CommitmentStatus::Active),
+            3 => Ok(CommitmentStatus::Inactive),
+            4 => Ok(CommitmentStatus::Slashed),
             _ => Err(CommitmentStatusDecodeError::UnknownCommitmentStatus(id)),
         }
     }
@@ -126,12 +128,13 @@ impl Decodable for CommitmentStatus {
     arbitrary::Arbitrary,
 )]
 
+// these do NOT start with 0, as RLP does not like "leading zeros"
 pub enum CommitmentType {
     #[default]
-    Stake = 0,
-    Pledge = 1,
-    Unpledge = 2,
-    Unstake = 3,
+    Stake = 1,
+    Pledge = 2,
+    Unpledge = 3,
+    Unstake = 4,
 }
 
 // TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
@@ -146,10 +149,10 @@ impl TryFrom<u8> for CommitmentType {
     type Error = CommitmentTypeDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            0 => Ok(CommitmentType::Stake),
-            1 => Ok(CommitmentType::Pledge),
-            2 => Ok(CommitmentType::Unpledge),
-            3 => Ok(CommitmentType::Unstake),
+            1 => Ok(CommitmentType::Stake),
+            2 => Ok(CommitmentType::Pledge),
+            3 => Ok(CommitmentType::Unpledge),
+            4 => Ok(CommitmentType::Unstake),
             _ => Err(CommitmentTypeDecodeError::UnknownCommitmentType(id)),
         }
     }

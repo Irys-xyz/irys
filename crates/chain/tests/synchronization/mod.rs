@@ -193,7 +193,11 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         earliest_block.header.hash,
         latest_block_before_restart.header.parent_hash
     );
-    // Check that the header hash is the same
+    // Check that the header number & hash is the same
+    assert_eq!(
+        latest_block_before_restart.header.number,
+        latest_block_right_after_restart.header.number
+    );
     assert_eq!(
         latest_block_before_restart.header.hash,
         latest_block_right_after_restart.header.hash

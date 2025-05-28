@@ -534,7 +534,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
 
-            let built = context.new_payload_irys2(prev_block_header.evm_block_hash, payload_attrs).await?;
+            let built = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
 
             // we can examine the execution status of generated shadow txs
             // let shadow_receipts = exec_payload.shadow_receipts;
@@ -547,7 +547,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // trigger forkchoice update via engine api to commit the block to the blockchain
             context
-                .update_forkchoice(block_hash, block_hash)
+                .update_forkchoice(prev_block_header.evm_block_hash, block_hash)
                 .await?;
 
             let evm_block_hash =  built.block().hash();
