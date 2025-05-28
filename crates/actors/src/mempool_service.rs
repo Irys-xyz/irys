@@ -1311,6 +1311,35 @@ impl Inner {
         Ok(())
     }
 
+    async fn handle_tx_existance_query(&self, txid: H256) -> Result<bool, TxIngressError> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+        let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
+            Ok(true)
+        } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
+            Ok(true)
+        } else if mempool_state_guard.invalid_tx.contains(&txid) {
+            // Still has it, just invalid
+            Ok(true)
+        } else {
+            let read_tx = self.read_tx().await;
+            let result = if read_tx.is_err() {
+                Err(TxIngressError::DatabaseError)
+            } else {
+                let tx_header =
+                    tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid);
+                if tx_header.is_err() {
+                    Err(TxIngressError::DatabaseError)
+                } else {
+                    Ok(tx_header.expect("exepected ").is_some())
+                }
+            };
+
+            result
+        };
+        response_value
+    }
+
     #[tracing::instrument(skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
     fn handle_message<'a>(
@@ -1318,8 +1347,6 @@ impl Inner {
         msg: MempoolServiceMessage,
     ) -> BoxFuture<'a, eyre::Result<()>> {
         Box::pin(async move {
-            let mempool_state = &self.mempool_state.clone();
-
             match msg {
                 MempoolServiceMessage::GetTransaction(tx, response) => {
                     let response_message = self.handle_transaction_message(tx).await;
@@ -1362,36 +1389,10 @@ impl Inner {
                     Ok(())
                 }
                 MempoolServiceMessage::TxExistenceQuery(txid, response) => {
-                    let mempool_state_guard = mempool_state.read().await;
-                    let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
-                        Ok(true)
-                    } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-                        Ok(true)
-                    } else if mempool_state_guard.invalid_tx.contains(&txid) {
-                        // Still has it, just invalid
-                        Ok(true)
-                    } else {
-                        let read_tx = self.read_tx().await;
-                        let result = if read_tx.is_err() {
-                            Err(TxIngressError::DatabaseError)
-                        } else {
-                            let tx_header = tx_header_by_txid(
-                                &read_tx.expect("expected valid header from tx id"),
-                                &txid,
-                            );
-                            if tx_header.is_err() {
-                                Err(TxIngressError::DatabaseError)
-                            } else {
-                                Ok(tx_header.expect("exepected ").is_some())
-                            }
-                        };
-
-                        result
-                    };
-                    drop(mempool_state_guard);
+                    let response_value = self.handle_tx_existance_query(txid).await;
 
                     if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send(bool) error: {:?}", e);
+                        tracing::error!("response.send() error: {:?}", e);
                     };
 
                     Ok(())
