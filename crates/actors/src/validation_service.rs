@@ -4,7 +4,8 @@ use actix::{
 };
 use irys_types::{Config, IrysBlockHeader};
 use std::sync::Arc;
-use tracing::error;
+use base58::ToBase58;
+use tracing::{debug, error};
 
 use crate::{
     block_index_service::BlockIndexReadGuard,
@@ -12,6 +13,7 @@ use crate::{
     block_validation::poa_is_valid,
     epoch_service::PartitionAssignmentsReadGuard,
 };
+use crate::block_validation::recall_recall_range_is_valid;
 
 #[derive(Debug)]
 pub struct ValidationService {
@@ -78,17 +80,38 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let vdf_info = block.vdf_limiter_info.clone();
         let poa = block.poa.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
+        let vdf_steps_guard_for_recall_validation = self.vdf_steps_guard.clone();
 
         // Spawn VDF validation first
         let vdf_config = self.config.consensus.vdf.clone();
         let vdf_future = tokio::task::spawn_blocking(move || {
-            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps_guard)
+            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps_guard.clone())
         });
 
         // Wait for results before processing next message
         let config = self.config.clone();
         ctx.wait(
             async move {
+                // Recall range check
+                match recall_recall_range_is_valid(&block, &config.consensus, &vdf_steps_guard_for_recall_validation).await {
+                    Ok(()) => {
+                        debug!(
+                            block_hash = ?block.block_hash.0.to_base58(),
+                            ?block.height,
+                            "recall_recall_range_is_valid",
+                        );
+                    }
+                    Err(error) => {
+                        error!("Recall range is invalid: {}", error);
+                        let block_tree_service = BlockTreeService::from_registry();
+                        block_tree_service.do_send(ValidationResultMessage {
+                            block_hash,
+                            validation_result: ValidationResult::Invalid,
+                        });
+                        return;
+                    }
+                }
+
                 let validation_result = match vdf_future.await.unwrap() {
                     Ok(_) => {
                         // VDF passed, now spawn and run PoA validation

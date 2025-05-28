@@ -87,14 +87,6 @@ pub async fn prevalidate_block(
         "solution_hash_is_valid",
     );
 
-    // Recall range check
-    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard).await?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "recall_recall_range_is_valid",
-    );
-
     // We only check last_step_checkpoints during pre-validation
     let vdf_checkpoint_valid = async {
         last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
