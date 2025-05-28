@@ -13,24 +13,26 @@
 //! - Balance decrements correspond to storage transaction fees
 //! - Every block ends with a nonce reset system tx
 
-use std::{marker::PhantomData, sync::Arc, time::SystemTime};
+use core::marker::PhantomData;
+use std::{sync::Arc, time::SystemTime};
 
 use alloy_consensus::TxLegacy;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, TxKind, U256};
-use alloy_rlp::{Decodable, Encodable};
+use alloy_rlp::{Decodable as _, Encodable as _};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 use futures::Stream;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
         components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PoolBuilder},
-        BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder, PayloadBuilderConfig,
+        BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
+        PayloadBuilderConfig as _,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{EthPrimitives, InvalidTransactionError, SealedBlock},
     providers::{
-        providers::ProviderFactoryBuilder, CanonStateNotification, CanonStateSubscriptions,
+        providers::ProviderFactoryBuilder, CanonStateNotification, CanonStateSubscriptions as _,
         EthStorage, StateProviderFactory,
     },
     transaction_pool::TransactionValidationTaskExecutor,
@@ -45,12 +47,12 @@ use reth_node_ethereum::{
     },
     EthEngineTypes, EthEvmConfig,
 };
-use reth_tracing::tracing::{self};
+use reth_tracing::tracing;
 use reth_transaction_pool::TransactionValidationOutcome;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
     EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering, TransactionOrigin, TransactionPool, TransactionValidator,
+    Priority, TransactionOrdering, TransactionOrigin, TransactionPool as _, TransactionValidator,
 };
 use reth_trie_db::MerklePatriciaTrie;
 use system_tx::SystemTransaction;
@@ -58,20 +60,19 @@ use tracing::{debug, info};
 
 pub mod system_tx;
 
-pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: SystemTransaction) -> TxLegacy {
+#[must_use]
+pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransaction) -> TxLegacy {
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
-    let tx_raw = TxLegacy {
+    TxLegacy {
         gas_limit: 99000,
         value: U256::ZERO,
         nonce,
-        gas_price: 1_000_000_000u128, // 1 Gwei
+        gas_price: 1_000_000_000_u128, // 1 Gwei
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
         input: system_tx_rlp.into(),
-        ..Default::default()
-    };
-    tx_raw
+    }
 }
 
 /// Type configuration for an Irys-Ethereum node.
@@ -91,6 +92,7 @@ impl NodeTypes for IrysEthereumNode {
 
 impl IrysEthereumNode {
     /// Returns a [`ComponentsBuilder`] configured for a regular Ethereum node.
+    #[must_use]
     pub fn components<Node>(
         &self,
     ) -> ComponentsBuilder<
@@ -102,7 +104,7 @@ impl IrysEthereumNode {
         EthereumConsensusBuilder,
     >
     where
-        Node: FullNodeTypes<Types = IrysEthereumNode>,
+        Node: FullNodeTypes<Types = Self>,
         <Node::Types as NodeTypes>::Payload: PayloadTypes<
             BuiltPayload = EthBuiltPayload,
             PayloadAttributes = EthPayloadAttributes,
@@ -114,12 +116,13 @@ impl IrysEthereumNode {
             .pool(IrysPoolBuilder {
                 allowed_system_tx_origin: self.allowed_system_tx_origin,
             })
-            .executor(IrysExecutorBuilder::default())
+            .executor(IrysExecutorBuilder)
             .payload(BasicPayloadServiceBuilder::default())
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
     }
 
+    #[must_use]
     pub fn provider_factory_builder() -> ProviderFactoryBuilder<Self> {
         ProviderFactoryBuilder::default()
     }
@@ -168,7 +171,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
                     .into_transactions()
                     .map(|tx| tx.inner.into_inner().into())
                     .collect(),
-                ommers: Default::default(),
+                ommers: Vec::default(),
                 withdrawals,
             },
         }
@@ -187,7 +190,7 @@ pub struct IrysPoolBuilder {
 /// This will be used to build the transaction pool and its maintenance tasks during launch.
 ///
 /// Original code from:
-/// https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322
+/// <https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322>
 ///
 /// Notable changes from the original: we evict system txs on every block and frokchoice. They would be deemed stale.
 /// A system tx can only live for a single block.
@@ -222,7 +225,11 @@ where
 
             // Derive the blob cache size from the target blob count, to auto scale it by
             // multiplying it with the slot count for 2 epochs: 384 for pectra
-            (blob_params.target_blob_count * EPOCH_SLOTS * 2) as u32
+            let calculated_size = blob_params
+                .target_blob_count
+                .saturating_mul(EPOCH_SLOTS)
+                .saturating_mul(2);
+            u32::try_from(calculated_size).unwrap_or(u32::MAX)
         };
 
         let custom_config =
@@ -249,10 +256,17 @@ where
             reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
 
+        // Cache config values before moving the transaction_pool into the block
+        let max_queued_lifetime = transaction_pool.config().max_queued_lifetime;
+        let no_local_exemptions = transaction_pool
+            .config()
+            .local_transactions_config
+            .no_exemptions;
+
         // spawn txpool maintenance task
         {
-            let pool = transaction_pool.clone();
-            let client = ctx.provider().clone();
+            let pool = &transaction_pool;
+            let client = ctx.provider();
             // Only spawn backup task if not disabled
             if !ctx.config().txpool.disable_transactions_backup {
                 // Use configured backup path or default to data dir
@@ -288,11 +302,8 @@ where
                     ctx.provider().canonical_state_stream(),
                     ctx.task_executor().clone(),
                     reth_transaction_pool::maintain::MaintainPoolConfig {
-                        max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
-                        no_local_exemptions: transaction_pool
-                            .config()
-                            .local_transactions_config
-                            .no_exemptions,
+                        max_tx_lifetime: max_queued_lifetime,
+                        no_local_exemptions,
                         ..Default::default()
                     },
                 ),
@@ -308,12 +319,13 @@ where
             );
 
             debug!(target: "reth::cli", "Spawned txpool maintenance task");
-        }
+        };
 
         Ok(transaction_pool)
     }
 }
 
+#[expect(clippy::type_complexity, reason = "original trait definition")]
 pub async fn maintain_system_txs<Node, St>(
     pool: Pool<
         TransactionValidationTaskExecutor<
@@ -327,7 +339,7 @@ pub async fn maintain_system_txs<Node, St>(
     Node: FullNodeTypes<Types = IrysEthereumNode>,
     St: Stream<Item = CanonStateNotification<EthPrimitives>> + Send + Unpin + 'static,
 {
-    use futures::StreamExt;
+    use futures::StreamExt as _;
     loop {
         let event = events.next().await;
         let Some(event) = event else {
@@ -340,13 +352,13 @@ pub async fn maintain_system_txs<Node, St>(
                     .all_transactions()
                     .all()
                     .filter_map(|tx| {
-                        use alloy_consensus::transaction::Transaction;
+                        use alloy_consensus::transaction::Transaction as _;
                         let input = tx.inner().input();
                         let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
                             return None;
                         };
 
-                        return Some(*tx.hash());
+                        Some(*tx.hash())
                     })
                     .collect::<Vec<_>>();
                 if stale_system_txs.is_empty() {
@@ -361,13 +373,13 @@ pub async fn maintain_system_txs<Node, St>(
                     .all_transactions()
                     .all()
                     .filter_map(|tx| {
-                        use alloy_consensus::transaction::Transaction;
+                        use alloy_consensus::transaction::Transaction as _;
                         let input = tx.inner().input();
                         let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
                             return None;
                         };
 
-                        return Some(*tx.hash());
+                        Some(*tx.hash())
                     })
                     .collect::<Vec<_>>();
                 if stale_system_txs.is_empty() {
@@ -430,7 +442,7 @@ where
             );
         }
 
-        return self.inner.validate_one(origin, transaction);
+        self.inner.validate_one(origin, transaction)
     }
 
     async fn validate_transactions(
@@ -444,7 +456,7 @@ where
     where
         B: reth_primitives_traits::Block,
     {
-        self.inner.on_new_head_block(new_tip_block)
+        self.inner.on_new_head_block(new_tip_block);
     }
 }
 
@@ -482,7 +494,7 @@ where
 
 impl<T> Default for SystemTxPriorityOrdering<T> {
     fn default() -> Self {
-        Self(Default::default())
+        Self(PhantomData)
     }
 }
 
@@ -523,12 +535,12 @@ where
 
 pub mod evm {
 
-    use std::convert::Infallible;
+    use core::convert::Infallible;
 
-    use alloy_consensus::{Block, Header, Transaction};
+    use alloy_consensus::{Block, Header, Transaction as _};
     use alloy_dyn_abi::DynSolValue;
     use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
-    use alloy_evm::eth::receipt_builder::ReceiptBuilder;
+    use alloy_evm::eth::receipt_builder::ReceiptBuilder as _;
 
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
@@ -560,16 +572,33 @@ pub mod evm {
     use revm::precompile::{PrecompileSpecId, Precompiles};
     use revm::state::{Account, EvmStorageSlot};
     use revm::Database as _;
-    use revm::{DatabaseCommit, MainBuilder, MainContext};
+    use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
     use tracing::error_span;
 
     use super::*;
 
     /// Irys block executor: handles execution of both regular and system transactions, enforcing protocol rules.
-    pub(crate) struct IrysBlockExecutor<'a, Evm> {
+    #[derive(Debug)]
+    pub struct IrysBlockExecutor<'a, Evm> {
         receipt_builder: &'a RethReceiptBuilder,
         system_tx_receipts: Vec<Receipt>,
-        pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
+        inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
+    }
+
+    impl<'a, Evm> IrysBlockExecutor<'a, Evm> {
+        /// Access the inner block executor
+        pub const fn inner(
+            &self,
+        ) -> &EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder> {
+            &self.inner
+        }
+
+        /// Access the inner block executor mutably
+        pub const fn inner_mut(
+            &mut self,
+        ) -> &mut EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder> {
+            &mut self.inner
+        }
     }
 
     impl<'db, DB, E> BlockExecutor for IrysBlockExecutor<'_, E>
@@ -592,10 +621,11 @@ pub mod evm {
         // Current hypothesis is: because we require direct access to the db to execute system txs,
         // reth cannot do parallel state root computations (which presumably are faster than non-parallel).
         // This does not change the end-result of the block but is somtehing we may want to look into.
+        #[expect(clippy::too_many_lines, reason = "easier to read")]
         fn execute_transaction_with_result_closure(
             &mut self,
             tx: impl ExecutableTx<Self>,
-            f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
+            on_result_f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
         ) -> Result<u64, BlockExecutionError> {
             let tx_envelope = tx.tx();
             let tx_envelope_input_buf = tx_envelope.input();
@@ -651,14 +681,16 @@ pub mod evm {
                 drop(guard);
 
                 // Handle the signer nonce increment
-                let mut new_state = self.adjust_signer_nonce(&tx, |nonce| nonce + 1)?;
+                let mut new_state =
+                    self.adjust_signer_nonce(&tx, |nonce| nonce.saturating_add(1))?;
 
                 // Process different system transaction types
                 let topic = system_tx.inner.topic();
                 let target;
                 let new_account_state = match system_tx.inner {
-                    system_tx::TransactionPacket::ReleaseStake(balance_increment) => {
-                        let log = self.create_system_log(
+                    system_tx::TransactionPacket::ReleaseStake(balance_increment)
+                    | system_tx::TransactionPacket::BlockReward(balance_increment) => {
+                        let log = Self::create_system_log(
                             balance_increment.target,
                             vec![topic],
                             vec![
@@ -667,24 +699,12 @@ pub mod evm {
                             ],
                         );
                         target = balance_increment.target;
-                        let res = self.handle_balance_increment(log, balance_increment);
+                        let res = self.handle_balance_increment(log, &balance_increment);
                         Ok(res)
                     }
-                    system_tx::TransactionPacket::BlockReward(balance_increment) => {
-                        let log = self.create_system_log(
-                            balance_increment.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_increment.amount, 256),
-                                DynSolValue::Address(balance_increment.target),
-                            ],
-                        );
-                        target = balance_increment.target;
-                        let res = self.handle_balance_increment(log, balance_increment);
-                        Ok(res)
-                    }
-                    system_tx::TransactionPacket::Stake(balance_decrement) => {
-                        let log = self.create_system_log(
+                    system_tx::TransactionPacket::Stake(balance_decrement)
+                    | system_tx::TransactionPacket::StorageFees(balance_decrement) => {
+                        let log = Self::create_system_log(
                             balance_decrement.target,
                             vec![topic],
                             vec![
@@ -693,19 +713,7 @@ pub mod evm {
                             ],
                         );
                         target = balance_decrement.target;
-                        self.handle_balance_decrement(log, tx_envelope.hash(), balance_decrement)?
-                    }
-                    system_tx::TransactionPacket::StorageFees(balance_decrement) => {
-                        let log = self.create_system_log(
-                            balance_decrement.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_decrement.amount, 256),
-                                DynSolValue::Address(balance_decrement.target),
-                            ],
-                        );
-                        target = balance_decrement.target;
-                        self.handle_balance_decrement(log, tx_envelope.hash(), balance_decrement)?
+                        self.handle_balance_decrement(log, tx_envelope.hash(), &balance_decrement)?
                     }
                     system_tx::TransactionPacket::ResetSystemTxNonce(reset_system_tx_nonce) => {
                         // in this arm we update the nonce of the signer and do an early return.
@@ -719,7 +727,7 @@ pub mod evm {
                             logs: vec![],
                             output: Output::Call([].into()),
                         };
-                        f(&execution_result);
+                        on_result_f(&execution_result);
                         self.system_tx_receipts
                             .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
                                 tx: tx_envelope,
@@ -740,7 +748,7 @@ pub mod evm {
                         let storage = plain_account
                             .storage
                             .iter()
-                            .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
+                            .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
                             .collect();
                         new_state.insert(
                             target,
@@ -756,7 +764,7 @@ pub mod evm {
                     Err(execution_result) => execution_result,
                 };
 
-                f(&execution_result);
+                on_result_f(&execution_result);
 
                 // Build and store the receipt
                 let evm = self.inner.evm_mut();
@@ -775,7 +783,8 @@ pub mod evm {
                 Ok(0)
             } else {
                 // Handle regular transactions using the inner executor
-                self.inner.execute_transaction_with_result_closure(tx, f)
+                self.inner
+                    .execute_transaction_with_result_closure(tx, on_result_f)
             }
         }
 
@@ -789,7 +798,7 @@ pub mod evm {
         }
 
         fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
-            self.inner.set_state_hook(hook)
+            self.inner.set_state_hook(hook);
         }
 
         fn evm_mut(&mut self) -> &mut Self::Evm {
@@ -811,7 +820,6 @@ pub mod evm {
     {
         /// Creates a system transaction log with the specified event name and parameters
         fn create_system_log(
-            &self,
             target: Address,
             topics: Vec<FixedBytes<32>>,
             params: Vec<DynSolValue>,
@@ -819,7 +827,8 @@ pub mod evm {
             let encoded_data = DynSolValue::Tuple(params).abi_encode();
             Log {
                 address: target,
-                data: LogData::new(topics, encoded_data.into()).unwrap(),
+                data: LogData::new(topics, encoded_data.into())
+                    .expect("System log creation should not fail"),
             }
         }
 
@@ -833,7 +842,11 @@ pub mod evm {
             let evm = self.inner.evm_mut();
             let db = evm.db_mut();
             let signer = tx.signer();
-            let state = db.load_cache_account(*signer).unwrap();
+            let state = db.load_cache_account(*signer).map_err(|_err| {
+                BlockExecutionError::Internal(reth_evm::block::InternalBlockExecutionError::msg(
+                    "Could not load signer account",
+                ))
+            })?;
 
             let Some(plain_account) = state.account.as_ref() else {
                 tracing::warn!("signer account does not exist");
@@ -849,7 +862,7 @@ pub mod evm {
             let storage = plain_account
                 .storage
                 .iter()
-                .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
+                .map(|(key, value)| (*key, EvmStorageSlot::new(*value)))
                 .collect();
 
             let mut new_account_info = plain_account.info.clone();
@@ -872,18 +885,23 @@ pub mod evm {
         fn handle_balance_increment(
             &mut self,
             log: Log,
-            balance_increment: system_tx::BalanceIncrement,
+            balance_increment: &system_tx::BalanceIncrement,
         ) -> (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>) {
             let evm = self.inner.evm_mut();
 
             let db = evm.db_mut();
-            let state = db.load_cache_account(balance_increment.target).unwrap();
+            let state = db
+                .load_cache_account(balance_increment.target)
+                .expect("Failed to load account for balance increment");
 
             // Get the existing account or create a new one if it doesn't exist
             let account_info = if let Some(plain_account) = state.account.as_ref() {
                 let mut plain_account = plain_account.clone();
                 // Add the incremented amount to the balance
-                plain_account.info.balance += balance_increment.amount;
+                plain_account.info.balance = plain_account
+                    .info
+                    .balance
+                    .saturating_add(balance_increment.amount);
                 plain_account
             } else {
                 // Create a new account with the incremented balance
@@ -904,11 +922,12 @@ pub mod evm {
         }
 
         /// Handles system transaction that decreases account balance
+        #[expect(clippy::type_complexity, reason = "original trait definition")]
         fn handle_balance_decrement(
             &mut self,
             log: Log,
             tx_hash: &FixedBytes<32>,
-            balance_decrement: system_tx::BalanceDecrement,
+            balance_decrement: &system_tx::BalanceDecrement,
         ) -> Result<
             Result<
                 (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>),
@@ -919,7 +938,15 @@ pub mod evm {
             let evm = self.inner.evm_mut();
 
             let db = evm.db_mut();
-            let state = db.load_cache_account(balance_decrement.target).unwrap();
+            let state = db
+                .load_cache_account(balance_decrement.target)
+                .map_err(|_err| {
+                    BlockExecutionError::Internal(
+                        reth_evm::block::InternalBlockExecutionError::msg(
+                            "Could not load account for balance decrement",
+                        ),
+                    )
+                })?;
 
             // Get the existing account or create a new one if it doesn't exist
             // handle a case when an account has never existed (0 balance, no data stored on it)
@@ -942,7 +969,10 @@ pub mod evm {
                 }));
             }
             // Apply the decrement amount to the balance
-            new_account_info.info.balance -= balance_decrement.amount;
+            new_account_info.info.balance = new_account_info
+                .info
+                .balance
+                .saturating_sub(balance_decrement.amount);
 
             let execution_result = ExecutionResult::Success {
                 reason: revm::context::result::SuccessReason::Return,
@@ -1010,16 +1040,19 @@ pub mod evm {
         }
 
         /// Exposes the receipt builder.
+        #[must_use]
         pub const fn receipt_builder(&self) -> &RethReceiptBuilder {
             self.inner.receipt_builder()
         }
 
         /// Exposes the chain specification.
+        #[must_use]
         pub const fn spec(&self) -> &Arc<ChainSpec> {
             self.inner.spec()
         }
 
         /// Exposes the EVM factory.
+        #[must_use]
         pub const fn evm_factory(&self) -> &IrysEvmFactory {
             self.inner.evm_factory()
         }
@@ -1034,8 +1067,9 @@ pub mod evm {
         type Transaction = TransactionSigned;
         type Receipt = Receipt;
 
+        #[must_use]
         fn evm_factory(&self) -> &Self::EvmFactory {
-            &self.inner.evm_factory()
+            self.inner.evm_factory()
         }
 
         fn create_executor<'a, DB, I>(
@@ -1170,26 +1204,20 @@ mod tests {
         eth_payload_attributes_with_parent, get_balance, nonce_reset, release_stake,
         setup_irys_reth, sign_tx, stake, storage_fees,
     };
-    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
     use alloy_eips::Encodable2718;
     use alloy_network::{EthereumWallet, TxSigner};
-    use alloy_primitives::{Address, Uint, B256};
-    use alloy_primitives::{FixedBytes, Signature, TxKind};
+    use alloy_primitives::{Address, B256};
+    use alloy_primitives::{FixedBytes, Signature};
     use alloy_rpc_types_engine::ForkchoiceState;
     use alloy_signer_local::PrivateKeySigner;
-    use eyre::OptionExt;
     use reth::api::EngineApiMessageVersion;
-    use reth::builder::{NodeBuilder, NodeHandle};
-    use reth::providers::providers::BlockchainProvider;
-    use reth::tasks::TaskManager;
     use reth::{
         providers::{AccountReader, BlockHashReader, BlockNumReader},
         rpc::server_types::eth::EthApiError,
     };
-    use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
-    use reth_node_ethereum::EthereumNode;
+    use reth_e2e_test_utils::wallet::Wallet;
     use reth_transaction_pool::TransactionPool;
-    use std::collections::HashSet;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1206,7 +1234,7 @@ mod tests {
         let (node, ctx) = ctx.get_single_node()?;
 
         let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
-        let mut system_tx_raw = compose_system_tx(0, 1, system_tx);
+        let mut system_tx_raw = compose_system_tx(0, 1, &system_tx);
         let signed_tx = ctx
             .target_account
             .sign_transaction(&mut system_tx_raw)
@@ -1344,7 +1372,7 @@ mod tests {
             valid_for_block_height: 1,
             parent_blockhash: genesis_blockhash,
         };
-        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_tx_raw = compose_system_tx(0, 1, &system_tx);
         let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
         let system_tx_hash = first_node
             .inner
@@ -1873,11 +1901,11 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn system_tx_with_invalid_origin_is_rejected_by_pool_validator() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let (node, ctx) = ctx.get_single_node()?;
 
         // Create a system tx with a valid block number and parent blockhash, signed by the correct signer
         let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
-        let system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
+        let system_tx_raw = compose_system_tx(0, 1, &system_tx);
         let system_pooled_tx = sign_tx(system_tx_raw, &ctx.block_producer_a).await;
         // Submit with TransactionOrigin::Local (should be rejected, only Private is allowed)
         let res = node
@@ -2184,6 +2212,7 @@ pub mod test_utils {
     use alloy_primitives::{FixedBytes, Signature, B256};
     use alloy_primitives::{TxKind, U256};
     use alloy_rpc_types::engine::PayloadAttributes;
+    use reth::providers::CanonStateSubscriptions;
     use reth::{
         api::{FullNodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
@@ -2300,7 +2329,7 @@ pub mod test_utils {
         nonce: u64,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<alloy_primitives::FixedBytes<32>> {
-        let system_tx_raw = compose_system_tx(nonce, 1, system_tx);
+        let system_tx_raw = compose_system_tx(nonce, 1, &system_tx);
         let system_pooled_tx = sign_tx(system_tx_raw, signer).await;
         let tx_hash = node
             .inner
@@ -2583,7 +2612,7 @@ pub mod test_utils {
         for block_number in start_block..(start_block + num_blocks) {
             for _tx_idx in 0..sys_txs_per_block {
                 let system_tx = block_reward(reward_to, block_number, parent_blockhash);
-                let system_tx_raw = compose_system_tx(nonce, 1, system_tx.clone());
+                let system_tx_raw = compose_system_tx(nonce, 1, &system_tx);
                 nonce += 1;
                 let system_pooled_tx = sign_tx(system_tx_raw, wallets).await;
                 node.inner
