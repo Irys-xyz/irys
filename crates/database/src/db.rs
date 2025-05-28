@@ -191,7 +191,7 @@ impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
     fn dup_count(&mut self, key: <T>::Key) -> Result<Option<u32>, DatabaseError> {
         Ok(
             // we seek to the key & check the key exists
-            // if we pass a nonexistant key to get_dup_count, it'll panic
+            // if we pass a nonexistent key to get_dup_count, it'll panic
             match self.seek_exact(key)? {
                 Some(_v) => Some(
                     self.inner
