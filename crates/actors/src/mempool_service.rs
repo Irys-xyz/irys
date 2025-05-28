@@ -1316,13 +1316,11 @@ impl Inner {
             let result = if read_tx.is_err() {
                 Err(TxIngressError::DatabaseError)
             } else {
-                let tx_header =
-                    tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid);
-                if tx_header.is_err() {
-                    Err(TxIngressError::DatabaseError)
-                } else {
-                    Ok(tx_header.expect("exepected ").is_some())
-                }
+                Ok(
+                    tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
+                        .map_err(|_| TxIngressError::DatabaseError)?
+                        .is_some(),
+                )
             };
 
             result
