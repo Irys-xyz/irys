@@ -1353,12 +1353,10 @@ impl Inner {
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
-                    Ok(())
                 }
                 MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
                     let _unused_response_message =
                         self.handle_block_confirmed_message(block, all_txs).await;
-                    Ok(())
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
                     let response_message = self
@@ -1367,46 +1365,34 @@ impl Inner {
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
-                    Ok(())
                 }
                 MempoolServiceMessage::ChunkIngressMessage(chunk, response) => {
                     let response_value = self.handle_chunk_ingress_message(chunk).await;
-
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
-
-                    Ok(())
                 }
                 MempoolServiceMessage::GetBestMempoolTxs(response) => {
                     let response_value = self.handle_get_best_mempool_txs().await;
-
                     // Return selected transactions grouped by type
                     if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send(txns) error: {:?}", e);
+                        tracing::error!("response.send() error: {:?}", e);
                     };
-
-                    Ok(())
                 }
                 MempoolServiceMessage::TxExistenceQuery(txid, response) => {
                     let response_value = self.handle_tx_existance_query(txid).await;
-
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
-
-                    Ok(())
                 }
                 MempoolServiceMessage::TxIngressMessage(tx, response) => {
                     let response_value = self.handle_tx_ingress_message(tx).await;
-
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
-
-                    Ok(())
                 }
             }
+            Ok(())
         })
     }
 
