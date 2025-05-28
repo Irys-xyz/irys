@@ -1,7 +1,9 @@
 use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
-use irys_reth::{IrysEthTransactionValidator, IrysEthereumNode, SystemTxsCoinbaseTipOrdering};
+use irys_reth::{
+    evm::IrysEvmConfig, IrysEthereumNode, IrysSystemTxValidator, SystemTxPriorityOrdering,
+};
 use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
 use reth::{
@@ -19,7 +21,7 @@ use reth::{
     },
 };
 use reth_chainspec::ChainSpec;
-use reth_db::{init_db, DatabaseEnv};
+use reth_db::init_db;
 use reth_node_builder::{
     FullNode, FullNodeTypesAdapter, NodeAdapter, NodeBuilder, NodeConfig, NodeHandle,
     NodeTypesWithDBAdapter,
@@ -30,9 +32,8 @@ use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
 use tracing::error;
 
-pub use reth_e2e_test_utils::node::NodeTestContext;
-
 use crate::{new_reth_context, unwind::unwind_to};
+pub use reth_e2e_test_utils::node::NodeTestContext;
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
@@ -51,15 +52,15 @@ pub type RethNodeAdapter = NodeAdapter<
         NetworkHandle,
         reth::transaction_pool::Pool<
             TransactionValidationTaskExecutor<
-                IrysEthTransactionValidator<
+                IrysSystemTxValidator<
                     BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
             >,
-            SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
+            SystemTxPriorityOrdering<EthPooledTransaction>,
             DiskFileBlobStore,
         >,
-        irys_reth::evm::CustomEvmConfig,
+        IrysEvmConfig,
         Arc<(dyn FullConsensus<EthPrimitives, Error = ConsensusError> + 'static)>,
     >,
 >;
