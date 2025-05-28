@@ -485,6 +485,149 @@ impl Inner {
         None
     }
 
+    async fn handle_commitment_tx_ingress_message(
+        &mut self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        debug!(
+            "received commitment tx {:?}",
+            &commitment_tx.id.0.to_base58()
+        );
+
+        let mempool_state = &self.mempool_state.clone();
+        let mut mempool_state_guard = mempool_state.write().await;
+
+        // Early out if we already know about this transaction (invalid)
+        if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Check if the transaction already exists in valid transactions
+        let tx_exists = mempool_state_guard
+            .valid_commitment_tx
+            .get(&commitment_tx.signer)
+            .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
+
+        if tx_exists {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Validate the tx anchor
+        if let Err(e) = self
+            .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
+            .await
+        {
+            tracing::warn!(
+                "Anchor {:?} for tx {:?} failure with error: {:?}",
+                &commitment_tx.anchor,
+                commitment_tx.id,
+                e
+            );
+            return Err(TxIngressError::InvalidAnchor);
+        }
+
+        // Check pending commitments and cached commitments and active commitments
+        let commitment_status = self.get_commitment_status(&commitment_tx).await;
+        if commitment_status == CommitmentStatus::Accepted {
+            // Validate tx signature
+            if let Err(e) = self.validate_signature(&commitment_tx).await {
+                tracing::error!(
+                    "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                    &commitment_tx,
+                    e
+                );
+                return Err(TxIngressError::InvalidSignature);
+            }
+
+            // Add the commitment tx to the valid tx list to be included in the next block
+            mempool_state_guard
+                .valid_commitment_tx
+                .entry(commitment_tx.signer)
+                .or_default()
+                .push(commitment_tx.clone());
+
+            mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
+
+            // Process any pending pledges for this newly staked address
+            // ------------------------------------------------------
+            // When a stake transaction is accepted, we can now process any pledge
+            // transactions from the same address that arrived earlier but were
+            // waiting for the stake. This effectively resolves the dependency
+            // order for address-based validation.
+            if let Some(pledges_lru) = mempool_state_guard
+                .pending_pledges
+                .pop(&commitment_tx.signer)
+            {
+                // Extract all pending pledges as a vector of owned transactions
+                let pledges: Vec<_> = pledges_lru
+                    .into_iter()
+                    .map(|(_, pledge_tx)| pledge_tx)
+                    .collect();
+
+                // PERFORMANCE NOTE: Processing all pending pledges synchronously
+                // If an address has accumulated many pending pledges, this could
+                // potentially block the actor for a significant time.
+                for pledge_tx in pledges {
+                    // Re-process each pledge now that its signer is staked
+                    // No need to clone as we own the transaction objects
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    // todo switch _ to actually handle the result
+                    let _ = self
+                        .handle_message(MempoolServiceMessage::CommitmentTxIngressMessage(
+                            pledge_tx, oneshot_tx,
+                        ))
+                        .await;
+
+                    let _ = oneshot_rx
+                        .await
+                        .expect("to process pending pledge for newly staked address");
+                }
+            }
+
+            // Gossip transaction
+            let gossip_sender = mempool_state_guard.service_senders.gossip_broadcast.clone();
+            let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
+
+            gossip_sender
+                .send(gossip_data)
+                .expect("Failed to send gossip data");
+        } else {
+            if commitment_status == CommitmentStatus::Unstaked {
+                // For unstaked pledges, we cache them in a 2-level LRU structure:
+                // Level 1: Keyed by signer address (allows tracking multiple addresses)
+                // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
+
+                if let Some(pledges_cache) = mempool_state_guard
+                    .pending_pledges
+                    .get_mut(&commitment_tx.signer)
+                {
+                    // Address already exists in cache - add this pledge transaction to its lru cache
+                    pledges_cache.put(commitment_tx.id, commitment_tx.clone());
+                } else {
+                    // First pledge from this address - create a new nested lru cache
+                    let max_pending_pledge_items = mempool_state_guard
+                        .config
+                        .consensus
+                        .mempool
+                        .max_pending_pledge_items;
+                    let mut new_address_cache =
+                        LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+                    // Add the pledge transaction to the new lru cache for the address
+                    new_address_cache.put(commitment_tx.id, commitment_tx.clone());
+
+                    // Add the address cache to the primary lru cache
+                    mempool_state_guard
+                        .pending_pledges
+                        .put(commitment_tx.signer, new_address_cache);
+                }
+            } else {
+                return Err(TxIngressError::Skipped);
+            }
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, err)]
     fn handle_message<'a>(
         &'a mut self,
@@ -497,7 +640,7 @@ impl Inner {
                 MempoolServiceMessage::GetTransaction(tx, response) => {
                     let response_message = self.handle_transaction_message(tx).await;
                     if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send(tx_header) error: {:?}", e);
+                        tracing::error!("response.send() error: {:?}", e);
                     };
                     Ok(())
                 }
@@ -591,154 +734,13 @@ impl Inner {
                     Ok(())
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
-                    let mut mempool_state_guard = mempool_state.write().await;
-                    debug!(
-                        "received commitment tx {:?}",
-                        &commitment_tx.id.0.to_base58()
-                    );
-
-                    // Early out if we already know about this transaction (invalid)
-                    if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
-                        if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
-                            tracing::error!("response.send(tx_header) error: {:?}", e);
-                        };
-                        return Ok(());
-                    }
-
-                    // Check if the transaction already exists in valid transactions
-                    let tx_exists = mempool_state_guard
-                        .valid_commitment_tx
-                        .get(&commitment_tx.signer)
-                        .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
-
-                    if tx_exists {
-                        if let Err(e) = response.send(Err(TxIngressError::Skipped)) {
-                            tracing::error!("response.send(tx_header) error: {:?}", e);
-                        };
-                        return Ok(());
-                    }
-
-                    // Validate the tx anchor
-                    if let Err(e) = self
-                        .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
-                        .await
-                    {
-                        tracing::error!(
-                            "Anchor {:?} for tx {:?} failure with error: {:?}",
-                            &commitment_tx.anchor,
-                            commitment_tx.id,
-                            e
-                        );
-                        return Ok(());
-                    }
-
-                    // Check pending commitments and cached commitments and active commitments
-                    let commitment_status = self.get_commitment_status(&commitment_tx).await;
-                    if commitment_status == CommitmentStatus::Accepted {
-                        // Validate tx signature
-                        if let Err(e) = self.validate_signature(&commitment_tx).await {
-                            tracing::error!(
-                                "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                                &commitment_tx,
-                                e
-                            );
-                        }
-
-                        // Add the commitment tx to the valid tx list to be included in the next block
-                        mempool_state_guard
-                            .valid_commitment_tx
-                            .entry(commitment_tx.signer)
-                            .or_default()
-                            .push(commitment_tx.clone());
-
-                        mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
-
-                        // Process any pending pledges for this newly staked address
-                        // ------------------------------------------------------
-                        // When a stake transaction is accepted, we can now process any pledge
-                        // transactions from the same address that arrived earlier but were
-                        // waiting for the stake. This effectively resolves the dependency
-                        // order for address-based validation.
-                        if let Some(pledges_lru) = mempool_state_guard
-                            .pending_pledges
-                            .pop(&commitment_tx.signer)
-                        {
-                            // Extract all pending pledges as a vector of owned transactions
-                            let pledges: Vec<_> = pledges_lru
-                                .into_iter()
-                                .map(|(_, pledge_tx)| pledge_tx)
-                                .collect();
-
-                            // PERFORMANCE NOTE: Processing all pending pledges synchronously
-                            // If an address has accumulated many pending pledges, this could
-                            // potentially block the actor for a significant time.
-                            for pledge_tx in pledges {
-                                // Re-process each pledge now that its signer is staked
-                                // No need to clone as we own the transaction objects
-                                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                                // todo switch _ to actually handle the result
-                                let _ = self
-                                    .handle_message(
-                                        MempoolServiceMessage::CommitmentTxIngressMessage(
-                                            pledge_tx, oneshot_tx,
-                                        ),
-                                    )
-                                    .await;
-
-                                let status = oneshot_rx
-                                    .await
-                                    .expect("to process pending pledge for newly staked address");
-                            }
-                        }
-
-                        // Gossip transaction
-                        // TODO is gossip sender not in the senders struct?
-                        let gossip_sender =
-                            mempool_state_guard.service_senders.gossip_broadcast.clone();
-                        let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
-
-                        if let Err(e) = gossip_sender.send(gossip_data) {
-                            tracing::error!("Failed to send gossip data: {:?}", e);
-                        }
-
-                        Ok(())
-                    } else {
-                        if commitment_status == CommitmentStatus::Unstaked {
-                            // For unstaked pledges, we cache them in a 2-level LRU structure:
-                            // Level 1: Keyed by signer address (allows tracking multiple addresses)
-                            // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
-
-                            if let Some(pledges_cache) = mempool_state_guard
-                                .pending_pledges
-                                .get_mut(&commitment_tx.signer)
-                            {
-                                // Address already exists in cache - add this pledge transaction to its lru cache
-                                pledges_cache.put(commitment_tx.id, commitment_tx.clone());
-                            } else {
-                                // First pledge from this address - create a new nested lru cache
-                                let max_pending_pledge_items = mempool_state_guard
-                                    .config
-                                    .consensus
-                                    .mempool
-                                    .max_pending_pledge_items;
-                                let mut new_address_cache = LruCache::new(
-                                    NonZeroUsize::new(max_pending_pledge_items).unwrap(),
-                                );
-
-                                // Add the pledge transaction to the new lru cache for the address
-                                new_address_cache.put(commitment_tx.id, commitment_tx.clone());
-
-                                // Add the address cache to the primary lru cache
-                                mempool_state_guard
-                                    .pending_pledges
-                                    .put(commitment_tx.signer, new_address_cache);
-                            }
-                            Ok(())
-                        } else {
-                            error!("error: {:?}", TxIngressError::Skipped);
-                            Ok(())
-                        }
-                    }
+                    let response_message = self
+                        .handle_commitment_tx_ingress_message(commitment_tx)
+                        .await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                    Ok(())
                 }
                 MempoolServiceMessage::ChunkIngressMessage(chunk, response) => {
                     let mempool_state_read_guard = mempool_state.read().await;
