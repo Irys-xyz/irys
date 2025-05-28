@@ -47,7 +47,7 @@ pub async fn post_chunk(
         Ok(v) => v,
     };
 
-    // If we recieved a response, check for validation errors within the response
+    // If we received a response, check for validation errors within the response
     let inner_result: Result<(), ChunkIngressError> = msg_result;
     if let Err(err) = inner_result {
         warn!(?data_root, ?number, "Error processing chunk: {:?}", &err);
