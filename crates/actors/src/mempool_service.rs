@@ -167,7 +167,7 @@ pub struct MempoolState {
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 
-/// Messages that the Mempool Service supports
+/// Messages that the Mempool Service handler supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// TODO: comments
@@ -349,7 +349,7 @@ impl ChunkIngressMessage {
     }
 }
 
-/// Reasons why Transaction Ingress might fail
+/// Reasons why Chunk Ingress might fail
 #[derive(Debug, Clone)]
 pub enum ChunkIngressError {
     /// The `data_path/proof` provided with the chunk data is invalid
