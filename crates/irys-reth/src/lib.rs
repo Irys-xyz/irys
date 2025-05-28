@@ -1,10 +1,25 @@
+//! # Irys Reth Node
+//!
+//! ## System Transactions
+//! System transactions are special EVM transactions used to encode protocol-level actions such as:
+//! - Block rewards (must go to the Irys block producer)
+//! - Storage fee collection (balance decrements)
+//! - Stake management (release, stake)
+//! - Nonce reset (must always be the last system tx in a block)
+//!
+//! The CL must validate that:
+//! - Block rewards are paid to the correct block producer
+//! - Balance increments correspond to rewards
+//! - Balance decrements correspond to storage transaction fees
+//! - Every block ends with a nonce reset system tx
+
 use std::{marker::PhantomData, sync::Arc, time::SystemTime};
 
 use alloy_consensus::TxLegacy;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, TxKind, U256};
 use alloy_rlp::{Decodable, Encodable};
-use evm::{CustomBlockAssembler, MyEthEvmFactory};
+use evm::{IrysBlockAssembler, IrysEvmFactory};
 use futures::Stream;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
@@ -85,10 +100,10 @@ impl IrysEthereumNode {
         &self,
     ) -> ComponentsBuilder<
         Node,
-        CustomPoolBuilder,
+        IrysPoolBuilder,
         BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
         EthereumNetworkBuilder,
-        CustomEthereumExecutorBuilder,
+        IrysExecutorBuilder,
         EthereumConsensusBuilder,
     >
     where
@@ -101,10 +116,10 @@ impl IrysEthereumNode {
     {
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(CustomPoolBuilder {
+            .pool(IrysPoolBuilder {
                 allowed_system_tx_origin: self.allowed_system_tx_origin,
             })
-            .executor(CustomEthereumExecutorBuilder::default())
+            .executor(IrysExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::default())
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -121,10 +136,10 @@ where
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
-        CustomPoolBuilder,
+        IrysPoolBuilder,
         BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
         EthereumNetworkBuilder,
-        CustomEthereumExecutorBuilder,
+        IrysExecutorBuilder,
         EthereumConsensusBuilder,
     >;
 
@@ -165,25 +180,31 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
     }
 }
 
-/// A custom pool builder
+/// A custom pool builder for Irys system transaction validation and pool configuration.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct CustomPoolBuilder {
+pub struct IrysPoolBuilder {
     pub allowed_system_tx_origin: Address,
 }
 
-/// Implement the [`PoolBuilder`] trait for the custom pool builder
+/// Implement the [`PoolBuilder`] trait for the Irys pool builder
 ///
 /// This will be used to build the transaction pool and its maintenance tasks during launch.
-impl<Node> PoolBuilder<Node> for CustomPoolBuilder
+///
+/// Original code from:
+/// https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322
+///
+/// Notable changes from the original: we evict system txs on every block and frokchoice. They would be deemed stale.
+/// A system tx can only live for a single block.
+impl<Node> PoolBuilder<Node> for IrysPoolBuilder
 where
     Node: FullNodeTypes<Types = IrysEthereumNode>,
 {
     type Pool = Pool<
         TransactionValidationTaskExecutor<
-            IrysEthTransactionValidator<Node::Provider, EthPooledTransaction>,
+            IrysSystemTxValidator<Node::Provider, EthPooledTransaction>,
         >,
-        SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
+        SystemTxPriorityOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
     >;
 
@@ -221,14 +242,14 @@ where
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
         let validator = TransactionValidationTaskExecutor {
-            validator: IrysEthTransactionValidator {
+            validator: IrysSystemTxValidator {
                 inner: validator.validator,
                 allowed_system_tx_origin: self.allowed_system_tx_origin,
             },
             to_validation_task: validator.to_validation_task,
         };
 
-        let ordering = SystemTxsCoinbaseTipOrdering::default();
+        let ordering = SystemTxPriorityOrdering::default();
         let transaction_pool =
             reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
@@ -301,9 +322,9 @@ where
 pub async fn maintain_system_txs<Node, St>(
     pool: Pool<
         TransactionValidationTaskExecutor<
-            IrysEthTransactionValidator<Node::Provider, EthPooledTransaction>,
+            IrysSystemTxValidator<Node::Provider, EthPooledTransaction>,
         >,
-        SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
+        SystemTxPriorityOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
     >,
     mut events: St,
@@ -366,13 +387,13 @@ pub async fn maintain_system_txs<Node, St>(
 }
 
 #[derive(Debug, Clone)]
-pub struct IrysEthTransactionValidator<Client, T> {
+pub struct IrysSystemTxValidator<Client, T> {
     allowed_system_tx_origin: Address,
     /// The type that performs the actual validation.
     inner: EthTransactionValidator<Client, T>,
 }
 
-impl<Client, Tx> TransactionValidator for IrysEthTransactionValidator<Client, Tx>
+impl<Client, Tx> TransactionValidator for IrysSystemTxValidator<Client, Tx>
 where
     Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
     Tx: EthPoolTransaction,
@@ -437,9 +458,9 @@ where
 /// The higher the coinbase tip is, the higher the priority of the transaction.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct SystemTxsCoinbaseTipOrdering<T>(PhantomData<T>);
+pub struct SystemTxPriorityOrdering<T>(PhantomData<T>);
 
-impl<T> TransactionOrdering for SystemTxsCoinbaseTipOrdering<T>
+impl<T> TransactionOrdering for SystemTxPriorityOrdering<T>
 where
     T: PoolTransaction + 'static,
 {
@@ -464,13 +485,13 @@ where
     }
 }
 
-impl<T> Default for SystemTxsCoinbaseTipOrdering<T> {
+impl<T> Default for SystemTxPriorityOrdering<T> {
     fn default() -> Self {
         Self(Default::default())
     }
 }
 
-impl<T> Clone for SystemTxsCoinbaseTipOrdering<T> {
+impl<T> Clone for SystemTxPriorityOrdering<T> {
     fn clone(&self) -> Self {
         Self::default()
     }
@@ -478,24 +499,24 @@ impl<T> Clone for SystemTxsCoinbaseTipOrdering<T> {
 
 /// A regular ethereum evm and executor builder.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct CustomEthereumExecutorBuilder;
+pub struct IrysExecutorBuilder;
 
-impl<Types, Node> ExecutorBuilder<Node> for CustomEthereumExecutorBuilder
+impl<Types, Node> ExecutorBuilder<Node> for IrysExecutorBuilder
 where
     Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>,
     Node: FullNodeTypes<Types = Types>,
 {
-    type EVM = evm::CustomEvmConfig;
+    type EVM = evm::IrysEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let evm_config = EthEvmConfig::new(ctx.chain_spec())
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
         let spec = ctx.chain_spec();
-        let evm_factory = MyEthEvmFactory::default();
-        let evm_config = evm::CustomEvmConfig {
+        let evm_factory = IrysEvmFactory::default();
+        let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
-            assembler: CustomBlockAssembler::new(ctx.chain_spec()),
-            executor_factory: evm::CustomBlockExecutorFactory::new(
+            assembler: IrysBlockAssembler::new(ctx.chain_spec()),
+            executor_factory: evm::IrysBlockExecutorFactory::new(
                 RethReceiptBuilder::default(),
                 spec,
                 evm_factory,
@@ -549,13 +570,14 @@ pub mod evm {
 
     use super::*;
 
-    pub(crate) struct CustomBlockExecutor<'a, Evm> {
+    /// Irys block executor: handles execution of both regular and system transactions, enforcing protocol rules.
+    pub(crate) struct IrysBlockExecutor<'a, Evm> {
         receipt_builder: &'a RethReceiptBuilder,
         system_tx_receipts: Vec<Receipt>,
         pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
     }
 
-    impl<'db, DB, E> BlockExecutor for CustomBlockExecutor<'_, E>
+    impl<'db, DB, E> BlockExecutor for IrysBlockExecutor<'_, E>
     where
         DB: Database + 'db,
         E: Evm<
@@ -571,6 +593,10 @@ pub mod evm {
             self.inner.apply_pre_execution_changes()
         }
 
+        //NOTE: whenever we execute system transactions, reth gives a warning: "State root task returned incorrect state root"
+        // Current hypothesis is: because we require direct access to the db to execute system txs,
+        // reth cannot do parallel state root computations (which presumably are faster than non-parallel).
+        // This does not change the end-result of the block but is somtehing we may want to look into.
         fn execute_transaction_with_result_closure(
             &mut self,
             tx: impl ExecutableTx<Self>,
@@ -687,6 +713,7 @@ pub mod evm {
                         self.handle_balance_decrement(log, tx_envelope.hash(), balance_decrement)?
                     }
                     system_tx::TransactionPacket::ResetSystemTxNonce(reset_system_tx_nonce) => {
+                        // in this arm we update the nonce of the signer and do an early return.
                         let state = self.adjust_signer_nonce(&tx, |nonce| {
                             nonce.saturating_sub(reset_system_tx_nonce.decrement_nonce_by)
                         })?;
@@ -779,7 +806,7 @@ pub mod evm {
         }
     }
 
-    impl<'db, DB, E> CustomBlockExecutor<'_, E>
+    impl<'db, DB, E> IrysBlockExecutor<'_, E>
     where
         DB: Database + 'db,
         E: Evm<
@@ -934,14 +961,14 @@ pub mod evm {
         }
     }
 
-    /// Block builder for Ethereum.
+    /// Irys block assembler: assembles blocks, ensuring system tx ordering and inclusion rules.
     #[derive(Debug, Clone)]
-    pub struct CustomBlockAssembler<ChainSpec = reth_chainspec::ChainSpec> {
+    pub struct IrysBlockAssembler<ChainSpec = reth_chainspec::ChainSpec> {
         inner: EthBlockAssembler<ChainSpec>,
     }
 
-    impl<ChainSpec> CustomBlockAssembler<ChainSpec> {
-        /// Creates a new [`CustomBlockAssembler`].
+    impl<ChainSpec> IrysBlockAssembler<ChainSpec> {
+        /// Creates a new [`IrysBlockAssembler`].
         pub fn new(chain_spec: Arc<ChainSpec>) -> Self {
             Self {
                 inner: EthBlockAssembler::new(chain_spec),
@@ -949,7 +976,7 @@ pub mod evm {
         }
     }
 
-    impl<F, ChainSpec> BlockAssembler<F> for CustomBlockAssembler<ChainSpec>
+    impl<F, ChainSpec> BlockAssembler<F> for IrysBlockAssembler<ChainSpec>
     where
         F: for<'a> BlockExecutorFactory<
             ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
@@ -968,19 +995,19 @@ pub mod evm {
         }
     }
 
-    /// Ethereum block executor factory.
+    /// Irys block executor factory: produces block executors.
     #[derive(Debug, Clone, Default)]
-    pub struct CustomBlockExecutorFactory {
-        inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, MyEthEvmFactory>,
+    pub struct IrysBlockExecutorFactory {
+        inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, IrysEvmFactory>,
     }
 
-    impl CustomBlockExecutorFactory {
+    impl IrysBlockExecutorFactory {
         /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
         /// [`ReceiptBuilder`].
         pub const fn new(
             receipt_builder: RethReceiptBuilder,
             spec: Arc<ChainSpec>,
-            evm_factory: MyEthEvmFactory,
+            evm_factory: IrysEvmFactory,
         ) -> Self {
             Self {
                 inner: EthBlockExecutorFactory::new(receipt_builder, spec, evm_factory),
@@ -998,16 +1025,16 @@ pub mod evm {
         }
 
         /// Exposes the EVM factory.
-        pub const fn evm_factory(&self) -> &MyEthEvmFactory {
+        pub const fn evm_factory(&self) -> &IrysEvmFactory {
             self.inner.evm_factory()
         }
     }
 
-    impl BlockExecutorFactory for CustomBlockExecutorFactory
+    impl BlockExecutorFactory for IrysBlockExecutorFactory
     where
         Self: 'static,
     {
-        type EvmFactory = MyEthEvmFactory;
+        type EvmFactory = IrysEvmFactory;
         type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
         type Transaction = TransactionSigned;
         type Receipt = Receipt;
@@ -1018,7 +1045,7 @@ pub mod evm {
 
         fn create_executor<'a, DB, I>(
             &'a self,
-            evm: <MyEthEvmFactory as EvmFactory>::Evm<&'a mut State<DB>, I>,
+            evm: <IrysEvmFactory as EvmFactory>::Evm<&'a mut State<DB>, I>,
             ctx: Self::ExecutionCtx<'a>,
         ) -> impl BlockExecutorFor<'a, Self, DB, I>
         where
@@ -1026,7 +1053,7 @@ pub mod evm {
             I: Inspector<<EthEvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,
         {
             let receipt_builder = self.inner.receipt_builder();
-            CustomBlockExecutor {
+            IrysBlockExecutor {
                 inner: EthBlockExecutor::new(evm, ctx, self.inner.spec(), receipt_builder),
                 receipt_builder,
                 system_tx_receipts: vec![],
@@ -1034,19 +1061,20 @@ pub mod evm {
         }
     }
 
+    /// Irys EVM config: wraps EVM config, block executor factory, and assembler.
     #[derive(Debug, Clone)]
-    pub struct CustomEvmConfig {
+    pub struct IrysEvmConfig {
         pub inner: EthEvmConfig<EthEvmFactory>,
-        pub executor_factory: CustomBlockExecutorFactory,
-        pub assembler: CustomBlockAssembler,
+        pub executor_factory: IrysBlockExecutorFactory,
+        pub assembler: IrysBlockAssembler,
     }
 
-    impl ConfigureEvm for CustomEvmConfig {
+    impl ConfigureEvm for IrysEvmConfig {
         type Primitives = EthPrimitives;
         type Error = Infallible;
         type NextBlockEnvCtx = NextBlockEnvAttributes;
-        type BlockExecutorFactory = CustomBlockExecutorFactory;
-        type BlockAssembler = CustomBlockAssembler<ChainSpec>;
+        type BlockExecutorFactory = IrysBlockExecutorFactory;
+        type BlockAssembler = IrysBlockAssembler<ChainSpec>;
 
         fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
             &self.executor_factory
@@ -1087,9 +1115,9 @@ pub mod evm {
     /// Factory producing [`EthEvm`].
     #[derive(Debug, Default, Clone, Copy)]
     #[non_exhaustive]
-    pub struct MyEthEvmFactory;
+    pub struct IrysEvmFactory;
 
-    impl EvmFactory for MyEthEvmFactory {
+    impl EvmFactory for IrysEvmFactory {
         type Evm<DB: Database, I: Inspector<EthEvmContext<DB>>> = EthEvm<DB, I, Self::Precompiles>;
         type Context<DB: Database> = revm::Context<BlockEnv, TxEnv, CfgEnv, DB>;
         type Tx = TxEnv;
@@ -1139,6 +1167,8 @@ pub mod evm {
 mod tests {
     use super::*;
     use crate::system_tx::{BalanceDecrement, SystemTransaction, TransactionPacket};
+    use crate::test_utils::asserst_topic_present_in_logs;
+    use crate::test_utils::get_nonce;
     use crate::test_utils::{
         advance_blocks, block_reward, custom_chain, eth_payload_attributes,
         eth_payload_attributes_with_parent, get_balance, nonce_reset, release_stake,
@@ -1167,14 +1197,18 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    /// Ensures that only the allowed system tx origin can submit system transactions.
+    ///
+    /// Steps:
+    /// - Setup: Use `setup_irys_reth` to launch node, `block_reward` to compose system tx, `sign_tx` to sign.
+    /// - Action: Inject system tx with invalid origin.
+    /// - Assertion: Tx is rejected with pool error.
     #[test_log::test(tokio::test)]
     async fn external_users_cannot_submit_system_txs() -> eyre::Result<()> {
         // setup
         let wallets = Wallet::new(2).wallet_gen();
-        let trget_account = EthereumWallet::from(wallets[0].clone());
-        let target_account = trget_account.default_signer();
-        let block_producer = EthereumWallet::from(wallets[1].clone());
-        let block_producer = block_producer.default_signer();
+        let target_account = EthereumWallet::from(wallets[0].clone()).default_signer();
+        let block_producer = EthereumWallet::from(wallets[1].clone()).default_signer();
         let (mut nodes, _tasks, ..) = setup_irys_reth(
             &[block_producer.address()],
             custom_chain(),
@@ -1183,14 +1217,15 @@ mod tests {
         )
         .await?;
         let first_node = nodes.pop().unwrap();
-        let system_tx = SystemTransaction {
-            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
-                amount: U256::from(7000000000000000000u64),
-                target: block_producer.address(),
-            }),
-            valid_for_block_height: 1,
-            parent_blockhash: FixedBytes::random(),
-        };
+        let genesis_blockhash = first_node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(0)
+            .unwrap()
+            .unwrap();
+        let system_tx = block_reward(block_producer.address(), 1, genesis_blockhash);
         let mut system_tx_raw = compose_system_tx(0, 1, system_tx.clone());
         let signed_tx = target_account
             .sign_transaction(&mut system_tx_raw)
@@ -1209,6 +1244,18 @@ mod tests {
         Ok(())
     }
 
+    /// Ensures that stale system transactions are dropped from the pool after a commit or reorg event.
+    ///
+    /// Setup:
+    /// - Create two nodes with the same block producer.
+    /// - Submit a normal tx and a system tx to the nodes.
+    ///
+    /// Action:
+    /// - Advance the block on the first node.
+    /// - Update forkchoice on the second node.
+    ///
+    /// Assertion:
+    /// - The system tx from second node is dropped from both pools and not included in the block.
     #[test_log::test(tokio::test)]
     async fn stale_system_txs_get_dropped() -> eyre::Result<()> {
         let wallets = Wallet::new(2).wallet_gen();
@@ -1410,9 +1457,6 @@ mod tests {
         #[case] system_tx: impl Fn(Address, u64, FixedBytes<32>) -> SystemTransaction,
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
-        // setup
-
-        use crate::test_utils::asserst_topic_present_in_logs;
         let wallets = Wallet::new(2).wallet_gen();
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
@@ -1484,6 +1528,7 @@ mod tests {
             block_producer_balance_after, block_producer_balance,
             "bolck_producer's balance should not change"
         );
+        assert_eq!(get_nonce(&node.inner, block_producer.address()), 5);
         Ok(())
     }
 
@@ -1496,9 +1541,6 @@ mod tests {
         #[case] system_tx: impl Fn(Address, u64, FixedBytes<32>) -> SystemTransaction,
         #[case] signer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
-        // setup
-
-        use crate::test_utils::asserst_topic_present_in_logs;
         let wallets = Wallet::new(2).wallet_gen();
         let block_producer = EthereumWallet::from(wallets[0].clone());
         let block_producer = block_producer.default_signer();
@@ -1516,8 +1558,7 @@ mod tests {
             .provider
             .consistent_provider()
             .unwrap()
-            .block_hash(0)
-            .unwrap()
+            .block_hash(0)?
             .unwrap();
         let signer_b_balance = get_balance(&node.inner, signer_b.address());
         let block_producer_balance = get_balance(&node.inner, block_producer.address());
@@ -1575,6 +1616,7 @@ mod tests {
             block_producer_balance_after, block_producer_balance,
             "bolck_producer's balance should not change"
         );
+        assert_eq!(get_nonce(&node.inner, block_producer.address()), 2);
         Ok(())
     }
 
@@ -2059,7 +2101,7 @@ mod tests {
         )
         .testing_node(exec)
         .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
-        .with_components(EthereumNode::components().executor(CustomEthereumExecutorBuilder))
+        .with_components(EthereumNode::components().executor(IrysExecutorBuilder))
         .with_add_ons(EthereumAddOns::default())
         .launch()
         .await?;
@@ -2163,7 +2205,7 @@ mod tests {
         )
         .testing_node(exec)
         .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
-        .with_components(EthereumNode::components().executor(CustomEthereumExecutorBuilder))
+        .with_components(EthereumNode::components().executor(IrysExecutorBuilder))
         .with_add_ons(EthereumAddOns::default())
         .launch()
         .await?;
@@ -2579,6 +2621,7 @@ mod tests {
 }
 
 #[cfg(any(feature = "test-utils", test))]
+/// Test Utilities for Irys Reth node
 pub mod test_utils {
     use super::*;
     use crate::system_tx::{SystemTransaction, TransactionPacket};
@@ -2601,6 +2644,16 @@ pub mod test_utils {
     use reth_transaction_pool::TransactionPool;
     use tracing::{span, Level};
 
+    /// Mines multiple blocks, each with a configurable number of system txs.
+    /// Returns the hashes of all produced blocks.
+    ///
+    /// # Arguments
+    /// - `node`: The node to mine blocks on.
+    /// - `reward_to`: Address to receive block rewards.
+    /// - `start_block`: Block number to start mining from.
+    /// - `num_blocks`: Number of blocks to mine.
+    /// - `sys_txs_per_block`: Number of system txs per block.
+    /// - `wallets`: Signer for system txs.
     pub async fn advance_blocks(
         node: &mut NodeHelperType<IrysEthereumNode>,
         reward_to: Address,
@@ -2640,6 +2693,7 @@ pub mod test_utils {
         Ok::<_, eyre::Error>(block_hashes)
     }
 
+    /// Compose a system tx for releasing stake.
     pub fn release_stake(
         address: Address,
         valid_for_block_height: u64,
@@ -2655,6 +2709,7 @@ pub mod test_utils {
         }
     }
 
+    /// Compose a system tx for block reward.
     pub fn block_reward(
         address: Address,
         valid_for_block_height: u64,
@@ -2670,6 +2725,7 @@ pub mod test_utils {
         }
     }
 
+    /// Compose a system tx for resetting the system tx nonce.
     pub fn nonce_reset(
         decrement_nonce_by: u64,
         valid_for_block_height: u64,
@@ -2684,6 +2740,7 @@ pub mod test_utils {
         }
     }
 
+    /// Compose a system tx for staking.
     pub fn stake(
         address: Address,
         valid_for_block_height: u64,
@@ -2699,6 +2756,7 @@ pub mod test_utils {
         }
     }
 
+    /// Compose a system tx for storage fees.
     pub fn storage_fees(
         address: Address,
         valid_for_block_height: u64,
@@ -2714,6 +2772,7 @@ pub mod test_utils {
         }
     }
 
+    /// Assert that a log topic is present in block execution receipts at least `desired_repetitions` times.
     pub fn asserst_topic_present_in_logs(
         block_execution: reth::providers::ExecutionOutcome,
         storage_fees_topic: [u8; 32],
@@ -2739,6 +2798,7 @@ pub mod test_utils {
         );
     }
 
+    /// Get the balance of an address from a node.
     pub fn get_balance<N, AddOns>(
         node: &FullNode<N, AddOns>,
         addr: Address,
@@ -2759,6 +2819,25 @@ pub mod test_utils {
         signer_balance
     }
 
+    /// Get the nonce of an address from a node.
+    pub fn get_nonce<N, AddOns>(node: &FullNode<N, AddOns>, addr: Address) -> u64
+    where
+        N: FullNodeComponents<Provider: CanonStateSubscriptions>,
+        AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
+        N::Types: NodeTypes<Primitives: FullNodePrimitives>,
+    {
+        let signer_balance = node
+            .provider
+            .basic_account(&addr)
+            .map(|account_info| account_info.map_or(0, |acc| acc.nonce))
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get nonce: {}", err);
+                0
+            });
+        signer_balance
+    }
+
+    /// Sign a legacy transaction with the provided signer.
     pub async fn sign_tx(
         mut tx_raw: TxLegacy,
         new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
@@ -2773,6 +2852,7 @@ pub mod test_utils {
         return pooled_tx;
     }
 
+    /// Returns a custom chain spec for testing.
     pub fn custom_chain() -> Arc<ChainSpec> {
         let custom_genesis = r#"
 {
@@ -2876,6 +2956,7 @@ pub mod test_utils {
         Arc::new(genesis.into())
     }
 
+    /// Returns payload attributes for a given timestamp.
     pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
         let attributes = PayloadAttributes {
             timestamp,
@@ -2887,7 +2968,7 @@ pub mod test_utils {
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
     }
 
-    /// New: Allows specifying the parent block hash for fork building
+    /// Returns payload attributes for a given timestamp and parent block hash.
     pub fn eth_payload_attributes_with_parent(
         timestamp: u64,
         parent_block_hash: B256,
@@ -2902,7 +2983,18 @@ pub mod test_utils {
         EthPayloadBuilderAttributes::new(parent_block_hash, attributes)
     }
 
-    /// Creates the initial setup with `num_nodes` started and interconnected.
+    /// Launches and connects multiple Irys+reth nodes for integration tests.
+    ///
+    /// # Arguments
+    /// - `num_nodes`: Addresses for allowed system tx origins (one per node)
+    /// - `chain_spec`: Chain spec to use
+    /// - `is_dev`: Whether to run in dev mode
+    /// - `attributes_generator`: Function to generate payload attributes
+    ///
+    /// # Returns
+    /// - `Vec<NodeHelperType<IrysEthereumNode>>`: Test node handles
+    /// - `TaskManager`: Task manager for async tasks
+    /// - `Wallet`: Default wallet for test accounts
     pub async fn setup_irys_reth(
         num_nodes: &[Address],
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,

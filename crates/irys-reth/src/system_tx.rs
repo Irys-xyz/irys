@@ -1,3 +1,15 @@
+//! # System Transactions
+//!
+//! This module defines the system transaction types used in the Irys protocol. System transactions
+//! are special EVM transactions that encode protocol-level actions, such as block rewards, storage
+//! fee collection, stake management, and nonce resets. The Irys Consensus Layer (CL) is responsible
+//! for validating these transactions in every block, ensuring protocol rules are enforced:
+//!
+//! - **Block rewards** must go to the Irys block producer
+//! - **Balance increments** correspond to rewards
+//! - **Balance decrements** correspond to storage transaction fees
+//! - **Every block must end with a nonce reset system tx**
+
 use alloy_primitives::Address;
 use alloy_primitives::FixedBytes;
 use alloy_primitives::U256;
@@ -6,24 +18,31 @@ use alloy_rlp::Encodable;
 use alloy_rlp::{Error as RlpError, Result as RlpResult};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 
+/// A system transaction, valid for a single block, encoding a protocol-level action.
 #[derive(
     Debug, Clone, RlpEncodable, RlpDecodable, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary,
 )]
 pub struct SystemTransaction {
-    /// the system is only valid for a single block
+    /// The block height for which this system tx is valid.
     pub valid_for_block_height: u64,
-    /// Ensure that the system tx does not land on an invalid block
+    /// The parent block hash to ensure the tx is not replayed on forks.
     pub parent_blockhash: FixedBytes<32>,
-    /// the actual system transaction packet
+    /// The actual system transaction packet (see TransactionPacket).
     pub inner: TransactionPacket,
 }
 
+/// Enum of all supported system transaction types in Irys protocol.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 pub enum TransactionPacket {
+    /// Release staked funds to an account (balance increment). Used for unstaking or protocol rewards.
     ReleaseStake(BalanceIncrement),
+    /// Block reward payment to the block producer (balance increment). Must be validated by CL.
     BlockReward(BalanceIncrement),
+    /// Stake funds from an account (balance decrement). Used for staking operations.
     Stake(BalanceDecrement),
+    /// Collect storage fees from an account (balance decrement). Must match storage usage.
     StorageFees(BalanceDecrement),
+    /// Reset the system tx nonce for the block producer. Must always be the last system tx in a block.
     ResetSystemTxNonce(ResetSystemTxNonce),
 }
 pub mod system_tx_topics {
@@ -138,6 +157,7 @@ impl Default for TransactionPacket {
     }
 }
 
+/// Balance decrement: used for staking and storage fee collection system txs.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -153,10 +173,13 @@ impl Default for TransactionPacket {
     arbitrary::Arbitrary,
 )]
 pub struct BalanceDecrement {
+    /// Amount to decrement from the target account.
     pub amount: U256,
+    /// Target account address.
     pub target: Address,
 }
 
+/// Balance increment: used for block rewards and stake release system txs.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -172,10 +195,13 @@ pub struct BalanceDecrement {
     arbitrary::Arbitrary,
 )]
 pub struct BalanceIncrement {
+    /// Amount to increment to the target account.
     pub amount: U256,
+    /// Target account address.
     pub target: Address,
 }
 
+/// Nonce reset: decrements the system tx nonce for the block producer. Must be the last system tx in a block.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -191,5 +217,6 @@ pub struct BalanceIncrement {
     arbitrary::Arbitrary,
 )]
 pub struct ResetSystemTxNonce {
+    /// Amount to decrement the nonce by.
     pub decrement_nonce_by: u64,
 }
