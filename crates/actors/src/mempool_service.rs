@@ -628,6 +628,102 @@ impl Inner {
         Ok(())
     }
 
+    async fn block_confirmed_message(
+        &mut self,
+        block: Arc<IrysBlockHeader>,
+        all_txs: Arc<Vec<IrysTransactionHeader>>,
+    ) -> Result<(), TxIngressError> {
+        let mempool_state = &self.mempool_state.clone();
+        let mut mempool_state_write_guard = mempool_state.write().await;
+        for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
+            // Remove the submit tx from the pending valid_tx pool
+            mempool_state_write_guard.valid_tx.remove(txid);
+            mempool_state_write_guard.recent_valid_tx.remove(txid);
+        }
+
+        // Is there a commitment ledger in this block?
+        let commitment_ledger = block
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+        if let Some(commitment_ledger) = commitment_ledger {
+            for txid in commitment_ledger.tx_ids.iter() {
+                // Remove the commitment tx from the pending valid_tx pool
+                self.remove_commitment_tx(txid).await;
+            }
+        }
+
+        let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+
+        // Loop though the promoted transactions and remove their ingress proofs
+        // from the mempool. In the future on a multi node network we may keep
+        // ingress proofs around longer to account for re-orgs, but for now
+        // we just remove them.
+        // FIXME: Note above about re-orgs!
+        if !published_txids.is_empty() {
+            let mut_tx = mempool_state_write_guard
+                .irys_db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            for (i, txid) in block.data_ledgers[DataLedger::Publish]
+                .tx_ids
+                .0
+                .iter()
+                .enumerate()
+            {
+                // Retrieve the promoted transactions header
+                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => {
+                        error!("No transaction header found for txid: {}", txid);
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Error fetching transaction header for txid {}: {}", txid, e);
+                        continue;
+                    }
+                };
+
+                // TODO: In a single node world there is only one ingress proof
+                // per promoted tx, but in the future there will be multiple proofs.
+                let proofs = block.data_ledgers[DataLedger::Publish]
+                    .proofs
+                    .as_ref()
+                    .unwrap();
+                let proof = proofs.0[i].clone();
+                tx_header.ingress_proofs = Some(proof);
+
+                // Update the header record in the database to include the ingress
+                // proof, indicating it is promoted
+                if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
+                    error!(
+                        "Could not update transactions with ingress proofs - txid: {} err: {}",
+                        txid, err
+                    );
+                }
+
+                info!("Promoted tx:\n{:?}", tx_header);
+            }
+
+            mut_tx.commit().expect("expect to commit to database");
+        }
+
+        drop(mempool_state_write_guard);
+
+        info!(
+            "Removing confirmed tx - Block height: {} num tx: {}",
+            block.height,
+            all_txs.len()
+        );
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, err)]
     fn handle_message<'a>(
         &'a mut self,
@@ -645,92 +741,8 @@ impl Inner {
                     Ok(())
                 }
                 MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
-                    let mut mempool_state_guard = mempool_state.write().await;
-                    for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-                        // Remove the submit tx from the pending valid_tx pool
-                        mempool_state_guard.valid_tx.remove(txid);
-                        mempool_state_guard.recent_valid_tx.remove(txid);
-                    }
-
-                    // Is there a commitment ledger in this block?
-                    let commitment_ledger = block
-                        .system_ledgers
-                        .iter()
-                        .find(|b| b.ledger_id == SystemLedger::Commitment);
-
-                    if let Some(commitment_ledger) = commitment_ledger {
-                        for txid in commitment_ledger.tx_ids.iter() {
-                            // Remove the commitment tx from the pending valid_tx pool
-                            self.remove_commitment_tx(txid).await;
-                        }
-                    }
-
-                    let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
-
-                    // Loop though the promoted transactions and remove their ingress proofs
-                    // from the mempool. In the future on a multi node network we may keep
-                    // ingress proofs around longer to account for re-orgs, but for now
-                    // we just remove them.
-                    if !published_txids.is_empty() {
-                        let mut_tx = mempool_state_guard
-                            .irys_db
-                            .tx_mut()
-                            .map_err(|e| {
-                                error!("Failed to create mdbx transaction: {}", e);
-                            })
-                            .unwrap();
-
-                        for (i, txid) in block.data_ledgers[DataLedger::Publish]
-                            .tx_ids
-                            .0
-                            .iter()
-                            .enumerate()
-                        {
-                            // Retrieve the promoted transactions header
-                            let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
-                                Ok(Some(header)) => header,
-                                Ok(None) => {
-                                    error!("No transaction header found for txid: {}", txid);
-                                    continue;
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Error fetching transaction header for txid {}: {}",
-                                        txid, e
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            // TODO: In a single node world there is only one ingress proof
-                            // per promoted tx, but in the future there will be multiple proofs.
-                            let proofs = block.data_ledgers[DataLedger::Publish]
-                                .proofs
-                                .as_ref()
-                                .unwrap();
-                            let proof = proofs.0[i].clone();
-                            tx_header.ingress_proofs = Some(proof);
-
-                            // Update the header record in the database to include the ingress
-                            // proof, indicating it is promoted
-                            if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
-                                error!(
-                                "Could not update transactions with ingress proofs - txid: {} err: {}",
-                                txid, err
-                            );
-                            }
-
-                            info!("Promoted tx:\n{:?}", tx_header);
-                        }
-
-                        let _ = mut_tx.commit();
-                    }
-
-                    info!(
-                        "Removing confirmed tx - Block height: {} num tx: {}",
-                        block.height,
-                        all_txs.len()
-                    );
+                    let _unused_response_message =
+                        self.block_confirmed_message(block, all_txs).await;
                     Ok(())
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
