@@ -735,13 +735,14 @@ impl Inner {
                     }
                 }
                 MempoolServiceMessage::ChunkIngressMessage(chunk, response) => {
-                    let mempool_state_guard = mempool_state.write().await;
+                    let mempool_state_read_guard = mempool_state.read().await;
                     // TODO: maintain a shared read transaction so we have read isolation
-                    let max_chunks_per_item = mempool_state_guard
+                    let max_chunks_per_item = mempool_state_read_guard
                         .config
                         .consensus
                         .mempool
                         .max_chunks_per_item;
+                    drop(mempool_state_read_guard);
 
                     info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
@@ -754,8 +755,12 @@ impl Inner {
                         Ok(v) => v,
                     };
 
-                    let binding = mempool_state_guard.storage_modules_guard.read().clone();
-                    drop(mempool_state_guard);
+                    let mempool_state_write_guard = mempool_state.write().await;
+                    let binding = mempool_state_write_guard
+                        .storage_modules_guard
+                        .read()
+                        .clone();
+                    drop(mempool_state_write_guard);
                     let candidate_sms = binding
                         .iter()
                         .filter_map(|sm| {
