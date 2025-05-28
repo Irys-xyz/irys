@@ -496,7 +496,7 @@ impl Inner {
         );
 
         let mempool_state = &self.mempool_state.clone();
-        let mut mempool_state_guard = mempool_state.write().await;
+        let mempool_state_guard = mempool_state.read().await;
 
         // Early out if we already know about this transaction (invalid)
         if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
@@ -508,6 +508,8 @@ impl Inner {
             .valid_commitment_tx
             .get(&commitment_tx.signer)
             .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
+
+        drop(mempool_state_guard);
 
         if tx_exists {
             return Err(TxIngressError::Skipped);
@@ -540,6 +542,7 @@ impl Inner {
                 return Err(TxIngressError::InvalidSignature);
             }
 
+            let mut mempool_state_guard = mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
             mempool_state_guard
                 .valid_commitment_tx
@@ -555,10 +558,11 @@ impl Inner {
             // transactions from the same address that arrived earlier but were
             // waiting for the stake. This effectively resolves the dependency
             // order for address-based validation.
-            if let Some(pledges_lru) = mempool_state_guard
+            let pop = mempool_state_guard
                 .pending_pledges
-                .pop(&commitment_tx.signer)
-            {
+                .pop(&commitment_tx.signer);
+            drop(mempool_state_guard);
+            if let Some(pledges_lru) = pop {
                 // Extract all pending pledges as a vector of owned transactions
                 let pledges: Vec<_> = pledges_lru
                     .into_iter()
@@ -586,7 +590,9 @@ impl Inner {
             }
 
             // Gossip transaction
+            let mempool_state_guard = mempool_state.read().await;
             let gossip_sender = mempool_state_guard.service_senders.gossip_broadcast.clone();
+            drop(mempool_state_guard);
             let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
 
             gossip_sender
@@ -598,6 +604,7 @@ impl Inner {
                 // Level 1: Keyed by signer address (allows tracking multiple addresses)
                 // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
 
+                let mut mempool_state_guard = mempool_state.write().await;
                 if let Some(pledges_cache) = mempool_state_guard
                     .pending_pledges
                     .get_mut(&commitment_tx.signer)
@@ -622,6 +629,7 @@ impl Inner {
                         .pending_pledges
                         .put(commitment_tx.signer, new_address_cache);
                 }
+                drop(mempool_state_guard)
             } else {
                 return Err(TxIngressError::Skipped);
             }
