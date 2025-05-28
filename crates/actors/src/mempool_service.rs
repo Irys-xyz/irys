@@ -787,8 +787,10 @@ impl Inner {
                     chunks_map.put(chunk.tx_offset, chunk.clone());
                 } else {
                     // If there's no entry for this data_root yet, create one
-                    let mut new_lru_cache =
-                        LruCache::new(NonZeroUsize::new(max_chunks_per_item).expect("expected valid NonZeroUsize::new"));
+                    let mut new_lru_cache = LruCache::new(
+                        NonZeroUsize::new(max_chunks_per_item)
+                            .expect("expected valid NonZeroUsize::new"),
+                    );
                     new_lru_cache.put(chunk.tx_offset, chunk.clone());
                     mempool_state_write_guard
                         .pending_chunks
@@ -875,10 +877,7 @@ impl Inner {
         // Check that the leaf hash on the data_path matches the chunk_hash
         match hash_sha256(&chunk.bytes.0).map_err(|_| ChunkIngressError::InvalidDataHash) {
             Err(e) => {
-                error!(
-                    "{:?}: hashed chunk_bytes hash_sha256() errored!",
-                    e
-                );
+                error!("{:?}: hashed chunk_bytes hash_sha256() errored!", e);
                 return Err(e);
             }
             Ok(hash_256) => {
@@ -950,17 +949,19 @@ impl Inner {
         let read_tx = match self
             .read_tx()
             .await
-            .map_err(|_| ChunkIngressError::DatabaseError) {
-                Err(e) => return Err(e),
-                Ok(v) => v,
-            };
+            .map_err(|_| ChunkIngressError::DatabaseError)
+        {
+            Err(e) => return Err(e),
+            Ok(v) => v,
+        };
 
         let mut cursor = match read_tx
             .cursor_dup_read::<CachedChunksIndex>()
-            .map_err(|_| ChunkIngressError::DatabaseError) {
-                Err(e) => return Err(e),
-                Ok(v) => v,
-            };
+            .map_err(|_| ChunkIngressError::DatabaseError)
+        {
+            Err(e) => return Err(e),
+            Ok(v) => v,
+        };
         // get the number of dupsort values (aka the number of chunks)
         // this ASSUMES that the index isn't corrupt (no double values etc)
         // the ingress proof generation task does a more thorough check
@@ -968,10 +969,11 @@ impl Inner {
             .dup_count(root_hash)
             .map_err(|_| ChunkIngressError::DatabaseError)
             .unwrap()
-            .ok_or(ChunkIngressError::DatabaseError) {
-                Err(e) => return Err(e),
-                Ok(v) => v,
-            };
+            .ok_or(ChunkIngressError::DatabaseError)
+        {
+            Err(e) => return Err(e),
+            Ok(v) => v,
+        };
 
         // data size is the offset of the last chunk
         // add one as index is 0-indexed
