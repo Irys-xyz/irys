@@ -468,6 +468,23 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
+    async fn handle_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+        // if tx exists
+        if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+            return Some(tx_header.clone());
+        }
+        drop(mempool_state_guard);
+
+        if let Ok(read_tx) = self.read_tx().await {
+            let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
+            return tx_header.clone();
+        }
+
+        None
+    }
+
     #[tracing::instrument(skip_all, err)]
     fn handle_message<'a>(
         &'a mut self,
@@ -478,21 +495,10 @@ impl Inner {
 
             match msg {
                 MempoolServiceMessage::GetTransaction(tx, response) => {
-                    let mempool_state_guard = mempool_state.read().await;
-                    if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
-                        if let Err(e) = response.send(Some(tx_header.clone())) {
-                            tracing::error!("response.send(tx_header) error: {:?}", e);
-                        };
-                        return Ok(());
-                    }
-
-                    if let Ok(read_tx) = self.read_tx().await {
-                        let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
-                        if let Err(e) = response.send(tx_header.clone()) {
-                            tracing::error!("response.send(tx_header) error: {:?}", e);
-                        };
-                    }
-
+                    let response_message = self.handle_transaction_message(tx).await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send(tx_header) error: {:?}", e);
+                    };
                     Ok(())
                 }
                 MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
