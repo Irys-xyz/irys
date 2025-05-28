@@ -39,7 +39,7 @@ pub struct ServiceReceivers {
     pub commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
     pub vdf: UnboundedReceiver<VdfServiceMessage>,
     pub vdf_mining: Receiver<bool>,
-    pub vdf_seed: Receiver<BroadcastMiningSeed>,
+    pub vdf_seed: UnboundedReceiver<BroadcastMiningSeed>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipData>,
 }
@@ -51,7 +51,7 @@ pub struct ServiceSendersInner {
     pub commitment_cache: UnboundedSender<CommitmentCacheMessage>,
     pub vdf: UnboundedSender<VdfServiceMessage>,
     pub vdf_mining: Sender<bool>,
-    pub vdf_seed: Sender<BroadcastMiningSeed>,
+    pub vdf_seed: UnboundedSender<BroadcastMiningSeed>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipData>,
 }
@@ -67,7 +67,7 @@ impl ServiceSendersInner {
         // enabling/disabling VDF mining thread
         let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
         // vdf channel for fast forwarding steps during node sync
-        let (vdf_seed_sender, vdf_seed_receiver) = channel::<BroadcastMiningSeed>(1);
+        let (vdf_seed_sender, vdf_seed_receiver) = unbounded_channel::<BroadcastMiningSeed>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipData>();

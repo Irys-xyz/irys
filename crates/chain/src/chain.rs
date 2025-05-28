@@ -942,6 +942,7 @@ impl IrysNode {
             service_senders.vdf_seed.clone(),
             gossip_listener,
             service_senders.vdf.clone(),
+            block_tree_guard.clone(),
         )?;
 
         // set up the price oracle
@@ -1137,7 +1138,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        new_seed_rx: mpsc::Receiver<BroadcastMiningSeed>,
+        new_seed_rx: mpsc::UnboundedReceiver<BroadcastMiningSeed>,
         vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,

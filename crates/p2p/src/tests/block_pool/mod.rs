@@ -21,6 +21,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error};
+use irys_actors::block_tree_service::{BlockTreeCache, BlockTreeReadGuard};
 
 #[derive(Clone, Default, Debug)]
 struct MockApiClient {
@@ -131,7 +132,7 @@ async fn should_process_block() {
     );
     let peer_addr = peer_list_service.start();
 
-    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
+    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::unbounded_channel();
     let (vdf_service_tx, mut vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
     let sync_state = SyncState::new(false);
     let service = BlockPoolService::new_with_client(
@@ -141,6 +142,7 @@ async fn should_process_block() {
         Some(vdf_tx),
         sync_state,
         vdf_service_tx,
+        BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTreeCache::new(&IrysBlockHeader::default()))))
     );
     let addr = service.start();
 
@@ -305,7 +307,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .await
         .expect("can't send message to peer list");
 
-    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
+    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::unbounded_channel();
     let (vdf_service_tx, mut vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
     let sync_state = SyncState::new(false);
 
@@ -334,6 +336,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         Some(vdf_tx),
         sync_state,
         vdf_service_tx,
+        BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTreeCache::new(&IrysBlockHeader::default()))))
     );
     let addr = service.start();
 
