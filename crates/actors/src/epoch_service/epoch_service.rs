@@ -102,9 +102,9 @@ impl EpochServiceActor {
         Self::validate_commitments(&genesis_block, &commitments)?;
 
         match self.perform_epoch_tasks(&None, &genesis_block, commitments) {
-            Ok(_) => debug!("Processed genesis epoch block"),
+            Ok(_) => debug!("Initialized Epoch Service"),
             Err(e) => {
-                return Err(eyre::eyre!("Error performing genesis epoch tasks {:?}", e));
+                return Err(eyre::eyre!("Error performing genesis init tasks {:?}", e));
             }
         }
 
@@ -189,8 +189,7 @@ impl EpochServiceActor {
         new_epoch_block: &IrysBlockHeader,
         new_epoch_commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochServiceError> {
-        let span = self.span.clone();
-        let _span = span.enter();
+        let _enter = self.span.clone().entered();
         // Validate the epoch blocks
         self.is_epoch_block(new_epoch_block)?;
 
@@ -216,8 +215,9 @@ impl EpochServiceActor {
             .map_err(|_| EpochServiceError::InvalidCommitments)?;
 
         debug!(
-            "Performing epoch tasks for {} ({})",
-            &new_epoch_block.block_hash, &new_epoch_block.height
+            height = new_epoch_block.height,
+            block_hash = %new_epoch_block.block_hash.0.to_base58(),
+            "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
         self.compute_commitment_state(new_epoch_commitments);
@@ -852,8 +852,6 @@ impl EpochServiceActor {
         let assignments = self.get_partition_assignments(miner);
         let num_chunks = self.config.consensus.num_chunks_in_partition as u32;
         let paths = &cfg.submodule_paths;
-
-        debug!("{:#?}", assignments);
 
         let mut module_infos = Vec::new();
 

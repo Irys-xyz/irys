@@ -1,19 +1,23 @@
 use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _, time::Duration};
 pub use tempfile;
 use tempfile::TempDir;
-use tokio::time::Sleep;
 use tracing::debug;
-use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    fmt::{self, SubscriberBuilder},
+    util::SubscriberInitExt,
+    EnvFilter,
+};
 
 pub fn initialize_tracing() {
     let _ = SubscriberBuilder::default()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
         .finish()
         .try_init();
 }
 
-pub async fn tokio_sleep(seconds: u64) -> Sleep {
-    tokio::time::sleep(Duration::from_secs(seconds))
+pub async fn tokio_sleep(seconds: u64) {
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
 }
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.  
@@ -24,6 +28,7 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     // TODO: expose tracing configuration
     let _ = SubscriberBuilder::default()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
         .finish()
         .try_init();
 

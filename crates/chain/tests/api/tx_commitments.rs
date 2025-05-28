@@ -10,10 +10,64 @@ use irys_actors::{
 };
 use irys_api_server::routes;
 use irys_chain::IrysNodeCtx;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
 use reth_primitives::{irys_primitives::CommitmentType, GenesisAccount};
 use tokio::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, debug_span, info};
+
+#[actix_web::test]
+async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
+    // std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var(
+        "RUST_LOG",
+        "irys_actors::epoch_service::epoch_service=debug",
+    );
+    initialize_tracing();
+
+    let span = debug_span!("TEST");
+    let _enter = span.enter();
+    debug!("span test");
+
+    // Configure a test network with accelerated epochs (2 blocks per epoch)
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    // Start the genesis node and wait for packing
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Initialize the peer with our keypair/signer
+    let peer_config = genesis_node.testnet_peer();
+
+    // Start the peer: No packing on the peer, it doesn't have partition assignments yet
+    let peer_node = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER")
+        .await;
+
+    genesis_node.mine_blocks(num_blocks_in_epoch).await?;
+
+    peer_node
+        .wait_until_height(num_blocks_in_epoch as u64, seconds_to_wait)
+        .await?;
+    let block = peer_node
+        .get_block_by_height(num_blocks_in_epoch as u64)
+        .await?;
+    debug!(
+        "epoch block:\n{}",
+        serde_json::to_string_pretty(&block).unwrap()
+    );
+
+    assert_eq!(block.height, num_blocks_in_epoch as u64);
+
+    genesis_node.stop().await;
+    peer_node.stop().await;
+
+    Ok(())
+}
 
 #[actix_web::test]
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
