@@ -235,33 +235,34 @@ impl Handler<RequestValidationMessage> for ValidationService {
                                 block_hash,
                                 validation_result: ValidationResult::Invalid,
                             });
+                            return;
                         }
 
                         // Recall range check
-                        // match recall_recall_range_is_valid(
-                        //     &block,
-                        //     &config.consensus,
-                        //     &vdf_steps_guard_for_recall_validation,
-                        // )
-                        // .await
-                        // {
-                        //     Ok(()) => {
-                        //         debug!(
-                        //             block_hash = ?block.block_hash.0.to_base58(),
-                        //             ?block.height,
-                        //             "recall_recall_range_is_valid",
-                        //         );
-                        //     }
-                        //     Err(error) => {
-                        //         error!("Recall range is invalid: {}", error);
-                        //         let block_tree_service = BlockTreeService::from_registry();
-                        //         block_tree_service.do_send(ValidationResultMessage {
-                        //             block_hash,
-                        //             validation_result: ValidationResult::Invalid,
-                        //         });
-                        //         return;
-                        //     }
-                        // }
+                        match recall_recall_range_is_valid(
+                            &block,
+                            &config.consensus,
+                            &vdf_steps_guard_for_recall_validation,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                debug!(
+                                    block_hash = ?block.block_hash.0.to_base58(),
+                                    ?block.height,
+                                    "recall_recall_range_is_valid",
+                                );
+                            }
+                            Err(error) => {
+                                error!("Recall range is invalid: {}", error);
+                                let block_tree_service = BlockTreeService::from_registry();
+                                block_tree_service.do_send(ValidationResultMessage {
+                                    block_hash,
+                                    validation_result: ValidationResult::Invalid,
+                                });
+                                return;
+                            }
+                        }
 
                         // VDF passed, now spawn and run PoA validation
                         let poa_future = tokio::task::spawn_blocking(move || {

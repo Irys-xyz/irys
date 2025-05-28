@@ -73,7 +73,7 @@ pub fn run_vdf(
                     proposed_ff_to_mining_seed.global_step, global_step_number
                 );
             }
-            continue;
+            // continue;
         }
 
         // check if vdf mining state should change
