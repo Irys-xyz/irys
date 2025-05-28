@@ -9,13 +9,13 @@ use crate::tables::{
 };
 
 use crate::metadata::MetadataKey;
+use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
     U256,
 };
 use reth_db::cursor::DbDupCursorRO;
-
 use reth_db::mdbx::init_db_for;
 use reth_db::table::{Table, TableInfo};
 use reth_db::transaction::DbTx;
