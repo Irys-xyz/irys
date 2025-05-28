@@ -112,7 +112,7 @@ impl PackingActor {
                 chunk_range,
             } = next_range;
 
-            let assignment = match storage_module.partition_assignment {
+            let assignment = match storage_module.partition_assignment() {
                 Some(v) => v,
                 None => {
                     warn!(target:"irys::packing", "Partition assignment for storage module {} is `None`, cannot pack requested range {:?}", &storage_module.id, &chunk_range);

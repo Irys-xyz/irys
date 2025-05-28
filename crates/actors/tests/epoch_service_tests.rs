@@ -408,6 +408,7 @@ async fn partition_expiration_and_repacking_test() {
             vdf_steps_guard.clone(),
             atomic_global_step_number.clone(),
             U256::zero(),
+            None,
         );
 
         let part_arbiter = Arbiter::new();

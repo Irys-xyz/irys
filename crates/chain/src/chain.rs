@@ -1,6 +1,4 @@
-use crate::peer_utilities::{
-    fetch_genesis_block, fetch_genesis_commitments, sync_state_from_peers,
-};
+use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
@@ -39,8 +37,7 @@ use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
 use irys_p2p::{
-    GossipService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal,
-    SyncState,
+    P2PService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::node::RethNode;
@@ -57,7 +54,7 @@ use irys_storage::{
 };
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
-    CommitmentTransaction, Config, GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, H256, U256,
 };
 use reth::{
@@ -181,7 +178,9 @@ impl Drop for StopGuard {
     fn drop(&mut self) {
         // Only check if this is the last reference to the guard
         if Arc::strong_count(&self.0) == 1 && !self.is_stopped() && !thread::panicking() {
-            panic!("IrysNodeCtx must be stopped before all instances are dropped");
+            error!("\x1b[1;31m============================================================\x1b[0m");
+            error!("\x1b[1;31mIrysNodeCtx must be stopped before all instances are dropped\x1b[0m");
+            error!("\x1b[1;31m============================================================\x1b[0m");
         }
     }
 }
@@ -570,18 +569,18 @@ impl IrysNode {
             &node_config.reth_peer_info.peering_tcp_addr
         );
 
-        // if we are an empty node joining an existing network
-        if *node_mode == NodeMode::PeerSync {
-            sync_state_from_peers(
-                ctx.config.node_config.trusted_peers.clone(),
-                ctx.actor_addresses.block_discovery_addr.clone(),
-                ctx.actor_addresses.mempool.clone(),
-                ctx.peer_list.clone(),
-                ctx.service_senders.vdf_seed.clone(),
-                ctx.service_senders.vdf.clone(),
-            )
-            .await?;
-        }
+        let latest_known_block_height = ctx.block_index_guard.read().latest_height();
+        // This is going to resolve instantly for a genesis node with 0 blocks,
+        //  going to wait for sync otherwise.
+        irys_p2p::sync_chain(
+            ctx.sync_state.clone(),
+            irys_api_client::IrysApiClient::new(),
+            ctx.peer_list.clone(),
+            node_mode,
+            latest_known_block_height as usize,
+            ctx.config.node_config.genesis_peer_discovery_timeout_millis,
+        )
+        .await?;
 
         Ok(ctx)
     }
@@ -705,7 +704,7 @@ impl IrysNode {
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
                 let exec = task_manager.executor();
-                let _ = span2.clone().enter();
+                let _span = span.enter();
                 let run_reth_until_ctrl_c_or_signal = async || {
                     _ = run_to_completion_or_panic(
                         &mut task_manager,
@@ -738,8 +737,7 @@ impl IrysNode {
                     reth_node_handle
                 };
 
-                let reth_node =
-                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal().instrument(span));
+                let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
 
                 debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
                 task_manager.graceful_shutdown();
@@ -814,7 +812,8 @@ impl IrysNode {
             .await?;
 
         // start the broadcast mining service
-        let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service();
+        let span = Span::current();
+        let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
 
         // start the epoch service
         let (storage_module_infos, epoch_service_actor) =
@@ -833,8 +832,11 @@ impl IrysNode {
             .send(GetCommitmentStateGuardMessage)
             .await?;
 
-        let (gossip_service, gossip_tx) = GossipService::new(config.node_config.miner_address());
-        let sync_state = gossip_service.sync_state.clone();
+        let p2p_service = P2PService::new(
+            config.node_config.miner_address(),
+            receivers.gossip_broadcast,
+        );
+        let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
         let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
@@ -871,7 +873,6 @@ impl IrysNode {
             &block_tree_guard,
             &commitment_state_guard,
             &service_senders,
-            gossip_tx.clone(),
         );
         let mempool_facade = MempoolServiceFacadeImpl::from(mempool_service.clone());
 
@@ -927,21 +928,11 @@ impl IrysNode {
             &block_index_guard,
             partition_assignments_guard,
             &vdf_steps_guard,
-            gossip_tx.clone(),
             Arc::clone(&reward_curve),
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        let current_tree_tip = block_tree_guard.read().tip;
-        let latest_known_block_height = block_tree_guard
-            .read()
-            .get_block(&current_tree_tip)
-            // Skip the genesis block, as it shouldn't be handled by the gossip sync and should be
-            // synced before the gossip task starts
-            .map(|block| if block.height > 0 { block.height } else { 1 })
-            .unwrap_or(1);
-
-        let gossip_service_handle = gossip_service.run(
+        let p2p_service_handle = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
@@ -950,8 +941,7 @@ impl IrysNode {
             irys_db.clone(),
             service_senders.vdf_seed.clone(),
             gossip_listener,
-            matches!(config.node_config.mode, NodeMode::Genesis),
-            latest_known_block_height as usize,
+            service_senders.vdf.clone(),
         )?;
 
         // set up the price oracle
@@ -1049,14 +1039,12 @@ impl IrysNode {
         // - Initializes storage modules when they receive partition assignments
         // - Handles the dynamic addition/removal of storage modules
         // - Coordinates with the epoch service for runtime updates
+        debug!("Starting StorageModuleService");
         let _handle = StorageModuleService::spawn_service(
             &task_exec,
             receivers.storage_modules,
             storage_modules,
             &irys_node_ctx.actor_addresses,
-            irys_node_ctx.arbiters.clone(),
-            block_tree_guard.clone(),
-            vdf_steps_guard.clone(),
             &config,
         );
 
@@ -1133,7 +1121,7 @@ impl IrysNode {
             server,
             vdf_thread_handler,
             reth_node,
-            gossip_service_handle,
+            p2p_service_handle,
         ))
     }
 
@@ -1166,9 +1154,14 @@ impl IrysNode {
             .base_directory
             .parent()
             .is_some_and(|p| p.ends_with(".tmp"));
+        let span = Span::current();
+
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = config.consensus.vdf.clone();
+
             move || {
+                let _span = span.enter();
+
                 if !is_test {
                     // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
                     let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
@@ -1220,6 +1213,7 @@ impl IrysNode {
                 vdf_steps_guard.clone(),
                 atomic_global_step_number.clone(),
                 initial_difficulty,
+                Some(Span::current()),
             );
             let part_arbiter = Arbiter::new();
             let partition_mining_actor =
@@ -1292,6 +1286,7 @@ impl IrysNode {
             price_oracle,
             service_senders: service_senders.clone(),
             blocks_remaining_for_test: None,
+            span: Span::current(),
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
@@ -1325,7 +1320,6 @@ impl IrysNode {
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
-        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
         reward_curve: Arc<HalvingCurve>,
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
@@ -1335,9 +1329,9 @@ impl IrysNode {
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
-            gossip_sender,
             epoch_service: epoch_service.clone(),
             reward_curve,
+            span: Span::current(),
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =
@@ -1394,7 +1388,6 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         commitment_state_guard: &CommitmentStateReadGuard,
         service_senders: &ServiceSenders,
-        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> (actix::Addr<MempoolService>, Arbiter) {
         let mempool_service = MempoolService::new(
             irys_db.clone(),
@@ -1405,7 +1398,6 @@ impl IrysNode {
             commitment_state_guard.clone(),
             &config,
             service_senders.clone(),
-            gossip_tx,
         );
         let mempool_arbiter = Arbiter::new();
         let mempool_service =
@@ -1522,11 +1514,14 @@ fn init_peer_list_service(
     (peer_list_service.into(), peer_list_arbiter)
 }
 
-fn init_broadcaster_service() -> (actix::Addr<BroadcastMiningService>, Arbiter) {
+fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>, Arbiter) {
     let broadcast_arbiter = Arbiter::new();
     let broadcast_mining_actor =
         BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-            BroadcastMiningService::default()
+            BroadcastMiningService {
+                span: Some(span),
+                ..Default::default()
+            }
         });
     SystemRegistry::set(broadcast_mining_actor.clone());
     (broadcast_mining_actor, broadcast_arbiter)

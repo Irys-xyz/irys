@@ -1,4 +1,3 @@
-use actix::{Actor, Arbiter};
 /// # StorageModuleService
 ///
 /// Manages storage modules and their lifecycle within the node.
@@ -16,23 +15,20 @@ use actix::{Actor, Arbiter};
 use futures::future::Either;
 use irys_config::StorageSubmodulesConfig;
 use irys_storage::{PackingParams, StorageModule, StorageModuleInfo};
-use irys_types::{ArbiterHandle, Config, PartitionChunkRange};
+use irys_types::{Config, PartitionChunkRange};
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{
     path::PathBuf,
     pin::pin,
-    sync::{atomic::AtomicU64, Arc, RwLock},
+    sync::{Arc, RwLock},
 };
 use tokio::{
     sync::{mpsc::UnboundedReceiver /*, oneshot*/},
     task::JoinHandle,
 };
-use tracing::{debug, warn};
+use tracing::{debug, warn, Span};
 
-use crate::{
-    block_tree_service::BlockTreeReadGuard, mining::PartitionMiningActor, packing::PackingRequest,
-    vdf_service::VdfStepsReadGuard, ActorAddresses,
-};
+use crate::{packing::PackingRequest, ActorAddresses};
 
 // Messages that the StorageModuleService service supports
 #[derive(Debug)]
@@ -53,11 +49,8 @@ pub struct StorageModuleService {
 pub struct StorageModuleServiceInner {
     storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
     actor_addresses: ActorAddresses,
-    arbiters: Arc<RwLock<Vec<ArbiterHandle>>>,
-    block_tree_guard: BlockTreeReadGuard,
-    vdf_steps_guard: VdfStepsReadGuard,
     submodules_config: StorageSubmodulesConfig,
-    config: Config,
+    _config: Config,
 }
 
 impl StorageModuleServiceInner {
@@ -65,9 +58,6 @@ impl StorageModuleServiceInner {
     pub fn new(
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         actor_addresses: ActorAddresses,
-        arbiters: Arc<RwLock<Vec<ArbiterHandle>>>,
-        block_tree_guard: BlockTreeReadGuard,
-        vdf_steps_guard: VdfStepsReadGuard,
         config: Config,
     ) -> Self {
         let submodules_config =
@@ -79,11 +69,8 @@ impl StorageModuleServiceInner {
         Self {
             storage_modules,
             actor_addresses,
-            arbiters,
-            block_tree_guard,
-            vdf_steps_guard,
             submodules_config,
-            config,
+            _config: config,
         }
     }
 
@@ -99,22 +86,26 @@ impl StorageModuleServiceInner {
         &mut self,
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
     ) -> eyre::Result<()> {
+        let span = Span::current();
+        let _span = span.enter();
+
         // Read the current storage modules once, outside the loop
-        let mut current_modules = self.storage_modules.write().unwrap();
-        let mut new_modules: Vec<Arc<StorageModule>> = Vec::new();
+        let current_modules = self.storage_modules.read().unwrap();
+        let mut updated_modules: Vec<Arc<StorageModule>> = Vec::new();
 
         for (i, info) in storage_module_infos.iter().enumerate() {
-            // Skip if we don't have a module at this index
-            if i >= current_modules.len() {
-                // This must be a new partition assignment, create a new StorageModule for it in the global list
-                let arc_module = Arc::new(StorageModule::new(&info, &self.config)?);
-                current_modules.push(arc_module.clone());
-                new_modules.push(arc_module);
+            // Get the existing StorageModule
+            let existing = &current_modules[i];
+
+            // Did this storage module get assigned a new partition_hash ?
+            if existing.partition_assignment().is_none() && info.partition_assignment.is_some() {
+                existing.assign_partition(info.partition_assignment.unwrap());
+                // Record this storage module as updated
+                updated_modules.push(existing.clone());
+
+                // Skip any further validations for now
                 continue;
             }
-
-            // Get the existing module
-            let existing = &current_modules[i];
 
             // Get the path for this module
             let path = &self.submodules_config.submodule_paths[i];
@@ -143,60 +134,23 @@ impl StorageModuleServiceInner {
             }
 
             // Validate the module against on-disk packing parameters
-            self.validate_packing_params(existing, path, i)?;
+            if info.partition_assignment.is_some() {
+                match self.validate_packing_params(existing, path, i) {
+                    Ok(_) => {}
+                    Err(err) => panic!("{}", err),
+                }
+            }
         }
 
-        // For each new module, start packing and mining
-        for new_sm in new_modules {
+        // For each updated module, start packing and mining
+        for updated_sm in updated_modules {
             // Message packing actor
-            if let Ok(interval) = new_sm.reset() {
+            if let Ok(interval) = updated_sm.reset() {
                 self.actor_addresses.packing.do_send(PackingRequest {
-                    storage_module: new_sm.clone(),
+                    storage_module: updated_sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });
             }
-
-            // Add a mining actor to the global list
-            let (global_step_number, _) = self.vdf_steps_guard.read().get_last_step_and_seed();
-            let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-
-            // Create a block tree read guard that lives long enough
-            let block_tree_guard = self.block_tree_guard.read();
-            let block_hash = block_tree_guard.get_canonical_chain().0.last().unwrap().0;
-            let latest_block = block_tree_guard.get_block_and_status(&block_hash);
-
-            // Now we can safely use latest_block
-            let initial_difficulty = match latest_block {
-                Some(latest_block) => latest_block.0.diff,
-                None => panic!("could not determine latest difficulty to start packing"),
-            };
-
-            let partition_mining_actor = PartitionMiningActor::new(
-                &self.config,
-                self.actor_addresses.block_producer.clone().recipient(),
-                self.actor_addresses.packing.clone().recipient(),
-                new_sm.clone(),
-                true, // start mining automatically
-                self.vdf_steps_guard.clone(),
-                atomic_global_step_number.clone(),
-                initial_difficulty,
-            );
-            let part_arbiter = Arbiter::new();
-            let partition_mining_actor =
-                PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| {
-                    partition_mining_actor
-                });
-
-            let mut arbiter_list = self.arbiters.write().unwrap();
-
-            // Add the part arbiter to the global list of arbiters
-            arbiter_list.push(ArbiterHandle::new(
-                part_arbiter,
-                "partition_arbiter".to_string(),
-            ));
-
-            // Add the partition mining actor to the global list
-            self.actor_addresses.partitions.push(partition_mining_actor);
         }
 
         Ok(())
@@ -211,7 +165,7 @@ impl StorageModuleServiceInner {
         index: usize,
     ) -> eyre::Result<()> {
         // Skip modules without partition assignments
-        if module.partition_assignment.is_none() {
+        if module.partition_assignment().is_none() {
             warn!(
                 "Storage module at index {} has no partition assignment",
                 index
@@ -220,7 +174,7 @@ impl StorageModuleServiceInner {
         }
 
         // Get the assignment
-        let assignment = module.partition_assignment.as_ref().unwrap();
+        let assignment = module.partition_assignment().unwrap().clone();
 
         // Load parameters from disk
         let params_path = module_path.join("packing_params.toml");
@@ -290,9 +244,6 @@ impl StorageModuleService {
         rx: UnboundedReceiver<StorageModuleServiceMessage>,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         actor_addresses: &ActorAddresses,
-        arbiters: Arc<RwLock<Vec<ArbiterHandle>>>,
-        block_tree_guard: BlockTreeReadGuard,
-        vdf_steps_guard: VdfStepsReadGuard,
         config: &Config,
     ) -> JoinHandle<()> {
         let actor_addresses = actor_addresses.clone();
@@ -303,14 +254,7 @@ impl StorageModuleService {
                 let pending_storage_module_service = Self {
                     shutdown,
                     msg_rx: rx,
-                    inner: StorageModuleServiceInner::new(
-                        storage_modules,
-                        actor_addresses,
-                        arbiters,
-                        block_tree_guard,
-                        vdf_steps_guard,
-                        config,
-                    ),
+                    inner: StorageModuleServiceInner::new(storage_modules, actor_addresses, config),
                 };
                 pending_storage_module_service
                     .start()

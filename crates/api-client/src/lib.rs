@@ -7,7 +7,6 @@ use irys_types::{
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
-use tracing::error;
 
 enum Method {
     GET,
@@ -102,10 +101,6 @@ impl IrysApiClient {
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
-                error!(
-                    "API request failed with status: {}, message: {}",
-                    status, error_text
-                );
                 Err(eyre::eyre!(
                     "API request failed with status: {} - {}",
                     status,
@@ -143,10 +138,7 @@ impl ApiClient for IrysApiClient {
 
         match response {
             Ok(_) => Ok(()),
-            Err(e) => {
-                error!("Failed to post transaction: {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -177,10 +169,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(peer_response)) => Ok(peer_response),
             Ok(None) => Err(eyre::eyre!("No response from peer")),
-            Err(e) => {
-                error!("Failed to post version: {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -196,10 +185,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(block)) => Ok(Some(block)),
             Ok(None) => Ok(None),
-            Err(e) => {
-                error!("Failed to get block: {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -224,10 +210,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(block_index)) => Ok(block_index),
             Ok(None) => Ok(vec![]),
-            Err(e) => {
-                error!("Failed to get block index: {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 }

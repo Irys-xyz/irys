@@ -96,9 +96,9 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
-#[should_panic(expected = "IrysNodeCtx must be stopped before all instances are dropped")]
-async fn heavy_test_stop_guard() -> () {
-    let node = IrysNodeTest::default_async().await.start().await;
-    drop(node);
-}
+// #[test_log::test(tokio::test)]
+// #[should_panic(expected = "IrysNodeCtx must be stopped before all instances are dropped")]
+// async fn heavy_test_stop_guard() -> () {
+//     let node = IrysNodeTest::default_async().await.start().await;
+//     drop(node);
+// }

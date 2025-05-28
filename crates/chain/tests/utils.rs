@@ -11,6 +11,7 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
+use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
@@ -32,16 +33,14 @@ use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
+use irys_types::partition::PartitionAssignment;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{
-    Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
-    UnpackedChunk,
-};
-use irys_types::{
-    CommitmentTransaction, Config, IrysTransactionHeader, IrysTransactionId, NodeConfig, NodeMode,
-    TxChunkOffset,
+    Base64, CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
+    NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
@@ -55,9 +54,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
-use tracing::debug;
-use tracing::error;
-use tracing::info;
+use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
@@ -214,10 +211,19 @@ impl IrysNodeTest<()> {
         }
     }
 
+    pub async fn start_with_name(self, log_name: &str) -> IrysNodeTest<IrysNodeCtx> {
+        let span = debug_span!("NODE", name = %log_name);
+        let _enter = span.enter();
+        self.start().await
+    }
+
     pub async fn start_and_wait_for_packing(
         self,
-        seconds_to_wait: u64,
+        log_name: &str,
+        seconds_to_wait: usize,
     ) -> IrysNodeTest<IrysNodeCtx> {
+        let span = debug_span!("NODE", name = %log_name);
+        let _enter = span.enter();
         let node = self.start().await;
         node.wait_for_packing(seconds_to_wait).await;
         node
@@ -292,22 +298,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height after {} retries",
+                "Failed to reach target height of {} after {} retries",
+                target_height,
                 retries
             ))
         } else {
             info!(
-                "got block after {} seconds and {} retries",
-                max_seconds, &retries
+                "got block at height: {} after {} seconds and {} retries",
+                target_height, max_seconds, &retries
             );
             Ok(())
         }
     }
 
-    pub async fn wait_for_packing(&self, seconds_to_wait: u64) {
+    pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         wait_for_packing(
             self.node_ctx.actor_addresses.packing.clone(),
-            Some(Duration::from_secs(seconds_to_wait)),
+            Some(Duration::from_secs(seconds_to_wait as u64)),
         )
         .await
         .expect("for packing to complete in the wait period");
@@ -363,13 +370,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height after {} retries",
+                "Failed to reach target height {} after {} retries",
+                target_height,
                 retries
             ))
         } else {
             info!(
-                "got block after {} seconds and {} retries",
-                max_seconds, &retries
+                "reached height {} after {} retries",
+                target_height, &retries
             );
             Ok(())
         }
@@ -409,10 +417,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx.set_partition_mining(false).await
     }
 
+    pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        self.mine_blocks(num_blocks).await?;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        Ok(())
+    }
+
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
-        seconds_to_wait: u64,
+        seconds_to_wait: usize,
     ) -> eyre::Result<()> {
         let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
         let mut retries = 0;
@@ -435,6 +451,21 @@ impl IrysNodeTest<IrysNodeCtx> {
         } else {
             info!("transaction found in mempool after {} retries", &retries);
             Ok(())
+        }
+    }
+
+    pub fn peer_address(&self) -> PeerAddress {
+        let http = &self.node_ctx.config.node_config.http;
+        let gossip = &self.node_ctx.config.node_config.gossip;
+
+        PeerAddress {
+            api: format!("{}:{}", http.bind_ip, http.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("{}:{}", gossip.bind_ip, gossip.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
         }
     }
 
@@ -522,6 +553,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
+    pub async fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+        self.node_ctx
+            .service_senders
+            .gossip_broadcast
+            .send(GossipData::Block((*block_header).clone()))?;
+
+        Ok(())
+    }
+
     pub fn get_block_by_hash_on_chain(
         &self,
         hash: &H256,
@@ -598,6 +638,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.post_commitment_tx_request(&api_uri, &stake_tx).await;
 
         stake_tx
+    }
+
+    pub async fn get_partition_assignments(
+        &self,
+        mining_address: Address,
+    ) -> Vec<PartitionAssignment> {
+        self.node_ctx
+            .actor_addresses
+            .epoch_service
+            .send(GetMinerPartitionAssignmentsMessage(mining_address))
+            .await
+            .expect("to retrieve partition assignments for miner")
     }
 
     async fn post_commitment_tx_request(

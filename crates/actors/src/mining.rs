@@ -19,7 +19,7 @@ use irys_types::{
     PartitionChunkOffset, PartitionChunkRange,
 };
 use openssl::sha;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Span};
 
 #[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
@@ -32,6 +32,7 @@ pub struct PartitionMiningActor {
     ranges: Ranges,
     steps_guard: VdfStepsReadGuard,
     atomic_global_step_number: AtomicVdfStepNumber,
+    span: Span,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -47,6 +48,7 @@ impl PartitionMiningActor {
         steps_guard: VdfStepsReadGuard,
         atomic_global_step_number: AtomicVdfStepNumber,
         initial_difficulty: U256,
+        span: Option<Span>,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -63,6 +65,7 @@ impl PartitionMiningActor {
             difficulty: initial_difficulty,
             steps_guard,
             atomic_global_step_number,
+            span: span.unwrap_or(Span::current()),
         }
     }
 
@@ -72,6 +75,8 @@ impl PartitionMiningActor {
         seed: &H256,
         partition_hash: &H256,
     ) -> eyre::Result<u64> {
+        let span = self.span.clone();
+        let _span = span.enter();
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
         if next_ranges_step >= step {
             debug!("Step {} already processed or next consecutive one", step);
@@ -116,6 +121,8 @@ impl PartitionMiningActor {
         vdf_step: u64,
         checkpoints: H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
+        let span = self.span.clone();
+        let _span = span.enter();
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
             None => {
@@ -226,8 +233,12 @@ impl Actor for PartitionMiningActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let broadcaster = BroadcastMiningService::from_registry();
         broadcaster.do_send(Subscribe(ctx.address()));
+        debug!("Partition Mining Actor Started");
     }
 
     fn stopping(&mut self, ctx: &mut Context<Self>) -> Running {
@@ -241,9 +252,17 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
+            return;
+        }
+
+        if self.storage_module.partition_assignment().is_none() {
+            debug!("No partition assigned - skipping seed {:?}", seed);
             return;
         }
 
@@ -295,6 +314,9 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let new_diff = msg.0.diff;
         debug!(
             "updating difficulty target in partition miner {}: from {} to {} (diff: {})",
@@ -311,6 +333,8 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, _ctx: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
         self.storage_module.partition_hash().map(|partition_hash| {
             let msg = msg.0;
             if msg.0.contains(&partition_hash) {
@@ -351,6 +375,9 @@ impl Handler<MiningControl> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, control: MiningControl, _ctx: &mut Context<Self>) -> Self::Result {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let should_mine = control.into_inner();
         debug!(
             "Setting should_mine to {} from {}",
@@ -509,7 +536,7 @@ mod tests {
 
         let _ = storage_module.sync_pending_chunks();
 
-        let mining_broadcaster = BroadcastMiningService::new();
+        let mining_broadcaster = BroadcastMiningService::new(None);
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
         let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;
@@ -535,6 +562,7 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
+            None,
         );
 
         let seed: Seed = Seed(H256::random());
@@ -684,6 +712,7 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
+            None,
         );
 
         let range = partition_mining_actor

@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace, warn, Span};
 
 use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
@@ -49,6 +49,8 @@ pub struct EpochServiceActor {
     pub config: Config,
     /// Computed commitment state
     pub(super) commitment_state: Arc<RwLock<CommitmentState>>,
+    /// Tracing span
+    pub span: Span,
 }
 
 impl Actor for EpochServiceActor {
@@ -85,6 +87,7 @@ impl EpochServiceActor {
             storage_submodules_config: storage_submodules_config.clone(),
             config: config.clone(),
             commitment_state: Default::default(),
+            span: Span::current(),
         }
     }
 
@@ -93,12 +96,14 @@ impl EpochServiceActor {
         genesis_block: IrysBlockHeader,
         commitments: Vec<CommitmentTransaction>,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
+        let span = self.span.clone();
+        let _span = span.enter();
         Self::validate_commitments(&genesis_block, &commitments)?;
 
         match self.perform_epoch_tasks(&None, &genesis_block, commitments) {
-            Ok(_) => debug!("Processed genesis epoch block"),
+            Ok(_) => debug!("Initialized Epoch Service"),
             Err(e) => {
-                return Err(eyre::eyre!("Error performing genesis epoch tasks {:?}", e));
+                return Err(eyre::eyre!("Error performing genesis init tasks {:?}", e));
             }
         }
 
@@ -112,6 +117,8 @@ impl EpochServiceActor {
         &mut self,
         epoch_replay_data: Vec<EpochReplayData>,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
+        let span = self.span.clone();
+        let _span = span.enter();
         // Initialize as None for the first iteration
         let mut previous_epoch_block: Option<IrysBlockHeader> = None;
 
@@ -181,6 +188,7 @@ impl EpochServiceActor {
         new_epoch_block: &IrysBlockHeader,
         new_epoch_commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochServiceError> {
+        let _enter = self.span.clone().entered();
         // Validate the epoch blocks
         self.is_epoch_block(new_epoch_block)?;
 
@@ -206,8 +214,9 @@ impl EpochServiceActor {
             .map_err(|_| EpochServiceError::InvalidCommitments)?;
 
         debug!(
-            "Performing epoch tasks for {} ({})",
-            &new_epoch_block.block_hash, &new_epoch_block.height
+            height = new_epoch_block.height,
+            block_hash = %new_epoch_block.block_hash.0.to_base58(),
+            "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
         self.compute_commitment_state(new_epoch_commitments);
@@ -768,7 +777,7 @@ impl EpochServiceActor {
 
         // Send the message
         if let Err(e) = self.service_senders.storage_modules.send(message) {
-            warn!("Failed to send partition assignments update: {}", e);
+            error!("Failed to send partition assignments update: {}", e);
         }
     }
 
@@ -904,6 +913,16 @@ impl EpochServiceActor {
                 id,
                 partition_assignment: Some(*pa),
                 submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
+            });
+        }
+
+        // STEP 4: Unassigned
+        for (idx, path) in paths.iter().enumerate().skip(module_infos.len()) {
+            // Create StorageModuleInfo entries without partition assignments
+            module_infos.push(StorageModuleInfo {
+                id: idx,
+                partition_assignment: None, // No partition assignment
+                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path.clone())],
             });
         }
 

@@ -215,6 +215,8 @@ pub struct NodeConfig {
 
     /// Reth settings
     pub reth_peer_info: RethPeerInfo,
+
+    pub genesis_peer_discovery_timeout_millis: u64,
 }
 
 impl Into<Config> for NodeConfig {
@@ -227,7 +229,7 @@ impl Into<Config> for NodeConfig {
 ///
 /// Defines how the node participates in the network - either as a genesis node
 /// that starts a new network or as a peer that syncs with existing nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
@@ -689,6 +691,8 @@ impl NodeConfig {
                 bind_port: 0,
             },
             reth_peer_info: RethPeerInfo::default(),
+
+            genesis_peer_discovery_timeout_millis: 10000,
         }
     }
 
@@ -872,6 +876,7 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
+        genesis_peer_discovery_timeout_millis = 10000
 
         [reth]
         chain = 1270
@@ -953,6 +958,7 @@ mod tests {
         consensus = "Testnet"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
         reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        genesis_peer_discovery_timeout_millis = 10000
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"

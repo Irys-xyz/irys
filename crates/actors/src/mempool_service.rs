@@ -135,7 +135,6 @@ pub struct MempoolService {
 
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
-    gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
 }
 
 impl Default for MempoolService {
@@ -165,7 +164,6 @@ impl MempoolService {
         commitment_state_guard: CommitmentStateReadGuard,
         config: &Config,
         service_senders: ServiceSenders,
-        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
         let mempool_config = &config.consensus.mempool;
@@ -183,7 +181,6 @@ impl MempoolService {
             block_tree_read_guard: block_tree_guard,
             commitment_state_guard,
             service_senders,
-            gossip_tx,
             recent_valid_tx: HashSet::new(),
             pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
             pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
@@ -592,14 +589,12 @@ impl Handler<TxIngressMessage> for MempoolService {
         }
 
         // Gossip transaction
-        let gossip_sender = self.gossip_tx.clone();
+        let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let gossip_data = GossipData::Transaction(tx.clone());
 
-        let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender.send(gossip_data).await {
-                tracing::error!("Failed to send gossip data: {:?}", error);
-            }
-        });
+        if let Err(error) = gossip_sender.send(gossip_data) {
+            tracing::error!("Failed to send gossip data: {:?}", error);
+        }
 
         Ok(())
     }
@@ -678,15 +673,37 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
                 }
             }
 
+            // HACK HACK: in order for block discovery to validate incoming blocks
+            // it needs to read commitment tx from the database. Ideally it should
+            // be reading them from the mempool_service in memory cache, but we are
+            // putting off that work until the actix mempool_service is rewritten as a
+            // tokio service.
+            match self.irys_db.update_eyre(|db_tx| {
+                irys_database::insert_commitment_tx(db_tx, &commitment_tx)?;
+                Ok(())
+            }) {
+                Ok(()) => {
+                    info!(
+                        "Successfully stored commitment_tx in db {:?}",
+                        commitment_tx.id.0.to_base58()
+                    );
+                }
+                Err(db_error) => {
+                    error!(
+                        "Failed to store commitment_tx in db {:?}: {:?}",
+                        commitment_tx.id.0.to_base58(),
+                        db_error
+                    );
+                }
+            }
+
             // Gossip transaction
-            let gossip_sender = self.gossip_tx.clone();
+            let gossip_sender = self.service_senders.gossip_broadcast.clone();
             let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
 
-            let _ = tokio::task::spawn(async move {
-                if let Err(error) = gossip_sender.send(gossip_data).await {
-                    tracing::error!("Failed to send gossip data: {:?}", error);
-                }
-            });
+            if let Err(error) = gossip_sender.send(gossip_data) {
+                tracing::error!("Failed to send gossip data: {:?}", error);
+            }
 
             Ok(())
         } else {
@@ -937,14 +954,12 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             });
         }
 
-        let gossip_sender = self.gossip_tx.clone();
+        let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let gossip_data = GossipData::Chunk(chunk);
 
-        let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender.send(gossip_data).await {
-                tracing::error!("Failed to send gossip data: {:?}", error);
-            }
-        });
+        if let Err(error) = gossip_sender.send(gossip_data) {
+            tracing::error!("Failed to send gossip data: {:?}", error);
+        }
 
         Ok(())
     }

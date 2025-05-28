@@ -328,7 +328,7 @@ fn find_storage_module(
     guard.iter().find_map(|module| {
         // First check ledger
         module
-            .partition_assignment
+            .partition_assignment()
             .as_ref()
             .and_then(|pa| pa.ledger_id)
             .filter(|&id| id == ledger as u32)
