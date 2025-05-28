@@ -1154,6 +1154,7 @@ impl Inner {
             error!("error: {:?}", TxIngressError::Skipped);
             return Err(TxIngressError::Skipped);
         }
+        drop(mempool_state_read_guard);
 
         // Validate anchor
         let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
@@ -1173,6 +1174,7 @@ impl Inner {
             .await
             .map_err(|_| TxIngressError::DatabaseError)?;
 
+        let mempool_state_read_guard = mempool_state.read().await;
         let read_reth_tx = &mempool_state_read_guard
             .reth_db
             .tx()
