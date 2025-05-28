@@ -628,7 +628,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn block_confirmed_message(
+    async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
         all_txs: Arc<Vec<IrysTransactionHeader>>,
@@ -724,7 +724,10 @@ impl Inner {
         Ok(())
     }
 
-    async fn chunk_ingress_message(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
+    async fn handle_chunk_ingress_message(
+        &self,
+        chunk: UnpackedChunk,
+    ) -> Result<(), ChunkIngressError> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_read_guard = mempool_state.read().await;
         // TODO: maintain a shared read transaction so we have read isolation
@@ -1029,7 +1032,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn get_best_mempool_txs(&self) -> MempoolTxs {
+    async fn handle_get_best_mempool_txs(&self) -> MempoolTxs {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
         let reth_db = mempool_state_guard.reth_db.clone();
@@ -1156,7 +1159,7 @@ impl Inner {
                 }
                 MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
                     let _unused_response_message =
-                        self.block_confirmed_message(block, all_txs).await;
+                        self.handle_block_confirmed_message(block, all_txs).await;
                     Ok(())
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
@@ -1169,7 +1172,7 @@ impl Inner {
                     Ok(())
                 }
                 MempoolServiceMessage::ChunkIngressMessage(chunk, response) => {
-                    let response_value = self.chunk_ingress_message(chunk).await;
+                    let response_value = self.handle_chunk_ingress_message(chunk).await;
 
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -1178,7 +1181,7 @@ impl Inner {
                     Ok(())
                 }
                 MempoolServiceMessage::GetBestMempoolTxs(response) => {
-                    let response_value = self.get_best_mempool_txs().await;
+                    let response_value = self.handle_get_best_mempool_txs().await;
 
                     // Return selected transactions grouped by type
                     if let Err(e) = response.send(response_value) {
