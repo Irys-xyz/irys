@@ -25,6 +25,7 @@ use lru::LruCache;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
+    DatabaseError,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -744,7 +745,7 @@ impl Inner {
         let read_tx = self
             .read_tx()
             .await
-            .expect("expected read access to database");
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let mempool_state_write_guard = mempool_state.write().await;
         let binding = mempool_state_write_guard
@@ -762,7 +763,7 @@ impl Inner {
             .collect::<Vec<_>>();
 
         let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-            .map_err(|_| ChunkIngressError::DatabaseError).expect("expected database access")
+            .map_err(|_| ChunkIngressError::DatabaseError)?
             .map(|cdr| cdr.data_size)
             .or_else(|| {
                 debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
@@ -949,34 +950,22 @@ impl Inner {
         }
 
         // check if we have all the chunks for this tx
-        let read_tx = match self
+        let read_tx = self
             .read_tx()
             .await
-            .map_err(|_| ChunkIngressError::DatabaseError)
-        {
-            Err(e) => return Err(e),
-            Ok(v) => v,
-        };
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        let mut cursor = match read_tx
+        let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
-            .map_err(|_| ChunkIngressError::DatabaseError)
-        {
-            Err(e) => return Err(e),
-            Ok(v) => v,
-        };
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
+
         // get the number of dupsort values (aka the number of chunks)
         // this ASSUMES that the index isn't corrupt (no double values etc)
         // the ingress proof generation task does a more thorough check
-        let chunk_count = match cursor
+        let chunk_count = cursor
             .dup_count(root_hash)
-            .map_err(|_| ChunkIngressError::DatabaseError)
-            .unwrap()
-            .ok_or(ChunkIngressError::DatabaseError)
-        {
-            Err(e) => return Err(e),
-            Ok(v) => v,
-        };
+            .map_err(|_| ChunkIngressError::DatabaseError)?
+            .ok_or(ChunkIngressError::DatabaseError)?;
 
         // data size is the offset of the last chunk
         // add one as index is 0-indexed
@@ -1179,13 +1168,15 @@ impl Inner {
             Ok(v) => v,
         };
 
-        let read_tx = self.read_tx().await.unwrap();
+        let read_tx = self
+            .read_tx()
+            .await
+            .map_err(|_| TxIngressError::DatabaseError)?;
 
         let read_reth_tx = &mempool_state_read_guard
             .reth_db
             .tx()
-            .map_err(|_| TxIngressError::DatabaseError)
-            .unwrap();
+            .map_err(|_| TxIngressError::DatabaseError)?;
 
         drop(mempool_state_read_guard);
         let mut mempool_state_write_guard = mempool_state.write().await;
@@ -1212,22 +1203,19 @@ impl Inner {
                         &tx.data_root, &e
                     );
                     TxIngressError::DatabaseError
-                })
-                .unwrap()
+                })?
                 .map_err(|e| {
                     error!(
                         "Error updating ingress proof expiry for {} - {}",
                         &tx.data_root, &e
                     );
                     TxIngressError::DatabaseError
-                })
-                .unwrap();
+                })?;
         }
 
         // Check account balance
         if irys_database::get_account_balance(read_reth_tx, tx.signer)
-            .map_err(|_| TxIngressError::DatabaseError)
-            .unwrap()
+            .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx.total_fee())
         {
             error!(
@@ -1402,14 +1390,13 @@ impl Inner {
     /// if the transaction could not be created. Logs an error if the transaction fails.
     async fn read_tx(
         &self,
-    ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, ChunkIngressError> {
+    ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_read_guard = mempool_state.read().await;
 
         mempool_state_read_guard
             .irys_db
             .tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)
             .inspect_err(|e| error!("database error reading tx: {:?}", e))
     }
 
