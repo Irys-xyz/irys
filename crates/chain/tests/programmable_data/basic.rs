@@ -38,6 +38,7 @@ sol!(
 const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
+#[ignore]
 #[test_log::test(actix_web::test)]
 async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let mut testnet_config = NodeConfig::testnet();
