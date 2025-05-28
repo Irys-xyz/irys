@@ -1,6 +1,3 @@
-[submodule "ext/reth"]
-	path = ext/reth
-	url = https://github.com/Irys-xyz/reth
 [submodule "fixtures/contracts/lib/openzeppelin-contracts"]
 	path = fixtures/contracts/lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts
