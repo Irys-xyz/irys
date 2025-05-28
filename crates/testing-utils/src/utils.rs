@@ -1,7 +1,6 @@
 use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _, time::Duration};
 pub use tempfile;
 use tempfile::TempDir;
-use tokio::time::Sleep;
 use tracing::debug;
 use tracing_subscriber::{
     fmt::{self, SubscriberBuilder},
@@ -17,8 +16,8 @@ pub fn initialize_tracing() {
         .try_init();
 }
 
-pub async fn tokio_sleep(seconds: u64) -> Sleep {
-    tokio::time::sleep(Duration::from_secs(seconds))
+pub async fn tokio_sleep(seconds: u64) {
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
 }
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.  
