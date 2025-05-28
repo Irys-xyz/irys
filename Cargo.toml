@@ -120,7 +120,6 @@ lru = "0.14.0"
 paste = "1.0.15"
 async-trait = "0.1.83"
 
-
 # reth & alloy deps
 alloy-dyn-abi = "1.1.0"
 alloy-evm = { version = "0.7.1", default-features = false }
@@ -183,8 +182,8 @@ reth-transaction-pool = { git = "https://github.com/Irys-xyz/reth", rev = "7f74b
 reth-trie-db = { git = "https://github.com/Irys-xyz/reth", rev = "7f74bff7265b59bc1333fa04707650312e5644fc" }
 reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "7f74bff7265b59bc1333fa04707650312e5644fc" }
 
-
 # just used
+
 
 # reth = { path = "./ext/reth/bin/reth" }
 # reth-chainspec = { path = "./ext/reth/crates/chainspec" }
@@ -212,6 +211,7 @@ reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "7f74bff72
 # reth-tracing = { path = "./ext/reth/crates/tracing" }
 # reth-transaction-pool = { path = "./ext/reth/crates/transaction-pool" }
 # reth-trie-db = { path = "./ext/reth/crates/trie/db" }
+
 # reth-cli-commands = { path = "./ext/reth/crates/cli/commands" }
 
 # all deps + used
@@ -478,6 +478,8 @@ redundant_pub_crate = "allow"
 significant_drop_in_scrutinee = "allow"
 significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
+renamed_function_params = "allow"
+same_name_method = "allow"
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]
