@@ -439,7 +439,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 == oneshot_rx
                     .await
                     .expect("to process ChunkIngressMessage")
-                    .expect("boolean response to transaction existance")
+                    .expect("boolean response to transaction existence")
             {
                 break;
             }

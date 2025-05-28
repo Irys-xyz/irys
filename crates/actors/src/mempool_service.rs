@@ -1301,7 +1301,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn handle_tx_existance_query(&self, txid: H256) -> Result<bool, TxIngressError> {
+    async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
         let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
@@ -1368,7 +1368,7 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::TxExistenceQuery(txid, response) => {
-                    let response_value = self.handle_tx_existance_query(txid).await;
+                    let response_value = self.handle_tx_existence_query(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
