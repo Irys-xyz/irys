@@ -298,7 +298,6 @@ reth-trie-db = { path = "./ext/reth/crates/trie/db" }
 
 [profile.dev]
 panic = "unwind"
-lto = "thin"
 
 [workspace.lints]
 rust.missing_debug_implementations = "warn"
