@@ -98,15 +98,11 @@ pub struct IrysNodeCtx {
 }
 
 impl IrysNodeCtx {
-    pub fn get_api_state(
-        &self,
-        ema_service: UnboundedSender<EmaServiceMessage>,
-        mempool_service: UnboundedSender<MempoolServiceMessage>,
-    ) -> ApiState {
+    pub fn get_api_state(&self) -> ApiState {
         ApiState {
-            mempool_service,
+            mempool_service: self.service_senders.mempool.clone(),
             chunk_provider: self.chunk_provider.clone(),
-            ema_service,
+            ema_service: self.service_senders.ema.clone(),
             peer_list: self.peer_list.clone(),
             db: self.db.clone(),
             config: self.config.clone(),
