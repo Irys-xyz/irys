@@ -403,7 +403,6 @@ mod tests {
     };
     use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
-    
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};

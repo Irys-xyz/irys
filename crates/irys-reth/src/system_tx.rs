@@ -10,6 +10,7 @@
 //! - **Balance decrements** correspond to storage transaction fees
 //! - **Every block must end with a nonce reset system tx**
 
+use alloy_primitives::keccak256;
 use alloy_primitives::Address;
 use alloy_primitives::FixedBytes;
 use alloy_primitives::U256;
@@ -17,7 +18,6 @@ use alloy_rlp::Decodable;
 use alloy_rlp::Encodable;
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use bytes;
-use alloy_primitives::keccak256;
 use std::sync::LazyLock;
 
 /// A system transaction, valid for a single block, encoding a protocol-level action.
@@ -49,7 +49,10 @@ pub enum TransactionPacket {
 }
 
 /// Topics for system transaction logs
-#[expect(clippy::module_name_repetitions, reason = "module name in type name provides clarity")]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "module name in type name provides clarity"
+)]
 pub mod system_tx_topics {
     use super::*;
 
@@ -120,7 +123,10 @@ pub const STAKE_ID: u8 = 0x02;
 pub const STORAGE_FEES_ID: u8 = 0x03;
 pub const RESET_SYS_SIGNER_NONCE_ID: u8 = 0x04;
 
-#[expect(clippy::arithmetic_side_effects, reason = "length calculation is safe for small values")]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "length calculation is safe for small values"
+)]
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
@@ -156,7 +162,10 @@ impl Encodable for TransactionPacket {
     }
 }
 
-#[expect(clippy::indexing_slicing, reason = "buffer bounds are checked before indexing")]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "buffer bounds are checked before indexing"
+)]
 impl Decodable for TransactionPacket {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         if buf.is_empty() {
@@ -193,7 +202,10 @@ impl Decodable for TransactionPacket {
     }
 }
 
-#[expect(clippy::unimplemented, reason = "intentional panic to prevent silent bugs")]
+#[expect(
+    clippy::unimplemented,
+    reason = "intentional panic to prevent silent bugs"
+)]
 impl Default for TransactionPacket {
     fn default() -> Self {
         unimplemented!("relying on the default impl for `SYSTEM_TX` is a critical bug")

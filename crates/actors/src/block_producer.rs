@@ -20,11 +20,7 @@ use irys_types::{
 };
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{
-    payload::EthBuiltPayload,
-    revm::primitives::B256,
-    rpc::eth::EthApiServer as _,
-};
+use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
 use std::{
