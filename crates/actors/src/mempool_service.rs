@@ -738,7 +738,7 @@ impl Inner {
         &self,
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mempool_state_read_guard = mempool_state.read().await;
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = mempool_state_read_guard
@@ -1031,7 +1031,7 @@ impl Inner {
     }
 
     async fn handle_get_best_mempool_txs(&self) -> MempoolTxs {
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
         let reth_db = mempool_state_guard.reth_db.clone();
         let mut fees_spent_per_address = HashMap::new();
@@ -1315,7 +1315,7 @@ impl Inner {
     }
 
     async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
         let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
             Ok(true)
@@ -1405,7 +1405,7 @@ impl Inner {
     async fn read_tx(
         &self,
     ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mempool_state_read_guard = mempool_state.read().await;
 
         mempool_state_read_guard
@@ -1419,7 +1419,7 @@ impl Inner {
     async fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
 
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mut mempool_state_guard = mempool_state.write().await;
 
         mempool_state_guard.recent_valid_tx.remove(&txid);
@@ -1457,7 +1457,7 @@ impl Inner {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> CommitmentStatus {
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
         // Check if already staked in the blockchain
         let is_staked = mempool_state_guard
@@ -1529,7 +1529,7 @@ impl Inner {
         tx_id: &IrysTransactionId,
         anchor: &H256,
     ) -> Result<IrysBlockHeader, TxIngressError> {
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mempool_state_read_guard = mempool_state.read().await;
 
         let read_tx = self
@@ -1580,7 +1580,7 @@ impl Inner {
 
     // Helper to get the canonical chain and latest height
     async fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
-        let mempool_state = &self.mempool_state.clone();
+        let mempool_state = &self.mempool_state;
         let mempool_state_read_guard = mempool_state.read().await;
         let canon_chain = mempool_state_read_guard
             .block_tree_read_guard
@@ -1603,7 +1603,7 @@ impl Inner {
             info!("Signature is valid");
             Ok(())
         } else {
-            let mempool_state = &self.mempool_state.clone();
+            let mempool_state = &self.mempool_state;
             mempool_state.write().await.invalid_tx.push(tx.id());
             debug!("Signature is NOT valid");
             Err(TxIngressError::InvalidSignature)
