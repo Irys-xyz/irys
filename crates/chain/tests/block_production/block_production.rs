@@ -296,6 +296,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let _block_reward = U256::from(0);
 
     error!("TODO: NEW SHADOW LOGIC");
+    node.stop().await;
     return Ok(());
 
     // for receipt in reth_exec_env.shadow_receipts {
