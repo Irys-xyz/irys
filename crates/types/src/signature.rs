@@ -20,13 +20,6 @@ impl IrysSignature {
         IrysSignature(signature)
     }
 
-    /// converts the parity to a bool, then to the Ethereum standard NonEip155 parity (27 or 28)
-    /// // as_bytes now applies this transformation for us :)
-    // pub fn with_eth_parity(mut self) -> Self {
-    //     self.0 = self.0.with_parity(27 + self.0.v() as usize);
-    //     self
-    // }
-
     /// Passthrough to the inner signature.as_bytes()
     pub fn as_bytes(&self) -> [u8; 65] {
         self.0.as_bytes()
