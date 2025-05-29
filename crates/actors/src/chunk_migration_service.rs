@@ -15,7 +15,6 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
     TxChunkOffset, UnpackedChunk, H256,
 };
-use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
 

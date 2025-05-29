@@ -6,7 +6,6 @@ use irys_actors::epoch_service::{
 
 use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
 use reth::payload::EthBuiltPayload;
-use reth::rpc::types::engine::ExecutionPayloadEnvelopeV5;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};

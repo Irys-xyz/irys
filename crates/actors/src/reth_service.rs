@@ -13,7 +13,6 @@ use reth::{
     revm::primitives::B256,
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
 };
-use reth_db::Database as _;
 use tracing::{debug, error, info};
 
 #[derive(Debug, Default)]

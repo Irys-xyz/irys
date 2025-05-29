@@ -1,5 +1,6 @@
 use actix::prelude::*;
 use actors::mocker::Mocker;
+use alloy_rpc_types_engine::PayloadAttributes;
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
@@ -7,7 +8,9 @@ use irys_database::{
     insert_commitment_tx, tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
-use irys_reth_node_bridge::{ext::IrysRethTestContextExt as _, new_reth_context, node::RethNodeProvider};
+use irys_reth_node_bridge::{
+    ext::IrysRethTestContextExt as _, new_reth_context, node::RethNodeProvider,
+};
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
@@ -18,9 +21,10 @@ use irys_types::{
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
-     payload::EthBuiltPayload, revm::primitives::{alloy_primitives, B256}, rpc::{eth::EthApiServer as _, types::engine::ExecutionPayloadEnvelopeV5}
+    payload::EthBuiltPayload,
+    revm::primitives::B256,
+    rpc::eth::EthApiServer as _,
 };
-use alloy_rpc_types_engine::PayloadAttributes;
 use reth_db::cursor::*;
 use reth_db::Database;
 use std::{
@@ -112,17 +116,13 @@ impl Handler<SetTestBlocksRemainingMessage> for BlockProducerActor {
 }
 
 #[derive(Message, Debug)]
-#[rtype(
-    result = "eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>"
-)]
+#[rtype(result = "eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>")]
 /// Announce to the node a mining solution has been found.
 pub struct SolutionFoundMessage(pub SolutionContext);
 
 impl Handler<SolutionFoundMessage> for BlockProducerActor {
-    type Result = AtomicResponse<
-        Self,
-        eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>,
-    >;
+    type Result =
+        AtomicResponse<Self, eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>>;
     #[tracing::instrument(skip_all, fields(
         minting_address = ?msg.0.mining_address,
         partition_hash = ?msg.0.partition_hash,
@@ -599,13 +599,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 finalized_hash: None,
             }).await??;
 
-            
-
-            // context
-            //     .engine_api
-            //     .update_forkchoice_full(block_hash, None, None)
-            //     .await
-            //     .unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
