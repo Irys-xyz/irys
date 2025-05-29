@@ -48,7 +48,6 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     // because irys_database init needs it to register metrics.
     let _ = install_prometheus_recorder();
     let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
-    /* reth_create_db(path, args)?.with_metrics_and_tables(tables); */
 
     Ok(db)
 }

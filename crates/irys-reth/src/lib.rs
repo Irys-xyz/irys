@@ -620,7 +620,7 @@ pub mod evm {
         //NOTE: whenever we execute system transactions, reth gives a warning: "State root task returned incorrect state root"
         // Current hypothesis is: because we require direct access to the db to execute system txs,
         // reth cannot do parallel state root computations (which presumably are faster than non-parallel).
-        // This does not change the end-result of the block but is somtehing we may want to look into.
+        // This does not change the end-result of the block but is something we may want to look into.
         #[expect(clippy::too_many_lines, reason = "easier to read")]
         fn execute_transaction_with_result_closure(
             &mut self,
