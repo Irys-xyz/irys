@@ -20,7 +20,6 @@ reth.workspace = true
 reth-db.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
-actix.workspace = true
 actix-web.workspace = true
 actix-cors = "0.7"
 tracing.workspace = true
