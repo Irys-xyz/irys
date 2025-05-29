@@ -756,12 +756,12 @@ impl Inner {
             .await
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        let mempool_state_write_guard = mempool_state.write().await;
-        let binding = mempool_state_write_guard
+        let mempool_state_read_guard = mempool_state.read().await;
+        let binding = mempool_state_read_guard
             .storage_modules_guard
             .read()
             .clone();
-        drop(mempool_state_write_guard);
+        drop(mempool_state_read_guard);
         let candidate_sms = binding
             .iter()
             .filter_map(|sm| {
@@ -1190,11 +1190,11 @@ impl Inner {
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         drop(mempool_state_read_guard);
-        let mut mempool_state_write_guard = mempool_state.write().await;
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-            let anchor_expiry_depth = mempool_state_write_guard
+            let mempool_state_read_guard = mempool_state.read().await;
+            let anchor_expiry_depth = mempool_state_read_guard
                 .config
                 .node_config
                 .consensus_config()
@@ -1205,7 +1205,8 @@ impl Inner {
                 "Updating ingress proof for data root {} expiry from {} -> {}",
                 &tx.data_root, &old_expiry.last_height, &new_expiry
             );
-            mempool_state_write_guard
+
+            mempool_state_read_guard
                 .irys_db
                 .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
                 .map_err(|e| {
@@ -1222,6 +1223,7 @@ impl Inner {
                     );
                     TxIngressError::DatabaseError
                 })?;
+            drop(mempool_state_read_guard);
         }
 
         // Check account balance
@@ -1240,6 +1242,7 @@ impl Inner {
         // Validate the transaction signature
         // check the result and error handle
         let _ = self.validate_signature(&tx).await;
+        let mut mempool_state_write_guard = mempool_state.write().await;
         mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
         mempool_state_write_guard.recent_valid_tx.insert(tx.id);
 
@@ -1322,6 +1325,7 @@ impl Inner {
             // Still has it, just invalid
             Ok(true)
         } else {
+            drop(mempool_state_guard);
             let read_tx = self.read_tx().await;
             let result = if read_tx.is_err() {
                 Err(TxIngressError::DatabaseError)
@@ -1469,6 +1473,7 @@ impl Inner {
 
         // For unstaked pledges, validate against cache and pending transactions
         let commitment_cache = mempool_state_guard.service_senders.commitment_cache.clone();
+        drop(mempool_state_guard);
         let commitment_tx_clone = commitment_tx.clone();
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -1491,6 +1496,7 @@ impl Inner {
 
         // For unstaked addresses, check for pending stake transactions
         if matches!(cache_status, CommitmentStatus::Unstaked) {
+            let mempool_state_guard = mempool_state.read().await;
             // Get pending transactions for this address
             if let Some(pending) = mempool_state_guard
                 .valid_commitment_tx
