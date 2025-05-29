@@ -32,6 +32,8 @@ reth-ethereum-primitives.workspace = true
 reth-transaction-pool.workspace = true
 reth-primitives-traits.workspace = true
 reth-e2e-test-utils = { workspace = true, optional = true }
+reth-engine-local = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 revm.workspace = true
 
 tokio.workspace = true
@@ -44,17 +46,17 @@ bytes.workspace = true
 
 [dev-dependencies]
 reth-e2e-test-utils = { workspace = true }
+serde_json.workspace = true
 alloy-rpc-types-engine.workspace = true
 test-log.workspace = true
-serde_json.workspace = true
 rstest.workspace = true
 futures.workspace = true
 alloy-signer-local.workspace = true
-reth-engine-local.workspace = true
+reth-engine-local = { workspace = true }
 reth-db = { workspace = true, features = ["test-utils"] }
 
 [features]
-test-utils = ["reth-e2e-test-utils"]
+test-utils = ["reth-e2e-test-utils", "reth-engine-local", "serde_json"]
 
 [lints]
 workspace = true
