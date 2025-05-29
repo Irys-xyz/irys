@@ -485,13 +485,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        self.node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::TxIngressMessage(
-                tx.header.clone(),
-                oneshot_tx,
-            ));
+        let response =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::TxIngressMessage(
+                    tx.header.clone(),
+                    oneshot_tx,
+                ));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
 
         match oneshot_rx.await {
             Ok(Ok(())) => return Ok(tx),

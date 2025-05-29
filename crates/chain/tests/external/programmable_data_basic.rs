@@ -140,10 +140,14 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     let recv_tx = loop {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        node.node_ctx
+        let response = node
+            .node_ctx
             .service_senders
             .mempool
             .send(MempoolServiceMessage::GetBestMempoolTxs(oneshot_tx));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
         match oneshot_rx.await {
             Ok(mempool_tx) if !mempool_tx.storage_tx.is_empty() => {
                 break mempool_tx.storage_tx[0].clone();
