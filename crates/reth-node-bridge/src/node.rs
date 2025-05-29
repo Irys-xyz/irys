@@ -111,7 +111,6 @@ pub async fn run_node(
     latest_block: u64,
     random_ports: bool,
 ) -> eyre::Result<RethNodeHandle> {
-    // let logs = LogArgs::default()
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
     reth_config.network.discovery.disable_discovery = true;
@@ -127,12 +126,6 @@ pub async fn run_node(
     reth_config.engine.persistence_threshold = 0;
     reth_config.engine.memory_block_buffer_target = 0;
 
-    // if let Some(chain_spec) = self.command.chain_spec() {
-    //     self.logs.log_file_directory =
-    //         self.logs.log_file_directory.join(chain_spec.chain.to_string());
-    // }
-    // let _guard = logs.init_tracing()?;
-    // info!(target: "reth::cli", "Initialized tracing, debug log directory: {}", logs.log_file_directory);
     let db_args = DatabaseArgs::default();
     // Install the prometheus recorder to be sure to record all metrics
     let _ = install_prometheus_recorder();
@@ -154,7 +147,7 @@ pub async fn run_node(
 
     let handle = builder
         .node(IrysEthereumNode {
-            allowed_system_tx_origin: Address::random(),
+            allowed_system_tx_origin: node_config.miner_address(),
         })
         .launch_with_debug_capabilities()
         .await?;
