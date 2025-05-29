@@ -1,45 +1,7 @@
-use alloy_primitives::{wrap_fixed_bytes, U256};
-use alloy_rlp::{
-    Decodable, Encodable, Error as RlpError, RlpDecodable, RlpDecodableWrapper, RlpEncodable,
-    RlpEncodableWrapper,
-};
+use alloy_primitives::wrap_fixed_bytes;
+use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use bytes::Buf;
 use reth_codecs::Compact;
-
-use super::DestHash;
-
-#[derive(PartialEq, Debug, Default, Eq, Clone, Copy, Hash)]
-// #[main_codec(no_arbitrary)]
-#[derive(Compact, serde::Serialize, serde::Deserialize, RlpEncodable, RlpDecodable)]
-#[rlp(trailing)]
-#[derive(arbitrary::Arbitrary)]
-
-pub struct Commitment {
-    pub tx_id: IrysTxId,
-    pub quantity: U256,
-    pub height: u64,
-    pub status: CommitmentStatus,
-    pub tx_type: CommitmentType,
-    pub dest_hash: Option<DestHash>,
-}
-
-impl Commitment {
-    pub fn update_status(&mut self, status: CommitmentStatus) -> &Self {
-        self.status = status;
-        self
-    }
-}
-
-// #[derive(PartialEq, Debug, Eq, Clone, Copy, Hash)]
-// // #[derive(Compact, serde::Serialize, serde::Deserialize)]
-// #[derive(PledgeArbitrary, PledgePropTestArbitrary)]
-// #[main_codec(no_arbitrary)]
-// pub enum CommitmentType {
-//     Stake = 2,
-//     Pledge = 3,
-//     Unpledge = 4,
-//     Unstake = 5,
-// }
 
 #[derive(
     PartialEq,
@@ -54,6 +16,8 @@ impl Commitment {
     serde::Deserialize,
     arbitrary::Arbitrary,
 )]
+
+// these do NOT start with 0, as RLP does not like "leading zeros"
 
 pub enum CommitmentStatus {
     #[default]
@@ -112,6 +76,7 @@ impl Decodable for CommitmentStatus {
     }
 }
 
+// TODO: these need to be redone!
 #[derive(
     PartialEq,
     Debug,
@@ -126,12 +91,13 @@ impl Decodable for CommitmentStatus {
     arbitrary::Arbitrary,
 )]
 
+// these do NOT start with 0, as RLP does not like "leading zeros"
 pub enum CommitmentType {
     #[default]
-    Stake = 2,
-    Pledge = 3,
-    Unpledge = 4,
-    Unstake = 5,
+    Stake = 1,
+    Pledge = 2,
+    Unpledge = 3,
+    Unstake = 4,
 }
 
 // TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
@@ -146,10 +112,10 @@ impl TryFrom<u8> for CommitmentType {
     type Error = CommitmentTypeDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            2 => Ok(CommitmentType::Stake),
-            3 => Ok(CommitmentType::Pledge),
-            4 => Ok(CommitmentType::Unpledge),
-            5 => Ok(CommitmentType::Unstake),
+            1 => Ok(CommitmentType::Stake),
+            2 => Ok(CommitmentType::Pledge),
+            3 => Ok(CommitmentType::Unpledge),
+            4 => Ok(CommitmentType::Unstake),
             _ => Err(CommitmentTypeDecodeError::UnknownCommitmentType(id)),
         }
     }
@@ -178,133 +144,6 @@ impl Decodable for CommitmentType {
 
         buf.advance(1);
         Ok(commitment_type)
-    }
-}
-
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Hash,
-    Eq,
-    Default,
-    RlpEncodableWrapper,
-    RlpDecodableWrapper,
-    Compact,
-    serde::Serialize,
-    serde::Deserialize,
-    arbitrary::Arbitrary,
-)]
-
-pub struct Commitments(pub Vec<Commitment>);
-
-// impl Commitments {
-//     /// Create a new pledges instance.
-//     pub fn new(pledges: Vec<Commitment>) -> Self {
-//         Self(pledges)
-//     }
-
-//     /// Calculate the total size, including capacity, of the pledges.
-//     #[inline]
-//     pub fn total_size(&self) -> usize {
-//         self.capacity() * std::mem::size_of::<Commitment>()
-//     }
-
-//     /// Calculate a heuristic for the in-memory size of the [pledges].
-//     #[inline]
-//     pub fn size(&self) -> usize {
-//         self.len() * std::mem::size_of::<Commitment>()
-//     }
-
-//     /// Get an iterator over the Shadows.
-//     pub fn iter(&self) -> std::slice::Iter<'_, Commitment> {
-//         self.0.iter()
-//     }
-
-//     /// Get a mutable iterator over the pledges.
-//     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Commitment> {
-//         self.0.iter_mut()
-//     }
-
-//     /// Convert [Self] into raw vec of pledges.
-//     pub fn into_inner(self) -> Vec<Commitment> {
-//         self.0
-//     }
-// }
-
-// impl IntoIterator for Commitments {
-//     type Item = Commitment;
-//     type IntoIter = std::vec::IntoIter<Commitment>;
-
-//     fn into_iter(self) -> Self::IntoIter {
-//         self.0.into_iter()
-//     }
-// }
-
-// impl AsRef<[Commitment]> for Commitments {
-//     fn as_ref(&self) -> &[Commitment] {
-//         &self.0
-//     }
-// }
-
-// impl Deref for Commitments {
-//     type Target = Vec<Commitment>;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-
-// impl DerefMut for Commitments {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.0
-//     }
-// }
-
-impl From<Vec<Commitment>> for Commitments {
-    fn from(pledges: Vec<Commitment>) -> Self {
-        Self(pledges)
-    }
-}
-
-#[derive(PartialEq, Debug, Default, Eq, Clone, Copy, Hash)]
-// #[main_codec(no_arbitrary)]
-// #[derive(PledgeArbitrary, PledgePropTestArbitrary, RlpEncodable, RlpDecodable)]
-#[derive(
-    Compact, serde::Serialize, serde::Deserialize, RlpEncodable, RlpDecodable, arbitrary::Arbitrary,
-)]
-pub struct Stake {
-    pub tx_id: IrysTxId,
-    pub quantity: U256,
-    pub height: u64,
-    pub status: CommitmentStatus,
-}
-
-impl Stake {
-    pub fn update_status(&mut self, status: CommitmentStatus) -> &Self {
-        self.status = status;
-        self
-    }
-}
-
-wrap_fixed_bytes!(
-    extra_derives: [],
-    pub struct IrysBlockHash<48>;
-);
-
-impl Compact for IrysBlockHash {
-    #[inline]
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        self.0.to_compact(buf)
-    }
-
-    #[inline]
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (v, buf) = <[u8; core::mem::size_of::<IrysBlockHash>()]>::from_compact(buf, len);
-        (Self::from(v), buf)
     }
 }
 

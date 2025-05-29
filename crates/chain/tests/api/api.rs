@@ -1,3 +1,17 @@
+use actix_http::StatusCode;
+use actix_web::{
+    middleware::Logger,
+    test,
+    web::{self, JsonConfig},
+    App,
+};
+use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
+use base58::ToBase58;
+use irys_actors::packing::wait_for_packing;
+use irys_api_server::{routes, ApiState};
+use irys_packing::{unpack, PackingType, PACKING_TYPE};
+use irys_types::TxChunkOffset;
 use irys_types::{
     irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, UnpackedChunk,
 };
@@ -6,22 +20,6 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use actix_http::StatusCode;
-use alloy_core::primitives::U256;
-use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
-use irys_packing::{unpack, PackingType, PACKING_TYPE};
-
-use actix_web::{
-    middleware::Logger,
-    test,
-    web::{self, JsonConfig},
-    App,
-};
-use base58::ToBase58;
-use irys_types::TxChunkOffset;
-use reth_primitives::GenesisAccount;
-
 use crate::utils::IrysNodeTest;
 
 #[actix_web::test]
@@ -29,7 +27,7 @@ async fn heavy_api_end_to_end_test_32b() {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
-        info!("C packing implementation do  not support chunk size different from CHUNK_SIZE");
+        info!("C packing implementation does not support chunk size different from CHUNK_SIZE");
     }
 }
 

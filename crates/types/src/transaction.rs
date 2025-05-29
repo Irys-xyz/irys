@@ -4,7 +4,7 @@ use crate::{
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
-use reth_primitives::irys_primitives::CommitmentType;
+use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
 pub type IrysTransactionId = H256;

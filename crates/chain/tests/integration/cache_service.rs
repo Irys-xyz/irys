@@ -1,17 +1,17 @@
 use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::get_cache_size;
 use irys_database::tables::CachedChunks;
-use irys_reth_node_bridge::adapter::node::RethNodeContext;
+use irys_reth_node_bridge::new_reth_context;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth::providers::BlockReader as _;
-use reth_db::Database as _;
-use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -176,7 +176,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     .unwrap();
 
     // mine a couple blocks
-    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;

@@ -2,6 +2,7 @@ use actix::prelude::*;
 use eyre::eyre;
 use irys_database::{
     cached_chunk_by_chunk_offset,
+    db::IrysDatabaseExt as _,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     BlockIndex,
 };
@@ -14,7 +15,6 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
     TxChunkOffset, UnpackedChunk, H256,
 };
-use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
 

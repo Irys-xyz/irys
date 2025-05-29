@@ -22,10 +22,12 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
+use irys_primitives::CommitmentType;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
@@ -40,10 +42,9 @@ use irys_types::{
     NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
-use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
+use reth::payload::EthBuiltPayload;
 use reth_db::cursor::*;
 use reth_db::Database;
-use reth_primitives::irys_primitives::CommitmentType;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -703,7 +704,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 pub async fn mine_blocks(
     node_ctx: &IrysNodeCtx,
     blocks: usize,
-) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let mut results = Vec::with_capacity(blocks);
     for _ in 0..blocks {
         results.push(mine_block(node_ctx).await?.unwrap());
@@ -713,7 +714,7 @@ pub async fn mine_blocks(
 
 pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
-) -> eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),

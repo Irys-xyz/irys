@@ -1,0 +1,62 @@
+[package]
+name = "irys-reth"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+alloy-dyn-abi.workspace = true
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-genesis.workspace = true
+alloy-network.workspace = true
+alloy-rpc-types.workspace = true
+alloy-rpc-types-eth.workspace = true
+
+reth-node-ethereum.workspace = true
+reth-tracing.workspace = true
+reth-chainspec.workspace = true
+reth.workspace = true
+reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
+reth-trie-db.workspace = true
+reth-ethereum-engine-primitives.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-transaction-pool.workspace = true
+reth-primitives-traits.workspace = true
+reth-e2e-test-utils = { workspace = true, optional = true }
+reth-engine-local = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+revm.workspace = true
+
+tokio.workspace = true
+eyre.workspace = true
+serde.workspace = true
+futures.workspace = true
+tracing.workspace = true
+arbitrary.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+reth-e2e-test-utils = { workspace = true }
+serde_json.workspace = true
+alloy-rpc-types-engine.workspace = true
+test-log.workspace = true
+rstest.workspace = true
+futures.workspace = true
+alloy-signer-local.workspace = true
+reth-engine-local = { workspace = true }
+reth-db = { workspace = true, features = ["test-utils"] }
+
+[features]
+test-utils = ["reth-e2e-test-utils", "reth-engine-local", "serde_json"]
+
+[lints]
+workspace = true

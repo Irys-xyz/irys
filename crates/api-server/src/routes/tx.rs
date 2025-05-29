@@ -6,12 +6,11 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_database::database;
+use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
     IrysTransactionResponse, H256,
 };
-use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 

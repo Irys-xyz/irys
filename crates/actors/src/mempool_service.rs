@@ -1,6 +1,6 @@
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
-use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
+use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentCacheStatus};
 use actix::{MailboxError, Message, MessageResponse};
 use base58::ToBase58 as _;
 use core::fmt::Display;
@@ -626,7 +626,7 @@ impl Inner {
                 .send(gossip_data)
                 .expect("Failed to send gossip data");
         } else {
-            if commitment_status == CommitmentStatus::Unstaked {
+            if commitment_status == CommitmentCacheStatus::Unstaked {
                 // For unstaked pledges, we cache them in a 2-level LRU structure:
                 // Level 1: Keyed by signer address (allows tracking multiple addresses)
                 // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
@@ -1488,7 +1488,7 @@ impl Inner {
     async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
-    ) -> CommitmentStatus {
+    ) -> CommitmentCacheStatus {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
         // Check if already staked in the blockchain
@@ -1500,7 +1500,7 @@ impl Inner {
         // Only pledges require special validation when not already staked
         let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
         if !is_pledge || is_staked {
-            return CommitmentStatus::Accepted;
+            return CommitmentCacheStatus::Accepted;
         }
 
         // For unstaked pledges, validate against cache and pending transactions
@@ -1518,16 +1518,16 @@ impl Inner {
             .expect("to receive CommitmentStatus from GetCommitmentStatus message");
 
         // Reject unsupported commitment types
-        if matches!(cache_status, CommitmentStatus::Unsupported) {
+        if matches!(cache_status, CommitmentCacheStatus::Unsupported) {
             warn!(
                 "Commitment is unsupported: {}",
                 commitment_tx.id.0.to_base58()
             );
-            return CommitmentStatus::Unsupported;
+            return CommitmentCacheStatus::Unsupported;
         }
 
         // For unstaked addresses, check for pending stake transactions
-        if matches!(cache_status, CommitmentStatus::Unstaked) {
+        if matches!(cache_status, CommitmentCacheStatus::Unstaked) {
             let mempool_state_guard = mempool_state.read().await;
             // Get pending transactions for this address
             if let Some(pending) = mempool_state_guard
@@ -1539,7 +1539,7 @@ impl Inner {
                     .iter()
                     .any(|c| c.commitment_type == CommitmentType::Stake)
                 {
-                    return CommitmentStatus::Accepted;
+                    return CommitmentCacheStatus::Accepted;
                 }
             }
 
@@ -1548,11 +1548,11 @@ impl Inner {
                 "Pledge Commitment is unstaked: {}",
                 commitment_tx.id.0.to_base58()
             );
-            return CommitmentStatus::Unstaked;
+            return CommitmentCacheStatus::Unstaked;
         }
 
         // All other cases are valid
-        CommitmentStatus::Accepted
+        CommitmentCacheStatus::Accepted
     }
 
     // Helper to validate anchor

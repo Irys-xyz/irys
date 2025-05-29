@@ -27,16 +27,13 @@ irys-price-oracle.workspace = true
 irys-p2p.workspace = true
 irys-api-client.workspace = true
 irys-reward-curve.workspace = true
-
+irys-primitives.workspace = true
 base58.workspace = true
 color-eyre.workspace = true
 tracing-error.workspace = true
 eyre.workspace = true
 rand.workspace = true
 nodit.workspace = true
-reth-db.workspace = true
-reth-primitives.workspace = true
-reth.workspace = true
 toml.workspace = true
 serde_json = "1"
 sha2.workspace = true
@@ -46,19 +43,10 @@ actix-http.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-alloy-network = { path = "../../ext/alloy/crates/network" }
-alloy-signer-local.workspace = true
-alloy-core.workspace = true
 actix.workspace = true
-alloy-consensus.workspace = true
-alloy-eips.workspace = true
-
 awc.workspace = true
 modular-bitfield.workspace = true
-reth-cli-runner.workspace = true
 futures.workspace = true
-reth-tracing.workspace = true
 hex.workspace = true
 test-fuzz.workspace = true
 k256 = { version = "0.13", default-features = false, features = [
@@ -68,13 +56,22 @@ k256 = { version = "0.13", default-features = false, features = [
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-provider.workspace = true
 core_affinity = "0.8.1"
+reth-db.workspace = true
+reth.workspace = true
+alloy-core.workspace = true
+alloy-genesis.workspace = true
+alloy-eips.workspace = true
+alloy-network.workspace = true
+alloy-signer-local.workspace = true
+alloy-sol-types.workspace = true
+reth-tracing.workspace = true
+alloy-consensus.workspace = true
+alloy-contract.workspace = true
 
 [dev-dependencies]
 assert_matches = "1.5.0"
 awc.workspace = true
 irys-actors = { workspace = true, features = ["test-utils"] }
-alloy-sol-types.workspace = true
-alloy-contract.workspace = true
 test-log.workspace = true
 rstest.workspace = true
 rust_decimal.workspace = true

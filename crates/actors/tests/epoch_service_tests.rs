@@ -4,23 +4,15 @@ use irys_actors::epoch_service::{
     EpochReplayData, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
 };
 
-use irys_actors::services::ServiceSenders;
-use irys_config::StorageSubmodulesConfig;
-use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
-use irys_types::{
-    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
-};
-use irys_types::{Config, U256};
+use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
+use reth::payload::EthBuiltPayload;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
+use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
 use tracing::{debug, error, info};
 
-use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
-
-use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
-use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
-
+use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     epoch_service::{EpochServiceActor, NewEpochMessage},
@@ -31,11 +23,17 @@ use irys_actors::{
     packing::{PackingActor, PackingRequest},
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
+use irys_config::StorageSubmodulesConfig;
 use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::NodeConfig;
 use irys_types::PartitionChunkRange;
+use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
+use irys_types::{
+    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
+};
+use irys_types::{Config, U256};
 
 #[actix::test]
 async fn genesis_test() {
@@ -366,9 +364,7 @@ async fn partition_expiration_and_repacking_test() {
     let closure_arc = arc_rwlock.clone();
 
     let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |_msg, _ctx| {
-        let inner_result: eyre::Result<
-            Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>,
-        > = Ok(None);
+        let inner_result: eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> = Ok(None);
         Box::new(Some(inner_result)) as Box<dyn Any>
     }));
 

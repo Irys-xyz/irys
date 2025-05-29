@@ -403,7 +403,6 @@ mod tests {
     };
     use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
-    use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
@@ -415,6 +414,7 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
         NodeConfig,
     };
+    use reth::payload::EthBuiltPayload;
     use std::any::Any;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
@@ -435,7 +435,7 @@ mod tests {
                 lck.replace(solution);
             }
 
-            let inner_result = None::<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>;
+            let inner_result = None::<(Arc<IrysBlockHeader>, EthBuiltPayload)>;
             Box::new(Some(inner_result)) as Box<dyn Any>
         }))
     }

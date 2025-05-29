@@ -3,40 +3,62 @@ use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
     TxPathHash, H256,
 };
+use paste::paste;
 use reth_codecs::Compact;
-use reth_db::tables;
-use reth_db::{HasName, HasTableType, TableType, TableViewer};
+use reth_db::table::TableInfo;
+use reth_db::{tables, TableSet};
+use reth_db::{TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // Per-submodule database tables
 tables! {
     SubmoduleTables;
-
-    /// Maps a partition relative offset to a chunk's path hashes
+  /// Maps a partition relative offset to a chunk's path hashes
     /// note: mdbx keys are always sorted, so range queries work :)
     /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
     /// Also change/split this to leverage key-sorting to only store a single tx_path_hash entry/data_root
-    table ChunkPathHashesByOffset<Key = PartitionChunkOffset, Value = ChunkPathHashes>;
+    table ChunkPathHashesByOffset {
+        type Key = PartitionChunkOffset;
+        type Value = ChunkPathHashes;
+    }
 
     /// Maps a chunk's data path hash to the full data path
     /// TODO: change how we store these to reduce duplication (use dupsort + tree traversal indices)
-    table ChunkDataPathByPathHash<Key = ChunkPathHash, Value = ChunkDataPath>;
+    table ChunkDataPathByPathHash {
+        type Key = ChunkPathHash;
+        type Value = ChunkDataPath;
+    }
 
     /// Maps a tx path hash to the full tx path
-    table TxPathByTxPathHash<Key = TxPathHash, Value = TxPath>;
+    table TxPathByTxPathHash {
+        type Key = TxPathHash;
+        type Value = TxPath;
+    }
 
     /// Maps a chunk path hash to the list of submodule-relative offsets it should inhabit
-    table ChunkOffsetsByPathHash<Key = ChunkPathHash, Value = ChunkOffsets>;
+    table ChunkOffsetsByPathHash {
+        type Key = ChunkPathHash;
+        type Value = ChunkOffsets;
+    }
 
     /// Maps a data root to the list of submodule-relative start offsets
-    table StartOffsetsByDataRoot<Key = DataRoot, Value = RelativeStartOffsets>;
+    table StartOffsetsByDataRoot {
+        type Key = DataRoot;
+        type Value = RelativeStartOffsets;
+    }
 
     /// Maps a data root to it's data size (used for validation)
-    table DataSizeByDataRoot<Key = DataRoot, Value = u64>;
+    table DataSizeByDataRoot {
+        type Key = DataRoot;
+        type Value = u64;
+    }
 
     /// Table to store various metadata, such as the current db schema version
-    table Metadata<Key = MetadataKey, Value = Vec<u8>>;
+    table Metadata {
+        type Key = MetadataKey;
+        type Value = Vec<u8>;
+    }
 
 }
 

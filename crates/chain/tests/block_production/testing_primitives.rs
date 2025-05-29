@@ -1,6 +1,6 @@
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use irys_types::{irys::IrysSigner, NodeConfig};
-use reth_primitives::GenesisAccount;
 use tracing::info;
 
 use crate::utils::IrysNodeTest;
