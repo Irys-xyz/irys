@@ -74,7 +74,7 @@ fn main() -> eyre::Result<()> {
         .tempdir();
     let tmpdir = builder
         .expect("Not able to create a temporary directory.")
-        .into_path();
+        .keep();
 
     let db = open_or_create_db(tmpdir, DupSortTables::ALL, None)?;
     let write_tx = db.tx_mut()?;
