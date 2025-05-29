@@ -39,13 +39,12 @@ pub async fn post_commitment_tx(
     // If message delivery succeeded, check for validation errors within the response
     let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
+        tracing::warn!("API: {:?}", err);
         return match err {
             TxIngressError::InvalidSignature => {
-                tracing::warn!("API: {:?}", StatusCode::BAD_REQUEST);
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
             }
             TxIngressError::Unfunded => {
-                tracing::warn!("API: {:?}", StatusCode::PAYMENT_REQUIRED);
                 Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED).body(format!("{:?}", err)))
             }
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
@@ -56,7 +55,6 @@ pub async fn post_commitment_tx(
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
             TxIngressError::InvalidAnchor => {
-                tracing::warn!("API: {:?}", StatusCode::BAD_REQUEST);
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
             }
             TxIngressError::DatabaseError => {

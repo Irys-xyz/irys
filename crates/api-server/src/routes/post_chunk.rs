@@ -37,6 +37,7 @@ pub async fn post_chunk(
     // Handle errors in reading the oneshot response
     let msg_result = match oneshot_rx.await {
         Err(err) => {
+            tracing::error!("API: Errors reading the mempool oneshot response {:?}", err);
             return Ok(
                 HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR).body(format!(
                     "Errors reading the mempool oneshot response: {:?}",

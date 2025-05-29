@@ -29,6 +29,7 @@ pub async fn post_tx(
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body(format!("Failed to deliver chunk: {:?}", err)));
     }
@@ -36,6 +37,7 @@ pub async fn post_tx(
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
+        tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body(format!("Failed to deliver transaction: {:?}", err)));
     }
@@ -43,6 +45,7 @@ pub async fn post_tx(
     // If message delivery succeeded, check for validation errors within the response
     let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
+        tracing::warn!("API: {:?}", err);
         return match err {
             TxIngressError::InvalidSignature => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid Signature: {:?}", err))),
@@ -51,16 +54,19 @@ pub async fn post_tx(
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
+                tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
             TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid Anchor: {:?}", err))),
             TxIngressError::DatabaseError => {
+                tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal database error: {:?}", err)))
             }
             TxIngressError::ServiceUninitialized => {
+                tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal service error: {:?}", err)))
             }
