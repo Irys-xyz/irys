@@ -18,8 +18,7 @@ use irys_types::{
     NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
-use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
-use reth::{payload::EthPayloadBuilderAttributes, rpc::types::engine::PayloadAttributes};
+use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database;
 use std::{
     collections::HashMap,

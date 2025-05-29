@@ -6,7 +6,6 @@ use irys_reth_node_bridge::new_reth_context;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
-use reth_db::Database as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;

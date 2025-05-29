@@ -44,7 +44,6 @@ use irys_types::{
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
-use reth::rpc::types::engine::ExecutionPayloadEnvelopeV5;
 use reth_db::cursor::*;
 use reth_db::Database;
 use sha2::{Digest, Sha256};

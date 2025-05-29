@@ -87,7 +87,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
     let wallet = EthereumWallet::from(signer);
 
-    let alloy_provider = ProviderBuilder::new().wallet(wallet).on_http(
+    let alloy_provider = ProviderBuilder::new().wallet(wallet).connect_http(
         format!(
             "http://127.0.0.1:{}/v1/execution-rpc",
             node.node_ctx.config.node_config.http.bind_port

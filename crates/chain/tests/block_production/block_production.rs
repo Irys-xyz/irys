@@ -64,7 +64,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         }
     }
 
-    let (block, reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
+    let (block, _reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
 
     // for receipt in reth_exec_env.shadow_receipts {
     //     match receipt.tx_type {
@@ -222,7 +222,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     ]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
-    let recipient_init_balance = reth_context
+    let _recipient_init_balance = reth_context
         .rpc
         .get_balance(recipient.address(), None)
         .await?;
@@ -289,9 +289,9 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         }
     }
 
-    let (block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (_block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
-    let mut block_reward = U256::from(0);
+    let _block_reward = U256::from(0);
 
     error!("TODO: NEW SHADOW LOGIC");
     return Ok(());
@@ -312,30 +312,30 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     //         }
     //     }
     // }
-    assert_ne!(block_reward, U256::from(0), "block reward cannot be 0");
+    // assert_ne!(block_reward, U256::from(0), "block reward cannot be 0");
 
-    //check reth for built block
-    let reth_block = reth_context
-        .inner
-        .provider
-        .block_by_hash(block.evm_block_hash)?
-        .unwrap();
+    // //check reth for built block
+    // let reth_block = reth_context
+    //     .inner
+    //     .provider
+    //     .block_by_hash(_block.evm_block_hash)?
+    //     .unwrap();
 
-    assert!(evm_txs.contains_key(reth_block.body.transactions.first().unwrap().hash()));
-    assert_eq!(
-        reth_context
-            .rpc
-            .get_balance(recipient.address(), None)
-            .await?,
-        recipient_init_balance + U256::from(1)
-    );
-    // check irys DB for built block
-    let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
+    // assert!(evm_txs.contains_key(reth_block.body.transactions.first().unwrap().hash()));
+    // assert_eq!(
+    //     reth_context
+    //         .rpc
+    //         .get_balance(recipient.address(), None)
+    //         .await?,
+    //     _recipient_init_balance + U256::from(1)
+    // );
+    // // check irys DB for built block
+    // let db_irys_block = node.get_block_by_hash(&_block.block_hash).unwrap();
 
-    assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+    // assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
-    node.stop().await;
-    Ok(())
+    // node.stop().await;
+    // Ok(())
 }
 
 #[tokio::test]
@@ -347,11 +347,11 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
 
     for _ in 0..3 {
         // mine a single block
-        let (block, reth_exec_env) = mine_block(&node.node_ctx)
+        let (block, _reth_exec_env) = mine_block(&node.node_ctx)
             .await?
             .ok_or_eyre("block was not mined")?;
 
@@ -366,14 +366,14 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
         // on every block *after* genesis, validate the reward shadow
         if let Some(old_ts) = prev_ts {
             // expected reward according to the protocol’s reward curve
-            let expected_reward = node
+            let _expected_reward = node
                 .node_ctx
                 .reward_curve
                 .reward_between(old_ts, new_ts)
                 .unwrap();
 
             // find the BlockReward shadow receipt and check correctness
-            let mut reward_shadow_found = false;
+            let _reward_shadow_found = false;
             error!("MISSING BLOCK REWARD SHADOW/SYSTEM TX LOGIC")
             // for receipt in reth_exec_env.shadow_receipts {
             //     if let ShadowTxType::BlockReward(br_shadow) = receipt.tx_type {
@@ -402,7 +402,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
         // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
-        init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+        _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
         sleep(Duration::from_millis(1_500)).await;
     }
 

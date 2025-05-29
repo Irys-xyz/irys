@@ -12,7 +12,6 @@ use irys_reth_node_bridge::new_reth_context;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth::providers::BlockReader as _;
-use reth_db::Database as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
