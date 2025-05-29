@@ -1,13 +1,13 @@
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
-use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentCacheStatus};
+use crate::{CommitmentCacheMessage, CommitmentCacheStatus, CommitmentStateReadGuard};
 use actix::{MailboxError, Message, MessageResponse};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
 use futures::future::{BoxFuture, Either};
 use irys_database::{
-    db::RethDbWrapper,
+    db::{IrysDatabaseExt as _, IrysDupCursorExt as _, RethDbWrapper},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
     submodule::get_data_size_by_data_root,
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
@@ -531,7 +531,7 @@ impl Inner {
 
         // Check pending commitments and cached commitments and active commitments
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
-        if commitment_status == CommitmentStatus::Accepted {
+        if commitment_status == CommitmentCacheStatus::Accepted {
             // Validate tx signature
             if let Err(e) = self.validate_signature(&commitment_tx).await {
                 tracing::error!(
