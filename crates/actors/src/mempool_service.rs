@@ -171,26 +171,40 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 /// Messages that the Mempool Service handler supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
-    /// TODO: comments
+    /// Block Confirmed, remove confirmed txns from mempool
     BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
+    /// Get IrysTransactionHeader
     GetTransaction(
         H256,
         tokio::sync::oneshot::Sender<Option<IrysTransactionHeader>>,
     ),
+    /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     ChunkIngressMessage(
         UnpackedChunk,
         tokio::sync::oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
+    /// Ingress CommitmentTransaction into the mempool
+    ///
+    /// This function performs a series of checks and validations:
+    /// - Skips the transaction if it is already known to be invalid or previously processed
+    /// - Validates the transaction's anchor and signature
+    /// - Inserts the valid transaction into the mempool and database
+    /// - Processes any pending pledge transactions that depended on this commitment
+    /// - Gossips the transaction to peers if accepted
+    /// - Caches the transaction for unstaked signers to be reprocessed later
     CommitmentTxIngressMessage(
         CommitmentTransaction,
         tokio::sync::oneshot::Sender<Result<(), TxIngressError>>,
     ),
+    /// Return filtered list of candidate txns
+    /// Filtering based on funding status etc
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<MempoolTxs>),
     /// Confirm if tx exists in database
     TxExistenceQuery(
         H256,
         tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
     ),
+    /// validate and process an incoming IrysTransactionHeader
     TxIngressMessage(
         IrysTransactionHeader,
         tokio::sync::oneshot::Sender<Result<(), TxIngressError>>,
