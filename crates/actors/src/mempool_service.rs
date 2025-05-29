@@ -1298,9 +1298,14 @@ impl Inner {
                     ))
                     .await;
 
-                let status = oneshot_rx
+                let msg_result = oneshot_rx
                     .await
                     .expect("pending chunks should be processed by the mempool");
+
+                if let Err(err) = msg_result {
+                    tracing::error!("oneshot failure: {:?}", err);
+                    return Err(TxIngressError::Other("oneshot failure".to_owned()));
+                }
             }
         }
 
