@@ -13,9 +13,9 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
-    ema_service::{EmaService, EmaServiceMessage},
+    ema_service::EmaService,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
-    mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
+    mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingConfig, PackingRequest},
     reth_service::{
@@ -26,8 +26,8 @@ use irys_actors::{
     vdf_service::{VdfService, VdfServiceMessage, VdfStepsReadGuard},
 };
 use irys_actors::{
-    ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
-    GetCommitmentStateGuardMessage, StorageModuleService,
+    ActorAddresses, CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage,
+    StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -71,7 +71,6 @@ use std::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn, Instrument as _, Span};
 

@@ -1,13 +1,5 @@
 use base58::ToBase58;
-use irys_actors::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::MempoolServiceMessage,
-    vdf_service::VdfServiceMessage,
-};
 use irys_api_client::{ApiClient, IrysApiClient};
-use irys_p2p::fast_forward_vdf_steps_from_block;
-use irys_p2p::PeerListServiceFacade;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
