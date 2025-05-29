@@ -377,7 +377,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
             // find the BlockReward shadow receipt and check correctness
             let _reward_shadow_found = false;
-            error!("MISSING BLOCK REWARD SHADOW/SYSTEM TX LOGIC")
+            error!("TODO: NEW SHADOW LOGIC");
             // for receipt in reth_exec_env.shadow_receipts {
             //     if let ShadowTxType::BlockReward(br_shadow) = receipt.tx_type {
             //         let expected_new_balance = init_balance + br_shadow.reward;
