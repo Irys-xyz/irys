@@ -649,6 +649,7 @@ impl Inner {
             mempool_state_write_guard.valid_tx.remove(txid);
             mempool_state_write_guard.recent_valid_tx.remove(txid);
         }
+        drop(mempool_state_write_guard);
 
         // Is there a commitment ledger in this block?
         let commitment_ledger = block
@@ -671,13 +672,15 @@ impl Inner {
         // we just remove them.
         // FIXME: Note above about re-orgs!
         if !published_txids.is_empty() {
-            let mut_tx = mempool_state_write_guard
+            let mempool_state_read_guard = mempool_state.read().await;
+            let mut_tx = mempool_state_read_guard
                 .irys_db
                 .tx_mut()
                 .map_err(|e| {
                     error!("Failed to create mdbx transaction: {}", e);
                 })
                 .expect("expected to read/write to database");
+            drop(mempool_state_read_guard);
 
             for (i, txid) in block.data_ledgers[DataLedger::Publish]
                 .tx_ids
@@ -721,8 +724,6 @@ impl Inner {
 
             mut_tx.commit().expect("expect to commit to database");
         }
-
-        drop(mempool_state_write_guard);
 
         info!(
             "Removing confirmed tx - Block height: {} num tx: {}",
