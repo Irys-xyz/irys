@@ -634,10 +634,8 @@ impl Inner {
                 .gossip_broadcast
                 .clone();
             drop(mempool_state_read_guard);
-            let gossip_data = GossipData::CommitmentTransaction(commitment_tx.clone());
-
             gossip_sender
-                .send(gossip_data)
+                .send(GossipData::CommitmentTransaction(commitment_tx.clone()))
                 .expect("Failed to send gossip data");
         } else {
             if commitment_status == CommitmentCacheStatus::Unstaked {
