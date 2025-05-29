@@ -5104,7 +5104,6 @@ dependencies = [
  "reth-ethereum-primitives",
  "reth-evm",
  "reth-evm-ethereum",
- "reth-network",
  "reth-node-ethereum",
  "reth-primitives-traits",
  "reth-tracing",
