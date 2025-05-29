@@ -166,7 +166,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
         };
 
         let built = genctx
-            .new_payload_irys(p1_latest.header.hash, payload_attrs)/* p1_latest.header.hash, payload_attrs */
+            .new_payload_irys(p1_latest.header.hash, payload_attrs)
             .await?;
 
         let block_hash = genctx.submit_payload(built.clone()).await?;
