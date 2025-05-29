@@ -66,6 +66,8 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
     let (block, _reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
 
+    error!("TODO: NEW SHADOW LOGIC");
+
     // for receipt in reth_exec_env.shadow_receipts {
     //     match receipt.tx_type {
     //         ShadowTxType::BlockReward(_block_reward_shadow) => {
