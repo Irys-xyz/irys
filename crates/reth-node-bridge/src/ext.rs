@@ -15,7 +15,7 @@ use reth_payload_builder::{EthPayloadBuilderAttributes, PayloadId};
 use reth_provider::{BlockReader, BlockReaderIdExt as _};
 use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, TraceExt};
 
-// TODO: async_trait
+#[async_trait::async_trait(?Send)]
 pub trait IrysRethTestContextExt {
     async fn assert_new_block_irys(
         &self,
@@ -48,6 +48,7 @@ pub trait IrysRethTestContextExt {
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>;
 }
 
+#[async_trait::async_trait(?Send)]
 impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns> {
     /// Asserts that a new block has been added to the blockchain
     /// and the tx has been included in the block.
@@ -148,7 +149,7 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
             .beacon_engine_handle
             .fork_choice_updated(
                 ForkchoiceState {
-                    head_block_hash: head_block_hash,
+                    head_block_hash,
                     safe_block_hash: confirmed_block_hash.unwrap_or(B256::ZERO),
                     finalized_block_hash: finalized_block_hash.unwrap_or(B256::ZERO),
                 },
@@ -174,6 +175,7 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
     }
 }
 
+#[async_trait::async_trait(?Send)]
 pub trait IrysRethPayloadTestContextExt {
     async fn build_new_payload_irys(
         &mut self,
@@ -192,6 +194,7 @@ pub trait IrysRethPayloadTestContextExt {
     >;
 }
 
+#[async_trait::async_trait(?Send)]
 impl IrysRethPayloadTestContextExt
     for PayloadTestContext<<IrysEthereumNode as NodeTypes>::Payload>
 {
@@ -247,6 +250,7 @@ where
     }
 }
 
+#[async_trait::async_trait(?Send)]
 pub trait IrysRethRpcTestContextExt<Node, EthApi>
 where
     Node: FullNodeComponents<Types: NodeTypes<ChainSpec: EthereumHardforks>>,
@@ -257,6 +261,7 @@ where
     async fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256>;
 }
 
+#[async_trait::async_trait(?Send)]
 impl<Node, EthApi> IrysRethRpcTestContextExt<Node, EthApi> for RpcTestContext<Node, EthApi>
 where
     Node: FullNodeComponents<Types: NodeTypes<ChainSpec: EthereumHardforks>>,

@@ -5125,6 +5125,7 @@ dependencies = [
  "alloy-eips 0.15.11",
  "alloy-primitives",
  "alloy-rpc-types-engine",
+ "async-trait",
  "clap",
  "eyre",
  "irys-database",
