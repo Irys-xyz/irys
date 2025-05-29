@@ -8,7 +8,6 @@ use base58::FromBase58 as _;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
 use reth::{providers::BlockReader, revm::primitives::alloy_primitives::TxHash};
-use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 

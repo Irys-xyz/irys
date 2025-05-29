@@ -11,7 +11,6 @@ use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
     IrysTransactionResponse, H256,
 };
-use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 

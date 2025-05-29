@@ -15,8 +15,8 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Base64, Config, DataLedger, DataTransactionLedger, H256List,
-    IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
-    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
+    IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
+    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use nodit::interval::ii;
 use openssl::sha;

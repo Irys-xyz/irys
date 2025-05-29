@@ -58,7 +58,6 @@ use irys_types::{
     PartitionChunkRange, H256, U256,
 };
 use reth::{
-    builder::FullNode,
     chainspec::ChainSpec,
     tasks::{TaskExecutor, TaskManager},
 };
