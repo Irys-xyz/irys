@@ -4,7 +4,6 @@ use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use eyre::Error;
-use fixed_hash::construct_fixed_hash;
 use openssl::sha;
 use rand::RngCore;
 use reth_codecs::Compact;
@@ -234,10 +233,8 @@ impl Compact for U256 {
 //==============================================================================
 // H256 Type
 //------------------------------------------------------------------------------
-construct_fixed_hash! {
-    /// A 256-bit hash type (32 bytes).
-    pub struct H256(32);
-}
+
+pub use crate::h256::H256;
 
 impl H256 {
     pub fn from_base58(string: &str) -> Self {
