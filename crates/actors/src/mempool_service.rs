@@ -541,12 +541,7 @@ impl Inner {
                     .map(|(_, pledge_tx)| pledge_tx)
                     .collect();
 
-                // PERFORMANCE NOTE: Processing all pending pledges synchronously
-                // If an address has accumulated many pending pledges, this could
-                // potentially block the actor for a significant time.
                 for pledge_tx in pledges {
-                    // Re-process each pledge now that its signer is staked
-                    // No need to clone as we own the transaction objects
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     // todo switch _ to actually handle the result
                     let _ = self
@@ -1278,15 +1273,7 @@ impl Inner {
         if let Some(chunks_map) = option_chunks_map {
             // Extract owned chunks from the map to process them
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-
-            // PERFORMANCE CONSIDERATION:
-            // This is executing in a synchronous actor context. If this transaction has
-            // many pending chunks (hundreds or thousands), processing them
-            // all here could block the actor for a significant time, delaying other messages.
-            // This should be addressed when the mempool_service is converted to a tokio service
-            // and the handlers become async
             for chunk in chunks {
-                // Process each chunk with full ownership (no cloning needed)
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 //todo check the value rather than _
                 let _ = self
