@@ -1,7 +1,6 @@
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentCacheStatus, CommitmentStateReadGuard};
-use actix::{MailboxError, Message, MessageResponse};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -38,24 +37,6 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, error, info, warn};
-
-impl From<MailboxError> for TxIngressError {
-    fn from(value: MailboxError) -> Self {
-        TxIngressError::Other(format!(
-            "Failed to send a message to MempoolService: {:?}",
-            value
-        ))
-    }
-}
-
-impl From<MailboxError> for ChunkIngressError {
-    fn from(value: MailboxError) -> Self {
-        ChunkIngressError::Other(format!(
-            "Failed to send a message to MempoolService: {:?}",
-            value
-        ))
-    }
-}
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
@@ -311,16 +292,6 @@ impl MempoolService {
     }
 }
 
-/// Message for when a new TX is discovered by the node, either though
-/// synchronization with peers, or by a user posting the tx.
-#[derive(Message, Debug)]
-#[rtype(result = "Result<(),TxIngressError>")]
-pub struct TxIngressMessage(pub IrysTransactionHeader);
-
-#[derive(Message, Debug)]
-#[rtype(result = "Result<(),TxIngressError>")]
-pub struct CommitmentTxIngressMessage(pub CommitmentTransaction);
-
 /// Reasons why Transaction Ingress might fail
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxIngressError {
@@ -348,19 +319,6 @@ impl TxIngressError {
     /// Allows converting an error that implements Display into an Other error
     pub fn other_display(err: impl Display) -> Self {
         Self::Other(err.to_string())
-    }
-}
-
-/// Message for when a new chunk is discovered by the node, either though
-/// synchronization with peers, or by a user posting the chunk.
-#[derive(Message, Debug)]
-#[rtype(result = "Result<(),ChunkIngressError>")]
-pub struct ChunkIngressMessage(pub UnpackedChunk);
-
-impl ChunkIngressMessage {
-    #[must_use]
-    pub fn into_inner(self) -> UnpackedChunk {
-        self.0
     }
 }
 
@@ -396,7 +354,7 @@ impl ChunkIngressError {
     }
 }
 
-#[derive(MessageResponse, Debug)]
+#[derive(Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub storage_tx: Vec<IrysTransactionHeader>,
