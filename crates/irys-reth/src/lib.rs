@@ -58,6 +58,8 @@ use reth_trie_db::MerklePatriciaTrie;
 use system_tx::SystemTransaction;
 use tracing::{debug, info};
 
+use crate::system_tx_validator::{SystemTxValidator, SystemTxValidatorBuilder};
+
 pub mod system_tx;
 pub mod system_tx_validator;
 
@@ -244,10 +246,12 @@ where
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let system_tx_validator = SystemTxValidatorBuilder::new(ctx.provider().clone()).build();
         let validator = TransactionValidationTaskExecutor {
             validator: IrysSystemTxValidator {
-                inner: validator.validator,
+                eth_tx_validator: validator.validator,
                 allowed_system_tx_origin: self.allowed_system_tx_origin,
+                system_tx_validator,
             },
             to_validation_task: validator.to_validation_task,
         };
@@ -398,7 +402,8 @@ pub async fn maintain_system_txs<Node, St>(
 pub struct IrysSystemTxValidator<Client, T> {
     allowed_system_tx_origin: Address,
     /// The type that performs the actual validation.
-    inner: EthTransactionValidator<Client, T>,
+    eth_tx_validator: EthTransactionValidator<Client, T>,
+    system_tx_validator: SystemTxValidator<Client, T>,
 }
 
 impl<Client, Tx> TransactionValidator for IrysSystemTxValidator<Client, Tx>
@@ -417,7 +422,7 @@ where
         let input = transaction.input();
         let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
             tracing::trace!(hash = ?transaction.hash(), "non system tx, passing to eth validator");
-            return self.inner.validate_one(origin, transaction);
+            return self.eth_tx_validator.validate_one(origin, transaction);
         };
 
         if transaction.sender() != self.allowed_system_tx_origin {
@@ -443,7 +448,7 @@ where
             );
         }
 
-        let result = self.inner.validate_one(origin, transaction);
+        let result = self.system_tx_validator.validate_one(origin, transaction);
         result
     }
 
@@ -451,14 +456,14 @@ where
         &self,
         transactions: Vec<(TransactionOrigin, Self::Transaction)>,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.inner.validate_all(transactions)
+        self.eth_tx_validator.validate_all(transactions)
     }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
     where
         B: reth_primitives_traits::Block,
     {
-        self.inner.on_new_head_block(new_tip_block);
+        self.eth_tx_validator.on_new_head_block(new_tip_block);
     }
 }
 
