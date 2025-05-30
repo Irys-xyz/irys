@@ -425,7 +425,6 @@ pub mod option_u64_stringify {
     use serde::{self, Deserialize, Deserializer, Serializer};
     use serde_json::Value;
 
-    #[allow(dead_code)]
     pub fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
