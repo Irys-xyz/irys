@@ -29,7 +29,7 @@ pub async fn post_tx(
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
-        tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
+        tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body(format!("Failed to deliver chunk: {:?}", err)));
     }

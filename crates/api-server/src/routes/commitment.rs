@@ -22,7 +22,10 @@ pub async fn post_commitment_tx(
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let tx_ingress_msg = MempoolServiceMessage::CommitmentTxIngressMessage(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
-        tracing::error!("API Failed to deliver MempoolServiceMessage::CommitmentTxIngressMessage");
+        tracing::error!(
+            "API Failed to deliver MempoolServiceMessage::CommitmentTxIngressMessage: {:?}",
+            err
+        );
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body(format!("Failed to deliver transaction: {:?}", err)));
     }
