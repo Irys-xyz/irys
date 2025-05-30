@@ -34,7 +34,7 @@ pub async fn post_commitment_tx(
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
-        tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
+        tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body(format!("Failed to deliver transaction: {:?}", err)));
     }
@@ -53,7 +53,7 @@ pub async fn post_commitment_tx(
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
-                tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
+                tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
@@ -61,12 +61,12 @@ pub async fn post_commitment_tx(
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
             }
             TxIngressError::DatabaseError => {
-                tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
+                tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal database error: {:?}", err)))
             }
             TxIngressError::ServiceUninitialized => {
-                tracing::error!("API: {:?}", StatusCode::INTERNAL_SERVER_ERROR);
+                tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal service error: {:?}", err)))
             }
