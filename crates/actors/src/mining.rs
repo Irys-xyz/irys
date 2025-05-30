@@ -501,7 +501,7 @@ mod tests {
         let storage_module_info = &infos[0];
         let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
-        // Verify the packing params file was crated in the submodule
+        // Verify the packing params file was created in the submodule
         let params_path = base_path.join("hdd0").join("packing_params.toml");
         let params = PackingParams::from_toml(params_path).expect("packing params to load");
         assert_eq!(params.partition_hash, Some(partition_hash));

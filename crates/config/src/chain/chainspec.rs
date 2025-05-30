@@ -20,7 +20,7 @@ impl IrysChainSpecBuilder {
             miner_address: config.node_config.miner_address(),
             reward_address: config.node_config.miner_address(),
             height: 0,
-            system_ledgers: vec![], // Make sure theres no invalid txids in the system ledger
+            system_ledgers: vec![], // Make sure there's no invalid txids in the system ledger
             // todo: we need a proper genesis block in the config rather than re-using a mock header
             ..IrysBlockHeader::new_mock_header()
         };
