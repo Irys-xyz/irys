@@ -41,7 +41,7 @@ cargo test -p irys-types  -- --nocapture
 
 ## Common env issues
 MacOS has a soft limit of 256 open file limit per process.
-Some tests currentyl require more than 256 open files.
+Some tests currently require more than 256 open files.
 Here we significantly increase that and persist across reboots.
 
 ```sh
