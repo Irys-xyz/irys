@@ -381,7 +381,7 @@ pub enum ChunkIngressError {
     DatabaseError,
     /// The service is uninitialized
     ServiceUninitialized,
-    // Catch-all variant for other errors.
+    /// Catch-all variant for other errors.
     Other(String),
 }
 
