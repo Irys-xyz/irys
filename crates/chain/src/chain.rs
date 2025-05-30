@@ -724,7 +724,7 @@ impl IrysNode {
                         ),
                     )
                     .await
-                    .inspect_err(|e| error!("Reth thread error: {:?}", &e));
+                    .inspect_err(|e| error!("Reth thread error: {}", &e));
 
                     debug!("Sending shutdown signal to the main actor thread");
                     let _ = main_actor_thread_shutdown_tx.try_send(());
@@ -845,8 +845,8 @@ impl IrysNode {
             irys_db.clone(),
             block_index_guard.clone(),
             &config,
-            reth_service_actor.clone(),
             &service_senders,
+            reth_service_actor.clone(),
         );
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();

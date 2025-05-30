@@ -94,6 +94,10 @@ pub struct BlockTreeServiceInner {
     pub consensus_config: ConsensusConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
+    /// Reth service actor sender
+    pub reth_service_actor: Addr<RethServiceActor>,
+    /// Current actix system
+    pub system: System,
 }
 
 impl BlockTreeService {
@@ -104,19 +108,20 @@ impl BlockTreeService {
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
         config: &Config,
-        reth_service_actor: Addr<RethServiceActor>,
         service_senders: &ServiceSenders,
+        reth_service_actor: Addr<RethServiceActor>,
     ) -> JoinHandle<()> {
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address().clone();
         let consensus_config = config.node_config.consensus_config().clone();
         let service_senders = service_senders.clone();
+        let system = System::current();
         exec.spawn_critical_with_graceful_shutdown_signal(
             "BlockTree Service",
             |shutdown| async move {
                 let cache = BlockTreeCache::initialize_from_list(
                     block_index_guard.clone(),
-                    reth_service_actor,
+                    reth_service_actor.clone(),
                     db.clone(),
                 );
 
@@ -130,6 +135,8 @@ impl BlockTreeService {
                         block_index_guard,
                         consensus_config,
                         service_senders,
+                        reth_service_actor,
+                        system,
                     },
                 };
                 block_tree_service
@@ -234,6 +241,10 @@ impl BlockTreeServiceInner {
             &block_header.block_hash.0.to_base58(),
             &block_header.height
         );
+
+        // HACK
+        System::set_current(self.system.clone());
+
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
         let block_finalized_message = BlockFinalizedMessage {
@@ -256,7 +267,7 @@ impl BlockTreeServiceInner {
             "JESSEDEBUG confirming irys block {} ({})",
             &confirmed_block.evm_block_hash, &confirmed_block.height
         );
-        if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
+        if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(tip_hash),
             confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
             finalized_hash: None,
@@ -267,6 +278,8 @@ impl BlockTreeServiceInner {
             )
         }
         let msg = BlockConfirmedMessage(confirmed_block.clone(), all_tx);
+        // HACK
+        System::set_current(self.system.clone());
         MempoolService::from_registry().do_send(msg);
         self.service_senders
             .ema
@@ -326,7 +339,7 @@ impl BlockTreeServiceInner {
         debug!(?finalized_hash, ?finalized_height, "finalizing irys block");
 
         // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
-        if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
+        if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(cache.tip),
             confirmed_hash: None,
             finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
@@ -375,6 +388,8 @@ impl BlockTreeServiceInner {
 
             if add_result.is_ok() {
                 // Schedule block for full validation regardless of origin
+                // HACK
+                System::set_current(self.system.clone());
                 let validation_service = ValidationService::from_registry();
                 validation_service.do_send(RequestValidationMessage(block.clone()));
 
