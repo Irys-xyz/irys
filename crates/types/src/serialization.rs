@@ -1,5 +1,5 @@
 use crate::{Arbitrary, IrysSignature};
-use alloy_primitives::{bytes, Address};
+use alloy_primitives::{bytes, Address, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
@@ -270,6 +270,12 @@ impl Decode for H256 {
         Ok(Self::from_slice(
             value.try_into().map_err(|_| DatabaseError::Decode)?,
         ))
+    }
+}
+
+impl Into<FixedBytes<32>> for H256 {
+    fn into(self) -> FixedBytes<32> {
+        FixedBytes(self.0)
     }
 }
 
