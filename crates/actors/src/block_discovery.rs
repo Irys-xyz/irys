@@ -1,6 +1,6 @@
 use crate::{
     block_index_service::BlockIndexReadGuard,
-    block_tree_service::BlockTreeService,
+    block_tree_service::BlockTreeServiceMessage,
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
@@ -237,7 +237,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //------------------------------------
         let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
-        let block_tree_addr = BlockTreeService::from_registry();
         let config = self.config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
@@ -247,6 +246,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
         let span2 = self.span.clone();
+        let block_tree_sender = self.service_senders.block_tree.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -379,12 +379,16 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     // WARNING: All block pre-validation needs to be completed before
                     // sending this message.
                     info!("Block is valid, sending to block tree");
-                    block_tree_addr
-                        .send(BlockPreValidatedMessage(
-                            new_block_header.clone(),
-                            Arc::new(all_txs),
-                        ))
-                        .await??;
+
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    let _ = block_tree_sender.send(BlockTreeServiceMessage::BlockPreValidated {
+                        block: new_block_header.clone(),
+                        all_txs: Arc::new(all_txs),
+                        response: oneshot_tx,
+                    });
+                    let _ = oneshot_rx
+                        .await
+                        .expect("to send the BlockPreValidated message");
 
                     // Send the block to the gossip bus
                     tracing::trace!(

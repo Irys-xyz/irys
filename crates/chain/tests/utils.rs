@@ -11,6 +11,7 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
+use irys_actors::mempool_service::{GetBestMempoolTxs, MempoolTxs};
 use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
@@ -453,6 +454,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    pub async fn get_best_mempool_tx(&self) -> MempoolTxs {
+        let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
+        mempool_service
+            .send(GetBestMempoolTxs {})
+            .await
+            .expect("to retrieve the best mempool transactions")
+    }
+
     pub fn peer_address(&self) -> PeerAddress {
         let http = &self.node_ctx.config.node_config.http;
         let gossip = &self.node_ctx.config.node_config.gossip;
@@ -593,6 +602,62 @@ impl IrysNodeTest<IrysNodeCtx> {
             cfg,
             temp_dir: self.temp_dir,
         }
+    }
+
+    pub async fn post_storage_tx_without_gossip(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        let tx = self.post_storage_tx(anchor, data, signer).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        tx
+    }
+
+    pub async fn post_storage_tx(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let tx = signer
+            .create_transaction(data, Some(anchor))
+            .expect("Expect to create a storage transaction from the data");
+        let tx = signer
+            .sign_transaction(tx)
+            .expect("to sign the storage transaction");
+
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/tx", api_uri);
+        let mut response = client
+            .post(url)
+            .send_json(&tx.header) // Send the tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        if response.status() != StatusCode::OK {
+            // Read the response body
+            let body_bytes = response.body().await.expect("Failed to read response body");
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            panic!(
+                "Response status: {} - {}\nRequest Body: {}",
+                response.status(),
+                body_str,
+                serde_json::to_string_pretty(&tx.header).unwrap(),
+            );
+        } else {
+            info!(
+                "Response status: {}\n{}",
+                response.status(),
+                serde_json::to_string_pretty(&tx).unwrap()
+            );
+        }
+        tx
     }
 
     pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {

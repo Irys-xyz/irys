@@ -1,4 +1,7 @@
-use crate::vdf_service::{vdf_steps_are_valid, VdfStepsReadGuard};
+use crate::{
+    services::ServiceSenders,
+    vdf_service::{vdf_steps_are_valid, VdfStepsReadGuard},
+};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, Supervised, SystemService, WrapFuture,
 };
@@ -7,10 +10,8 @@ use std::sync::Arc;
 use tracing::error;
 
 use crate::{
-    block_index_service::BlockIndexReadGuard,
-    block_tree_service::{BlockTreeService, ValidationResult, ValidationResultMessage},
-    block_validation::poa_is_valid,
-    epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard, block_tree_service::ValidationResult,
+    block_validation::poa_is_valid, epoch_service::PartitionAssignmentsReadGuard,
 };
 
 #[derive(Debug)]
@@ -23,6 +24,8 @@ pub struct ValidationService {
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Reference to global config for node
     pub config: Config,
+    /// Service channels
+    pub service_senders: ServiceSenders,
 }
 
 impl Default for ValidationService {
@@ -38,12 +41,14 @@ impl ValidationService {
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         vdf_steps_guard: VdfStepsReadGuard,
         config: &Config,
+        service_senders: &ServiceSenders,
     ) -> Self {
         Self {
             block_index_guard,
             partition_assignments_guard,
             vdf_steps_guard,
             config: config.clone(),
+            service_senders: service_senders.clone(),
         }
     }
 }
@@ -87,6 +92,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
 
         // Wait for results before processing next message
         let config = self.config.clone();
+        let block_tree_sender = self.service_senders.block_tree.clone();
         ctx.wait(
             async move {
                 let validation_result = match vdf_future.await.unwrap() {
@@ -116,11 +122,14 @@ impl Handler<RequestValidationMessage> for ValidationService {
                     }
                 };
 
-                let block_tree_service = BlockTreeService::from_registry();
-                block_tree_service.do_send(ValidationResultMessage {
-                    block_hash,
-                    validation_result,
-                });
+                block_tree_sender
+                    .send(
+                        crate::block_tree_service::BlockTreeServiceMessage::ValidationResult {
+                            block_hash,
+                            validation_result,
+                        },
+                    )
+                    .unwrap();
             }
             .into_actor(self),
         );

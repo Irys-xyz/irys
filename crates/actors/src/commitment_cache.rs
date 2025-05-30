@@ -40,7 +40,7 @@ pub enum CommitmentCacheMessage {
 pub enum CommitmentCacheStatus {
     Accepted,    // The commitment is valid and was added to the cache
     Unknown,     // The commitment is unknown to the cache & has no status
-    Unsupported, // The commitment is an unsupported type (pledge/unpledge)
+    Unsupported, // The commitment is an unsupported type (unstake/unpledge)
     Unstaked,    // The pledge commitment doesn't have a corresponding stake
 }
 

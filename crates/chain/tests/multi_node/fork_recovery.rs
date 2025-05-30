@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use base58::ToBase58;
 use irys_testing_utils::*;
-use irys_types::{NodeConfig, H256};
+use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
 use tracing::debug;
 
 #[actix_web::test]
@@ -90,16 +90,58 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     peer1_node.wait_for_packing(seconds_to_wait).await;
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
+    let chunks1 = vec![[10; 32], [20; 32], [30; 32]];
+    let data1: Vec<u8> = chunks1.concat();
+
+    let chunks2 = vec![[40; 32], [50; 32], [60; 32]];
+    let data2: Vec<u8> = chunks2.concat();
+
+    let chunks3 = vec![[70; 32], [80; 32], [90; 32]];
+    let data3: Vec<u8> = chunks3.concat();
+
+    // Post a transaction that should be gossiped to all peers
+    let shared_tx = genesis_node
+        .post_storage_tx(
+            H256::zero(),
+            data3,
+            &genesis_node.node_ctx.config.irys_signer(),
+        )
+        .await;
+
+    // Wait for the transaction to gossip
+    let txid = shared_tx.header.id;
+    peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
+    peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
+
+    // Post a unique storage transaction to each peer
+    let peer1_tx = peer1_node
+        .post_storage_tx_without_gossip(H256::zero(), data1, &peer1_signer)
+        .await;
+    let peer2_tx = peer2_node
+        .post_storage_tx_without_gossip(H256::zero(), data2, &peer2_signer)
+        .await;
+
     // Mine mine blocks on both peers in parallel
     let (result1, result2) = tokio::join!(
         peer1_node.mine_blocks_without_gossip(1),
         peer2_node.mine_blocks_without_gossip(1)
     );
+
+    // Fail the test on any error results
     result1?;
     result2?;
 
+    // Validate the peer blocks create forks with different transactions
     let peer1_block = peer1_node.get_block_by_height(3).await?;
     let peer2_block = peer2_node.get_block_by_height(3).await?;
+
+    let peer1_block_txids = &peer1_block.data_ledgers[DataLedger::Submit].tx_ids.0;
+    assert_eq!(peer1_block_txids.contains(&txid), true);
+    assert_eq!(peer1_block_txids.contains(&peer1_tx.header.id), true);
+
+    let peer2_block_txids = &peer2_block.data_ledgers[DataLedger::Submit].tx_ids.0;
+    assert_eq!(peer2_block_txids.contains(&txid), true);
+    assert_eq!(peer2_block_txids.contains(&peer2_tx.header.id), true);
 
     // Assert both blocks have the same cumulative difficulty this will ensure
     // that the peers prefer the first block they saw with this cumulative difficulty,
@@ -137,12 +179,16 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     );
     debug!("\nGENESIS: {:?}", genesis_block.block_hash.0.to_base58());
 
-    // Whichever block the genesis node has, have the opposite peer mine the next
-    // to force a reorg
+    // Determine which peer lost the fork race and extend the other peer's chain
+    // to trigger a reorganization. The losing peer's transaction will be evicted
+    // and returned to the mempool.
+    let reorg_tx: IrysTransaction;
     let reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
+        reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
         peer2_node.mine_block().await?;
         peer2_node.get_block_by_height(4).await?
     } else {
+        reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
         peer1_node.mine_block().await?;
         peer1_node.get_block_by_height(4).await?
     };
@@ -150,6 +196,14 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // GENESIS occasionally doesn't arrive at block 4 - 10s for gossip is too slow!
     genesis_node.wait_until_height(4, seconds_to_wait).await?;
     let genesis_block = genesis_node.get_block_by_height(4).await?;
+
+    // Make sure the reorg_tx is back in the mempool ready to be included in the next block
+    let pending_tx = genesis_node.get_best_mempool_tx().await;
+    let tx = pending_tx
+        .storage_tx
+        .iter()
+        .find(|tx| tx.id == reorg_tx.header.id);
+    assert_eq!(tx, Some(&reorg_tx.header));
 
     debug!(
         "reorg_block: {}\nnew_genesis: {}",

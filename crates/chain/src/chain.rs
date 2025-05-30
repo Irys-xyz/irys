@@ -3,13 +3,14 @@ use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
-    block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
+    block_tree_service::BlockTreeService,
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
@@ -838,14 +839,25 @@ impl IrysNode {
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
-        let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
+        let _handle = BlockTreeService::spawn_service(
+            &task_exec,
+            receivers.block_tree,
+            irys_db.clone(),
+            block_index_guard.clone(),
             &config,
-            &block_index,
-            &irys_db,
+            reth_service_actor.clone(),
             &service_senders,
-            &block_index_guard,
-        );
-        let block_tree_guard = block_tree_service.send(GetBlockTreeGuardMessage).await?;
+        )
+        .await?;
+
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let block_tree_sender = service_senders.block_tree.clone();
+        let _ = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+            response: oneshot_tx,
+        });
+        let block_tree_guard = oneshot_rx
+            .await
+            .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
         // Spawn EMA service
         let _handle =
@@ -909,6 +921,7 @@ impl IrysNode {
             &block_index_guard,
             &partition_assignments_guard,
             &vdf_steps_guard,
+            &service_senders,
         );
 
         // create the block reward curve
@@ -1064,10 +1077,6 @@ impl IrysNode {
         arbiters_guard.push(ArbiterHandle::new(
             validation_arbiter,
             "validation_arbiter".to_string(),
-        ));
-        arbiters_guard.push(ArbiterHandle::new(
-            block_tree_arbiter,
-            "block_tree_arbiter".to_string(),
         ));
         arbiters_guard.push(ArbiterHandle::new(
             peer_list_arbiter,
@@ -1345,12 +1354,14 @@ impl IrysNode {
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: &irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
+        service_senders: &ServiceSenders,
     ) -> Arbiter {
         let validation_service = ValidationService::new(
             block_index_guard.clone(),
             partition_assignments_guard.clone(),
             vdf_steps_guard.clone(),
             config,
+            service_senders,
         );
         let validation_arbiter = Arbiter::new();
         let validation_service =
@@ -1403,30 +1414,6 @@ impl IrysNode {
             MempoolService::start_in_arbiter(&mempool_arbiter.handle(), |_| mempool_service);
         SystemRegistry::set(mempool_service.clone());
         (mempool_service, mempool_arbiter)
-    }
-
-    fn init_block_tree_service(
-        config: &Config,
-        block_index: &Arc<RwLock<BlockIndex>>,
-        irys_db: &DatabaseProvider,
-        service_senders: &ServiceSenders,
-        block_index_guard: &BlockIndexReadGuard,
-    ) -> (actix::Addr<BlockTreeService>, Arbiter) {
-        let block_tree_service = BlockTreeService::new(
-            irys_db.clone(),
-            block_index.clone(),
-            &config.node_config.miner_address(),
-            block_index_guard.clone(),
-            config.consensus.clone(),
-            service_senders.clone(),
-        );
-        let block_tree_arbiter = Arbiter::new();
-        let block_tree_service =
-            BlockTreeService::start_in_arbiter(&block_tree_arbiter.handle(), |_| {
-                block_tree_service
-            });
-        SystemRegistry::set(block_tree_service.clone());
-        (block_tree_service, block_tree_arbiter)
     }
 
     fn init_storage_modules(

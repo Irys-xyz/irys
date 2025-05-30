@@ -1,11 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, RwLock, RwLockReadGuard},
-    time::SystemTime,
-};
-
 use crate::{
-    block_discovery::BlockPreValidatedMessage,
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
     block_producer::BlockConfirmedMessage,
     chunk_migration_service::ChunkMigrationService,
@@ -19,19 +12,25 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::ensure;
-use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid, BlockIndex,
-};
+use futures::future::Either;
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
-    Address, BlockHash, ConsensusConfig, DataLedger, DatabaseProvider, IrysBlockHeader,
+    Address, BlockHash, Config, ConsensusConfig, DataLedger, DatabaseProvider, IrysBlockHeader,
     IrysTransactionHeader, IrysTransactionId, H256, U256,
 };
+use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::{transaction::DbTx, Database as _};
+use std::pin::pin;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, RwLock, RwLockReadGuard},
+    time::SystemTime,
+};
+use tokio::{
+    sync::{mpsc::UnboundedReceiver, oneshot},
+    task::JoinHandle,
+};
 use tracing::{debug, error, info};
-
-//==============================================================================
-// BlockTreeReadGuard
-//------------------------------------------------------------------------------
 
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
@@ -57,85 +56,155 @@ impl BlockTreeReadGuard {
     }
 }
 
-/// Retrieve a read only reference to the `block_tree`'s cache
-#[derive(Message, Debug)]
-#[rtype(result = "BlockTreeReadGuard")]
-pub struct GetBlockTreeGuardMessage;
-
-impl Handler<GetBlockTreeGuardMessage> for BlockTreeService {
-    type Result = BlockTreeReadGuard; // Return guard directly
-
-    fn handle(&mut self, _msg: GetBlockTreeGuardMessage, _ctx: &mut Self::Context) -> Self::Result {
-        BlockTreeReadGuard::new(self.cache.clone().unwrap())
-    }
+// Messages that the CommitmentCache service supports
+#[derive(Debug)]
+pub enum BlockTreeServiceMessage {
+    GetBlockTreeReadGuard {
+        response: oneshot::Sender<BlockTreeReadGuard>,
+    },
+    BlockPreValidated {
+        block: Arc<IrysBlockHeader>,
+        all_txs: Arc<Vec<IrysTransactionHeader>>,
+        response: oneshot::Sender<eyre::Result<()>>,
+    },
+    ValidationResult {
+        block_hash: H256,
+        validation_result: ValidationResult,
+    },
 }
-
-//==============================================================================
-// BlockTree Actor
-//------------------------------------------------------------------------------
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockTreeService {
-    db: Option<DatabaseProvider>,
+    shutdown: GracefulShutdown,
+    msg_rx: UnboundedReceiver<BlockTreeServiceMessage>,
+    inner: BlockTreeServiceInner,
+}
+
+#[derive(Debug)]
+pub struct BlockTreeServiceInner {
+    db: DatabaseProvider,
     /// Block tree internal state
-    pub cache: Option<Arc<RwLock<BlockTreeCache>>>,
+    pub cache: Arc<RwLock<BlockTreeCache>>,
     /// The wallet address of the local miner
     pub miner_address: Address,
     /// Read view of the `block_index`
-    pub block_index_guard: Option<BlockIndexReadGuard>,
+    pub block_index_guard: BlockIndexReadGuard,
     /// Global storage config
     pub consensus_config: ConsensusConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
 }
 
-impl Default for BlockTreeService {
-    fn default() -> Self {
-        panic!("do not rely on the `default()` implementation of `BlockTreeService`")
-    }
-}
-
-impl Actor for BlockTreeService {
-    type Context = Context<Self>;
-}
-
-/// Adds this actor the the local service registry
-impl Supervised for BlockTreeService {}
-
-impl SystemService for BlockTreeService {
-    fn service_started(&mut self, _ctx: &mut Context<Self>) {
-        println!("service started: block_tree (Default)");
-    }
-}
-
 impl BlockTreeService {
-    /// Initializes a `BlockTreeActor` without a `block_producer` address
-    pub fn new(
+    /// Spawn a new BlockTree service
+    pub fn spawn_service(
+        exec: &TaskExecutor,
+        rx: UnboundedReceiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
-        block_index: Arc<RwLock<BlockIndex>>,
-        miner_address: &Address,
         block_index_guard: BlockIndexReadGuard,
-        consensus_config: ConsensusConfig,
-        service_senders: ServiceSenders,
-    ) -> Self {
-        let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
+        config: &Config,
+        reth_service_actor: Addr<RethServiceActor>,
+        service_senders: &ServiceSenders,
+    ) -> JoinHandle<()> {
+        // Dereference miner_address here, before the closure
+        let miner_address = config.node_config.miner_address().clone();
+        let consensus_config = config.node_config.consensus_config().clone();
+        let service_senders = service_senders.clone();
+        exec.spawn_critical_with_graceful_shutdown_signal(
+            "BlockTree Service",
+            |shutdown| async move {
+                let cache = BlockTreeCache::initialize_from_list(
+                    block_index_guard.clone(),
+                    reth_service_actor,
+                    db.clone(),
+                );
 
-        Self {
-            db: Some(db),
-            cache: Some(Arc::new(RwLock::new(cache))),
-            miner_address: *miner_address,
-            block_index_guard: Some(block_index_guard),
-            consensus_config,
-            service_senders,
+                let block_tree_service = Self {
+                    shutdown,
+                    msg_rx: rx,
+                    inner: BlockTreeServiceInner {
+                        db,
+                        cache: Arc::new(RwLock::new(cache)),
+                        miner_address,
+                        block_index_guard,
+                        consensus_config,
+                        service_senders,
+                    },
+                };
+                block_tree_service
+                    .start()
+                    .await
+                    .expect("BlockTree encountered an irrecoverable error")
+            },
+        )
+    }
+
+    async fn start(mut self) -> eyre::Result<()> {
+        tracing::info!("starting BlockTree service");
+
+        let mut shutdown_future = pin!(self.shutdown);
+        let shutdown_guard = loop {
+            let mut msg_rx = pin!(self.msg_rx.recv());
+            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
+                Either::Left((Some(msg), _)) => {
+                    self.inner.handle_message(msg).await?;
+                }
+                Either::Left((None, _)) => {
+                    tracing::warn!("receiver channel closed");
+                    break None;
+                }
+                Either::Right((shutdown, _)) => {
+                    tracing::warn!("shutdown signal received");
+                    break Some(shutdown);
+                }
+            }
+        };
+
+        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg).await?;
         }
+
+        // explicitly inform the TaskManager that we're shutting down
+        drop(shutdown_guard);
+
+        tracing::info!("shutting down BlockTree service");
+        Ok(())
+    }
+}
+
+impl BlockTreeServiceInner {
+    /// Dispatches received messages to appropriate handler methods and sends responses
+    #[tracing::instrument(skip_all, err)]
+    async fn handle_message(&mut self, msg: BlockTreeServiceMessage) -> eyre::Result<()> {
+        match msg {
+            BlockTreeServiceMessage::GetBlockTreeReadGuard { response } => {
+                let guard = BlockTreeReadGuard::new(self.cache.clone());
+                let _ = response.send(guard);
+            }
+            BlockTreeServiceMessage::BlockPreValidated {
+                block,
+                all_txs,
+                response,
+            } => {
+                let result = self.on_block_prevalidated(block, all_txs).await;
+                let _ = response.send(result);
+            }
+            BlockTreeServiceMessage::ValidationResult {
+                block_hash,
+                validation_result,
+            } => {
+                self.on_validation_result(block_hash, validation_result);
+            }
+        }
+        Ok(())
     }
 
     fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
         let tx = self
             .db
             .clone()
-            .unwrap()
             .tx()
             .map_err(|e| eyre::eyre!("Failed to create transaction: {}", e))?;
 
@@ -245,7 +314,7 @@ impl BlockTreeService {
         );
 
         // Verify block isn't already finalized
-        let binding = self.block_index_guard.clone().unwrap();
+        let binding = self.block_index_guard.clone();
         let bi = binding.read();
         if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
             let finalized = bi.get_item(finalized_height).unwrap();
@@ -256,6 +325,7 @@ impl BlockTreeService {
         }
         debug!(?finalized_hash, ?finalized_height, "finalizing irys block");
 
+        // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
         if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(cache.tip),
             confirmed_hash: None,
@@ -268,48 +338,29 @@ impl BlockTreeService {
             error!("Unable to send block finalized message");
         }
     }
-}
 
-//==============================================================================
-// Messages and Handlers
-//------------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub enum ValidationResult {
-    Valid,
-    Invalid,
-}
-
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct ValidationResultMessage {
-    pub block_hash: H256,
-    pub validation_result: ValidationResult,
-}
-
-/// Handles pre-validated blocks received from the validation service.
-///
-/// The handling differs based on whether the block was produced locally:
-/// - For locally mined blocks: Added as `BlockState::Unknown` to allow chain extension
-///   while validation is pending
-/// - For peer blocks: Added normally via `add_block`
-///
-/// After adding the block, it's scheduled for full validation and the previous
-/// block is marked for storage finalization.
-impl Handler<BlockPreValidatedMessage> for BlockTreeService {
-    type Result = ResponseFuture<eyre::Result<()>>;
-
-    fn handle(&mut self, msg: BlockPreValidatedMessage, _ctx: &mut Context<Self>) -> Self::Result {
+    /// Handles pre-validated blocks received from the validation service.
+    ///
+    /// The handling differs based on whether the block was produced locally:
+    /// - For locally mined blocks: Added as `BlockState::Unknown` to allow chain extension
+    ///   while validation is pending
+    /// - For peer blocks: Added normally via `add_block`
+    ///
+    /// After adding the block, it's scheduled for full validation and the previous
+    /// block is marked for storage finalization.
+    async fn on_block_prevalidated(
+        &mut self,
+        block: Arc<IrysBlockHeader>,
+        all_txs: Arc<Vec<IrysTransactionHeader>>,
+    ) -> eyre::Result<()> {
         let miner_address = self.miner_address;
         let ema_service = self.service_senders.ema.clone();
-        let cache = self.cache.clone().expect("cache to be initialised");
 
-        return Box::pin(async move {
-            let block = msg.0;
-            let all_txs = msg.1;
-            let block_hash = &block.block_hash;
-            let _finalized_block_hash = block.previous_block_hash;
-            let mut cache = cache.write().expect("cache lock poisoined");
+        let block_hash = &block.block_hash;
+
+        // Scope the cache lock so it's dropped before the await
+        let should_update_ema = {
+            let mut cache = self.cache.write().expect("cache lock poisoned");
 
             // Handle block addition differently based on origin
             let add_result = if block.miner_address == miner_address {
@@ -338,34 +389,30 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
                     "scheduling block for validation: {}",
                     block_hash.0.to_base58()
                 );
-                // release the lock on `cache` so that the EMA service can acquire it
-                drop(cache);
-
-                // block until EMA service is updated
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
-                rx.await?;
+                true
+            } else {
+                false
             }
+        }; // cache lock is dropped here
 
-            Ok(())
-        });
+        // Only update EMA if block was successfully added
+        if should_update_ema {
+            // block until EMA service is updated
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
+            rx.await?;
+        }
+
+        Ok(())
     }
-}
 
-impl Handler<ValidationResultMessage> for BlockTreeService {
-    type Result = ();
-    fn handle(&mut self, msg: ValidationResultMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        let ValidationResultMessage {
-            block_hash,
-            validation_result,
-        } = msg;
-
+    fn on_validation_result(&mut self, block_hash: H256, validation_result: ValidationResult) {
         match validation_result {
             ValidationResult::Invalid => {
                 error!("{} INVALID BLOCK", block_hash.0.to_base58());
             }
             ValidationResult::Valid => {
-                let binding = self.cache.clone().unwrap();
+                let binding = self.cache.clone();
                 let mut cache = binding.write().unwrap();
 
                 // Mark block as validated in cache
@@ -389,13 +436,7 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                 let all_tx = block_entry.all_tx.clone();
 
                 // Now do mutable operations
-                let mark_tip = cache.mark_tip(&block_hash);
-                let _ = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(block_hash),
-                    confirmed_hash: None,
-                    finalized_hash: None,
-                });
-                if mark_tip.is_ok() {
+                if cache.mark_tip(&block_hash).is_ok() {
                     self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
 
@@ -404,6 +445,12 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub enum ValidationResult {
+    Valid,
+    Invalid,
 }
 
 /// Fetches full transaction headers from a ledger in a block.
@@ -500,6 +547,17 @@ pub enum BlockState {
     ValidBlock,
 }
 
+/// The result of marking a new tip for the canonical chain
+#[derive(Debug, Clone)]
+pub enum TipChangeResult {
+    NoChange,
+    Extension,
+    Reorg {
+        orphaned_blocks: Vec<BlockHash>,
+        fork_height: u64,
+    },
+}
+
 impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
     /// on-chain and set as the tip.
@@ -558,10 +616,11 @@ impl BlockTreeCache {
     /// The most recent block in the list is marked as the tip.
     /// The input blocks must be sorted in descending order, from newest to oldest.
     pub fn initialize_from_list(
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index_guard: BlockIndexReadGuard,
+        reth_service_actor: Addr<RethServiceActor>,
         db: DatabaseProvider,
     ) -> Self {
-        let block_index = block_index.read().unwrap();
+        let block_index = block_index_guard.read();
         assert!(block_index.num_blocks() > 0, "Block list must not be empty");
 
         //block_index.print_items();
@@ -600,7 +659,8 @@ impl BlockTreeCache {
 
         let tip_hash = block_index.get_latest_item().unwrap().block_hash;
         cache.mark_tip(&tip_hash).unwrap();
-        RethServiceActor::from_registry()
+
+        reth_service_actor
             .try_send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Irys(tip_hash),
                 confirmed_hash: None,
@@ -961,7 +1021,11 @@ impl BlockTreeCache {
     }
 
     /// Marks a block as the new tip
-    pub fn mark_tip(&mut self, block_hash: &BlockHash) -> eyre::Result<bool> {
+    pub fn mark_tip(&mut self, block_hash: &BlockHash) -> eyre::Result<TipChangeResult> {
+        // Capture the old canonical chain before any changes
+        let old_canonical_chain = self.get_canonical_chain();
+        let old_tip = self.tip;
+
         // Get the current block
         let block_entry = self
             .blocks
@@ -969,7 +1033,9 @@ impl BlockTreeCache {
             .ok_or_else(|| eyre::eyre!("Block not found in cache"))?;
 
         let block = block_entry.block.clone();
-        let old_tip = self.tip;
+
+        // Check if this is just extending the current chain
+        let is_extension = block.previous_block_hash == old_tip;
 
         // Recursively mark previous blocks
         self.mark_on_chain(&block)?;
@@ -988,7 +1054,79 @@ impl BlockTreeCache {
             block.height
         );
 
-        Ok(old_tip != *block_hash)
+        // Determine the type of tip change
+        if old_tip == *block_hash {
+            Ok(TipChangeResult::NoChange)
+        } else if is_extension {
+            Ok(TipChangeResult::Extension)
+        } else {
+            // This is potentially a reorg - need to check for orphaned blocks
+            let new_canonical_chain = self.get_canonical_chain();
+
+            // Compare old and new chains to find orphaned blocks
+            let old_hashes: Vec<BlockHash> = old_canonical_chain
+                .0
+                .iter()
+                .map(|(hash, _, _, _)| *hash)
+                .collect();
+            let new_hashes: Vec<BlockHash> = new_canonical_chain
+                .0
+                .iter()
+                .map(|(hash, _, _, _)| *hash)
+                .collect();
+
+            // Find the common ancestor
+            let mut common_ancestor_index = 0;
+            for (i, (old, new)) in old_hashes.iter().zip(new_hashes.iter()).enumerate() {
+                if old == new {
+                    common_ancestor_index = i;
+                } else {
+                    break;
+                }
+            }
+
+            // Collect orphaned blocks
+            let orphaned_blocks: Vec<BlockHash> = old_hashes[common_ancestor_index + 1..]
+                .iter()
+                .filter(|hash| !new_hashes.contains(hash))
+                .copied()
+                .collect();
+
+            if !orphaned_blocks.is_empty() {
+                let fork_height = old_canonical_chain
+                    .0
+                    .get(common_ancestor_index)
+                    .map(|(_, height, _, _)| *height)
+                    .unwrap_or(0);
+
+                info!(
+                "🔄 REORG DETECTED: {} blocks orphaned, fork at height {}, new tip: {} (height: {})",
+                orphaned_blocks.len(),
+                fork_height,
+                block_hash.0.to_base58(),
+                block.height
+            );
+
+                // Log details about orphaned blocks
+                for orphaned_hash in &orphaned_blocks {
+                    if let Some(orphaned_entry) = self.blocks.get(&orphaned_hash) {
+                        debug!(
+                            "  Orphaned block: {} at height {}",
+                            orphaned_hash.0.to_base58(),
+                            orphaned_entry.block.height
+                        );
+                    }
+                }
+
+                Ok(TipChangeResult::Reorg {
+                    orphaned_blocks,
+                    fork_height,
+                })
+            } else {
+                // This case might happen if we're marking a tip on a fork that was already validated
+                Ok(TipChangeResult::Extension)
+            }
+        }
     }
 
     pub fn mark_block_as_validation_scheduled(
@@ -1481,7 +1619,7 @@ mod tests {
         );
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
-        // Even though b2 is marked as a tip, it is still lower difficulty than B1_2 so will
+        // Even though b2 is marked as a tip, it is still lower difficulty than b1_2 so will
         // not be included in the longest chain
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         assert_eq!(Some(&b1_2), cache.get_block(&b1_2.block_hash));
@@ -1793,12 +1931,12 @@ mod tests {
             cache.add_validated_block(b13.clone(), BlockState::ValidBlock, all_tx.clone()),
             Ok(_)
         );
-        let reorg = cache.mark_tip(&b13.block_hash).unwrap();
+        let result = cache.mark_tip(&b13.block_hash).unwrap();
 
         // The tip does change here, even though it's not part of the longest
         // chain, this seems like a bug
         println!("tip: {} after mark_tip()", cache.tip);
-        assert!(reorg);
+        assert_matches!(result, TipChangeResult::Extension);
 
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
         // Although b13 becomes the tip, it's not included in the longest_chain_cache.
@@ -1815,7 +1953,7 @@ mod tests {
         //                   /     because B12 has same cdiff & was first
         //                  /
         // [B11] cdiff=0 --+-- [B12] cdiff=1, NotValidated (first added)
-        // (genesis)             ⚠ not counted as onchain due to not being validated
+        // (genesis - tip)       ⚠ not counted as onchain due to not being validated
         //
         // ▶ Longest chain contains: [B11]
         // ▶ Not on chain count: 0
@@ -1827,7 +1965,9 @@ mod tests {
         //   longest chain contains b12, as b12 was seen first with same difficulty.
         // Fix: mark_tip() should reject attempts to change tip to a block that has equal
         //   (rather than greater) difficulty compared to the current max_difficulty block.
-        //   This would ensure tip always follows the longest chain.
+        //   This would ensure tip always follows the longest chain. TBH the current behavior
+        //   is likely aligned with the local miners economic interest and why things
+        //   like "uncle" blocks exist on other chains.
         assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(_));
 
         // Extend the b13->b11 chain
