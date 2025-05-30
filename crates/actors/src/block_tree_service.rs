@@ -1436,7 +1436,7 @@ mod tests {
             b1_2.block_hash, b1_2.cumulative_diff, b1_2.solution_hash
         );
 
-        // Verify if we exclude b1_2 we wont get it back
+        // Verify if we exclude b1_2 we won't get it back
         assert_eq!(
             cache
                 .get_by_solution_hash(
@@ -1942,7 +1942,7 @@ mod tests {
             cache.get_block_and_status(&b14.block_hash).unwrap(),
             (&b14, &ChainState::Validated(BlockState::ValidBlock))
         );
-        // b14 is validated, but wont be onchain until is tip_height or lower
+        // b14 is validated, but won't be onchain until is tip_height or lower
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
 
         // add a b16 block
