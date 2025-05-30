@@ -13,10 +13,9 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
-    ema_service::{EmaService, EmaServiceMessage},
+    ema_service::EmaService,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
-    mempool_service::MempoolService,
-    mempool_service::MempoolServiceFacadeImpl,
+    mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingConfig, PackingRequest},
     reth_service::{
@@ -27,8 +26,8 @@ use irys_actors::{
     vdf_service::{VdfService, VdfServiceMessage, VdfStepsReadGuard},
 };
 use irys_actors::{
-    ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
-    GetCommitmentStateGuardMessage, StorageModuleService,
+    ActorAddresses, CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage,
+    StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -72,7 +71,6 @@ use std::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn, Instrument as _, Span};
 
@@ -99,11 +97,11 @@ pub struct IrysNodeCtx {
 }
 
 impl IrysNodeCtx {
-    pub fn get_api_state(&self, ema_service: UnboundedSender<EmaServiceMessage>) -> ApiState {
+    pub fn get_api_state(&self) -> ApiState {
         ApiState {
-            mempool: self.actor_addresses.mempool.clone(),
+            mempool_service: self.service_senders.mempool.clone(),
             chunk_provider: self.chunk_provider.clone(),
-            ema_service,
+            ema_service: self.service_senders.ema.clone(),
             peer_list: self.peer_list.clone(),
             db: self.db.clone(),
             config: self.config.clone(),
@@ -852,7 +850,7 @@ impl IrysNode {
             EmaService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.ema, &config);
 
         // Spawn the CommitmentCache service
-        let _handle = CommitmentCache::spawn_service(
+        let _commitcache_handle = CommitmentCache::spawn_service(
             &task_exec,
             receivers.commitments_cache,
             commitment_state_guard.clone(),
@@ -862,18 +860,19 @@ impl IrysNode {
         let (peer_list_service, peer_list_arbiter) =
             init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
 
-        // Spawn the mempool service
-        let (mempool_service, mempool_arbiter) = Self::init_mempools_service(
-            &config,
+        // Spawn mempool service
+        let _mempool_handle = MempoolService::spawn_service(
+            &task_exec,
             &irys_db,
-            &reth_node,
             reth_db,
             &storage_modules_guard,
             &block_tree_guard,
             &commitment_state_guard,
+            receivers.mempool,
+            &config,
             &service_senders,
         );
-        let mempool_facade = MempoolServiceFacadeImpl::from(mempool_service.clone());
+        let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
 
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
@@ -956,7 +955,6 @@ impl IrysNode {
             &service_senders,
             &epoch_service_actor,
             &block_tree_guard,
-            &mempool_service,
             &vdf_steps_guard,
             block_discovery.clone(),
             price_oracle,
@@ -1010,7 +1008,6 @@ impl IrysNode {
                 block_discovery_addr: block_discovery,
                 block_producer: block_producer_addr,
                 packing: packing_actor_addr,
-                mempool: mempool_service.clone(),
                 block_index: block_index_service_actor,
                 epoch_service: epoch_service_actor,
                 reth: reth_service_actor,
@@ -1073,10 +1070,6 @@ impl IrysNode {
             peer_list_arbiter,
             "peer_list_arbiter".to_string(),
         ));
-        arbiters_guard.push(ArbiterHandle::new(
-            mempool_arbiter,
-            "mempool_arbiter".to_string(),
-        ));
         arbiters_guard.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
         arbiters_guard.extend(
             part_arbiters
@@ -1087,8 +1080,8 @@ impl IrysNode {
 
         let server = run_server(
             ApiState {
+                mempool_service: service_senders.mempool.clone(),
                 ema_service: service_senders.ema.clone(),
-                mempool: mempool_service,
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_service,
                 db: irys_db,
@@ -1266,7 +1259,6 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         epoch_service_actor: &actix::Addr<EpochServiceActor>,
         block_tree_guard: &BlockTreeReadGuard,
-        mempool_service: &actix::Addr<MempoolService>,
         vdf_steps_guard: &VdfStepsReadGuard,
         block_discovery: actix::Addr<BlockDiscoveryActor>,
         price_oracle: Arc<IrysPriceOracle>,
@@ -1276,7 +1268,6 @@ impl IrysNode {
             db: irys_db.clone(),
             config: config.clone(),
             reward_curve,
-            mempool_addr: mempool_service.clone(),
             block_discovery_addr: block_discovery,
             epoch_service: epoch_service_actor.clone(),
             reth_provider: reth_node.clone(),
@@ -1376,33 +1367,6 @@ impl IrysNode {
             service_senders.clone(),
         );
         SystemRegistry::set(chunk_migration_service.start());
-    }
-
-    fn init_mempools_service(
-        config: &Config,
-        irys_db: &DatabaseProvider,
-        reth_node: &RethNodeProvider,
-        reth_db: irys_database::db::RethDbWrapper,
-        storage_modules_guard: &StorageModulesReadGuard,
-        block_tree_guard: &BlockTreeReadGuard,
-        commitment_state_guard: &CommitmentStateReadGuard,
-        service_senders: &ServiceSenders,
-    ) -> (actix::Addr<MempoolService>, Arbiter) {
-        let mempool_service = MempoolService::new(
-            irys_db.clone(),
-            reth_db.clone(),
-            reth_node.task_executor.clone(),
-            storage_modules_guard.clone(),
-            block_tree_guard.clone(),
-            commitment_state_guard.clone(),
-            &config,
-            service_senders.clone(),
-        );
-        let mempool_arbiter = Arbiter::new();
-        let mempool_service =
-            MempoolService::start_in_arbiter(&mempool_arbiter.handle(), |_| mempool_service);
-        SystemRegistry::set(mempool_service.clone());
-        (mempool_service, mempool_arbiter)
     }
 
     fn init_block_tree_service(

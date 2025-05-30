@@ -74,7 +74,6 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
@@ -98,7 +97,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     )
     .await?;
 
-    let api_state = node.node_ctx.get_api_state(ema_tx);
+    let api_state = node.node_ctx.get_api_state();
     let _db = api_state.db.clone();
 
     // Start the API server
@@ -273,8 +272,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         .await?;
 
         // Initialize API for submitting commitment transactions
-        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-        let api_state = node.node_ctx.get_api_state(ema_tx);
+        let api_state = node.node_ctx.get_api_state();
 
         let _app = actix_web::test::init_service(
             App::new()

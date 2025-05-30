@@ -8,9 +8,11 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade,
+    broadcast_mining_service::BroadcastMiningSeed,
+    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError},
+};
 use irys_api_client::ApiClient;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
