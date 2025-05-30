@@ -847,8 +847,7 @@ impl IrysNode {
             &config,
             reth_service_actor.clone(),
             &service_senders,
-        )
-        .await?;
+        );
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
