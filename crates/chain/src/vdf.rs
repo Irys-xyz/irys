@@ -3,12 +3,68 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf_service::VdfServiceMessage,
 };
-use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
+use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
+use base58::ToBase58;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tracing::{debug, info};
+
+pub fn broadcast_genesis_vdf(
+    genesis_block: &IrysBlockHeader,
+    // broadcast_mining_service: Addr<BroadcastMiningService>,
+    vdf_service: UnboundedSender<VdfServiceMessage>
+) {
+    // First, insert broadcast prev_output, which should be equal to the last_epoch_block at this point already
+    if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(genesis_block.vdf_limiter_info.prev_output))) {
+        panic!("Unable to send new Seed to VDF service: {:?}", e);
+    }
+
+    // // We should have 1 step in the genesis block at this point
+    // let Some(first_step_hash) = genesis_block.vdf_limiter_info.steps.0.get(0) else {
+    //     panic!("VDF should be run at least once for the genesis block");
+    // };
+    //
+    // // Then, broadcast the first step
+    // if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(*first_step_hash))) {
+    //     panic!("Unable to send new Seed to VDF service: {:?}", e);
+    // }
+    // broadcast_mining_service.do_send(BroadcastMiningSeed {
+    //     seed: Seed(*first_step_hash),
+    //     checkpoints: genesis_block.vdf_limiter_info.last_step_checkpoints.clone(),
+    //     global_step: 1,
+    // });
+}
+
+pub fn run_vdf_for_genesis_block(
+    genesis_block: &mut IrysBlockHeader,
+    config: &irys_types::VdfConfig,
+    // atomic_vdf_global_step: AtomicVdfStepNumber,
+) {
+    let mut hasher = Sha256::new();
+    let mut hash: H256 = genesis_block.vdf_limiter_info.seed;
+
+    let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+    let global_step_number = 0;
+
+    let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
+
+    vdf_sha(
+        &mut hasher,
+        &mut salt,
+        &mut hash,
+        config.num_checkpoints_in_vdf_step,
+        config.sha_1s_difficulty,
+        &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
+    );
+
+    genesis_block.vdf_limiter_info.steps.0 = vec![hash];
+    genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints;
+
+    // global_step_number += 1;
+    // atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub fn run_vdf(
     config: &irys_types::VdfConfig,
@@ -65,7 +121,7 @@ pub fn run_vdf(
                     panic!("Unable to send new Seed to VDF service: {:?}", e);
                 }
 
-                broadcast_mining_service.do_send(proposed_ff_to_mining_seed);
+                // broadcast_mining_service.do_send(proposed_ff_to_mining_seed);
                 debug!("VDF fast forwarded");
             } else {
                 debug!(
@@ -73,7 +129,7 @@ pub fn run_vdf(
                     proposed_ff_to_mining_seed.global_step, global_step_number
                 );
             }
-            // continue;
+            continue;
         }
 
         // check if vdf mining state should change
@@ -110,7 +166,7 @@ pub fn run_vdf(
 
         info!(
             "Seed created {} step number {}",
-            hash.clone(),
+            hash.0.to_base58(),
             global_step_number
         );
         if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash))) {

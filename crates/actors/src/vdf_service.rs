@@ -22,7 +22,7 @@ use tokio::{
     task::JoinHandle,
     time::{sleep, Duration},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::broadcast_mining_service::BroadcastMiningSeed;
@@ -85,6 +85,7 @@ impl VdfState {
         let start: usize = (i.start() - first_global_step).try_into()?;
         let end: usize = (i.end() - first_global_step).try_into()?;
 
+        debug!("Start: {}, end: {}", start, end);
         Ok(H256List(
             self.seeds
                 .range(start..=end)
