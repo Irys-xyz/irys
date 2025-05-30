@@ -159,27 +159,9 @@ impl fixed_hash::core_::fmt::Debug for H256 {
 }
 impl fixed_hash::core_::fmt::Display for H256 {
     fn fmt(&self, f: &mut fixed_hash::core_::fmt::Formatter) -> fixed_hash::core_::fmt::Result {
-        // f.write_fmt(core::format_args!("0x"))?;
-        // for i in &self.0[0..2] {
-        //     f.write_fmt(core::format_args!("{:02x}", i))?;
-        // }
-        // f.write_fmt(core::format_args!("…"))?;
-        // for i in &self.0[32 - 2..32] {
-        //     f.write_fmt(core::format_args!("{:02x}", i))?;
-        // }
-
-        // f.write_fmt(core::format_args!("0x"))?;
-        // for i in &self.0[0..2] {
-        //     f.write_fmt(/* core::format_args!("{:02x}", i) */ i.to_base58())?;
-        // }
-        // f.write(&self.0[0..2].to_base58());
         write!(f, "{}", &self.0[0..4].to_base58())?;
         f.write_fmt(core::format_args!("…"))?;
-        // for i in &self.0[32 - 2..32] {
-        //     f.write_fmt(/* core::format_args!("{:02x}", i) */ i.to_base58())?;
-        // }
         write!(f, "{}", &self.0[32 - 4..32].to_base58())?;
-
         Ok(())
     }
 }
