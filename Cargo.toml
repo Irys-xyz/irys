@@ -154,6 +154,8 @@ alloy-sol-macro = { version = "1.1.0", default-features = false }
 alloy-sol-types = { version = "1.1.0", default-features = false }
 
 revm = { version = "23.1.0", default-features = false }
+revm-primitives = "19"
+revm-interpreter = "19"
 
 
 reth = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
@@ -183,7 +185,7 @@ reth-tracing = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da62
 reth-transaction-pool = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
 reth-trie-db = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
 reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
-
+reth-storage-api = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
 # just used (for local testing)
 
 

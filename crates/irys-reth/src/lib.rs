@@ -59,16 +59,17 @@ use system_tx::SystemTransaction;
 use tracing::{debug, info};
 
 pub mod system_tx;
+pub mod system_tx_validator;
 
 #[must_use]
 pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransaction) -> TxLegacy {
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
     TxLegacy {
-        gas_limit: 99000,
+        gas_limit: 1,
         value: U256::ZERO,
         nonce,
-        gas_price: 1_000_000_000_u128, // 1 Gwei
+        gas_price: 1000000000, // 1 Gwei
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
         input: system_tx_rlp.into(),
@@ -442,7 +443,8 @@ where
             );
         }
 
-        self.inner.validate_one(origin, transaction)
+        let result = self.inner.validate_one(origin, transaction);
+        result
     }
 
     async fn validate_transactions(

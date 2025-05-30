@@ -35,6 +35,10 @@ reth-e2e-test-utils = { workspace = true, optional = true }
 reth-engine-local = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 revm.workspace = true
+reth-tasks.workspace = true
+reth-storage-api.workspace = true
+revm-primitives.workspace = true
+revm-interpreter.workspace = true
 
 tokio.workspace = true
 eyre.workspace = true
