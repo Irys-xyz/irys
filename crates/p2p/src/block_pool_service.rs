@@ -178,27 +178,27 @@ where
                         current_block_hash.0.to_base58()
                     );
 
-                    // process vdf steps from block
-                    fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
-
-                    info!(
-                        "FF VDF Steps for block for block {} completed. Waiting for FF VDF Steps to be saved to VdfState",
-                        current_block_hash.0.to_base58()
-                    );
+                    // // process vdf steps from block
+                    // fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
+                    //
+                    // info!(
+                    //     "FF VDF Steps for block for block {} completed. Waiting for FF VDF Steps to be saved to VdfState",
+                    //     current_block_hash.0.to_base58()
+                    // );
 
                     // wait to be sure the FF steps are saved to VdfState before we try to discover the block that requires them
-                    let desired_step = block_header.vdf_limiter_info.global_step_number;
-                    if let Err(vdf_error) = wait_for_vdf_step(vdf_service_sender, desired_step).await {
-                        self_addr.do_send(RemoveBlockFromPool {
-                            block_hash: block_header.block_hash,
-                        });
-                        return Err(BlockPoolError::OtherInternal(format!("Can't process VDF steps for block: {:?}", vdf_error)))
-                    }
-
-                    info!(
-                        "VDF Steps for block {} saved. Starting block validation",
-                        current_block_hash.0.to_base58()
-                    );
+                    // let desired_step = block_header.vdf_limiter_info.global_step_number;
+                    // if let Err(vdf_error) = wait_for_vdf_step(vdf_service_sender, desired_step).await {
+                    //     self_addr.do_send(RemoveBlockFromPool {
+                    //         block_hash: block_header.block_hash,
+                    //     });
+                    //     return Err(BlockPoolError::OtherInternal(format!("Can't process VDF steps for block: {:?}", vdf_error)))
+                    // }
+                    //
+                    // info!(
+                    //     "VDF Steps for block {} saved. Starting block validation",
+                    //     current_block_hash.0.to_base58()
+                    // );
 
                     if let Err(block_discovery_error) = block_discovery
                         .as_ref()

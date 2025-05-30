@@ -1,5 +1,5 @@
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use crate::vdf::run_vdf;
+use crate::vdf::{broadcast_genesis_vdf, run_vdf, run_vdf_for_genesis_block};
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;
@@ -52,11 +52,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
-use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
-    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, H256, U256,
-};
+use irys_types::{app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, AtomicVdfStepNumber, CloneableJoinHandle, CommitmentTransaction, Config, H256List, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, VDFLimiterInfo, H256, U256};
 use reth::{
     chainspec::ChainSpec,
     tasks::{TaskExecutor, TaskManager},
@@ -72,7 +68,7 @@ use std::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn, Instrument as _, Span};
 
@@ -390,6 +386,15 @@ impl IrysNode {
 
         // Add commitment transactions to genesis block
         add_genesis_commitments(&mut genesis_block, &self.config);
+
+        let last_epoch_hash = &genesis_block.last_epoch_hash;
+
+        genesis_block.vdf_limiter_info = VDFLimiterInfo {
+            global_step_number: 1,
+            prev_output: *last_epoch_hash,
+            ..VDFLimiterInfo::default()
+        };
+        run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
 
         (genesis_block, commitments)
     }
@@ -798,6 +803,13 @@ impl IrysNode {
             .await??;
         debug!("Reth Service Actor updated about fork choice");
 
+        if latest_block.height == 0 {
+            broadcast_genesis_vdf(
+                &latest_block,
+                service_senders.vdf.clone()
+            );
+        }
+
         let _handle = ChunkCacheService::spawn_service(
             &task_exec,
             irys_db.clone(),
@@ -909,6 +921,8 @@ impl IrysNode {
             &block_index_guard,
             &partition_assignments_guard,
             &vdf_steps_guard,
+            service_senders.vdf_fast_forward.clone(),
+            service_senders.vdf.clone(),
         );
 
         // create the block reward curve
@@ -938,7 +952,7 @@ impl IrysNode {
             task_exec,
             peer_list_service.clone(),
             irys_db.clone(),
-            service_senders.vdf_seed.clone(),
+            service_senders.vdf_fast_forward.clone(),
             gossip_listener,
             service_senders.vdf.clone(),
         )?;
@@ -990,7 +1004,7 @@ impl IrysNode {
         let vdf_thread_handler = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
-            receivers.vdf_seed,
+            receivers.vdf_fast_forward,
             receivers.vdf_mining,
             latest_block,
             seed,
@@ -1136,7 +1150,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        new_seed_rx: mpsc::Receiver<BroadcastMiningSeed>,
+        fast_forward_rx: mpsc::Receiver<BroadcastMiningSeed>,
         vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
@@ -1179,7 +1193,7 @@ impl IrysNode {
                     global_step_number,
                     seed,
                     vdf_reset_seed,
-                    new_seed_rx,
+                    fast_forward_rx,
                     vdf_mining_state_rx,
                     vdf_shutdown_receiver,
                     broadcast_mining_actor.clone(),
@@ -1345,12 +1359,16 @@ impl IrysNode {
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: &irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
+        vdf_fast_forward_sender: Sender<BroadcastMiningSeed>,
+        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
     ) -> Arbiter {
         let validation_service = ValidationService::new(
             block_index_guard.clone(),
             partition_assignments_guard.clone(),
             vdf_steps_guard.clone(),
             config,
+            vdf_fast_forward_sender,
+            vdf_service_sender,
         );
         let validation_arbiter = Arbiter::new();
         let validation_service =

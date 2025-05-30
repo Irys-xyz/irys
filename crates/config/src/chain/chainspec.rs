@@ -1,4 +1,4 @@
-use irys_types::{Config, IrysBlockHeader};
+use irys_types::{Config, H256List, IrysBlockHeader, VDFLimiterInfo};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use tracing::debug;
 
