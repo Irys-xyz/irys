@@ -189,7 +189,6 @@ impl fixed_hash::core_::fmt::UpperHex for H256 {
 }
 impl fixed_hash::core_::marker::Copy for H256 {}
 
-#[cfg_attr(feature = "dev", allow(expl_impl_clone_on_copy))]
 impl fixed_hash::core_::clone::Clone for H256 {
     fn clone(&self) -> H256 {
         let mut ret = H256::zero();
