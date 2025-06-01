@@ -21,10 +21,10 @@ use crate::{
 use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
-use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::MempoolFacade;
-use irys_actors::vdf_service::VdfServiceMessage;
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade, broadcast_mining_service::BroadcastMiningSeed,
+    mempool_service::MempoolFacade, vdf_service::VdfServiceMessage,
+};
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;

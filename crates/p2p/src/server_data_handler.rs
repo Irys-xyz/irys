@@ -1,14 +1,18 @@
-use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
-use crate::cache::GossipCacheKey;
-use crate::peer_list::PeerListFacade;
-use crate::sync::SyncState;
-use crate::types::{GossipDataRequest, InternalGossipError, InvalidDataError};
-use crate::{cache::GossipCache, GossipClient, GossipError, GossipResult};
+use crate::{
+    block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock},
+    cache::{GossipCache, GossipCacheKey},
+    peer_list::PeerListFacade,
+    sync::SyncState,
+    types::{GossipDataRequest, InternalGossipError, InvalidDataError},
+    GossipClient, GossipError, GossipResult,
+};
 use actix::{Actor, Addr, Context, Handler};
 use base58::ToBase58;
 use core::net::SocketAddr;
-use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade,
+    mempool_service::{ChunkIngressError, MempoolFacade},
+};
 use irys_api_client::ApiClient;
 use irys_types::{
     CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,

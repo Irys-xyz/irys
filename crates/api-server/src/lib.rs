@@ -1,38 +1,35 @@
 pub mod error;
 pub mod routes;
 
-use actix::Addr;
 use actix_cors::Cors;
-use actix_web::dev::Server;
 use actix_web::{
-    dev::HttpServiceFactory,
+    dev::{HttpServiceFactory, Server},
     error::InternalError,
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
-use irys_actors::ema_service::EmaServiceMessage;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
-    mempool_service::MempoolService,
+    ema_service::EmaServiceMessage, mempool_service::MempoolServiceMessage,
 };
-use irys_p2p::PeerListServiceFacade;
-use irys_p2p::SyncState;
+use irys_p2p::{PeerListServiceFacade, SyncState};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
-use routes::commitment;
 use routes::{
-    block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
-    price, proxy::proxy, tx,
+    block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
+    post_version, price, proxy::proxy, tx,
 };
-use std::net::TcpListener;
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{SocketAddr, TcpListener},
+    sync::Arc,
+};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub mempool: Addr<MempoolService>,
+    pub mempool_service: UnboundedSender<MempoolServiceMessage>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub ema_service: UnboundedSender<EmaServiceMessage>,
     pub peer_list: PeerListServiceFacade,

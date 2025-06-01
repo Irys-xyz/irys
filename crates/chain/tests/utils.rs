@@ -1,4 +1,3 @@
-use actix::MailboxError;
 use actix_http::Request;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
@@ -17,7 +16,7 @@ use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
     block_validation,
-    mempool_service::{TxExistenceQuery, TxIngressError, TxIngressMessage},
+    mempool_service::{MempoolServiceMessage, TxIngressError},
     packing::wait_for_packing,
     vdf_service::VdfStepsReadGuard,
     SetTestBlocksRemainingMessage,
@@ -53,7 +52,7 @@ use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
-use tokio::time::sleep;
+use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
@@ -163,7 +162,7 @@ pub async fn random_port() -> eyre::Result<u16> {
 pub enum AddTxError {
     CreateTx(eyre::Report),
     TxIngress(TxIngressError),
-    Mailbox(MailboxError),
+    Mailbox(RecvError),
 }
 
 // TODO: add an "name" field for debug logging
@@ -335,8 +334,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn start_public_api(
         &self,
     ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
-        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-        let api_state = self.node_ctx.get_api_state(ema_tx);
+        let api_state = self.node_ctx.get_api_state();
 
         actix_web::test::init_service(
             App::new()
@@ -430,15 +428,24 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx_id: IrysTransactionId,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
-        let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
 
-        while mempool_service
-            .send(TxExistenceQuery(tx_id))
-            .await?
-            .is_ok_and(|f| f == false)
-        {
+        for _ in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            mempool_service.send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))?;
+
+            //if transaction exists
+            if true
+                == oneshot_rx
+                    .await
+                    .expect("to process ChunkIngressMessage")
+                    .expect("boolean response to transaction existence")
+            {
+                break;
+            }
+
             sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
@@ -487,13 +494,20 @@ impl IrysNodeTest<IrysNodeCtx> {
             .map_err(AddTxError::CreateTx)?;
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
-        match self
-            .node_ctx
-            .actor_addresses
-            .mempool
-            .send(TxIngressMessage(tx.header.clone()))
-            .await
-        {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let response =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::TxIngressMessage(
+                    tx.header.clone(),
+                    oneshot_tx,
+                ));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+
+        match oneshot_rx.await {
             Ok(Ok(())) => return Ok(tx),
             Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
             Err(e) => return Err(AddTxError::Mailbox(e)),
