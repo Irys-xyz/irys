@@ -10,7 +10,7 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
-use irys_actors::mempool_service::{GetBestMempoolTxs, MempoolTxs};
+use irys_actors::mempool_service::MempoolTxs;
 use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
@@ -462,11 +462,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_best_mempool_tx(&self) -> MempoolTxs {
-        let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
-        mempool_service
-            .send(GetBestMempoolTxs {})
-            .await
-            .expect("to retrieve the best mempool transactions")
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBestMempoolTxs(tx))
+            .expect("to send MempoolServiceMessage");
+        rx.await.expect("to receive best transactions from mempool")
     }
 
     pub fn peer_address(&self) -> PeerAddress {

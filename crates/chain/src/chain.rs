@@ -27,8 +27,8 @@ use irys_actors::{
     vdf_service::{VdfService, VdfServiceMessage, VdfStepsReadGuard},
 };
 use irys_actors::{
-    ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
-    GetCommitmentStateGuardMessage, StorageModuleService,
+    ActorAddresses, CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage,
+    StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
