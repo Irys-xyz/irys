@@ -257,7 +257,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Submit Ledger Transactions
             let (tx, rx) = tokio::sync::oneshot::channel();
-            service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(tx)).expect("to send MempoolServiceMessage");
+            service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(Some(prev_block_header.evm_block_hash), tx)).expect("to send MempoolServiceMessage");
             let submit_txs = rx.await.expect("to receive txns");
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);

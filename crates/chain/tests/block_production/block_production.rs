@@ -224,10 +224,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     ]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
-    let _recipient_init_balance = reth_context
-        .rpc
-        .get_balance(recipient.address(), None)
-        .await?;
+    let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
 
     let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     let mut evm_txs: HashMap<B256, TxEnvelope> = HashMap::new();
@@ -350,7 +347,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
 
     for _ in 0..3 {
         // mine a single block
@@ -405,7 +402,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
         // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
-        _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+        _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
         sleep(Duration::from_millis(1_500)).await;
     }
 

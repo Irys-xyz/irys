@@ -39,6 +39,7 @@ rayon.workspace = true
 sha2.workspace = true
 reth.workspace = true
 alloy-rpc-types-engine.workspace = true
+derive_more.workspace = true
 # serde.workspace = true
 
 [dev-dependencies]

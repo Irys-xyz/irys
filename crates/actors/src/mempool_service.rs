@@ -13,7 +13,12 @@ use irys_database::{
     {insert_tx_header, tx_header_by_txid, SystemLedger},
 };
 use irys_primitives::CommitmentType;
+use irys_reth_node_bridge::adapter::RethContext;
+use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+use irys_reth_node_bridge::new_reth_context;
+use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::StorageModulesReadGuard;
+use irys_types::EvmBlockHash;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
     validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot, GossipData,
@@ -21,6 +26,7 @@ use irys_types::{
     MempoolConfig, TxChunkOffset, H256, U256,
 };
 use lru::LruCache;
+use reth::rpc::types::BlockId;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
@@ -166,8 +172,12 @@ pub enum MempoolServiceMessage {
         tokio::sync::oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
-    /// Filtering based on funding status etc
-    GetBestMempoolTxs(tokio::sync::oneshot::Sender<MempoolTxs>),
+    /// Filtering based on funding status etc based on the provided EVM block hash
+    /// If `None` is provided, the latest canonical block is used
+    GetBestMempoolTxs(
+        Option<EvmBlockHash>,
+        tokio::sync::oneshot::Sender<MempoolTxs>,
+    ),
     /// Confirm if tx exists in database
     TxExistenceQuery(
         H256,
@@ -180,7 +190,7 @@ pub enum MempoolServiceMessage {
     ),
 }
 
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 struct Inner {
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
@@ -189,8 +199,9 @@ struct Inner {
     /// instead of the actor executor runtime, while also providing some `QoL`
     exec: TaskExecutor,
     irys_db: DatabaseProvider,
+    #[debug(skip)]
+    reth_ctx: Arc<RethContext>,
     mempool_state: AtomicMempoolState,
-    reth_db: RethDbWrapper,
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
     storage_modules_guard: StorageModulesReadGuard,
@@ -212,17 +223,17 @@ impl Default for MempoolService {
 
 impl MempoolService {
     /// Spawn a new Mempool service
-    pub fn spawn_service(
+    pub async fn spawn_service(
         exec: &TaskExecutor,
-        irys_db: &DatabaseProvider,
-        reth_db: RethDbWrapper,
-        storage_modules_guard: &StorageModulesReadGuard,
+        irys_db: DatabaseProvider,
+        reth: RethNodeProvider, // TODO: If we keep having to clone the RethNode struct for other services, set up a shared read-only instance of the RethNodeContext via the RethNodeService (or in chain.rs)
+        storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
         commitment_state_guard: &CommitmentStateReadGuard,
         rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
         service_senders: &ServiceSenders,
-    ) -> JoinHandle<()> {
+    ) -> eyre::Result<JoinHandle<()>> {
         info!("mempool service spawned");
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
@@ -231,9 +242,9 @@ impl MempoolService {
         let exec = exec.clone();
         let commitment_state_guard = commitment_state_guard.clone();
         let storage_modules_guard = storage_modules_guard.clone();
-        let irys_db = irys_db.clone();
         let service_senders = service_senders.clone();
-        exec.clone().spawn_critical_with_graceful_shutdown_signal(
+        let reth_ctx = Arc::new(new_reth_context(reth.into()).await?);
+        Ok(exec.clone().spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
             |shutdown| async move {
                 let mempool_service = Self {
@@ -246,7 +257,7 @@ impl MempoolService {
                         exec,
                         irys_db,
                         mempool_state: Arc::new(RwLock::new(mempool_state)),
-                        reth_db,
+                        reth_ctx,
                         service_senders,
                         storage_modules_guard,
                     },
@@ -256,7 +267,7 @@ impl MempoolService {
                     .await
                     .expect("Mempool service encountered an irrecoverable error")
             },
-        )
+        ))
     }
 
     async fn start(mut self) -> eyre::Result<()> {
@@ -995,10 +1006,13 @@ impl Inner {
         Ok(())
     }
 
-    async fn handle_get_best_mempool_txs(&self) -> MempoolTxs {
+    async fn handle_get_best_mempool_txs(
+        &self,
+        parent_evm_block_hash: Option<EvmBlockHash>,
+    ) -> MempoolTxs {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
-        let reth_db = self.reth_db.clone();
+        // let reth_db = mempool_state_guard.reth_db.clone();
         let mut fees_spent_per_address = HashMap::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
@@ -1020,9 +1034,14 @@ impl Inner {
             let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
 
             // Calculate total required balance including previously selected transactions
-            let tx_ref = &reth_db.tx().unwrap();
-            let has_funds = irys_database::get_account_balance(tx_ref, signer).unwrap()
-                >= U256::from(current_spent + fee);
+
+            // get balance state for the block we're building off of
+            let balance: U256 = self.reth_ctx.rpc.get_balance_irys(
+                signer,
+                parent_evm_block_hash.and_then(|bh| Some(BlockId::Hash(bh.into()))),
+            );
+
+            let has_funds = balance >= U256::from(current_spent + fee);
 
             // Track fees for this address regardless of whether this specific transaction is included
             fees_spent_per_address
@@ -1142,14 +1161,6 @@ impl Inner {
             .await
             .map_err(|_| TxIngressError::DatabaseError)?;
 
-        let mempool_state_read_guard = mempool_state.read().await;
-        let read_reth_tx = &self
-            .reth_db
-            .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
-
-        drop(mempool_state_read_guard);
-
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
             let anchor_expiry_depth = self
@@ -1183,10 +1194,8 @@ impl Inner {
         }
 
         // Check account balance
-        if irys_database::get_account_balance(read_reth_tx, tx.signer)
-            .map_err(|_| TxIngressError::DatabaseError)?
-            < U256::from(tx.total_fee())
-        {
+
+        if self.reth_ctx.rpc.get_balance_irys(tx.signer, None) < U256::from(tx.total_fee()) {
             error!(
                 "{:?}: unfunded balance from irys_database::get_account_balance({:?})",
                 TxIngressError::Unfunded,
@@ -1329,8 +1338,10 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::GetBestMempoolTxs(response) => {
-                    let response_value = self.handle_get_best_mempool_txs().await;
+                MempoolServiceMessage::GetBestMempoolTxs(parent_evm_block_hash, response) => {
+                    let response_value = self
+                        .handle_get_best_mempool_txs(parent_evm_block_hash)
+                        .await;
                     // Return selected transactions grouped by type
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
