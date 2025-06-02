@@ -1,5 +1,5 @@
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use crate::vdf::{broadcast_genesis_vdf, run_vdf, run_vdf_for_genesis_block};
+use crate::vdf::{run_vdf, run_vdf_for_genesis_block};
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;
@@ -801,13 +801,6 @@ impl IrysNode {
             })
             .await??;
         debug!("Reth Service Actor updated about fork choice");
-
-        if latest_block.height == 0 {
-            broadcast_genesis_vdf(
-                &latest_block,
-                service_senders.vdf.clone()
-            );
-        }
 
         let _handle = ChunkCacheService::spawn_service(
             &task_exec,

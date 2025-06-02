@@ -16,7 +16,6 @@ use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use std::{collections::HashMap, time::Duration};
 use tokio::time::sleep;
 use tracing::{error, info};
-
 use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
