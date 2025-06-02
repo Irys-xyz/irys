@@ -2,6 +2,7 @@ use core::{future::Future, task::Poll, time::Duration};
 use eyre::Context;
 use futures::FutureExt as _;
 use irys_database::{
+    db::IrysDatabaseExt as _,
     db_cache::DataRootLRUEntry,
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{

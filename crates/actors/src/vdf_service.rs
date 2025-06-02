@@ -293,7 +293,6 @@ fn create_state(
     {
         let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
         let tx = db.tx().unwrap();
-
         let mut block = block_header_by_hash(&tx, &block_hash, false)
             .unwrap()
             .unwrap();
@@ -549,6 +548,7 @@ pub mod test_helpers {
 mod tests {
     use crate::vdf_service::test_helpers::mocked_vdf_service;
     use irys_storage::ii;
+    use irys_testing_utils::setup_tracing_and_temp_dir;
     use irys_types::{H256List, NodeConfig, H256};
 
     use super::*;
@@ -556,7 +556,10 @@ mod tests {
     #[actix_rt::test]
     /// Tests vdf deque populates via FIFO and shows steps being dropped from the deque
     async fn test_vdf_fifo_steps_deque() {
+        let temp_dir = setup_tracing_and_temp_dir(Some("test_vdf_fifo_steps_deque"), false);
         let mut node_config = NodeConfig::testnet();
+        node_config.base_directory = temp_dir.path().to_path_buf();
+
         // set queue to length 4 with 8/2 occurring within the vdf spawn
         node_config.consensus.get_mut().num_chunks_in_partition = 8;
         node_config.consensus.get_mut().num_chunks_in_recall_range = 2;

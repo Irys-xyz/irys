@@ -20,7 +20,6 @@ pub struct IrysSigner {
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
 impl IrysSigner {
-    #[cfg(any(feature = "test-utils", test))]
     pub fn random_signer(config: &crate::ConsensusConfig) -> Self {
         use rand::rngs::OsRng;
 

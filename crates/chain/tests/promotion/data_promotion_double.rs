@@ -7,6 +7,7 @@ use actix_web::{
     App,
 };
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
@@ -15,7 +16,6 @@ use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use reth_db::Database as _;
-use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::debug;
@@ -23,7 +23,6 @@ use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let chunk_size = 32; // 32 byte chunks
     config.consensus.get_mut().chunk_size = chunk_size;
@@ -65,7 +64,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
-        ema_service: ema_tx,
+        ema_service: node.node_ctx.service_senders.ema.clone(),
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
@@ -76,7 +75,7 @@ async fn heavy_double_root_data_promotion_test() {
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        mempool_service: node.node_ctx.service_senders.mempool.clone(),
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),

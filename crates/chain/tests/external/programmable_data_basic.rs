@@ -1,19 +1,20 @@
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use base58::ToBase58;
-use irys_actors::mempool_service::GetBestMempoolTxs;
+use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
+use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
-use reth_primitives::{irys_primitives::precompile::IrysPrecompileOffsets, GenesisAccount};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -86,16 +87,13 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
     let wallet = EthereumWallet::from(signer);
 
-    let alloy_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http(
-            format!(
-                "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.node_config.http.bind_port
-            )
-            .parse()?,
-        );
+    let alloy_provider = ProviderBuilder::new().wallet(wallet).connect_http(
+        format!(
+            "http://127.0.0.1:{}/v1/execution-rpc",
+            node.node_ctx.config.node_config.http.bind_port
+        )
+        .parse()?,
+    );
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
@@ -139,13 +137,16 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     info!("waiting for tx header...");
 
     let recv_tx = loop {
-        let txs = node
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let response = node
             .node_ctx
-            .actor_addresses
+            .service_senders
             .mempool
-            .send(GetBestMempoolTxs)
-            .await;
-        match txs {
+            .send(MempoolServiceMessage::GetBestMempoolTxs(oneshot_tx));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+        match oneshot_rx.await {
             Ok(mempool_tx) if !mempool_tx.storage_tx.is_empty() => {
                 break mempool_tx.storage_tx[0].clone();
             }

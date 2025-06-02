@@ -1,32 +1,33 @@
 [workspace]
 exclude = ["ext/"]
 members = [
-    "crates/actors",
-    "crates/api-client",
-    "crates/c",
-    "crates/chain",
-    "crates/cli",
-    "crates/config",
-    "crates/database",
-    "crates/debug-utils",
-    "crates/efficient-sampling",
-    "crates/macros",
-    "crates/p2p",
-    "crates/packing",
-    "crates/price-oracle",
-    "crates/primitives",
-    "crates/reth-node-bridge",
-    "crates/reward-curve",
-    "crates/storage",
-    "crates/testing-utils",
-    "crates/types",
-    "xtask",
+  "crates/actors",
+  "crates/c",
+  "crates/chain",
+  "crates/primitives",
+  "crates/reth-node-bridge",
+  "crates/types",
+  "crates/packing",
+  "crates/database",
+  "crates/storage",
+  "crates/testing-utils",
+  "crates/config",
+  "crates/efficient-sampling",
+  "crates/macros",
+  "crates/debug-utils",
+  "xtask",
+  "crates/price-oracle",
+  "crates/cli",
+  "crates/p2p",
+  "crates/api-client",
+  "crates/reward-curve",
+  "crates/irys-reth",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
@@ -53,6 +54,7 @@ irys-reward-curve = { path = "./crates/reward-curve" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
 irys-p2p = { path = "./crates/p2p" }
+irys-reth = { path = "./crates/irys-reth" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -62,113 +64,33 @@ actix-http = "3.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
 tokio-stream = "0.1"
-lru = "0.14.0"
-alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }
-alloy-core = { path = "./ext/alloy-core/crates/core" }
-alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
-alloy-genesis = { path = "./ext/alloy/crates/genesis", default-features = false }
-alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = [
-    "arbitrary",
-] }
 rand = "0.8"
 hex = "0.4"
 base64-url = "2"
-alloy-rlp = "0.3.4"
-alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
-alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = [
-  "serde",
-] }
 clap = { version = "4", features = ["derive"] }
-alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
-reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
-alloy-serde = { path = "./ext/alloy/crates/serde", default-features = false }
-alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
-alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro", features = [
-  "json",
-] }
-alloy-sol-types = { path = "./ext/alloy-core/crates/sol-types" }
-alloy-contract = { path = "./ext/alloy/crates/contract" }
-alloy-provider = { path = "./ext/alloy/crates/provider", features = [
-  "trace-api",
-] }
-
 arbitrary = { version = "1.3", features = ["derive"] }
 rstest = "0.25"
 once_cell = "1"
 assert_matches = "1"
 bytes = "1.5"
-derive_more = { version = "1", features = ["full"] }
+derive_more = { version = "2", features = ["full"] }
 eyre = "0.6"
 sha2 = "0.10"
+rayon = "1.8.0"
 color-eyre = "0.6"
 itertools = "0.13"
 futures = "0.3"
-rayon = "1.8.0"
 bytemuck = "1"
 futures-concurrency = "7"
 test-log = { version = "0.2", features = ["trace"] }
 pretty_assertions = "1"
-
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
 openssl = { version = "0.10", features = ["vendored"] }
 proptest-derive = "0.5"
-reth = { path = "./ext/reth/bin/reth" }
-reth-auto-seal-consensus = { path = "./ext/reth/crates/consensus/auto-seal" }
-reth-beacon-consensus = { path = "./ext/reth/crates/consensus/beacon" }
-reth-blockchain-tree = { path = "./ext/reth/crates/blockchain-tree" }
-reth-chainspec = { path = "./ext/reth/crates/chainspec" }
-reth-cli = { path = "./ext/reth/crates/cli/cli" }
-reth-cli-commands = { path = "./ext/reth/crates/cli/commands" }
-reth-cli-runner = { path = "./ext/reth/crates/cli/runner" }
-reth-cli-util = { path = "./ext/reth/crates/cli/util" }
-reth-codecs = { path = "./ext/reth/crates/storage/codecs" }
-reth-codecs-derive = { path = "./ext/reth/crates/storage/codecs/derive" }
-reth-consensus = { path = "./ext/reth/crates/consensus/consensus" }
-reth-config = { path = "./ext/reth/crates/config" }
-reth-static-file = { path = "./ext/reth/crates/static-file/static-file" }
-reth-prune = { path = "./ext/reth/crates/prune/prune" }
-reth-stages = { path = "./ext/reth/crates/stages/stages" }
-reth-evm = { path = "./ext/reth/crates/evm" }
-reth-downloaders = { path = "./ext/reth/crates/net/downloaders" }
-reth-consensus-debug-client = { path = "./ext/reth/crates/consensus/debug-client" }
-reth-db = { path = "./ext/reth/crates/storage/db" }
-reth-db-api = { path = "./ext/reth/crates/storage/db-api" }
-reth-db-models = { path = "./ext/reth/crates/storage/db-models" }
-reth-engine-service = { path = "./ext/reth/crates/engine/service" }
-reth-engine-tree = { path = "./ext/reth/crates/engine/tree" }
-reth-engine-util = { path = "./ext/reth/crates/engine/util" }
-reth-ethereum-cli = { path = "./ext/reth/crates/ethereum/cli" }
-reth-ethereum-engine-primitives = { path = "./ext/reth/crates/ethereum/engine-primitives" }
-reth-exex = { path = "./ext/reth/crates/exex/exex" }
-reth-network = { path = "./ext/reth/crates/net/network" }
-reth-network-peers = { path = "./ext/reth/crates/net/peers" }
-reth-network-api = { path = "./ext/reth/crates/net/network-api" }
-reth-node-api = { path = "./ext/reth/crates/node/api" }
-reth-node-builder = { path = "./ext/reth/crates/node/builder" }
-reth-node-core = { path = "./ext/reth/crates/node/core" }
-reth-node-ethereum = { path = "./ext/reth/crates/ethereum/node" }
-reth-node-events = { path = "./ext/reth/crates/node/events" }
-reth-node-metrics = { path = "./ext/reth/crates/node/metrics" }
-reth-payload-primitives = { path = "./ext/reth/crates/payload/primitives" }
-reth-primitives = { path = "./ext/reth/crates/primitives" }
-reth-provider = { path = "./ext/reth/crates/storage/provider" }
-reth-rpc-engine-api = { path = "./ext/reth/crates/rpc/rpc-engine-api" }
-reth-rpc-eth-types = { path = "./ext/reth/crates/rpc/rpc-eth-types" }
-reth-tasks = { path = "./ext/reth/crates/tasks" }
-reth-tokio-util = { path = "./ext/reth/crates/tokio-util" }
-reth-tracing = { path = "./ext/reth/crates/tracing" }
-reth-rpc-types-compat = { path = "./ext/reth/crates/rpc/rpc-types-compat" }
-reth-transaction-pool = { path = "./ext/reth/crates/transaction-pool" }
-reth-stages-types = { path = "./ext/reth/crates/stages/types" }
-alloy-network = { path = "./ext/alloy/crates/network" }
-revm = { path = "./ext/revm/crates/revm", features = ["std", "serde-json"] }
-revm-primitives = { path = "./ext/revm/crates/primitives" }
-reth-payload-builder = { path = "./ext/reth/crates/payload/builder" }
 rust_decimal = "1"
 rust_decimal_macros = "1"
 serde = { version = "1", default-features = false }
-reth-rpc-layer = { path = "./ext/reth/crates/rpc/rpc-layer" }
 serde_json = "1"
 test-fuzz = "6"
 thiserror = "1"
@@ -177,7 +99,7 @@ toml = "0.8"
 derive-syn-parse = "0"
 proc-macro2 = "1"
 quote = "1"
-semver = "1.0"
+semver = { version = "1.0", features = ["serde"] }
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"
@@ -187,7 +109,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "json",
   "ansi",
 ] }
-alloy-signer = { path = "./ext/alloy/crates/signer" }
 tempfile = "3"
 csv = "1"
 jsonrpsee = "0.24"
@@ -195,50 +116,233 @@ jsonrpsee-core = "0.24"
 jsonrpsee-http-client = "0.24"
 jsonrpsee-types = "0.24"
 futures-util = "0.3"
+lru = "0.14.0"
+paste = "1.0.15"
+async-trait = "0.1.83"
+strum = { version = "0.27", features = ["derive"] }
 
-[patch.crates-io]
-revm = { path = "./ext/revm/crates/revm" }
-revm-primitives = { path = "./ext/revm/crates/primitives" }
 
-# alloy
-alloy-consensus = { path = "./ext/alloy/crates/consensus" }
-alloy-contract = { path = "./ext/alloy/crates/contract" }
-alloy-eips = { path = "./ext/alloy/crates/eips" }
-alloy-genesis = { path = "./ext/alloy/crates/genesis" }
-alloy-json-rpc = { path = "./ext/alloy/crates/json-rpc" }
-alloy-network = { path = "./ext/alloy/crates/network" }
-alloy-network-primitives = { path = "./ext/alloy/crates/network-primitives" }
-alloy-provider = { path = "./ext/alloy/crates/provider" }
-alloy-pubsub = { path = "./ext/alloy/crates/pubsub" }
-alloy-rpc-client = { path = "./ext/alloy/crates/rpc-client" }
-alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
-alloy-rpc-types-admin = { path = "./ext/alloy/crates/rpc-types-admin" }
-alloy-rpc-types-anvil = { path = "./ext/alloy/crates/rpc-types-anvil" }
-alloy-rpc-types-beacon = { path = "./ext/alloy/crates/rpc-types-beacon" }
-alloy-rpc-types-debug = { path = "./ext/alloy/crates/rpc-types-debug" }
-alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine" }
-alloy-rpc-types-eth = { path = "./ext/alloy/crates/rpc-types-eth" }
-alloy-rpc-types-mev = { path = "./ext/alloy/crates/rpc-types-mev" }
-alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
-alloy-rpc-types-txpool = { path = "./ext/alloy/crates/rpc-types-txpool" }
-alloy-serde = { path = "./ext/alloy/crates/serde" }
-alloy-signer = { path = "./ext/alloy/crates/signer" }
-alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
-alloy-transport = { path = "./ext/alloy/crates/transport" }
-alloy-transport-http = { path = "./ext/alloy/crates/transport-http" }
-alloy-transport-ws = { path = "./ext/alloy/crates/transport-ws" }
+# reth & alloy deps
+alloy-dyn-abi = "1.1.0"
+alloy-evm = { version = "0.7.1", default-features = false }
+alloy-primitives = { version = "1.1.0", default-features = false, features = [
+  "map-foldhash",
+  "arbitrary",
+  "rlp",
+  "getrandom",
+] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = [
+  "core-net",
+] }
 
-# alloy-core
-alloy-core = { path = "./ext/alloy-core/crates/core" }
-alloy-dyn-abi = { path = "./ext/alloy-core/crates/dyn-abi" }
-alloy-json-abi = { path = "./ext/alloy-core/crates/json-abi" }
-alloy-primitives = { path = "./ext/alloy-core/crates/primitives" }
-alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro" }
-alloy-sol-macro-expander = { path = "./ext/alloy-core/crates/sol-macro-expander" }
-alloy-sol-macro-input = { path = "./ext/alloy-core/crates/sol-macro-input" }
-alloy-sol-type-parser = { path = "./ext/alloy-core/crates/sol-type-parser" }
-alloy-sol-types = { path = "./ext/alloy-core/crates/sol-types" }
-syn-solidity = { path = "./ext/alloy-core/crates/syn-solidity" }
+alloy-consensus = { version = "0.15.10", default-features = false }
+alloy-eips = { version = "0.15.10", default-features = false }
+alloy-genesis = { version = "0.15.10", default-features = false }
+alloy-core = { version = "1.1.0", default-features = false }
+alloy-provider = { version = "0.15.10", default-features = false }
+alloy-network = { version = "0.15.10", default-features = false }
+alloy-rpc-types = { version = "0.15.10", features = [
+  "eth",
+], default-features = false }
+alloy-rpc-types-eth = { version = "0.15.10", default-features = false }
+alloy-rpc-types-engine = { version = "0.15.10", default-features = false }
+alloy-signer = { version = "0.15.10", default-features = false }
+alloy-signer-local = { version = "0.15.10", default-features = false }
+alloy-contract = { version = "0.15.10", default-features = false }
+
+alloy-sol-macro = { version = "1.1.0", default-features = false }
+alloy-sol-types = { version = "1.1.0", default-features = false }
+
+revm = { version = "23.1.0", default-features = false }
+
+
+reth = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-chainspec = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-e2e-test-utils = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-engine-local = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-ethereum-engine-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-evm-ethereum = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-node-ethereum = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-ethereum-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-evm = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-network = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-node-api = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-node-builder = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-node-core = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-node-metrics = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-primitives-traits = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-rpc-eth-api = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-codecs = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-db-api = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-db = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-provider = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-tasks = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-tracing = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-transaction-pool = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-trie-db = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+
+# just used (for local testing)
+
+
+# reth = { path = "./ext/reth/bin/reth" }
+# reth-chainspec = { path = "./ext/reth/crates/chainspec" }
+# reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
+# reth-engine-local = { path = "./ext/reth/crates/engine/local" }
+# reth-ethereum-engine-primitives = { path = "./ext/reth/crates/ethereum/engine-primitives" }
+# reth-evm-ethereum = { path = "./ext/reth/crates/ethereum/evm" }
+# reth-node-ethereum = { path = "./ext/reth/crates/ethereum/node" }
+# reth-ethereum-primitives = { path = "./ext/reth/crates/ethereum/primitives" }
+# reth-evm = { path = "./ext/reth/crates/evm/evm" }
+# reth-network = { path = "./ext/reth/crates/net/network" }
+# reth-node-api = { path = "./ext/reth/crates/node/api" }
+# reth-node-builder = { path = "./ext/reth/crates/node/builder" }
+# reth-node-core = { path = "./ext/reth/crates/node/core" }
+# reth-node-metrics = { path = "./ext/reth/crates/node/metrics" }
+# reth-payload-builder = { path = "./ext/reth/crates/payload/builder" }
+# reth-primitives-traits = { path = "./ext/reth/crates/primitives-traits" }
+# reth-primitives = { path = "./ext/reth/crates/primitives" }
+# reth-rpc-eth-api = { path = "./ext/reth/crates/rpc/rpc-eth-api" }
+# reth-codecs = { path = "./ext/reth/crates/storage/codecs" }
+# reth-db-api = { path = "./ext/reth/crates/storage/db-api" }
+# reth-db = { path = "./ext/reth/crates/storage/db" }
+# reth-provider = { path = "./ext/reth/crates/storage/provider" }
+# reth-tasks = { path = "./ext/reth/crates/tasks" }
+# reth-tracing = { path = "./ext/reth/crates/tracing" }
+# reth-transaction-pool = { path = "./ext/reth/crates/transaction-pool" }
+# reth-trie-db = { path = "./ext/reth/crates/trie/db" }
+
+# reth-cli-commands = { path = "./ext/reth/crates/cli/commands" }
+
+# all deps + used
+
+# reth = { path = "./ext/reth/bin/reth" }
+# # reth-chain-state = { path = "./ext/reth/crates/chain-state" }
+# reth-chainspec = { path = "./ext/reth/crates/chainspec" }
+# # reth-cli = { path = "./ext/reth/crates/cli/cli" }
+# # reth-cli-commands = { path = "./ext/reth/crates/cli/commands" }
+# # reth-cli-runner = { path = "./ext/reth/crates/cli/runner" }
+# # reth-cli-util = { path = "./ext/reth/crates/cli/util" }
+# # reth-config = { path = "./ext/reth/crates/config" }
+# # reth-consensus-common = { path = "./ext/reth/crates/consensus/common" }
+# # reth-consensus = { path = "./ext/reth/crates/consensus/consensus" }
+# # reth-consensus-debug-client = { path = "./ext/reth/crates/consensus/debug-client" }
+# reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
+# # reth-invalid-block-hooks = { path = "./ext/reth/crates/engine/invalid-block-hooks" }
+# reth-engine-local = { path = "./ext/reth/crates/engine/local" }
+# # reth-engine-primitives = { path = "./ext/reth/crates/engine/primitives" }
+# # reth-engine-service = { path = "./ext/reth/crates/engine/service" }
+# # reth-engine-tree = { path = "./ext/reth/crates/engine/tree" }
+# # reth-engine-util = { path = "./ext/reth/crates/engine/util" }
+# # reth-errors = { path = "./ext/reth/crates/errors" }
+# # reth-ethereum-cli = { path = "./ext/reth/crates/ethereum/cli" }
+# # reth-ethereum-consensus = { path = "./ext/reth/crates/ethereum/consensus" }
+# reth-ethereum-engine-primitives = { path = "./ext/reth/crates/ethereum/engine-primitives" }
+# reth-evm-ethereum = { path = "./ext/reth/crates/ethereum/evm" }
+# reth-node-ethereum = { path = "./ext/reth/crates/ethereum/node" }
+# # reth-ethereum-payload-builder = { path = "./ext/reth/crates/ethereum/payload" }
+# # reth-ethereum-forks = { path = "./ext/reth/crates/ethereum/hardforks" }
+# reth-ethereum-primitives = { path = "./ext/reth/crates/ethereum/primitives" }
+# # reth-ethereum = { path = "./ext/reth/crates/ethereum/reth" }
+# # reth-etl = { path = "./ext/reth/crates/etl" }
+# # reth-execution-errors = { path = "./ext/reth/crates/evm/execution-errors" }
+# # reth-execution-types = { path = "./ext/reth/crates/evm/execution-types" }
+# reth-evm = { path = "./ext/reth/crates/evm/evm" }
+# # reth-exex = { path = "./ext/reth/crates/exex/exex" }
+# # reth-exex-test-utils = { path = "./ext/reth/crates/exex/test-utils" }
+# # reth-exex-types = { path = "./ext/reth/crates/exex/types" }
+# # reth-fs-util = { path = "./ext/reth/crates/fs-util" }
+# # reth-metrics = { path = "./ext/reth/crates/metrics" }
+# # reth-net-banlist = { path = "./ext/reth/crates/net/banlist" }
+# # reth-discv4 = { path = "./ext/reth/crates/net/discv4" }
+# # reth-discv5 = { path = "./ext/reth/crates/net/discv5" }
+# # reth-dns-discovery = { path = "./ext/reth/crates/net/dns" }
+# # reth-downloaders = { path = "./ext/reth/crates/net/downloaders" }
+# # reth-ecies = { path = "./ext/reth/crates/net/ecies" }
+# # reth-eth-wire-types = { path = "./ext/reth/crates/net/eth-wire-types" }
+# # reth-eth-wire = { path = "./ext/reth/crates/net/eth-wire" }
+# # reth-net-nat = { path = "./ext/reth/crates/net/nat" }
+# # reth-network-api = { path = "./ext/reth/crates/net/network-api" }
+# # reth-network-types = { path = "./ext/reth/crates/net/network-types" }
+# reth-network = { path = "./ext/reth/crates/net/network" }
+# # reth-network-p2p = { path = "./ext/reth/crates/net/p2p" }
+# # reth-network-peers = { path = "./ext/reth/crates/net/peers" }
+# reth-node-api = { path = "./ext/reth/crates/node/api" }
+# reth-node-builder = { path = "./ext/reth/crates/node/builder" }
+# reth-node-core = { path = "./ext/reth/crates/node/core" }
+# # reth-node-events = { path = "./ext/reth/crates/node/events" }
+# reth-node-metrics = { path = "./ext/reth/crates/node/metrics" }
+# # reth-node-types = { path = "./ext/reth/crates/node/types" }
+# # op-reth = { path = "./ext/reth/crates/optimism/bin" }
+# # reth-optimism-chainspec = { path = "./ext/reth/crates/optimism/chainspec" }
+# # reth-optimism-cli = { path = "./ext/reth/crates/optimism/cli" }
+# # reth-optimism-consensus = { path = "./ext/reth/crates/optimism/consensus" }
+# # reth-optimism-evm = { path = "./ext/reth/crates/optimism/evm" }
+# # reth-optimism-forks = { path = "./ext/reth/crates/optimism/hardforks" }
+# # reth-optimism-node = { path = "./ext/reth/crates/optimism/node" }
+# # reth-optimism-payload-builder = { path = "./ext/reth/crates/optimism/payload" }
+# # reth-optimism-primitives = { path = "./ext/reth/crates/optimism/primitives" }
+# # reth-optimism-rpc = { path = "./ext/reth/crates/optimism/rpc" }
+# # reth-optimism-storage = { path = "./ext/reth/crates/optimism/storage" }
+# # reth-op = { path = "./ext/reth/crates/optimism/reth" }
+# # reth-optimism-txpool = { path = "./ext/reth/crates/optimism/txpool" }
+# # reth-basic-payload-builder = { path = "./ext/reth/crates/payload/basic" }
+# reth-payload-builder = { path = "./ext/reth/crates/payload/builder" }
+# # reth-payload-primitives = { path = "./ext/reth/crates/payload/primitives" }
+# # reth-payload-validator = { path = "./ext/reth/crates/payload/validator" }
+# # reth-payload-builder-primitives = { path = "./ext/reth/crates/payload/builder-primitives" }
+# # reth-payload-util = { path = "./ext/reth/crates/payload/util" }
+# reth-primitives-traits = { path = "./ext/reth/crates/primitives-traits" }
+# reth-primitives = { path = "./ext/reth/crates/primitives" }
+# # reth-prune = { path = "./ext/reth/crates/prune/prune" }
+# # reth-prune-types = { path = "./ext/reth/crates/prune/types" }
+# # reth-revm = { path = "./ext/reth/crates/revm" }
+# # reth-ipc = { path = "./ext/reth/crates/rpc/ipc" }
+# # reth-rpc-api = { path = "./ext/reth/crates/rpc/rpc-api" }
+# # reth-rpc-builder = { path = "./ext/reth/crates/rpc/rpc-builder" }
+# # reth-rpc-engine-api = { path = "./ext/reth/crates/rpc/rpc-engine-api" }
+# reth-rpc-eth-api = { path = "./ext/reth/crates/rpc/rpc-eth-api" }
+# # reth-rpc-eth-types = { path = "./ext/reth/crates/rpc/rpc-eth-types" }
+# # reth-rpc-layer = { path = "./ext/reth/crates/rpc/rpc-layer" }
+# # reth-rpc-server-types = { path = "./ext/reth/crates/rpc/rpc-server-types" }
+# # reth-rpc-api-testing-util = { path = "./ext/reth/crates/rpc/rpc-testing-util" }
+# # reth-rpc-types-compat = { path = "./ext/reth/crates/rpc/rpc-types-compat" }
+# # reth-rpc = { path = "./ext/reth/crates/rpc/rpc" }
+# # reth-stages-api = { path = "./ext/reth/crates/stages/api" }
+# # reth-stages = { path = "./ext/reth/crates/stages/stages" }
+# # reth-stages-types = { path = "./ext/reth/crates/stages/types" }
+# # reth-static-file = { path = "./ext/reth/crates/static-file/static-file" }
+# # reth-static-file-types = { path = "./ext/reth/crates/static-file/types" }
+# # reth-codecs-derive = { path = "./ext/reth/crates/storage/codecs/derive" }
+# reth-codecs = { path = "./ext/reth/crates/storage/codecs" }
+# reth-db-api = { path = "./ext/reth/crates/storage/db-api" }
+# # reth-db-common = { path = "./ext/reth/crates/storage/db-common" }
+# # reth-db-models = { path = "./ext/reth/crates/storage/db-models" }
+# reth-db = { path = "./ext/reth/crates/storage/db" }
+# # reth-storage-errors = { path = "./ext/reth/crates/storage/errors" }
+# # reth-mdbx-sys = { path = "./ext/reth/crates/storage/libmdbx-rs/mdbx-sys" }
+# # reth-libmdbx = { path = "./ext/reth/crates/storage/libmdbx-rs" }
+# # reth-nippy-jar = { path = "./ext/reth/crates/storage/nippy-jar" }
+# reth-provider = { path = "./ext/reth/crates/storage/provider" }
+# # reth-storage-api = { path = "./ext/reth/crates/storage/storage-api" }
+# # reth-zstd-compressors = { path = "./ext/reth/crates/storage/zstd-compressors" }
+# reth-tasks = { path = "./ext/reth/crates/tasks" }
+# # reth-tokio-util = { path = "./ext/reth/crates/tokio-util" }
+# reth-tracing = { path = "./ext/reth/crates/tracing" }
+# reth-transaction-pool = { path = "./ext/reth/crates/transaction-pool" }
+# # reth-trie-common = { path = "./ext/reth/crates/trie/common" }
+# reth-trie-db = { path = "./ext/reth/crates/trie/db" }
+# # reth-trie-parallel = { path = "./ext/reth/crates/trie/parallel" }
+# # reth-trie = { path = "./ext/reth/crates/trie/trie" }
+# # reth-trie-sparse = { path = "./ext/reth/crates/trie/sparse" }
+# # reth-era-downloader = { path = "./ext/reth/crates/era-downloader" }
+# # reth-era-utils = { path = "./ext/reth/crates/era-utils" }
+# # reth-era = { path = "./ext/reth/crates/era" }
+# # reth-ress-protocol = { path = "./ext/reth/crates/ress/protocol" }
+# # reth-ress-provider = { path = "./ext/reth/crates/ress/provider" }
+# # reth-stateless = { path = "./ext/reth/crates/stateless" }
 
 [profile.dev]
 panic = "unwind"
@@ -376,6 +480,8 @@ redundant_pub_crate = "allow"
 significant_drop_in_scrutinee = "allow"
 significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
+renamed_function_params = "allow"
+same_name_method = "allow"
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]

@@ -1,13 +1,13 @@
-use std::time::Duration;
-
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use irys_types::{irys::IrysSigner, NodeConfig};
-use reth_primitives::GenesisAccount;
+use std::time::Duration;
 use tracing::info;
+
+use irys_types::{irys::IrysSigner, NodeConfig};
 
 use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 // Codegen from artifact.
@@ -45,9 +45,8 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
     let signer: PrivateKeySigner = node.cfg.mining_key.clone().into();
 
     let alloy_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
         .wallet(EthereumWallet::from(signer))
-        .on_http(
+        .connect_http(
             format!(
                 "http://127.0.0.1:{}/v1/execution-rpc",
                 node.node_ctx.config.node_config.http.bind_port
@@ -65,7 +64,7 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
     .await??;
 
     info!("Contract address is {:?}", contract.address());
-    let main_balance = contract.balanceOf(main_address).call().await?._0;
+    let main_balance = contract.balanceOf(main_address).call().await?;
     assert_eq!(main_balance, U256::from(10000000000000000000000_u128));
 
     let transfer_call_builder = contract.transfer(account1.address(), U256::from(10));
@@ -80,8 +79,8 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
     .await??;
 
     // check balance for account1
-    let addr1_balance = contract.balanceOf(account1.address()).call().await?._0;
-    let main_balance2 = contract.balanceOf(main_address).call().await?._0;
+    let addr1_balance = contract.balanceOf(account1.address()).call().await?;
+    let main_balance2 = contract.balanceOf(main_address).call().await?;
 
     assert_eq!(addr1_balance, U256::from(10));
     assert_eq!(main_balance2, U256::from(10000000000000000000000 - 10_u128));

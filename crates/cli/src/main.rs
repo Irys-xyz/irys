@@ -5,13 +5,13 @@ use irys_database::reth_db::{
 };
 use irys_types::NodeConfig;
 use reth_node_core::version::default_client_version;
-use reth_tracing::tracing_subscriber::util::SubscriberInitExt as _;
 use std::fs::File;
 use std::io::{BufWriter, Write as _};
 use std::{path::PathBuf, sync::Arc};
 use tracing::info;
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 
 #[derive(Debug, Parser, Clone)]

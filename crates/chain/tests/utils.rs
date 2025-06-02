@@ -1,4 +1,3 @@
-use actix::MailboxError;
 use actix_http::Request;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
@@ -16,17 +15,19 @@ use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
     block_validation,
-    mempool_service::{TxExistenceQuery, TxIngressError, TxIngressMessage},
+    mempool_service::{MempoolServiceMessage, TxIngressError},
     packing::wait_for_packing,
     vdf_service::VdfStepsReadGuard,
     SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
+use irys_primitives::CommitmentType;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
@@ -41,17 +42,16 @@ use irys_types::{
     NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
-use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
+use reth::payload::EthBuiltPayload;
 use reth_db::cursor::*;
 use reth_db::Database;
-use reth_primitives::irys_primitives::CommitmentType;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
-use tokio::time::sleep;
+use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
@@ -161,7 +161,7 @@ pub async fn random_port() -> eyre::Result<u16> {
 pub enum AddTxError {
     CreateTx(eyre::Report),
     TxIngress(TxIngressError),
-    Mailbox(MailboxError),
+    Mailbox(RecvError),
 }
 
 // TODO: add an "name" field for debug logging
@@ -333,8 +333,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn start_public_api(
         &self,
     ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
-        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-        let api_state = self.node_ctx.get_api_state(ema_tx);
+        let api_state = self.node_ctx.get_api_state();
 
         actix_web::test::init_service(
             App::new()
@@ -428,15 +427,24 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx_id: IrysTransactionId,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
-        let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
 
-        while mempool_service
-            .send(TxExistenceQuery(tx_id))
-            .await?
-            .is_ok_and(|f| f == false)
-        {
+        for _ in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            mempool_service.send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))?;
+
+            //if transaction exists
+            if true
+                == oneshot_rx
+                    .await
+                    .expect("to process ChunkIngressMessage")
+                    .expect("boolean response to transaction existence")
+            {
+                break;
+            }
+
             sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
@@ -477,13 +485,20 @@ impl IrysNodeTest<IrysNodeCtx> {
             .map_err(AddTxError::CreateTx)?;
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
-        match self
-            .node_ctx
-            .actor_addresses
-            .mempool
-            .send(TxIngressMessage(tx.header.clone()))
-            .await
-        {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let response =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::TxIngressMessage(
+                    tx.header.clone(),
+                    oneshot_tx,
+                ));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+
+        match oneshot_rx.await {
             Ok(Ok(())) => return Ok(tx),
             Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
             Err(e) => return Err(AddTxError::Mailbox(e)),
@@ -689,7 +704,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 pub async fn mine_blocks(
     node_ctx: &IrysNodeCtx,
     blocks: usize,
-) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let mut results = Vec::with_capacity(blocks);
     for _ in 0..blocks {
         results.push(mine_block(node_ctx).await?.unwrap());
@@ -699,7 +714,7 @@ pub async fn mine_blocks(
 
 pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
-) -> eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),

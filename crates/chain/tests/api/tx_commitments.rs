@@ -1,18 +1,19 @@
 use crate::{api::post_commitment_tx_request, utils::*};
 use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
 use base58::ToBase58;
 use irys_actors::{
-    packing::wait_for_packing, CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus,
-    GetCommitmentStateGuardMessage, GetPartitionAssignmentsGuardMessage,
+    packing::wait_for_packing, CommitmentCacheMessage, CommitmentCacheStatus,
+    CommitmentStateReadGuard, GetCommitmentStateGuardMessage, GetPartitionAssignmentsGuardMessage,
     PartitionAssignmentsReadGuard,
 };
 use irys_api_server::routes;
 use irys_chain::IrysNodeCtx;
+use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
-use reth_primitives::{irys_primitives::CommitmentType, GenesisAccount};
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
 
@@ -73,7 +74,6 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
@@ -97,7 +97,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     )
     .await?;
 
-    let api_state = node.node_ctx.get_api_state(ema_tx);
+    let api_state = node.node_ctx.get_api_state();
     let _db = api_state.db.clone();
 
     // Start the API server
@@ -121,7 +121,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Verify stake commitment starts in 'Unknown' state
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Unknown);
+    assert_eq!(status, CommitmentCacheStatus::Unknown);
 
     // Submit stake commitment via API
     post_commitment_tx_request(&uri, &stake_tx).await;
@@ -131,7 +131,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Verify stake commitment is now 'Accepted'
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Accepted);
+    assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address
@@ -145,14 +145,14 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Verify pledge starts in 'Unknown' state
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Unknown);
+    assert_eq!(status, CommitmentCacheStatus::Unknown);
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
 
     // Verify pledge is still 'Unknown' before mining
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Unknown);
+    assert_eq!(status, CommitmentCacheStatus::Unknown);
 
     // Mine a block to include the pledge
     debug!("MINE BLOCK - Height should become 2");
@@ -160,12 +160,12 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Verify pledge is now 'Accepted' after mining
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Accepted);
+    assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // ===== TEST CASE 3: Re-submitting Existing Commitment =====
     // Verify stake commitment is still accepted
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Accepted);
+    assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // Re-submit the same stake commitment
     post_commitment_tx_request(&uri, &stake_tx).await;
@@ -173,7 +173,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Verify stake is still 'Accepted' (idempotent operation)
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Accepted);
+    assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // ===== TEST CASE 4: Pledge Without Stake (Should Fail) =====
     // Create a new signer without any stake commitment
@@ -190,7 +190,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Verify pledge starts in 'Unstaked' state
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Unstaked);
+    assert_eq!(status, CommitmentCacheStatus::Unstaked);
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
@@ -198,7 +198,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
-    assert_eq!(status, CommitmentStatus::Unstaked);
+    assert_eq!(status, CommitmentCacheStatus::Unstaked);
 
     // ===== TEST CLEANUP =====
     node.node_ctx.stop().await;
@@ -208,7 +208,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 async fn get_commitment_status(
     commitment_tx: &CommitmentTransaction,
     node_context: &IrysNodeCtx,
-) -> CommitmentStatus {
+) -> CommitmentCacheStatus {
     let commitment_cache = &node_context.service_senders.commitment_cache;
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
 
@@ -272,8 +272,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         .await?;
 
         // Initialize API for submitting commitment transactions
-        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-        let api_state = node.node_ctx.get_api_state(ema_tx);
+        let api_state = node.node_ctx.get_api_state();
 
         let _app = actix_web::test::init_service(
             App::new()

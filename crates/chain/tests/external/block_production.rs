@@ -1,13 +1,12 @@
-use std::time::Duration;
-
 use alloy_core::primitives::{TxHash, U256};
+use alloy_genesis::GenesisAccount;
 use irys_actors::block_producer::SolutionFoundMessage;
-use irys_reth_node_bridge::adapter::node::RethNodeContext;
+use irys_database::db::IrysDatabaseExt as _;
+use irys_reth_node_bridge::new_reth_context;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
-use reth_db::Database as _;
-use reth_primitives::GenesisAccount;
+use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
@@ -64,7 +63,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
         Address::from_slice(account1_address.as_slice())
     );
 
-    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.into()).await?;
+    let reth_context = new_reth_context(node.node_ctx.reth_handle.into()).await?;
 
     while reth_context.inner.pool.pending_transactions().is_empty() {
         info!("waiting for tx...");

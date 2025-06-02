@@ -22,7 +22,7 @@ pub struct IngressProof {
 
 impl Compress for IngressProof {
     type Compressed = Vec<u8>;
-    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(self, buf: &mut B) {
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
         let _ = Compact::to_compact(&self, buf);
     }
 }
@@ -81,8 +81,7 @@ pub fn verify_ingress_proof(
 
     let sig = proof.signature.as_bytes();
 
-    let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())
-        .ok_or_eyre("Unable to recover signer")?;
+    let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
 
     // re-compute the ingress proof & regular trees & roots
     let (proof_root, regular_root) = generate_ingress_proof_tree(chunks, recovered_address, true)?;

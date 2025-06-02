@@ -3,22 +3,21 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_database::database;
+use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse,
     NodeConfig, H256,
 };
 use reth_db::Database;
-use reth_primitives::GenesisAccount;
 use tokio::time::Duration;
 use tracing::{error, info};
 
 #[actix_web::test]
 async fn test_get_tx() -> eyre::Result<()> {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
@@ -66,7 +65,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     };
 
     let app_state = ApiState {
-        ema_service: ema_tx,
+        ema_service: node.node_ctx.service_senders.ema.clone(),
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
@@ -77,7 +76,7 @@ async fn test_get_tx() -> eyre::Result<()> {
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        mempool_service: node.node_ctx.service_senders.mempool.clone(),
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),

@@ -1,30 +1,26 @@
 use actix::prelude::*;
 use actors::mocker::Mocker;
-use alloy_rpc_types_engine::{
-    ExecutionPayloadEnvelopeV1Irys, PayloadAttributes, PayloadStatusEnum,
-};
+use alloy_rpc_types_engine::PayloadAttributes;
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, insert_commitment_tx,
-    tables::IngressProofs, tx_header_by_txid, SystemLedger,
+    block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
+    insert_commitment_tx, tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
-use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
-use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
+use irys_reth_node_bridge::{
+    ext::IrysRethTestContextExt as _, new_reth_context, node::RethNodeProvider,
+};
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Base64, Config, DataLedger, DataTransactionLedger, H256List,
-    IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
-    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
+    IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
+    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{
-    revm::primitives::{alloy_primitives, B256},
-    rpc::eth::EthApiServer as _,
-};
+use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
 use std::{
@@ -40,7 +36,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool_service::{GetBestMempoolTxs, MempoolService},
+    mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     vdf_service::VdfStepsReadGuard,
@@ -59,15 +55,13 @@ pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
-    /// Address of the mempool actor
-    pub mempool_addr: Addr<MempoolService>,
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
-    /// Reference to the VM node
+    /// Reference to the reth node
     pub reth_provider: RethNodeProvider,
     /// Global config
     pub config: Config,
@@ -116,15 +110,13 @@ impl Handler<SetTestBlocksRemainingMessage> for BlockProducerActor {
 }
 
 #[derive(Message, Debug)]
-#[rtype(result = "eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>")]
+#[rtype(result = "eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>")]
 /// Announce to the node a mining solution has been found.
 pub struct SolutionFoundMessage(pub SolutionContext);
 
 impl Handler<SolutionFoundMessage> for BlockProducerActor {
-    type Result = AtomicResponse<
-        Self,
-        eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>,
-    >;
+    type Result =
+        AtomicResponse<Self, eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>>;
     #[tracing::instrument(skip_all, fields(
         minting_address = ?msg.0.mining_address,
         partition_hash = ?msg.0.partition_hash,
@@ -155,7 +147,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let Self {
             db,
-            mempool_addr,
             block_discovery_addr,
             epoch_service,
             service_senders,
@@ -265,13 +256,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions
-            let mempool_tx =
-                mempool_addr.send(GetBestMempoolTxs).await.unwrap();
-            let submit_txs = mempool_tx.storage_tx;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(tx)).expect("to send MempoolServiceMessage");
+            let submit_txs = rx.await.expect("to receive txns");
 
-            let submit_chunks_added = calculate_chunks_added(&submit_txs, config.consensus.chunk_size);
+            let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
-            let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
+            let submit_txids = submit_txs.storage_tx.iter().map(|h| h.id).collect::<Vec<H256>>();
 
             // Commitment Transactions
             let block_height = prev_block_header.height + 1;
@@ -303,7 +294,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let tx = db.tx_mut().unwrap();
                 let mut txids = H256List::new();
 
-                for tx_item in mempool_tx.commitment_tx.iter() {
+                for tx_item in submit_txs.commitment_tx.iter() {
                     // Only include successfully inserted transactions
                     if insert_commitment_tx(&tx, tx_item).is_ok() {
                         debug!("New commitment persisted: {}", tx_item.id.0.to_base58());
@@ -454,7 +445,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     // Term Submit Ledger
                     DataTransactionLedger {
                         ledger_id: DataLedger::Submit.into(),
-                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
+                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs.storage_tx).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
@@ -476,37 +467,37 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-            let mut context =  RethNodeContext::new(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
-            let shadows = submit_txs
-                    .iter()
-                    // add data transaction shadows
-                    .map(|header| ShadowTx {
-                        tx_id: IrysTxId::from_slice(header.id.as_bytes()),
-                        fee: irys_primitives::U256::from(
-                            header.total_fee(),
-                        ),
-                        address: header.signer,
-                        tx: ShadowTxType::Data(DataShadow {
-                            fee: irys_primitives::U256::from(
-                                header.total_fee(),
-                            ),
-                        }),
-                    }).chain([
-                        // add block rewards shadow
-                        ShadowTx {
-                            tx_id: IrysTxId::from_slice(irys_block.block_hash.as_bytes()),
-                            fee: alloy_primitives::U256::ZERO,
-                            address: irys_block.reward_address,
-                            tx: ShadowTxType::BlockReward(BlockRewardShadow {
-                                reward: irys_block.reward_amount.into(),
-                            })
-                        },
-                    ]);
-            let shadows = Shadows::new(shadows.collect());
+            let mut context =  new_reth_context(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
+
+            // let shadows = submit_txs
+            //         .iter()
+            //         // add data transaction shadows
+            //         .map(|header| ShadowTx {
+            //             tx_id: IrysTxId::from_slice(header.id.as_bytes()),
+            //             fee: irys_primitives::U256::from(
+            //                 header.total_fee(),
+            //             ),
+            //             address: header.signer,
+            //             tx: ShadowTxType::Data(DataShadow {
+            //                 fee: irys_primitives::U256::from(
+            //                     header.total_fee(),
+            //                 ),
+            //             }),
+            //         }).chain([
+            //             // add block rewards shadow
+            //             ShadowTx {
+            //                 tx_id: IrysTxId::from_slice(irys_block.block_hash.as_bytes()),
+            //                 fee: alloy_primitives::U256::ZERO,
+            //                 address: irys_block.reward_address,
+            //                 tx: ShadowTxType::BlockReward(BlockRewardShadow {
+            //                     reward: irys_block.reward_amount.into(),
+            //                 })
+            //             },
+            //         ]);
+            // // let shadows = Shadows::new(shadows.collect());
 
             // create a new reth payload
-
 
             // make sure the parent block is canonical on the reth side so we can built upon it
             RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
@@ -522,10 +513,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // .eth_api()
             // .block_by_hash(prev_block_header.evm_block_hash, false)
             // .await?.expect("Should be able to get the parent EVM block");
+
             let parent = {
                 let mut attempts = 0;
                 loop {
                     if attempts > 50 {
+                        error!("Failed to get parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
                         break None;
                     }
 
@@ -537,7 +530,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         .await?;
 
                     match result {
-                        Some(block) => break Some(block),
+                        Some(block) => {
+                            info!("Got parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
+                            break Some(block)
+                        },
                         None => {
                             attempts += 1;
                             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -551,33 +547,27 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // generate payload attributes
             let payload_attrs = PayloadAttributes {
                 timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-                prev_randao: parent.header.mix_hash.unwrap_or(B256::ZERO),
+                prev_randao: parent.header.mix_hash,
                 suggested_fee_recipient: irys_block.reward_address,
                 withdrawals: None, // these should ALWAYS be none
-                parent_beacon_block_root: None, // maybe one day we pass through the parent irys block hash here?
-                shadows: Some(shadows),
+                parent_beacon_block_root: Some(B256::ZERO), // maybe one day we pass through the parent irys block hash here?
             };
 
 
-            let (exec_payload, built, attrs) = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
+            let built = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
 
             // we can examine the execution status of generated shadow txs
             // let shadow_receipts = exec_payload.shadow_receipts;
 
             let block_hash = context
-            .engine_api
             .submit_payload(
-                built.clone(),
-                attrs.clone(),
-                PayloadStatusEnum::Valid,
-                vec![],
+                built.clone()
             )
             .await?;
 
             // trigger forkchoice update via engine api to commit the block to the blockchain
             context
-                .engine_api
-                .update_forkchoice(block_hash, block_hash)
+                .update_forkchoice(prev_block_header.evm_block_hash, block_hash)
                 .await?;
 
             let evm_block_hash =  built.block().hash();
@@ -608,11 +598,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 finalized_hash: None,
             }).await??;
 
-            // context
-            //     .engine_api
-            //     .update_forkchoice_full(block_hash, None, None)
-            //     .await
-            //     .unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
@@ -620,7 +605,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
 
-            Ok(Some((block.clone(), exec_payload)))
+            Ok(Some((block.clone(), built)))
         }
         .into_actor(self)
         .map(|result, actor, _ctx| {

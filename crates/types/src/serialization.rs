@@ -3,7 +3,7 @@ use alloy_primitives::{bytes, Address};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
-use eyre::{Error, OptionExt};
+use eyre::Error;
 use openssl::sha;
 use rand::RngCore;
 use reth_codecs::Compact;
@@ -17,8 +17,6 @@ use serde::{
 };
 use std::fmt;
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
-
-use fixed_hash::construct_fixed_hash;
 use uint::construct_uint;
 
 //==============================================================================
@@ -235,10 +233,8 @@ impl Compact for U256 {
 //==============================================================================
 // H256 Type
 //------------------------------------------------------------------------------
-construct_fixed_hash! {
-    /// A 256-bit hash type (32 bytes).
-    pub struct H256(32);
-}
+
+pub use crate::h256::H256;
 
 impl H256 {
     pub fn from_base58(string: &str) -> Self {
@@ -321,8 +317,7 @@ impl TxIngressProof {
         let prehash = hasher.finish();
 
         let sig = self.signature.as_bytes();
-        let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())
-            .ok_or_eyre("Unable to recover signer")?;
+        let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
 
         Ok(recovered_address)
     }
@@ -555,7 +550,7 @@ impl Compact for H256 {
 impl Compress for H256 {
     type Compressed = Vec<u8>;
 
-    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(self, buf: &mut B) {
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
         let _ = Compact::to_compact(&self, buf);
     }
 }

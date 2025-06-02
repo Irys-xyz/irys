@@ -1,16 +1,15 @@
 use crate::{Arbitrary, Signature};
-use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, U256 as RethU256};
-use alloy_rlp::{RlpDecodable, RlpEncodable};
+use alloy_primitives::{bytes, ruint::aliases::U256, Address, U256 as RethU256};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use reth_primitives::transaction::recover_signer;
-
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+
 //==============================================================================
 // IrysSignature
 //------------------------------------------------------------------------------
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary, RlpEncodable, RlpDecodable)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary)]
 /// Wrapper newtype around [`Signature`], with enforced [`Parity::NonEip155`] parity
 pub struct IrysSignature(Signature);
 
@@ -18,13 +17,7 @@ pub struct IrysSignature(Signature);
 
 impl IrysSignature {
     pub fn new(signature: Signature) -> IrysSignature {
-        IrysSignature(signature).with_eth_parity()
-    }
-
-    /// converts the parity to a bool, then to the Ethereum standard NonEip155 parity (27 or 28)
-    pub fn with_eth_parity(mut self) -> Self {
-        self.0 = self.0.with_parity(Parity::NonEip155(self.0.v().y_parity()));
-        self
+        IrysSignature(signature)
     }
 
     /// Passthrough to the inner signature.as_bytes()
@@ -48,11 +41,7 @@ impl IrysSignature {
 
 impl Default for IrysSignature {
     fn default() -> Self {
-        IrysSignature::new(Signature::new(
-            RethU256::ZERO,
-            RethU256::ZERO,
-            Parity::Parity(false),
-        ))
+        IrysSignature::new(Signature::new(RethU256::ZERO, RethU256::ZERO, false))
     }
 }
 
@@ -86,7 +75,7 @@ impl Compact for IrysSignature {
         // self.reth_signature.to_compact(buf)
         buf.put_slice(&self.0.r().as_le_bytes());
         buf.put_slice(&self.0.s().as_le_bytes());
-        buf.put_u8(self.0.v().y_parity_byte());
+        buf.put_u8(self.0.v() as u8);
         65
     }
 
@@ -98,7 +87,7 @@ impl Compact for IrysSignature {
 
         let r = U256::from_le_slice(&buf[0..32]);
         let s = U256::from_le_slice(&buf[32..64]);
-        let signature = Signature::new(r, s, Parity::NonEip155(buf[64] == 1));
+        let signature = Signature::new(r, s, buf[64] == 1);
         buf.advance(65);
         (IrysSignature::new(signature), buf)
     }
@@ -145,13 +134,48 @@ impl<'de> Deserialize<'de> for IrysSignature {
     }
 }
 
+impl alloy_rlp::Encodable for IrysSignature {
+    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+        let sig = self.0;
+        alloy_rlp::Header {
+            list: true,
+            payload_length: sig.rlp_rs_len() + sig.v().length(),
+        }
+        .encode(out); // V R S encode ordering is specified by ethereum's tx signature specs
+        sig.write_rlp_vrs(out, sig.v());
+    }
+
+    fn length(&self) -> usize {
+        let sig = self.0;
+        let payload_length = sig.rlp_rs_len() + sig.v().length();
+        payload_length + alloy_rlp::length_of_length(payload_length)
+    }
+}
+
+impl alloy_rlp::Decodable for IrysSignature {
+    fn decode(buf: &mut &[u8]) -> Result<Self, alloy_rlp::Error> {
+        let header = alloy_rlp::Header::decode(buf)?;
+        let pre_len = buf.len();
+        let decoded = Signature::decode_rlp_vrs(buf, bool::decode)?;
+        let consumed = pre_len - buf.len();
+        if consumed != header.payload_length {
+            return Err(alloy_rlp::Error::Custom(
+                "consumed incorrect number of bytes",
+            ));
+        }
+
+        Ok(IrysSignature(decoded))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::{irys::IrysSigner, ConsensusConfig, IrysTransaction, IrysTransactionHeader, H256};
-    use alloy_core::hex::{self};
+    use alloy_core::hex;
     use alloy_primitives::Address;
+    use alloy_rlp::{Decodable, Encodable};
     use k256::ecdsa::SigningKey;
 
     // spellchecker:off
@@ -221,6 +245,14 @@ mod tests {
         assert_eq!(SIG_BS58, ser);
         let decoded_js_sig = Signature::try_from(&hex::decode(SIG_HEX)?[..])?;
         assert_eq!(transaction.header.signature, decoded_js_sig.into());
+
+        // test RLP roundtrip
+        let mut bytes = Vec::new();
+        transaction.header.signature.encode(&mut bytes);
+        assert_eq!(
+            IrysSignature::decode(&mut &bytes[..]).unwrap(),
+            transaction.header.signature
+        );
 
         Ok(())
     }

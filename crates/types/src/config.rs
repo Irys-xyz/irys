@@ -6,9 +6,10 @@ use crate::{
     },
     PeerAddress, RethPeerInfo,
 };
-use alloy_primitives::{Address, U256};
+use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
+use alloy_genesis::{Genesis, GenesisAccount};
+use alloy_primitives::Address;
 use reth_chainspec::Chain;
-use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, Genesis, GenesisAccount};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -546,7 +547,7 @@ impl ConsensusConfig {
             reth: RethChainSpec {
                 chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
                 genesis: Genesis {
-                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
+                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
                     alloc: {
                         let mut map = BTreeMap::new();
                         map.insert(
@@ -633,7 +634,7 @@ impl NodeConfig {
             accounts.push((
                 signer.address(),
                 GenesisAccount {
-                    balance: U256::from(690000000000000000_u128),
+                    balance: alloy_primitives::U256::from(690000000000000000_u128),
                     ..Default::default()
                 },
             ))

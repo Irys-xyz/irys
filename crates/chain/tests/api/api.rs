@@ -1,3 +1,17 @@
+use actix_http::StatusCode;
+use actix_web::{
+    middleware::Logger,
+    test,
+    web::{self, JsonConfig},
+    App,
+};
+use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
+use base58::ToBase58;
+use irys_actors::packing::wait_for_packing;
+use irys_api_server::{routes, ApiState};
+use irys_packing::{unpack, PackingType, PACKING_TYPE};
+use irys_types::TxChunkOffset;
 use irys_types::{
     irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, UnpackedChunk,
 };
@@ -6,22 +20,6 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use actix_http::StatusCode;
-use alloy_core::primitives::U256;
-use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
-use irys_packing::{unpack, PackingType, PACKING_TYPE};
-
-use actix_web::{
-    middleware::Logger,
-    test,
-    web::{self, JsonConfig},
-    App,
-};
-use base58::ToBase58;
-use irys_types::TxChunkOffset;
-use reth_primitives::GenesisAccount;
-
 use crate::utils::IrysNodeTest;
 
 #[actix_web::test]
@@ -29,7 +27,7 @@ async fn heavy_api_end_to_end_test_32b() {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
-        info!("C packing implementation do  not support chunk size different from CHUNK_SIZE");
+        info!("C packing implementation does not support chunk size different from CHUNK_SIZE");
     }
 }
 
@@ -39,7 +37,6 @@ async fn heavy_api_end_to_end_test_256kb() {
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let entropy_packing_iterations = 1_000;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
@@ -60,7 +57,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     node.node_ctx.start_mining().await.unwrap();
 
     let app_state = ApiState {
-        ema_service: ema_tx,
+        ema_service: node.node_ctx.service_senders.ema.clone(),
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
@@ -71,7 +68,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        mempool_service: node.node_ctx.service_senders.mempool.clone(),
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),

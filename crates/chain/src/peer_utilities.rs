@@ -1,8 +1,6 @@
 use base58::ToBase58;
 use irys_api_client::{ApiClient, IrysApiClient};
-pub use irys_reth_node_bridge::node::{
-    RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
-};
+pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
 use irys_types::block::CombinedBlockHeader;
 use irys_types::{
     BlockIndexItem, CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, H256,

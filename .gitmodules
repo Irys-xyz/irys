@@ -1,15 +1,3 @@
-[submodule "ext/revm"]
-	path = ext/revm
-	url = https://github.com/Irys-xyz/revm
-[submodule "ext/reth"]
-	path = ext/reth
-	url = https://github.com/Irys-xyz/reth
-[submodule "ext/alloy-core"]
-	path = ext/alloy-core
-	url = https://github.com/Irys-xyz/alloy-core
-[submodule "ext/alloy"]
-	path = ext/alloy
-	url = https://github.com/Irys-xyz/alloy
 [submodule "fixtures/contracts/lib/openzeppelin-contracts"]
 	path = fixtures/contracts/lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts
