@@ -982,6 +982,8 @@ impl IrysNode {
             .map(|x| x.0)
             .unwrap_or(latest_block.vdf_limiter_info.seed);
 
+        // let (global_step_number, seed) = (0, H256::zero());
+
         // set up packing actor
         let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(
             &config,

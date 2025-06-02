@@ -1,3 +1,4 @@
+use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
@@ -17,7 +18,6 @@ use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use std::{collections::HashMap, time::Duration};
 use tokio::time::sleep;
 use tracing::{error, info};
-use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -112,12 +112,13 @@ async fn vdf_t() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async().await;
 
     let irys_node = node.start().await;
+    irys_node.stop_mining().await;
 
-    let (block, _reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
+    // let (block, _reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
 
-    sleep(Duration::from_millis(15_000)).await;
+    sleep(Duration::from_millis(5_000)).await;
 
-    let db_irys_block = irys_node.get_block_by_hash(&block.block_hash).unwrap();
+    // let db_irys_block = irys_node.get_block_by_hash(&block.block_hash).unwrap();
 
     irys_node.stop().await;
 

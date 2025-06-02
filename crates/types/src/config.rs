@@ -35,6 +35,10 @@ impl Config {
             chunk_size: self.consensus.chunk_size,
         }
     }
+
+    pub fn testnet() -> Self {
+        Self::new(NodeConfig::testnet())
+    }
 }
 
 impl Deref for Config {

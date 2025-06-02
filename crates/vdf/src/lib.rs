@@ -42,6 +42,13 @@ pub fn vdf_sha_verification(
     num_checkpoints: usize,
     num_iterations: usize,
 ) -> Vec<H256> {
+    tracing::debug!(
+        "JESSEDEBUG args {} {} {} {}",
+        &salt,
+        &seed,
+        &num_checkpoints,
+        &num_iterations
+    );
     let mut local_salt: U256 = salt;
     let mut local_seed: H256 = seed;
     let mut salt_bytes: H256 = H256::zero();
@@ -138,6 +145,7 @@ pub async fn last_step_checkpoints_is_valid(
     } else {
         vdf_info.prev_output
     };
+    // let mut seed = vdf_info.prev_output;
     let mut checkpoint_hashes = vdf_info.last_step_checkpoints.clone();
 
     // println!("---");

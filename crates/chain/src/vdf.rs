@@ -1,43 +1,109 @@
 use actix::Addr;
+use base58::{FromBase58, ToBase58};
 use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf_service::VdfServiceMessage,
 };
-use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256};
+use irys_testing_utils::initialize_tracing;
+use irys_types::{
+    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, NodeConfig, H256, U256,
+};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
-use base58::ToBase58;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tracing::{debug, info};
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
     config: &irys_types::VdfConfig,
-    // atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
-    let mut hasher = Sha256::new();
+    // TOOD: make sure this is random!
+    let mut hash: H256 = genesis_block.vdf_limiter_info.seed;
+    let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+
+    for global_step_number in 0..=1 {
+        let mut hasher = Sha256::new();
+        let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
+
+        if global_step_number == 0 {
+            assert_eq!(salt, U256::from(0));
+            assert_eq!(hash, H256::from_base58("11111111111111111111111111111111"))
+        } else {
+            assert_eq!(salt, U256::from(1));
+            assert_eq!(
+                hash,
+                H256::from_base58("5mRzwP4eqmGjXmxmCGvW2y1PeNKURNxUKnQE53q27moC")
+            )
+        }
+
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut hash,
+            config.num_checkpoints_in_vdf_step,
+            config.sha_1s_difficulty,
+            &mut checkpoints,
+        );
+
+        if global_step_number == 0 {
+            assert_eq!(salt, U256::from(25));
+            assert_eq!(
+                hash,
+                H256::from_base58("5mRzwP4eqmGjXmxmCGvW2y1PeNKURNxUKnQE53q27moC")
+            );
+            genesis_block.vdf_limiter_info.prev_output = hash;
+        } else {
+            assert_eq!(salt, U256::from(26));
+            assert_eq!(
+                hash,
+                H256::from_base58("B9wNvK2xTfspfHhqoBW3PPD1Avkv8v8jc9kQDQBKCG9U")
+            );
+            genesis_block.vdf_limiter_info.global_step_number = 1;
+            genesis_block.vdf_limiter_info.output = hash;
+            genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints.clone();
+            genesis_block.vdf_limiter_info.steps.0 = vec![hash];
+        }
+    }
+}
+
+#[tokio::test]
+async fn vdf_test_aaa() -> eyre::Result<()> {
+    initialize_tracing();
+    let config = irys_types::Config::testnet();
+
+    // let mut genesis_block = IrysBlockHeader::new_mock_header();
+
+    let (_, mut genesis_block) =
+        irys_config::chain::chainspec::IrysChainSpecBuilder::from_config(&config).build();
+    let vdf_config = config.consensus.vdf.clone();
+    run_vdf_for_genesis_block(&mut genesis_block, &vdf_config);
+
+    // let mut hash: H256 = genesis_block.vdf_limiter_info.seed;
     let mut hash: H256 = genesis_block.vdf_limiter_info.seed;
 
-    let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
-    let global_step_number = 0;
+    for global_step_number in 0..=1 {
+        let salt = U256::from(step_number_to_salt_number(&vdf_config, global_step_number));
 
-    let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
+        let checkpoints = irys_vdf::vdf_sha_verification(
+            salt,
+            hash,
+            vdf_config.num_checkpoints_in_vdf_step,
+            vdf_config.sha_1s_difficulty as usize,
+        );
 
-    vdf_sha(
-        &mut hasher,
-        &mut salt,
-        &mut hash,
-        config.num_checkpoints_in_vdf_step,
-        config.sha_1s_difficulty,
-        &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
-    );
+        if global_step_number == 0 {
+            hash = *checkpoints.last().unwrap();
+            assert_eq!(hash, genesis_block.vdf_limiter_info.prev_output)
+        } else {
+            assert_eq!(
+                checkpoints.last().unwrap(),
+                genesis_block.vdf_limiter_info.steps.0.last().unwrap()
+            )
+        }
+    }
 
-    genesis_block.vdf_limiter_info.steps.0 = vec![hash];
-    genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints;
-
-    // global_step_number += 1;
-    // atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 pub fn run_vdf(
@@ -55,7 +121,7 @@ pub fn run_vdf(
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
-    let mut global_step_number = global_step_number;
+    let mut global_step_number = /* global_step_number */ 0;
     // FIXME: The reset seed is the same as the seed... which I suspect is incorrect!
     let reset_seed = initial_reset_seed;
     info!(
@@ -123,6 +189,11 @@ pub fn run_vdf(
 
         let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
 
+        debug!(
+            "JESSEDEBUG BEFORE {:?} {:?} {:?}",
+            &salt, &hash, &global_step_number
+        );
+
         vdf_sha(
             &mut hasher,
             &mut salt,
@@ -130,6 +201,11 @@ pub fn run_vdf(
             config.num_checkpoints_in_vdf_step,
             config.sha_1s_difficulty,
             &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
+        );
+
+        debug!(
+            "JESSEDEBUG AFTER {:?} {:?} {:?}",
+            &salt, &hash, &global_step_number
         );
 
         global_step_number += 1;

@@ -83,21 +83,22 @@ pub async fn wait_for_vdf_step(
     desired_step: u64,
 ) -> eyre::Result<()> {
     let retries_per_second = 20;
-    loop {
-        tracing::trace!("looping waiting for step {}", desired_step);
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            tracing::error!(
-                "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
-                e
-            );
-        };
-        // TODO: move before the loop
-        let vdf_steps_guard = oneshot_rx
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
+        response: oneshot_tx,
+    }) {
+        tracing::error!(
+            "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
+            e
+        );
+    };
+    let vdf_steps_guard = oneshot_rx
             .await
             .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
+
+    loop {
+        tracing::trace!("looping waiting for step {}", desired_step);
+                
         if vdf_steps_guard.read().global_step >= desired_step {
             return Ok(());
         }
@@ -126,7 +127,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let prev_output = vdf_info.prev_output;
         let vdf_steps_in_block = vdf_info.steps.0.len() as u64;
         // This is the start where block's VDF starts
-        let first_step_of_the_block = vdf_info
+        let block_first_step_number = vdf_info
             .global_step_number
             .saturating_sub(vdf_steps_in_block);
 
@@ -141,8 +142,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
         //  2. Check that the first step is equal to the last VDF step.
         //  3. Run the validation, gather steps
         //  4. Send the gathered steps over to VDF thread so it can save them
-
-        debug!("Block {}: {:?}", block_hash.0.to_base58(), info);
+        debug!("Block {}: {:?}", block_hash, info);
 
         let vdf_service_sender = self.vdf_service_sender.clone();
         let vdf_fast_forward_sender = self.vdf_fast_forward_sender.clone();
@@ -151,14 +151,14 @@ impl Handler<RequestValidationMessage> for ValidationService {
         ctx.wait(
             async move {
                 let block_tree_service = BlockTreeService::from_registry();
-
-                let prev_output_step = first_step_of_the_block;
+                let block_prev_step_number = block_first_step_number - 1;
+                
                 debug!(
-                    "Waiting for the VDF to catch up to step {}",
-                    first_step_of_the_block
+                    "Waiting for the VDF to catch up to step {} for block {}",
+                    block_prev_step_number, block_hash
                 );
                 if let Err(vdf_error) =
-                    wait_for_vdf_step(vdf_service_sender.clone(), prev_output_step)
+                    wait_for_vdf_step(vdf_service_sender.clone(), block_prev_step_number)
                         .await
                 {
                     error!(
@@ -172,45 +172,45 @@ impl Handler<RequestValidationMessage> for ValidationService {
                     return;
                 }
 
-                // TODO: there should be no special logic for genesis
-                // if first_step_of_the_block > 0 {
-                    let stored_steps =
-                        match vdf_steps_guard_for_recall_validation.read().get_steps(ii(
-                            prev_output_step,
-                            prev_output_step,
-                        )) {
-                            Ok(steps) => steps,
-                            Err(error) => {
-                                error!("{:?}", error);
-                                block_tree_service.do_send(ValidationResultMessage {
-                                    block_hash,
-                                    validation_result: ValidationResult::Invalid,
-                                });
-                                return;
-                            }
-                        };
 
-                    if let Some(stored_previous_output) = stored_steps.get(0) {
-                        if *stored_previous_output != prev_output {
-                            error!(
-                                "Block validation {} failed: Expected stored step {} to be {}, but got {}",
-                                block_hash.0.to_base58(), prev_output_step, stored_previous_output.0.to_base58(), prev_output.0.to_base58()
-                            );
+                // check that the prev_output stored in the block's header is equal to the global step of the first step of the block, minus 1.
+                let stored_steps =
+                    match vdf_steps_guard_for_recall_validation.read().get_steps(ii(
+                        block_prev_step_number,
+                        block_prev_step_number,
+                    )) {
+                        Ok(steps) => steps,
+                        Err(error) => {
+                            error!("{:?}", error);
                             block_tree_service.do_send(ValidationResultMessage {
                                 block_hash,
                                 validation_result: ValidationResult::Invalid,
                             });
                             return;
                         }
-                    } else {
-                        error!("Expected to have a required seed");
+                    };
+                if let Some(stored_previous_output) = stored_steps.get(0) {
+                    if *stored_previous_output != prev_output {
+                        error!(
+                            "Block validation {} failed: Expected stored step {} to be {}, but got {}",
+                            block_hash, block_first_step_number, stored_previous_output, prev_output
+                        );
                         block_tree_service.do_send(ValidationResultMessage {
                             block_hash,
                             validation_result: ValidationResult::Invalid,
                         });
                         return;
                     }
-                // }
+                    debug!("passed validation! yaaaay");
+                } else {
+                    error!("Unable to get prev_output global step {} for block {} ({})",block_prev_step_number, block_hash, block.height );
+                    block_tree_service.do_send(ValidationResultMessage {
+                        block_hash,
+                        validation_result: ValidationResult::Invalid,
+                    });
+                    return;
+                }
+
 
                 let validation_result = match vdf_future.await.unwrap() {
                     Ok(vdf_steps) => {
@@ -226,11 +226,11 @@ impl Handler<RequestValidationMessage> for ValidationService {
 
                         debug!(
                             "Waiting for the VDF to catch up to step {}",
-                            first_step_of_the_block + vdf_steps_in_block
+                            block_first_step_number + vdf_steps_in_block
                         );
                         if let Err(vdf_error) = wait_for_vdf_step(
                             vdf_service_sender,
-                            first_step_of_the_block + vdf_steps_in_block,
+                            block_first_step_number + vdf_steps_in_block,
                         )
                         .await
                         {
