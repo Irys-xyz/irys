@@ -133,7 +133,6 @@ pub struct MempoolState {
     invalid_tx: Vec<H256>,
     /// Tracks recent valid txids from either storage or commitment
     recent_valid_tx: HashSet<H256>,
-    config: Config,
     storage_modules_guard: StorageModulesReadGuard,
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
@@ -189,6 +188,7 @@ pub enum MempoolServiceMessage {
 
 #[derive(Debug)]
 struct Inner {
+    config: Config,
     irys_db: DatabaseProvider,
     mempool_state: AtomicMempoolState,
     reth_db: RethDbWrapper,
@@ -224,6 +224,7 @@ impl MempoolService {
         service_senders: &ServiceSenders,
     ) -> JoinHandle<()> {
         info!("mempool service spawned");
+        let config = config.clone();
         let mempool_config = &config.consensus.mempool;
         let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
         let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
@@ -232,7 +233,6 @@ impl MempoolService {
             block_tree_guard.clone(),
             commitment_state_guard.clone(),
             storage_modules_guard.clone(),
-            config,
             LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
             LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         );
@@ -245,6 +245,7 @@ impl MempoolService {
                     shutdown,
                     msg_rx: rx,
                     inner: Inner {
+                        config,
                         irys_db,
                         mempool_state: Arc::new(RwLock::new(mempool_state)),
                         reth_db,
@@ -601,11 +602,8 @@ impl Inner {
                     pledges_cache.put(commitment_tx.id, commitment_tx.clone());
                 } else {
                     // First pledge from this address - create a new nested lru cache
-                    let max_pending_pledge_items = mempool_state_guard
-                        .config
-                        .consensus
-                        .mempool
-                        .max_pending_pledge_items;
+                    let max_pending_pledge_items =
+                        self.config.consensus.mempool.max_pending_pledge_items;
                     let mut new_address_cache =
                         LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
 
@@ -725,14 +723,8 @@ impl Inner {
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
         let mempool_state = &self.mempool_state;
-        let mempool_state_read_guard = mempool_state.read().await;
         // TODO: maintain a shared read transaction so we have read isolation
-        let max_chunks_per_item = mempool_state_read_guard
-            .config
-            .consensus
-            .mempool
-            .max_chunks_per_item;
-        drop(mempool_state_read_guard);
+        let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
 
         info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
@@ -817,8 +809,7 @@ impl Inner {
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
-        let target_offset =
-            u128::from(chunk.end_byte_offset(mempool_state_guard.config.consensus.chunk_size));
+        let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
         let path_buff = &chunk.data_path;
 
         info!(
@@ -845,7 +836,7 @@ impl Inner {
         // data_path is valid but the chunk size doesn't mach the protocols
         // consensus size, then the data_root is actually invalid and no future
         // chunks from that data_root should be ingressed.
-        let chunk_size = mempool_state_guard.config.consensus.chunk_size;
+        let chunk_size = self.config.consensus.chunk_size;
 
         // Is this chunk index any of the chunks before the last in the tx?
         let num_chunks_in_tx = data_size.div_ceil(chunk_size);
@@ -982,7 +973,7 @@ impl Inner {
                 .unwrap();
 
             let db = self.irys_db.clone();
-            let signer = mempool_state_guard.config.irys_signer();
+            let signer = self.config.irys_signer();
             let latest_height = *latest_height;
             mempool_state_guard
                 .task_exec
@@ -1089,13 +1080,14 @@ impl Inner {
 
         // Prepare storage transactions for inclusion after commitments
         let mut all_storage_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
+        drop(mempool_state_guard);
 
         // Sort storage transactions by fee (highest first) to maximize revenue
         all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
 
         // Apply block size constraint and funding checks to storage transactions
         let mut storage_tx = Vec::new();
-        let max_txs = mempool_state_guard
+        let max_txs = self
             .config
             .node_config
             .consensus_config()
@@ -1103,8 +1095,6 @@ impl Inner {
             .max_data_txs_per_block
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
-
-        drop(mempool_state_guard);
 
         // Select storage transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
@@ -1174,8 +1164,7 @@ impl Inner {
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-            let mempool_state_read_guard = mempool_state.read().await;
-            let anchor_expiry_depth = mempool_state_read_guard
+            let anchor_expiry_depth = self
                 .config
                 .node_config
                 .consensus_config()
@@ -1203,7 +1192,6 @@ impl Inner {
                     );
                     TxIngressError::DatabaseError
                 })?;
-            drop(mempool_state_read_guard);
         }
 
         // Check account balance
@@ -1505,7 +1493,6 @@ impl Inner {
         anchor: &H256,
     ) -> Result<IrysBlockHeader, TxIngressError> {
         let mempool_state = &self.mempool_state;
-        let mempool_state_read_guard = mempool_state.read().await;
 
         let read_tx = self
             .read_tx()
@@ -1513,13 +1500,14 @@ impl Inner {
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         let latest_height = self.get_latest_block_height().await?;
-        let anchor_expiry_depth = mempool_state_read_guard
+        let anchor_expiry_depth = self
             .config
             .node_config
             .consensus_config()
             .mempool
             .anchor_expiry_depth as u64;
 
+        let mempool_state_read_guard = mempool_state.read().await;
         // Allow transactions to use the txid of a transaction in the mempool
         if mempool_state_read_guard.recent_valid_tx.contains(anchor) {
             let (canonical_blocks, _) = mempool_state_read_guard
@@ -1593,7 +1581,6 @@ pub fn create_state(
     block_tree_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
-    config: &Config,
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
 ) -> MempoolState {
@@ -1602,7 +1589,6 @@ pub fn create_state(
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),
         task_exec,
-        config: config.clone(),
         storage_modules_guard,
         block_tree_read_guard: block_tree_guard,
         commitment_state_guard,
