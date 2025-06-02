@@ -16,6 +16,7 @@ pub fn broadcast_genesis_vdf(
     // broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: UnboundedSender<VdfServiceMessage>
 ) {
+    debug!("Broadcasting genesis VDF");
     // First, insert broadcast prev_output, which should be equal to the last_epoch_block at this point already
     if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(genesis_block.vdf_limiter_info.prev_output))) {
         panic!("Unable to send new Seed to VDF service: {:?}", e);
