@@ -10,6 +10,7 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
+use irys_actors::block_tree_service::ReorgEvent;
 use irys_actors::mempool_service::MempoolTxs;
 use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
@@ -393,6 +394,31 @@ impl IrysNodeTest<IrysNodeCtx> {
             .last()
             .unwrap()
             .1
+    }
+
+    pub async fn wait_for_reorg(&self, seconds_to_wait: usize) -> eyre::Result<ReorgEvent> {
+        // Subscribe to reorg events
+        let mut reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
+
+        // Wait for reorg event with timeout
+        match tokio::time::timeout(Duration::from_secs(seconds_to_wait as u64), reorg_rx.recv())
+            .await
+        {
+            Ok(Ok(reorg_event)) => {
+                info!(
+                    "Reorg detected: {} blocks orphaned at height {}, new tip: {}",
+                    reorg_event.orphaned_blocks.len(),
+                    reorg_event.fork_height,
+                    reorg_event.new_tip.0.to_base58()
+                );
+                Ok(reorg_event)
+            }
+            Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
+            Err(_) => Err(eyre::eyre!(
+                "Timeout: No reorg event received within {} seconds",
+                seconds_to_wait
+            )),
+        }
     }
 
     pub async fn mine_block(&self) -> eyre::Result<()> {

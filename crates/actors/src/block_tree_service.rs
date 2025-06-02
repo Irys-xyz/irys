@@ -99,6 +99,14 @@ pub struct BlockTreeServiceInner {
     pub system: System,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReorgEvent {
+    pub orphaned_blocks: Vec<BlockHash>,
+    pub fork_height: u64,
+    pub new_tip: BlockHash,
+    pub timestamp: SystemTime,
+}
+
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     pub fn spawn_service(
@@ -403,8 +411,8 @@ impl BlockTreeServiceInner {
                     error!("Unable to mark block as ValidationScheduled");
                 }
                 debug!(
-                    "scheduling block for validation: {}",
-                    block_hash.0.to_base58()
+                    "scheduling block for validation: {} height: {}",
+                    block_hash, block.height
                 );
                 true
             } else {
@@ -424,6 +432,10 @@ impl BlockTreeServiceInner {
     }
 
     fn on_validation_result(&mut self, block_hash: H256, validation_result: ValidationResult) {
+        debug!(
+            "On validation result {} {:?}",
+            block_hash, validation_result
+        );
         match validation_result {
             ValidationResult::Invalid => {
                 error!("{} INVALID BLOCK", block_hash.0.to_base58());
@@ -444,17 +456,63 @@ impl BlockTreeServiceInner {
                 // Process new tip if available
                 let Some((block_entry, _, _)) = cache.get_earliest_not_onchain_in_longest_chain()
                 else {
+                    debug!("No new tip found {}", block_hash);
                     return;
                 };
 
+                //let block_entry = cache.blocks.get(&block_hash).unwrap();
+
                 // Get block info before mutable operations
-                let block_hash = block_entry.block.block_hash;
+                let bh = block_entry.block.block_hash;
                 let arc_block = Arc::new(block_entry.block.clone());
                 let all_tx = block_entry.all_tx.clone();
 
+                if bh != block_hash {
+                    debug!(
+                        "get_earliest_not_onchain_in_longest_chain did not return {} but {} {}",
+                        block_hash, bh, arc_block.height
+                    );
+                }
+
                 // Now do mutable operations
-                if cache.mark_tip(&block_hash).is_ok() {
-                    self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
+                match cache.mark_tip(&bh) {
+                    Ok(TipChangeResult::Reorg {
+                        orphaned_blocks,
+                        fork_height,
+                    }) => {
+                        debug!(
+                            "Reorg when block height {} fully validated {}",
+                            arc_block.height, bh
+                        );
+                        // Broadcast reorg event using the shared sender
+                        let event = ReorgEvent {
+                            orphaned_blocks: orphaned_blocks.clone(),
+                            fork_height,
+                            new_tip: bh,
+                            timestamp: SystemTime::now(),
+                        };
+
+                        // Send via service_senders
+                        if let Err(e) = self.service_senders.reorg_events.send(event) {
+                            debug!("No reorg subscribers: {:?}", e);
+                        }
+
+                        self.notify_services_of_block_confirmation(bh, &arc_block, all_tx);
+                    }
+                    Ok(TipChangeResult::Extension) => {
+                        debug!(
+                            "\u{001b}[32mExtending longest chain to height {} {}\u{001b}[0m",
+                            arc_block.height, bh
+                        );
+                        self.notify_services_of_block_confirmation(bh, &arc_block, all_tx);
+                    }
+                    Ok(TipChangeResult::NoChange) => {
+                        // No action needed
+                        debug!("No Change {}", bh);
+                    }
+                    Err(e) => {
+                        error!("Failed to mark tip: {}", e);
+                    }
                 }
 
                 // Handle block finalization
@@ -755,7 +813,15 @@ impl BlockTreeCache {
             .or_default()
             .insert(hash);
 
+        debug!(
+            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}",
+            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash
+        );
         if block.cumulative_diff > self.max_cumulative_difficulty.0 {
+            debug!(
+                "setting max_cumulative_difficulty ({}, {}) for height: {}",
+                block.cumulative_diff, hash, block.height
+            );
             self.max_cumulative_difficulty = (block.cumulative_diff, hash);
         }
 
@@ -927,7 +993,10 @@ impl BlockTreeCache {
 
         let mut current = self.max_cumulative_difficulty.1;
         let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
-        tracing::debug!(latest_cache_tip =? current, "updating canonical chain cache");
+        tracing::debug!(
+            "updating canonical chain cache latest_cache_tip: {}",
+            current
+        );
 
         while let Some(entry) = self.blocks.get(&current) {
             match &entry.chain_state {
@@ -1224,6 +1293,10 @@ impl BlockTreeCache {
         while prev_block.height > 0 && depth_count < BLOCK_CACHE_DEPTH {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
+            debug!(
+                "get_earliest_not_onchain: prev_entry.chain_state: {:?} {}",
+                prev_entry.chain_state, prev_hash
+            );
             match prev_entry.chain_state {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
                     return Some((
