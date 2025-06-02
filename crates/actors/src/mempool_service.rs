@@ -18,7 +18,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
     validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot, GossipData,
     IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, IrysTransactionId,
-    TxChunkOffset, H256, U256,
+    MempoolConfig, TxChunkOffset, H256, U256,
 };
 use lru::LruCache;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
@@ -126,15 +126,10 @@ pub struct MempoolState {
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
-    /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
-    /// instead of the actor executor runtime, while also providing some `QoL`
-    task_exec: TaskExecutor,
     /// The miner's signer instance, used to sign ingress proofs
     invalid_tx: Vec<H256>,
     /// Tracks recent valid txids from either storage or commitment
     recent_valid_tx: HashSet<H256>,
-    storage_modules_guard: StorageModulesReadGuard,
-    commitment_state_guard: CommitmentStateReadGuard,
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
@@ -188,12 +183,17 @@ pub enum MempoolServiceMessage {
 #[derive(Debug)]
 struct Inner {
     block_tree_read_guard: BlockTreeReadGuard,
+    commitment_state_guard: CommitmentStateReadGuard,
     config: Config,
+    /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
+    /// instead of the actor executor runtime, while also providing some `QoL`
+    exec: TaskExecutor,
     irys_db: DatabaseProvider,
     mempool_state: AtomicMempoolState,
     reth_db: RethDbWrapper,
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
+    storage_modules_guard: StorageModulesReadGuard,
 }
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -227,18 +227,13 @@ impl MempoolService {
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
         let mempool_config = &config.consensus.mempool;
-        let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
-        let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
-        let mempool_state = create_state(
-            exec.clone(),
-            commitment_state_guard.clone(),
-            storage_modules_guard.clone(),
-            LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
-            LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
-        );
+        let mempool_state = create_state(&mempool_config);
+        let exec = exec.clone();
+        let commitment_state_guard = commitment_state_guard.clone();
+        let storage_modules_guard = storage_modules_guard.clone();
         let irys_db = irys_db.clone();
         let service_senders = service_senders.clone();
-        exec.spawn_critical_with_graceful_shutdown_signal(
+        exec.clone().spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
             |shutdown| async move {
                 let mempool_service = Self {
@@ -246,11 +241,14 @@ impl MempoolService {
                     msg_rx: rx,
                     inner: Inner {
                         block_tree_read_guard,
+                        commitment_state_guard,
                         config,
+                        exec,
                         irys_db,
                         mempool_state: Arc::new(RwLock::new(mempool_state)),
                         reth_db,
                         service_senders,
+                        storage_modules_guard,
                     },
                 };
                 mempool_service
@@ -735,12 +733,7 @@ impl Inner {
             .await
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        let mempool_state_read_guard = mempool_state.read().await;
-        let binding = mempool_state_read_guard
-            .storage_modules_guard
-            .read()
-            .clone();
-        drop(mempool_state_read_guard);
+        let binding = self.storage_modules_guard.read().clone();
         let candidate_sms = binding
             .iter()
             .filter_map(|sm| {
@@ -892,7 +885,7 @@ impl Inner {
             return Err(e);
         }
 
-        for sm in mempool_state_guard.storage_modules_guard.read().iter() {
+        for sm in self.storage_modules_guard.read().iter() {
             if !sm
                 .get_writeable_offsets(&chunk)
                 .unwrap_or_default()
@@ -973,25 +966,22 @@ impl Inner {
             let db = self.irys_db.clone();
             let signer = self.config.irys_signer();
             let latest_height = *latest_height;
-            mempool_state_guard
-                .task_exec
-                .clone()
-                .spawn_blocking(async move {
-                    generate_ingress_proof(db.clone(), root_hash, data_size, chunk_size, signer)
-                        // TODO: handle results instead of unwrapping
-                        .unwrap();
-                    db.update(|wtx| {
-                        wtx.put::<DataRootLRU>(
-                            root_hash,
-                            DataRootLRUEntry {
-                                last_height: latest_height,
-                                ingress_proof: true,
-                            },
-                        )
-                    })
-                    .unwrap()
+            self.exec.clone().spawn_blocking(async move {
+                generate_ingress_proof(db.clone(), root_hash, data_size, chunk_size, signer)
+                    // TODO: handle results instead of unwrapping
                     .unwrap();
-                });
+                db.update(|wtx| {
+                    wtx.put::<DataRootLRU>(
+                        root_hash,
+                        DataRootLRUEntry {
+                            last_height: latest_height,
+                            ingress_proof: true,
+                        },
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            });
         }
         drop(mempool_state_guard);
 
@@ -1419,12 +1409,8 @@ impl Inner {
         commitment_tx: &CommitmentTransaction,
     ) -> CommitmentCacheStatus {
         let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
         // Check if already staked in the blockchain
-        let is_staked = mempool_state_guard
-            .commitment_state_guard
-            .is_staked(commitment_tx.signer);
-        drop(mempool_state_guard);
+        let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
 
         // Most commitments are valid by default
         // Only pledges require special validation when not already staked
@@ -1565,22 +1551,15 @@ impl Inner {
 
 /// Create a new instance of the mempool state passing in a reference
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
-pub fn create_state(
-    task_exec: TaskExecutor,
-    commitment_state_guard: CommitmentStateReadGuard,
-    storage_modules_guard: StorageModulesReadGuard,
-    pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
-    pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
-) -> MempoolState {
+pub fn create_state(config: &MempoolConfig) -> MempoolState {
+    let max_pending_chunk_items = config.max_pending_chunk_items;
+    let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
         valid_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),
-        task_exec,
-        storage_modules_guard,
-        commitment_state_guard,
         recent_valid_tx: HashSet::new(),
-        pending_chunks,
-        pending_pledges,
+        pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
+        pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
     }
 }
