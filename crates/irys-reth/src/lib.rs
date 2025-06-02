@@ -68,10 +68,11 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransactio
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
     TxLegacy {
-        gas_limit: 1,
+        gas_limit: 100,
         value: U256::ZERO,
         nonce,
-        gas_price: 1000000000, // 1 Gwei
+        // 99 eth
+        gas_price: 99_000000000000000000_u128,
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
         input: system_tx_rlp.into(),
@@ -351,19 +352,35 @@ pub async fn maintain_system_txs<Node, St>(
             break;
         };
         match event {
-            CanonStateNotification::Commit { .. } => {
-                // Get the new block's number and parent hash
+            CanonStateNotification::Commit { new } => {
+                use alloy_consensus::BlockHeader as _;
+                let new_tip_header = new.tip().sealed_block().header();
+                let block_number = new_tip_header.number();
+                let parent_hash = new_tip_header.parent_hash();
+                dbg!(&new_tip_header);
                 let stale_system_txs = pool
                     .all_transactions()
                     .all()
                     .filter_map(|tx| {
-                        use alloy_consensus::transaction::Transaction as _;
+                        use alloy_consensus::transaction::Transaction;
                         let input = tx.inner().input();
-                        let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
+                        let Ok(system_tx) = SystemTransaction::decode(&mut &input[..]) else {
                             return None;
                         };
 
-                        Some(*tx.hash())
+                        // Remove if block number >= valid_for_block, or parent hash changed
+                        if block_number >= system_tx.valid_for_block_height
+                            || parent_hash != system_tx.parent_blockhash
+                        {
+                            dbg!(
+                                block_number,
+                                parent_hash,
+                                system_tx.valid_for_block_height,
+                                system_tx.parent_blockhash
+                            );
+                            return Some(*tx.hash());
+                        }
+                        None
                     })
                     .collect::<Vec<_>>();
                 if stale_system_txs.is_empty() {
@@ -2033,6 +2050,8 @@ mod tests {
         let payload_attributes = {
             let parent_tracker = parent_tracker.clone();
             move |timestamp: u64| {
+                dbg!(&timestamp);
+                panic!();
                 let parent = *parent_tracker.lock().unwrap();
                 eth_payload_attributes_with_parent(timestamp, parent)
             }
@@ -2917,6 +2936,7 @@ pub mod test_utils {
         timestamp: u64,
         parent_block_hash: B256,
     ) -> EthPayloadBuilderAttributes {
+        dbg!(&timestamp);
         let attributes = PayloadAttributes {
             timestamp,
             prev_randao: B256::ZERO,

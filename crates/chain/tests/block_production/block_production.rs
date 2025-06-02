@@ -1,6 +1,7 @@
 use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt};
@@ -12,6 +13,8 @@ use irys_reth_node_bridge::{
 };
 use irys_types::{irys::IrysSigner, IrysTransaction, NodeConfig};
 use k256::ecdsa::SigningKey;
+use reth::providers::ReceiptProvider;
+use reth::rpc::api::OtterscanClient;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use std::{collections::HashMap, time::Duration};
 use tokio::time::sleep;
@@ -26,6 +29,13 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let account2 = IrysSigner::random_signer(&node.cfg.consensus_config());
     let account3 = IrysSigner::random_signer(&node.cfg.consensus_config());
     node.cfg.consensus.extend_genesis_accounts(vec![
+        (
+            node.cfg.signer().address(),
+            GenesisAccount {
+                balance: U256::from(99999999999_u128),
+                ..Default::default()
+            },
+        ),
         (
             account1.address(),
             GenesisAccount {
@@ -48,14 +58,20 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             },
         ),
     ]);
-    let irys_node = node.start().await;
 
-    let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
+    // print all addresses
+    println!("account1: {:?}", account1.address());
+    println!("account2: {:?}", account2.address());
+    println!("account3: {:?}", account3.address());
+    println!("node: {:?}", node.cfg.signer().address());
+
+    let irys_node = node.start().await;
+    let mut txs = Vec::new();
     for signer in [&account1, &account2, &account3] {
         let data_bytes = "Hello, world!".as_bytes().to_vec();
         match irys_node.create_submit_data_tx(&signer, data_bytes).await {
             Ok(tx) => {
-                txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
+                txs.push(tx);
             }
             Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
                 assert_eq!(signer.address(), account1.address(), "account1 should fail");
@@ -63,35 +79,74 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             Err(e) => panic!("unexpected error {:?}", e),
         }
     }
+    // todo left off: system txs are getting dropped for some reason
 
-    let (block, _reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
+    let (block, reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
+    dbg!(&block.evm_block_hash);
+    dbg!(&reth_exec_env.block().hash());
+    let txs = reth_exec_env.block().transaction_count();
+    dbg!(&txs);
 
-    // error!("TODO: NEW SHADOW LOGIC");
+    let mut context = new_reth_context(irys_node.node_ctx.reth_handle.clone().into())
+        .await
+        .unwrap();
+    let receipts = context
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(reth_exec_env.block().hash()))
+        .unwrap();
+    // let receipts = receipts.last().unwrap();
+    // let (receipts) = state
+    //     .state_by_hash(reth_exec_env.block().hash())
+    //     .unwrap()
+    //     .executed_block_receipts();
+    // let receipts = receipts.last().unwrap();
+    dbg!(&receipts);
+    // dbg!(&block);
+    panic!();
 
-    // // for receipt in reth_exec_env.shadow_receipts {
-    // //     match receipt.tx_type {
-    // //         ShadowTxType::BlockReward(_block_reward_shadow) => {
-    // //             assert_eq!(receipt.result, ShadowResult::Success);
-    // //         }
-    // //         ShadowTxType::Data(_data_shadow) => {
-    // //             let og_tx = txs.get(&receipt.tx_id).unwrap();
-    // //             assert_eq!(receipt.result, ShadowResult::Success);
-    // //             assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
-    // //         }
-    // //         _ => {
-    // //             panic!("test does not expect this shadow type")
-    // //         }
-    // //     }
-    // // }
+    // let receipts = state.receipts();
+    // dbg!(&receipts);
+    // let latest_block_receipts = receipts.last().unwrap();
+    // // First two receipts should be data transactions
+    // for (irys_receipts, reth_receipts) in txs.iter().zip(&latest_block_receipts[0..2]) {
+    //     assert_eq!(
+    //         reth_receipts.success, true,
+    //         "Data transaction should succeed"
+    //     );
+    //     // todo take the first log from the reth receipt, decode it and assert it's the same as the irys receipt
+    // }
 
-    // let reth_context = new_reth_context(irys_node.node_ctx.reth_handle.clone().into()).await?;
+    // // Third receipt should be block reward
+    // let block_reward_receipt = &latest_block_receipts[2];
+    // assert_eq!(
+    //     block_reward_receipt.status, 1,
+    //     "Block reward transaction should succeed"
+    // );
+    // assert_eq!(
+    //     block_reward_receipt.logs[0].topics[0],
+    //     system_tx_topics::BLOCK_REWARD.into(),
+    //     "Block reward transaction should have correct topic"
+    // );
 
-    // //check reth for built block
-    // let reth_block = reth_context
-    //     .inner
-    //     .provider
-    //     .block_by_hash(block.evm_block_hash)?
-    //     .unwrap();
+    // // Fourth receipt should be nonce reset
+    // let nonce_reset_receipt = &latest_block_receipts[3];
+    // assert_eq!(
+    //     nonce_reset_receipt.status, 1,
+    //     "Nonce reset transaction should succeed"
+    // );
+    // assert_eq!(
+    //     nonce_reset_receipt.logs[0].topics[0],
+    //     system_tx_topics::RESET_SYSTEM_TX_NONCE.into(),
+    //     "Nonce reset transaction should have correct topic"
+    // );
+
+    // todo assert block reward
+    // todo assert data txs
+    // todo assert nonce reset tx
+
+    // todo assert block height
+    // todo assert block producers nonce is 0
 
     // // height is hardcoded at 42 right now
     // // assert_eq!(reth_block.number, block.height);

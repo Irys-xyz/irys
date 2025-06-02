@@ -116,22 +116,31 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
         let attributes = EthPayloadBuilderAttributes::new(parent, attributes);
-        self.payload
+        let payload_id = self
+            .payload
             .build_new_payload_irys(attributes.clone())
             .await?;
-        // first event is the payload attributes
 
-        self.payload.expect_attr_event(attributes.clone()).await?;
-        // wait for the payload builder to have finished building
+        let payload = self
+            .payload
+            .payload_builder
+            .best_payload(payload_id)
+            .await
+            .unwrap()?;
+        dbg!(&payload);
 
-        // self.payload
-        //     .wait_for_built_payload(attributes.payload_id())
-        //     .await;
-        self.payload
-            .wait_for_built_payload_irys(attributes.payload_id())
-            .await?;
+        // // first event is the payload attributes
+        // self.payload.expect_attr_event(attributes.clone()).await?;
 
-        Ok(self.payload.expect_built_payload().await?)
+        // // wait for the payload builder to have finished building
+        // let data = self
+        //     .payload
+        //     .wait_for_built_payload_irys(attributes.payload_id())
+        //     .await?;
+        // dbg!(&data);
+
+        // Ok(self.payload.expect_built_payload().await?)
+        Ok(payload)
     }
 
     /// Sends forkchoice update to the engine api
@@ -180,7 +189,7 @@ pub trait IrysRethPayloadTestContextExt {
     async fn build_new_payload_irys(
         &mut self,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes,
-    ) -> eyre::Result<()>;
+    ) -> eyre::Result<PayloadId>;
 
     async fn wait_for_built_payload_irys(
         &self,
@@ -201,12 +210,13 @@ impl IrysRethPayloadTestContextExt
     async fn build_new_payload_irys(
         &mut self,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes,
-    ) -> eyre::Result<()> {
-        self.payload_builder
+    ) -> eyre::Result<PayloadId> {
+        let payload_id = self
+            .payload_builder
             .send_new_payload(attributes.clone())
             .await
             .unwrap()?;
-        Ok(())
+        Ok(payload_id)
     }
 
     async fn wait_for_built_payload_irys(

@@ -469,6 +469,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     tracing::warn!("Failed to get nonce: {}", err);
                     0
                 });
+            dbg!(prev_block_header.evm_block_hash, parent.header.hash);
             let block_reward_system_tx = SystemTransaction {
                 valid_for_block_height: block_height,
                 parent_blockhash: prev_block_header.evm_block_hash,
@@ -525,12 +526,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
 
             // generate payload attributes
+            let timestamp = now.as_secs() + 100;
+            dbg!(&timestamp);
             let payload_attrs = PayloadAttributes {
-                timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+                timestamp, // tie timestamp together **THIS HAS TO BE SECONDS**
                 prev_randao: parent.header.mix_hash,
                 suggested_fee_recipient: config.node_config.reward_address,
                 withdrawals: None, // these should ALWAYS be none
-                parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+                parent_beacon_block_root: Some(B256::ZERO),
+                // parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             };
             let built = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
             let block_hash = context.submit_payload(built.clone()).await?;
