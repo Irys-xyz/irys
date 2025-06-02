@@ -142,9 +142,6 @@ pub struct MempoolState {
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
-
-    /// Reference to all the services we can send messages to
-    service_senders: ServiceSenders,
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -194,7 +191,11 @@ pub enum MempoolServiceMessage {
 
 #[derive(Debug)]
 struct Inner {
+    //irys_db: DatabaseProvider,
     mempool_state: AtomicMempoolState,
+    //reth_db: RethDbWrapper,
+    /// Reference to all the services we can send messages to
+    service_senders: ServiceSenders,
 }
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -236,10 +237,10 @@ impl MempoolService {
             commitment_state_guard.clone(),
             storage_modules_guard.clone(),
             config,
-            service_senders,
             LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
             LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         );
+        let service_senders = service_senders.clone();
         exec.spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
             |shutdown| async move {
@@ -248,6 +249,7 @@ impl MempoolService {
                     msg_rx: rx,
                     inner: Inner {
                         mempool_state: Arc::new(RwLock::new(mempool_state)),
+                        service_senders: service_senders,
                     },
                 };
                 mempool_service
@@ -580,14 +582,11 @@ impl Inner {
                     );
                 }
             }
+            drop(mempool_state_read_guard);
 
             // Gossip transaction
-            let gossip_sender = mempool_state_read_guard
-                .service_senders
+            self.service_senders
                 .gossip_broadcast
-                .clone();
-            drop(mempool_state_read_guard);
-            gossip_sender
                 .send(GossipData::CommitmentTransaction(commitment_tx.clone()))
                 .expect("Failed to send gossip data");
         } else {
@@ -1010,9 +1009,9 @@ impl Inner {
                     .unwrap();
                 });
         }
-
-        let gossip_sender = mempool_state_guard.service_senders.gossip_broadcast.clone();
         drop(mempool_state_guard);
+
+        let gossip_sender = &self.service_senders.gossip_broadcast.clone();
         let gossip_data = GossipData::Chunk(chunk);
 
         if let Err(error) = gossip_sender.send(gossip_data) {
@@ -1142,11 +1141,6 @@ impl Inner {
 
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_read_guard = mempool_state.read().await;
-
-        let gossip_sender = mempool_state_read_guard
-            .service_senders
-            .gossip_broadcast
-            .clone();
 
         // Early out if we already know about this transaction
         if mempool_state_read_guard.invalid_tx.contains(&tx.id)
@@ -1295,8 +1289,7 @@ impl Inner {
 
         // Gossip transaction
         let gossip_data = GossipData::Transaction(tx.clone());
-
-        if let Err(error) = gossip_sender.send(gossip_data) {
+        if let Err(error) = self.service_senders.gossip_broadcast.send(gossip_data) {
             tracing::error!("Failed to send gossip data: {:?}", error);
         }
 
@@ -1452,6 +1445,7 @@ impl Inner {
         let is_staked = mempool_state_guard
             .commitment_state_guard
             .is_staked(commitment_tx.signer);
+        drop(mempool_state_guard);
 
         // Most commitments are valid by default
         // Only pledges require special validation when not already staked
@@ -1461,8 +1455,7 @@ impl Inner {
         }
 
         // For unstaked pledges, validate against cache and pending transactions
-        let commitment_cache = mempool_state_guard.service_senders.commitment_cache.clone();
-        drop(mempool_state_guard);
+        let commitment_cache = self.service_senders.commitment_cache.clone();
         let commitment_tx_clone = commitment_tx.clone();
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -1610,7 +1603,6 @@ pub fn create_state(
     commitment_state_guard: CommitmentStateReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
     config: &Config,
-    service_senders: &ServiceSenders,
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
 ) -> MempoolState {
@@ -1625,7 +1617,6 @@ pub fn create_state(
         storage_modules_guard,
         block_tree_read_guard: block_tree_guard,
         commitment_state_guard,
-        service_senders: service_senders.clone(),
         recent_valid_tx: HashSet::new(),
         pending_chunks,
         pending_pledges,
