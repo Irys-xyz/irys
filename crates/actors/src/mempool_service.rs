@@ -123,8 +123,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
 #[derive(Debug)]
 pub struct MempoolState {
-    irys_db: DatabaseProvider,
-    reth_db: RethDbWrapper,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
@@ -191,9 +189,9 @@ pub enum MempoolServiceMessage {
 
 #[derive(Debug)]
 struct Inner {
-    //irys_db: DatabaseProvider,
+    irys_db: DatabaseProvider,
     mempool_state: AtomicMempoolState,
-    //reth_db: RethDbWrapper,
+    reth_db: RethDbWrapper,
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
 }
@@ -230,8 +228,6 @@ impl MempoolService {
         let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
         let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
         let mempool_state = create_state(
-            irys_db,
-            reth_db,
             exec.clone(),
             block_tree_guard.clone(),
             commitment_state_guard.clone(),
@@ -240,6 +236,7 @@ impl MempoolService {
             LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
             LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         );
+        let irys_db = irys_db.clone();
         let service_senders = service_senders.clone();
         exec.spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
@@ -248,8 +245,10 @@ impl MempoolService {
                     shutdown,
                     msg_rx: rx,
                     inner: Inner {
+                        irys_db,
                         mempool_state: Arc::new(RwLock::new(mempool_state)),
-                        service_senders: service_senders,
+                        reth_db,
+                        service_senders,
                     },
                 };
                 mempool_service
@@ -563,8 +562,7 @@ impl Inner {
             // be reading them from the mempool_service in memory cache, but we are
             // putting off that work until the actix mempool_service is rewritten as a
             // tokio service.
-            let mempool_state_read_guard = mempool_state.read().await;
-            match mempool_state_read_guard.irys_db.update_eyre(|db_tx| {
+            match self.irys_db.update_eyre(|db_tx| {
                 irys_database::insert_commitment_tx(db_tx, &commitment_tx)?;
                 Ok(())
             }) {
@@ -582,7 +580,6 @@ impl Inner {
                     );
                 }
             }
-            drop(mempool_state_read_guard);
 
             // Gossip transaction
             self.service_senders
@@ -663,15 +660,13 @@ impl Inner {
         // we just remove them.
         // FIXME: Note above about re-orgs!
         if !published_txids.is_empty() {
-            let mempool_state_read_guard = mempool_state.read().await;
-            let mut_tx = mempool_state_read_guard
+            let mut_tx = self
                 .irys_db
                 .tx_mut()
                 .map_err(|e| {
                     error!("Failed to create mdbx transaction: {}", e);
                 })
                 .expect("expected to read/write to database");
-            drop(mempool_state_read_guard);
 
             for (i, txid) in block.data_ledgers[DataLedger::Publish]
                 .tx_ids
@@ -896,7 +891,7 @@ impl Inner {
         }
 
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-        if let Err(e) = mempool_state_guard
+        if let Err(e) = self
             .irys_db
             .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|_| ChunkIngressError::DatabaseError)
@@ -986,7 +981,7 @@ impl Inner {
                 .ok_or(ChunkIngressError::ServiceUninitialized)
                 .unwrap();
 
-            let db = mempool_state_guard.irys_db.clone();
+            let db = self.irys_db.clone();
             let signer = mempool_state_guard.config.irys_signer();
             let latest_height = *latest_height;
             mempool_state_guard
@@ -1024,7 +1019,7 @@ impl Inner {
     async fn handle_get_best_mempool_txs(&self) -> MempoolTxs {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
-        let reth_db = mempool_state_guard.reth_db.clone();
+        let reth_db = self.reth_db.clone();
         let mut fees_spent_per_address = HashMap::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
@@ -1170,7 +1165,7 @@ impl Inner {
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         let mempool_state_read_guard = mempool_state.read().await;
-        let read_reth_tx = &mempool_state_read_guard
+        let read_reth_tx = &self
             .reth_db
             .tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
@@ -1192,8 +1187,7 @@ impl Inner {
                 &tx.data_root, &old_expiry.last_height, &new_expiry
             );
 
-            mempool_state_read_guard
-                .irys_db
+            self.irys_db
                 .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
                 .map_err(|e| {
                     error!(
@@ -1228,12 +1222,14 @@ impl Inner {
         // Validate the transaction signature
         // check the result and error handle
         let _ = self.validate_signature(&tx).await;
+
         let mut mempool_state_write_guard = mempool_state.write().await;
         mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
         mempool_state_write_guard.recent_valid_tx.insert(tx.id);
+        drop(mempool_state_write_guard);
 
         // Cache the data_root in the database
-        match mempool_state_write_guard.irys_db.update_eyre(|db_tx| {
+        match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, &tx)?;
             // TODO: tx headers should not immediately be added to the database
             // this is a work around until the mempool can persist its state
@@ -1262,6 +1258,7 @@ impl Inner {
 
         // Process any chunks that arrived before their parent transaction
         // These were temporarily stored in the pending_chunks cache
+        let mut mempool_state_write_guard = mempool_state.write().await;
         let option_chunks_map = mempool_state_write_guard.pending_chunks.pop(&tx.data_root);
         drop(mempool_state_write_guard);
         if let Some(chunks_map) = option_chunks_map {
@@ -1387,11 +1384,7 @@ impl Inner {
     async fn read_tx(
         &self,
     ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
-        let mempool_state = &self.mempool_state;
-        let mempool_state_read_guard = mempool_state.read().await;
-
-        mempool_state_read_guard
-            .irys_db
+        self.irys_db
             .tx()
             .inspect_err(|e| error!("database error reading tx: {:?}", e))
     }
@@ -1596,8 +1589,6 @@ impl Inner {
 /// Create a new instance of the mempool state passing in a reference
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
 pub fn create_state(
-    irys_db: &DatabaseProvider,
-    reth_db: RethDbWrapper,
     task_exec: TaskExecutor,
     block_tree_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
@@ -1607,8 +1598,6 @@ pub fn create_state(
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
 ) -> MempoolState {
     MempoolState {
-        irys_db: irys_db.clone(),
-        reth_db,
         valid_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),
