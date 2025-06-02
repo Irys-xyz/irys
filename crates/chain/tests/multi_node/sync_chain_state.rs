@@ -13,6 +13,7 @@ use irys_database::block_header_by_hash;
 use irys_primitives::IrysTxId;
 use irys_reth_node_bridge::adapter::new_reth_context;
 use irys_reth_node_bridge::ext::IrysRethTestContextExt as _;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
     NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
@@ -216,6 +217,8 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// TODO: Mine on peer2 and see if those blocks arrive at genesis via gossip
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
     // setup trusted peers connection data and configs for genesis and nodes
     let (
         testnet_config_genesis,

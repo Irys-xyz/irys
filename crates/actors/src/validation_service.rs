@@ -152,7 +152,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
             async move {
                 let block_tree_service = BlockTreeService::from_registry();
 
-                let prev_output_step = first_step_of_the_block - 1;
+                let prev_output_step = first_step_of_the_block;
                 debug!(
                     "Waiting for the VDF to catch up to step {}",
                     first_step_of_the_block
@@ -173,7 +173,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
                 }
 
                 // TODO: there should be no special logic for genesis
-                if first_step_of_the_block > 0 {
+                // if first_step_of_the_block > 0 {
                     let stored_steps =
                         match vdf_steps_guard_for_recall_validation.read().get_steps(ii(
                             prev_output_step,
@@ -193,8 +193,8 @@ impl Handler<RequestValidationMessage> for ValidationService {
                     if let Some(stored_previous_output) = stored_steps.get(0) {
                         if *stored_previous_output != prev_output {
                             error!(
-                                "Block validation {} failed: Expected stored block seed to be {}, but got {}",
-                                block_hash.0.to_base58(), stored_previous_output.0.to_base58(), prev_output.0.to_base58()
+                                "Block validation {} failed: Expected stored step {} to be {}, but got {}",
+                                block_hash.0.to_base58(), prev_output_step, stored_previous_output.0.to_base58(), prev_output.0.to_base58()
                             );
                             block_tree_service.do_send(ValidationResultMessage {
                                 block_hash,
@@ -210,7 +210,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
                         });
                         return;
                     }
-                }
+                // }
 
                 let validation_result = match vdf_future.await.unwrap() {
                     Ok(vdf_steps) => {

@@ -51,7 +51,11 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
-use irys_types::{app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, AtomicVdfStepNumber, CloneableJoinHandle, CommitmentTransaction, Config, H256List, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, VDFLimiterInfo, H256, U256};
+use irys_types::{
+    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
+    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, VDFLimiterInfo, H256, U256,
+};
 use reth::{
     chainspec::ChainSpec,
     tasks::{TaskExecutor, TaskManager},
@@ -301,7 +305,7 @@ impl IrysNode {
         genesis_block: IrysBlockHeader,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+    ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>)> {
         info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node: {:?}", node_mode);
 
         // Check if blockchain data already exists
@@ -309,7 +313,7 @@ impl IrysNode {
 
         if has_existing_data {
             // CASE 1: Load existing genesis block and commitments from database
-            return self.load_existing_genesis(irys_db, block_index).await;
+            return Ok(self.load_existing_genesis(irys_db, block_index).await);
         }
 
         // CASE 2: No existing data - handle based on node mode
@@ -320,7 +324,7 @@ impl IrysNode {
             }
             NodeMode::PeerSync => {
                 // Fetch genesis data from trusted peer when joining network
-                return self.fetch_genesis_from_trusted_peer().await;
+                return Ok(self.fetch_genesis_from_trusted_peer().await);
             }
         }
     }
@@ -367,7 +371,7 @@ impl IrysNode {
     async fn create_new_genesis_block(
         &self,
         mut genesis_block: IrysBlockHeader,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+    ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>)> {
         // Generate genesis commitments from configuration
         let commitments = get_genesis_commitments(&self.config);
 
@@ -393,9 +397,14 @@ impl IrysNode {
             prev_output: *last_epoch_hash,
             ..VDFLimiterInfo::default()
         };
+
         run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
 
-        (genesis_block, commitments)
+        // self.config
+        //     .irys_signer()
+        //     .sign_block_header(&mut genesis_block)?;
+
+        Ok((genesis_block, commitments))
     }
 
     async fn fetch_genesis_from_trusted_peer(
@@ -487,7 +496,7 @@ impl IrysNode {
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments) = self
             .get_or_create_genesis_info(node_mode, genesis_block, &irys_db, &block_index)
-            .await;
+            .await?;
 
         // Persist the genesis block to the block_index and db if it's not there already
         if block_index.num_blocks() == 0 {

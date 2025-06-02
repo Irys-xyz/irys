@@ -54,7 +54,7 @@ impl VdfState {
         tracing::info!(
             "Received seed: {:?} global step: {}",
             self.seeds.back().unwrap(),
-            self.global_step
+            self.global_step - 1
         );
     }
 
@@ -64,22 +64,23 @@ impl VdfState {
 
         let last_global_step = self.global_step;
 
-        // first available global step should be at least one.
+        // first available global step should be at least step 0.
         // TODO: Should this instead panic! as something has gone very wrong?
-        let first_global_step = last_global_step.saturating_sub(vdf_steps_len) + 1;
+        let first_global_step = (last_global_step + 1).saturating_sub(vdf_steps_len);
 
         if first_global_step > last_global_step {
             return Err(eyre::eyre!("No steps stored!"));
         }
 
         if !ii(first_global_step, last_global_step).contains_interval(&i) {
-            return Err(eyre::eyre!(
+            let e = eyre::eyre!(
                 "Unavailable requested range ({}..={}). Stored steps range is ({}..={})",
                 i.start(),
                 i.end(),
                 first_global_step,
                 last_global_step
-            ));
+            );
+            return Err(e);
         }
 
         let start: usize = (i.start() - first_global_step).try_into()?;
@@ -296,10 +297,11 @@ fn create_state(
         let mut block = block_header_by_hash(&tx, &block_hash, false)
             .unwrap()
             .unwrap();
+        let latest_block_height = block.height;
         let global_step_number = block.vdf_limiter_info.global_step_number;
         let mut steps_remaining = capacity;
 
-        while steps_remaining > 0 && block.height > 0 {
+        while steps_remaining > 0 {
             // get all the steps out of the block
             for step in block.vdf_limiter_info.steps.0.iter().rev() {
                 seeds.push_front(Seed(*step));
@@ -308,15 +310,23 @@ fn create_state(
                     break;
                 }
             }
+
+            if block.height == 0 {
+                seeds.push_back(Seed(block.vdf_limiter_info.prev_output));
+                break;
+            }
+
             // get the previous block
             block = block_header_by_hash(&tx, &block.previous_block_hash, false)
                 .unwrap()
                 .unwrap();
         }
+
         info!(
-            "Initializing vdf service from block's info in step number {}",
-            global_step_number
+            "Initializing vdf service from block {} info in step number {}",
+            latest_block_height, global_step_number
         );
+
         return VdfState {
             global_step: global_step_number,
             seeds,
@@ -325,13 +335,14 @@ fn create_state(
         };
     };
 
-    info!("No block index found, initializing VdfState from zero");
-    VdfState {
-        global_step: 0,
-        seeds: VecDeque::with_capacity(capacity),
-        capacity,
-        mining_state_sender: Some(vdf_mining_state_sender),
-    }
+    panic!("DO NOT START THE VDF SERVICE WITHOUT A GENESIS BLOCK (in DB & block index) >:c");
+    // info!("No block index found, initializing VdfState from zero");
+    // VdfState {
+    //     global_step: 0,
+    //     seeds: VecDeque::with_capacity(capacity),
+    //     capacity,
+    //     mining_state_sender: Some(vdf_mining_state_sender),
+    // }
 }
 
 /// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()

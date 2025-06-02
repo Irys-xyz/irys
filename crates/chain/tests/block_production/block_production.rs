@@ -10,6 +10,7 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::{
     adapter::new_reth_context, reth_e2e_test_utils::transaction::TransactionTestContext,
 };
+use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysTransaction, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
@@ -20,6 +21,7 @@ use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
+    initialize_tracing();
     let mut node = IrysNodeTest::default_async().await;
     let account1 = IrysSigner::random_signer(&node.cfg.consensus_config());
     let account2 = IrysSigner::random_signer(&node.cfg.consensus_config());
@@ -100,6 +102,25 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
     irys_node.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn vdf_t() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
+    let mut node = IrysNodeTest::default_async().await;
+
+    let irys_node = node.start().await;
+
+    let (block, _reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
+
+    sleep(Duration::from_millis(15_000)).await;
+
+    let db_irys_block = irys_node.get_block_by_hash(&block.block_hash).unwrap();
+
+    irys_node.stop().await;
+
     Ok(())
 }
 
