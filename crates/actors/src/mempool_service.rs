@@ -134,7 +134,6 @@ pub struct MempoolState {
     /// Tracks recent valid txids from either storage or commitment
     recent_valid_tx: HashSet<H256>,
     storage_modules_guard: StorageModulesReadGuard,
-    block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
@@ -188,6 +187,7 @@ pub enum MempoolServiceMessage {
 
 #[derive(Debug)]
 struct Inner {
+    block_tree_read_guard: BlockTreeReadGuard,
     config: Config,
     irys_db: DatabaseProvider,
     mempool_state: AtomicMempoolState,
@@ -217,20 +217,20 @@ impl MempoolService {
         irys_db: &DatabaseProvider,
         reth_db: RethDbWrapper,
         storage_modules_guard: &StorageModulesReadGuard,
-        block_tree_guard: &BlockTreeReadGuard,
+        block_tree_read_guard: &BlockTreeReadGuard,
         commitment_state_guard: &CommitmentStateReadGuard,
         rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
         service_senders: &ServiceSenders,
     ) -> JoinHandle<()> {
         info!("mempool service spawned");
+        let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
         let mempool_config = &config.consensus.mempool;
         let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
         let max_pending_pledge_items = mempool_config.max_pending_pledge_items;
         let mempool_state = create_state(
             exec.clone(),
-            block_tree_guard.clone(),
             commitment_state_guard.clone(),
             storage_modules_guard.clone(),
             LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
@@ -245,6 +245,7 @@ impl MempoolService {
                     shutdown,
                     msg_rx: rx,
                     inner: Inner {
+                        block_tree_read_guard,
                         config,
                         irys_db,
                         mempool_state: Arc::new(RwLock::new(mempool_state)),
@@ -961,10 +962,7 @@ impl Inner {
             // we *should* have all the chunks
             // dispatch a ingress proof task
 
-            let canon_chain = mempool_state_guard
-                .block_tree_read_guard
-                .read()
-                .get_canonical_chain();
+            let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
 
             let (_, latest_height, _, _) = canon_chain
                 .0
@@ -1510,10 +1508,7 @@ impl Inner {
         let mempool_state_read_guard = mempool_state.read().await;
         // Allow transactions to use the txid of a transaction in the mempool
         if mempool_state_read_guard.recent_valid_tx.contains(anchor) {
-            let (canonical_blocks, _) = mempool_state_read_guard
-                .block_tree_read_guard
-                .read()
-                .get_canonical_chain();
+            let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
             let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
             // Just provide the most recent block as an anchor
             match irys_database::block_header_by_hash(&read_tx, latest_block_hash, false) {
@@ -1543,13 +1538,7 @@ impl Inner {
 
     // Helper to get the canonical chain and latest height
     async fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
-        let mempool_state = &self.mempool_state;
-        let mempool_state_read_guard = mempool_state.read().await;
-        let canon_chain = mempool_state_read_guard
-            .block_tree_read_guard
-            .read()
-            .get_canonical_chain();
-        drop(mempool_state_read_guard);
+        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
         let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
@@ -1578,7 +1567,6 @@ impl Inner {
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
 pub fn create_state(
     task_exec: TaskExecutor,
-    block_tree_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
@@ -1590,7 +1578,6 @@ pub fn create_state(
         invalid_tx: Vec::new(),
         task_exec,
         storage_modules_guard,
-        block_tree_read_guard: block_tree_guard,
         commitment_state_guard,
         recent_valid_tx: HashSet::new(),
         pending_chunks,
