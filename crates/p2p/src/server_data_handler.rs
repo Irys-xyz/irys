@@ -19,7 +19,7 @@ use irys_types::{
     IrysTransactionResponse, RethPeerInfo, UnpackedChunk, H256,
 };
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, Span};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -37,6 +37,8 @@ where
     pub gossip_client: GossipClient,
     pub peer_list_service: PeerListFacade<TApiClient, R>,
     pub sync_state: SyncState,
+    /// Tracing span
+    pub span: Span,
 }
 
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
@@ -55,6 +57,7 @@ where
             gossip_client: self.gossip_client.clone(),
             peer_list_service: self.peer_list_service.clone(),
             sync_state: self.sync_state.clone(),
+            span: self.span.clone(),
         }
     }
 }
@@ -228,14 +231,17 @@ where
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
     ) -> GossipResult<()> {
+        let span = self.span.clone();
+        let _span = span.enter();
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
         debug!(
-            "Node {}: Gossip block received from peer {}: {:?}",
+            "Node {}: Gossip block received from peer {}: {} height: {}",
             self.gossip_client.mining_address,
             source_miner_address,
-            block_hash.0.to_base58()
+            block_hash,
+            block_header.height
         );
 
         if self.sync_state.is_syncing()
@@ -243,8 +249,7 @@ where
         {
             debug!(
                 "Node {}: Block {} is out of the sync range, skipping",
-                self.gossip_client.mining_address,
-                block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_hash
             );
             return Ok(());
         }
