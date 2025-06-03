@@ -21,7 +21,7 @@ mod v0_to_v1 {
     use super::*;
     use crate::tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, DataRootLRU, IngressProofs,
-        IrysBlockHeaders, IrysTxHeaders,
+        IrysBlockHeaders, IrysTxHeaders, MempoolTxHeaders,
     };
     use reth_db::table::Table;
     use reth_db_api::cursor::DbCursorRO;
@@ -34,6 +34,7 @@ mod v0_to_v1 {
         debug!("Migrating from v0 to v1");
         move_all_records::<IrysBlockHeaders, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<IrysTxHeaders, TXOld, TXNew>(tx_old, tx_new)?;
+        move_all_records::<MempoolTxHeaders, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<CachedDataRoots, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<CachedChunksIndex, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<CachedChunks, TXOld, TXNew>(tx_old, tx_new)?;

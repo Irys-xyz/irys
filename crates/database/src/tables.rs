@@ -119,6 +119,12 @@ table IrysTxHeaders {
     type Value = CompactTxHeader;
 }
 
+/// Stores tx headers that are awaiting confirmation in the mempool
+table MempoolTxHeaders {
+    type Key = H256;
+    type Value = CompactTxHeader;
+}
+
 /// Stores commitment transactions
 table IrysCommitments {
     type Key = H256;
