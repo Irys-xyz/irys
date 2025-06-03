@@ -1489,8 +1489,11 @@ impl Inner {
             .anchor_expiry_depth as u64;
 
         let mempool_state_read_guard = mempool_state.read().await;
+        let anchor_found_in_recent_valid_txs =
+            mempool_state_read_guard.recent_valid_tx.contains(anchor);
+        drop(mempool_state_read_guard);
         // Allow transactions to use the txid of a transaction in the mempool
-        if mempool_state_read_guard.recent_valid_tx.contains(anchor) {
+        if anchor_found_in_recent_valid_txs {
             let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
             let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
             // Just provide the most recent block as an anchor
@@ -1502,8 +1505,6 @@ impl Inner {
                 _ => {}
             };
         }
-
-        drop(mempool_state_read_guard); // Release read lock before acquiring write lock
 
         match irys_database::block_header_by_hash(&read_tx, anchor, false) {
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
