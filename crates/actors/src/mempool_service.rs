@@ -442,7 +442,7 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
-    async fn handle_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
+    async fn handle_get_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
         // if tx exists
@@ -1303,7 +1303,7 @@ impl Inner {
         Box::pin(async move {
             match msg {
                 MempoolServiceMessage::GetTransaction(tx, response) => {
-                    let response_message = self.handle_transaction_message(tx).await;
+                    let response_message = self.handle_get_transaction_message(tx).await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
