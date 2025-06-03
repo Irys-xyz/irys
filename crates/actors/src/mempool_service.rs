@@ -1142,13 +1142,10 @@ impl Inner {
             .await
             .map_err(|_| TxIngressError::DatabaseError)?;
 
-        let mempool_state_read_guard = mempool_state.read().await;
         let read_reth_tx = &self
             .reth_db
             .tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
-
-        drop(mempool_state_read_guard);
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
