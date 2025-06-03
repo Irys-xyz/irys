@@ -12,9 +12,9 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_testing_utils::setup_tracing_and_temp_dir;
-use irys_types::TxChunkOffset;
 use irys_types::{
-    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, UnpackedChunk,
+    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
+    UnpackedChunk,
 };
 use rand::Rng;
 use std::time::Duration;
