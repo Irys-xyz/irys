@@ -124,7 +124,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
 
                 block_tree_sender
                     .send(
-                        crate::block_tree_service::BlockTreeServiceMessage::ValidationResult {
+                        crate::block_tree_service::BlockTreeServiceMessage::ValidationComplete {
                             block_hash,
                             validation_result,
                         },

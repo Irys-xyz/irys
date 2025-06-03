@@ -66,7 +66,7 @@ pub enum BlockTreeServiceMessage {
         all_txs: Arc<Vec<IrysTransactionHeader>>,
         response: oneshot::Sender<eyre::Result<()>>,
     },
-    ValidationResult {
+    ValidationComplete {
         block_hash: H256,
         validation_result: ValidationResult,
     },
@@ -205,11 +205,11 @@ impl BlockTreeServiceInner {
                 let result = self.on_block_prevalidated(block, all_txs).await;
                 let _ = response.send(result);
             }
-            BlockTreeServiceMessage::ValidationResult {
+            BlockTreeServiceMessage::ValidationComplete {
                 block_hash,
                 validation_result,
             } => {
-                self.on_validation_result(block_hash, validation_result);
+                self.on_block_validation_complete(block_hash, validation_result);
             }
         }
         Ok(())
@@ -323,7 +323,11 @@ impl BlockTreeServiceInner {
             .iter()
             .position(|x| x.0 == arc_block.block_hash)
         else {
-            panic!("Finalized block not in longest chain");
+            info!(
+                "Validated block not in longest chain, block {} height: {}, skipping finalization",
+                arc_block.block_hash, arc_block.height
+            );
+            return;
         };
 
         if current_index < migration_depth {
@@ -431,20 +435,29 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    fn on_validation_result(&mut self, block_hash: H256, validation_result: ValidationResult) {
+    fn on_block_validation_complete(
+        &mut self,
+        block_hash: H256,
+        validation_result: ValidationResult,
+    ) {
         debug!(
-            "On validation result {} {:?}",
+            "On validation complete : result {} {:?}",
             block_hash, validation_result
         );
         match validation_result {
             ValidationResult::Invalid => {
+                // Do nothing - TODO probably remove from cache
                 error!("{} INVALID BLOCK", block_hash.0.to_base58());
             }
             ValidationResult::Valid => {
                 let binding = self.cache.clone();
                 let mut cache = binding.write().unwrap();
 
-                // Mark block as validated in cache
+                // Get the current tip before any changes
+                let old_tip = cache.tip.clone();
+                let old_tip_block = cache.get_block(&old_tip).unwrap().clone();
+
+                // Mark block as validated in cache, this will update the canonical chain
                 if let Err(_) = cache.mark_block_as_valid(&block_hash) {
                     error!(
                         "Unable to mark block as Validated: {}",
@@ -453,66 +466,57 @@ impl BlockTreeServiceInner {
                     return;
                 }
 
-                // Process new tip if available
-                let Some((block_entry, _, _)) = cache.get_earliest_not_onchain_in_longest_chain()
+                // let (longest_chain, not_on_chain_count) = cache.get_canonical_chain();
+                let Some((_block_entry, fork_blocks, _)) =
+                    cache.get_earliest_not_onchain_in_longest_chain()
                 else {
                     debug!("No new tip found {}", block_hash);
                     return;
                 };
 
-                //let block_entry = cache.blocks.get(&block_hash).unwrap();
+                // if the old tip isn't in the fork_blocks, it's a reorg
+                let is_reorg = fork_blocks
+                    .iter()
+                    .find(|bh| bh.block_hash == old_tip)
+                    .is_none();
 
                 // Get block info before mutable operations
-                let bh = block_entry.block.block_hash;
+                let block_entry = cache.blocks.get(&block_hash).unwrap();
                 let arc_block = Arc::new(block_entry.block.clone());
                 let all_tx = block_entry.all_tx.clone();
 
-                if bh != block_hash {
-                    debug!(
-                        "get_earliest_not_onchain_in_longest_chain did not return {} but {} {}",
-                        block_hash, bh, arc_block.height
-                    );
-                }
-
                 // Now do mutable operations
-                match cache.mark_tip(&bh) {
-                    Ok(TipChangeResult::Reorg {
-                        orphaned_blocks,
-                        fork_height,
-                    }) => {
+                if cache.mark_tip(&block_hash).is_ok() {
+                    if is_reorg {
+                        let orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
+                        let fork_hash = orphaned_blocks.first().unwrap().previous_block_hash;
+                        let fork_height = cache.get_block(&fork_hash).unwrap().height;
                         debug!(
                             "Reorg when block height {} fully validated {}",
-                            arc_block.height, bh
+                            arc_block.height, arc_block.block_hash
                         );
-                        // Broadcast reorg event using the shared sender
                         let event = ReorgEvent {
-                            orphaned_blocks: orphaned_blocks.clone(),
+                            orphaned_blocks: orphaned_blocks
+                                .iter()
+                                .map(|bh| bh.block_hash)
+                                .collect(),
                             fork_height,
-                            new_tip: bh,
+                            new_tip: block_hash,
                             timestamp: SystemTime::now(),
                         };
 
-                        // Send via service_senders
+                        // Broadcast reorg event using the shared sender
                         if let Err(e) = self.service_senders.reorg_events.send(event) {
                             debug!("No reorg subscribers: {:?}", e);
                         }
-
-                        self.notify_services_of_block_confirmation(bh, &arc_block, all_tx);
-                    }
-                    Ok(TipChangeResult::Extension) => {
+                    } else {
                         debug!(
                             "\u{001b}[32mExtending longest chain to height {} {}\u{001b}[0m",
-                            arc_block.height, bh
+                            arc_block.height, arc_block.block_hash
                         );
-                        self.notify_services_of_block_confirmation(bh, &arc_block, all_tx);
                     }
-                    Ok(TipChangeResult::NoChange) => {
-                        // No action needed
-                        debug!("No Change {}", bh);
-                    }
-                    Err(e) => {
-                        error!("Failed to mark tip: {}", e);
-                    }
+
+                    self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
 
                 // Handle block finalization
@@ -1087,13 +1091,12 @@ impl BlockTreeCache {
                 let prev_children = prev_entry.children.clone();
 
                 match prev_entry.chain_state {
-                    ChainState::NotOnchain(_) => Err(eyre::eyre!("invalid_tip")),
                     ChainState::Onchain => {
-                        // Mark other branches as validated
+                        // Mark other branches as not onchain (but preserve their validation state)
                         self.mark_off_chain(prev_children, &block.block_hash);
                         Ok(())
                     }
-                    ChainState::Validated(_) => {
+                    ChainState::NotOnchain(BlockState::ValidBlock) | ChainState::Validated(_) => {
                         // Update previous block to on_chain
                         if let Some(entry) = self.blocks.get_mut(&prev_hash) {
                             entry.chain_state = ChainState::Onchain;
@@ -1101,17 +1104,14 @@ impl BlockTreeCache {
                         // Recursively mark previous blocks
                         self.mark_on_chain(&prev_block)
                     }
+                    ChainState::NotOnchain(_) => Err(eyre::eyre!("invalid_tip")),
                 }
             }
         }
     }
 
     /// Marks a block as the new tip
-    pub fn mark_tip(&mut self, block_hash: &BlockHash) -> eyre::Result<TipChangeResult> {
-        // Capture the old canonical chain before any changes
-        let old_canonical_chain = self.get_canonical_chain();
-        let old_tip = self.tip;
-
+    pub fn mark_tip(&mut self, block_hash: &BlockHash) -> eyre::Result<bool> {
         // Get the current block
         let block_entry = self
             .blocks
@@ -1119,9 +1119,7 @@ impl BlockTreeCache {
             .ok_or_else(|| eyre::eyre!("Block not found in cache"))?;
 
         let block = block_entry.block.clone();
-
-        // Check if this is just extending the current chain
-        let is_extension = block.previous_block_hash == old_tip;
+        let old_tip = self.tip;
 
         // Recursively mark previous blocks
         self.mark_on_chain(&block)?;
@@ -1140,79 +1138,7 @@ impl BlockTreeCache {
             block.height
         );
 
-        // Determine the type of tip change
-        if old_tip == *block_hash {
-            Ok(TipChangeResult::NoChange)
-        } else if is_extension {
-            Ok(TipChangeResult::Extension)
-        } else {
-            // This is potentially a reorg - need to check for orphaned blocks
-            let new_canonical_chain = self.get_canonical_chain();
-
-            // Compare old and new chains to find orphaned blocks
-            let old_hashes: Vec<BlockHash> = old_canonical_chain
-                .0
-                .iter()
-                .map(|(hash, _, _, _)| *hash)
-                .collect();
-            let new_hashes: Vec<BlockHash> = new_canonical_chain
-                .0
-                .iter()
-                .map(|(hash, _, _, _)| *hash)
-                .collect();
-
-            // Find the common ancestor
-            let mut common_ancestor_index = 0;
-            for (i, (old, new)) in old_hashes.iter().zip(new_hashes.iter()).enumerate() {
-                if old == new {
-                    common_ancestor_index = i;
-                } else {
-                    break;
-                }
-            }
-
-            // Collect orphaned blocks
-            let orphaned_blocks: Vec<BlockHash> = old_hashes[common_ancestor_index + 1..]
-                .iter()
-                .filter(|hash| !new_hashes.contains(hash))
-                .copied()
-                .collect();
-
-            if !orphaned_blocks.is_empty() {
-                let fork_height = old_canonical_chain
-                    .0
-                    .get(common_ancestor_index)
-                    .map(|(_, height, _, _)| *height)
-                    .unwrap_or(0);
-
-                info!(
-                "🔄 REORG DETECTED: {} blocks orphaned, fork at height {}, new tip: {} (height: {})",
-                orphaned_blocks.len(),
-                fork_height,
-                block_hash.0.to_base58(),
-                block.height
-            );
-
-                // Log details about orphaned blocks
-                for orphaned_hash in &orphaned_blocks {
-                    if let Some(orphaned_entry) = self.blocks.get(&orphaned_hash) {
-                        debug!(
-                            "  Orphaned block: {} at height {}",
-                            orphaned_hash.0.to_base58(),
-                            orphaned_entry.block.height
-                        );
-                    }
-                }
-
-                Ok(TipChangeResult::Reorg {
-                    orphaned_blocks,
-                    fork_height,
-                })
-            } else {
-                // This case might happen if we're marking a tip on a fork that was already validated
-                Ok(TipChangeResult::Extension)
-            }
-        }
+        Ok(old_tip != *block_hash)
     }
 
     pub fn mark_block_as_validation_scheduled(
@@ -1236,9 +1162,10 @@ impl BlockTreeCache {
             if entry.chain_state == ChainState::NotOnchain(BlockState::ValidationScheduled) {
                 entry.chain_state = ChainState::NotOnchain(BlockState::ValidBlock);
                 self.update_longest_chain_cache();
+                return Ok(());
             }
         }
-        Ok(())
+        Err(eyre::eyre!("unable to mark block as valid"))
     }
 
     /// Gets block by hash
@@ -2021,12 +1948,12 @@ mod tests {
             cache.add_validated_block(b13.clone(), BlockState::ValidBlock, all_tx.clone()),
             Ok(_)
         );
-        let result = cache.mark_tip(&b13.block_hash).unwrap();
+        let reorg = cache.mark_tip(&b13.block_hash).unwrap();
 
         // The tip does change here, even though it's not part of the longest
         // chain, this seems like a bug
         println!("tip: {} after mark_tip()", cache.tip);
-        assert_matches!(result, TipChangeResult::Extension);
+        assert!(reorg);
 
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
         // Although b13 becomes the tip, it's not included in the longest_chain_cache.
@@ -2077,18 +2004,18 @@ mod tests {
         // b14 isn't validated so it doesn't count towards the not_onchain_count
         assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(_));
 
-        // Try to mutate the state of the cache with some validations
+        // Try to mutate the state of the cache with some random validations
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&BlockHash::random()),
             Ok(_)
         );
-        assert_matches!(cache.mark_block_as_valid(&BlockHash::random()), Ok(_));
+        assert_matches!(cache.mark_block_as_valid(&BlockHash::random()), Err(_));
         // Attempt to mark the already onchain b13 to prior vdf states
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b13.block_hash),
             Ok(_)
         );
-        assert_matches!(cache.mark_block_as_valid(&b13.block_hash), Ok(_));
+        assert_matches!(cache.mark_block_as_valid(&b13.block_hash), Err(_));
         // Verify its state wasn't changed
         assert_eq!(
             cache.get_block_and_status(&b13.block_hash).unwrap(),
@@ -2114,7 +2041,7 @@ mod tests {
             )
         );
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b14.block_hash,
                 &ChainState::NotOnchain(BlockState::ValidationScheduled),
                 &cache
@@ -2131,7 +2058,7 @@ mod tests {
             (&b14, &ChainState::NotOnchain(BlockState::ValidBlock))
         );
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b14.block_hash,
                 &ChainState::NotOnchain(BlockState::ValidBlock),
                 &cache
@@ -2146,7 +2073,7 @@ mod tests {
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(cache.add_block(&b15, all_tx.clone()), Ok(_));
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b14.block_hash,
                 &ChainState::NotOnchain(BlockState::ValidBlock),
                 &cache
@@ -2161,7 +2088,7 @@ mod tests {
             Ok(_)
         );
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2183,7 +2110,7 @@ mod tests {
             Ok(_)
         );
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2196,7 +2123,7 @@ mod tests {
         // Mark b16 as vdf validated eve though b15 is not
         assert_matches!(cache.mark_block_as_valid(&b16.block_hash), Ok(_));
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2216,7 +2143,7 @@ mod tests {
             (&b14, &ChainState::Onchain)
         );
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2239,7 +2166,7 @@ mod tests {
 
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
-            cache.add_validated_block(b12.clone(), BlockState::ValidationScheduled, all_tx),
+            cache.add_validated_block(b12.clone(), BlockState::ValidationScheduled, all_tx.clone()),
             Ok(())
         );
         assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(_));
@@ -2247,11 +2174,63 @@ mod tests {
         // When a locally produced block is added as validated "onchain" but it
         // hasn't yet been validated by the validation_service
         assert_matches!(
-            check_earliest_not_validated(
+            check_earliest_not_onchian(
                 &b12.block_hash,
                 &ChainState::Validated(BlockState::ValidationScheduled),
                 &cache
             ),
+            Ok(_)
+        );
+
+        // <Reset the cache>
+        let b11 = random_block(U256::zero());
+        let mut cache = BlockTreeCache::new(&b11);
+        assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
+
+        let b12 = extend_chain(random_block(U256::one()), &b11);
+        assert_matches!(
+            cache.add_validated_block(b12.clone(), BlockState::ValidBlock, all_tx.clone()),
+            Ok(_)
+        );
+        assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
+
+        assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(_));
+
+        // Create a fork at b12
+        let b13a = extend_chain(random_block(U256::from(2)), &b12);
+        let b13b = extend_chain(random_block(U256::from(2)), &b12);
+
+        assert_matches!(
+            cache.add_validated_block(b13a.clone(), BlockState::ValidBlock, all_tx.clone()),
+            Ok(_)
+        );
+        assert_matches!(
+            cache.add_validated_block(b13b.clone(), BlockState::ValidBlock, all_tx.clone()),
+            Ok(_)
+        );
+
+        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 1, &cache), Ok(_));
+
+        assert_matches!(cache.mark_tip(&b13a.block_hash), Ok(_));
+        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 0, &cache), Ok(_));
+
+        // extend the fork to make it canonical
+        let b14b = extend_chain(random_block(U256::from(3)), &b13b);
+        assert_matches!(
+            cache.add_validated_block(b14b.clone(), BlockState::ValidBlock, all_tx.clone()),
+            Ok(_)
+        );
+
+        assert_matches!(
+            check_longest_chain(&[&b11, &b12, &b13b, &b14b], 2, &cache),
+            Ok(_)
+        );
+
+        // Mark the new tip
+        assert_matches!(cache.mark_tip(&b14b.block_hash), Ok(_));
+
+        assert_matches!(
+            check_longest_chain(&[&b11, &b12, &b13b, &b14b], 0, &cache),
             Ok(_)
         );
     }
@@ -2276,11 +2255,12 @@ mod tests {
         new_block
     }
 
-    fn check_earliest_not_validated(
+    fn check_earliest_not_onchian(
         block_hash: &BlockHash,
         chain_state: &ChainState,
         cache: &BlockTreeCache,
     ) -> eyre::Result<()> {
+        let _x = 1;
         if let Some((block_entry, _, _)) = cache.get_earliest_not_onchain_in_longest_chain() {
             let c_s = &block_entry.chain_state;
 
@@ -2324,7 +2304,10 @@ mod tests {
         );
         ensure!(
             not_onchain_count == expected_not_onchain,
-            "Number of not-onchain blocks does not match expected"
+            format!(
+                "Number of not-onchain blocks ({}) does not match expected ({})",
+                not_onchain_count, expected_not_onchain
+            )
         );
         Ok(())
     }

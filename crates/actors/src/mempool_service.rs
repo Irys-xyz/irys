@@ -235,6 +235,7 @@ impl MempoolService {
         let storage_modules_guard = storage_modules_guard.clone();
         let irys_db = irys_db.clone();
         let service_senders = service_senders.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
         exec.clone().spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
             |shutdown| async move {
