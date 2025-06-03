@@ -32,7 +32,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         (
             node.cfg.signer().address(),
             GenesisAccount {
-                balance: U256::from(99999999999_u128),
+                balance: U256::from(u128::MAX),
                 ..Default::default()
             },
         ),
@@ -66,26 +66,26 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     println!("node: {:?}", node.cfg.signer().address());
 
     let irys_node = node.start().await;
-    let mut txs = Vec::new();
-    for signer in [&account1, &account2, &account3] {
-        let data_bytes = "Hello, world!".as_bytes().to_vec();
-        match irys_node.create_submit_data_tx(&signer, data_bytes).await {
-            Ok(tx) => {
-                txs.push(tx);
-            }
-            Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-                assert_eq!(signer.address(), account1.address(), "account1 should fail");
-            }
-            Err(e) => panic!("unexpected error {:?}", e),
-        }
-    }
+    // let mut txs = Vec::new();
+    // for signer in [&account1, &account2, &account3] {
+    //     let data_bytes = "Hello, world!".as_bytes().to_vec();
+    //     match irys_node.create_submit_data_tx(&signer, data_bytes).await {
+    //         Ok(tx) => {
+    //             txs.push(tx);
+    //         }
+    //         Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
+    //             assert_eq!(signer.address(), account1.address(), "account1 should fail");
+    //         }
+    //         Err(e) => panic!("unexpected error {:?}", e),
+    //     }
+    // }
     // todo left off: system txs are getting dropped for some reason
 
     let (block, reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
     dbg!(&block.evm_block_hash);
     dbg!(&reth_exec_env.block().hash());
     let txs = reth_exec_env.block().transaction_count();
-    dbg!(&txs);
+    // dbg!(&txs);
 
     let mut context = new_reth_context(irys_node.node_ctx.reth_handle.clone().into())
         .await

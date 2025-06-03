@@ -38,6 +38,7 @@ use reth::transaction_pool::TransactionPool;
 use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
+use reth_transaction_pool::BestTransactionsAttributes;
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
     collections::HashMap,
@@ -518,7 +519,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 pooled_tx
             }).map(|tx| {
                 context.inner.pool.add_transaction(
-                    reth_transaction_pool::TransactionOrigin::Private,
+                    reth_transaction_pool::TransactionOrigin::Local,
                     tx,
                 )
             });
@@ -537,6 +538,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             };
             let built = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
+            let pending = context.inner.pool.pending_transactions();
+            dbg!(&pending);
+            let queued = context.inner.pool.queued_transactions();
+            dbg!(&queued);
+
+            let best_transactions_attributes = BestTransactionsAttributes { basefee: 0, blob_fee: None } ;
+            let best_txs = context.inner.pool.best_transactions_with_attributes(best_transactions_attributes);
+            for best_tx in best_txs {
+                dbg!(& best_tx.hash());
+            }
             let block_hash = context.submit_payload(built.clone()).await?;
 
             // trigger forkchoice update via engine api to commit the block to the blockchain
