@@ -21,3 +21,6 @@ test-fuzz.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["derive_more"]
+
+[lints]
+workspace = true
