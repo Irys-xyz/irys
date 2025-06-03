@@ -177,6 +177,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 return Ok(None)
             }
 
+            // make sure the parent block is canonical on the reth side so we can build upon it & query for balances
+            // do this early
+            RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
+                head_hash: BlockHashType::Evm(prev_block_header.evm_block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            }).await??;
+
             // Get all the ingress proofs for data promotion
             let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
             let mut proofs: Vec<TxIngressProof> = Vec::new();
@@ -254,6 +262,40 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let publish_chunks_added = calculate_chunks_added(&publish_txs, config.consensus.chunk_size);
             let publish_max_chunk_offset =  prev_block_header.data_ledgers[DataLedger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
+
+            let mut context =  new_reth_context(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
+
+            // wait for the parent EVM block to become available
+            let parent = {
+                let mut attempts = 0;
+                loop {
+                    if attempts > 50 {
+                        error!("Failed to get parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
+                        break None;
+                    }
+
+                    let result = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_hash(prev_block_header.evm_block_hash, false)
+                        .await?;
+
+                    match result {
+                        Some(block) => {
+                            info!("Got parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
+                            break Some(block)
+                        },
+                        None => {
+                            attempts += 1;
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }.expect("Should be able to get the parent EVM block");
+
+            assert!(parent.header.hash == prev_block_header.evm_block_hash);
+            // now we can validate irys txs against the user's balance on the previous EVM block
 
             // Submit Ledger Transactions
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -466,9 +508,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 ema_irys_price: ema_irys_price.ema,
             };
 
-            // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-
-            let mut context =  new_reth_context(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
             // let shadows = submit_txs
             //         .iter()
@@ -499,50 +538,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // create a new reth payload
 
-            // make sure the parent block is canonical on the reth side so we can built upon it
-            RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
-                head_hash: BlockHashType::Evm(prev_block_header.evm_block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            }).await??;
 
-            // try to get block by hash
-            // let parent = context
-            // .rpc
-            // .inner
-            // .eth_api()
-            // .block_by_hash(prev_block_header.evm_block_hash, false)
-            // .await?.expect("Should be able to get the parent EVM block");
 
-            let parent = {
-                let mut attempts = 0;
-                loop {
-                    if attempts > 50 {
-                        error!("Failed to get parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
-                        break None;
-                    }
 
-                    let result = context
-                        .rpc
-                        .inner
-                        .eth_api()
-                        .block_by_hash(prev_block_header.evm_block_hash, false)
-                        .await?;
-
-                    match result {
-                        Some(block) => {
-                            info!("Got parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
-                            break Some(block)
-                        },
-                        None => {
-                            attempts += 1;
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-            }.expect("Should be able to get the parent EVM block");
-
-            assert!(parent.header.hash == prev_block_header.evm_block_hash);
 
             // generate payload attributes
             let payload_attrs = PayloadAttributes {

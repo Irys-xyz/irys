@@ -6,7 +6,7 @@ use core::fmt::Display;
 use eyre::eyre;
 use futures::future::{BoxFuture, Either};
 use irys_database::{
-    db::{IrysDatabaseExt as _, IrysDupCursorExt as _, RethDbWrapper},
+    db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
     submodule::get_data_size_by_data_root,
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
@@ -277,9 +277,11 @@ impl MempoolService {
         let shutdown_guard = loop {
             let mut msg_rx = pin!(self.msg_rx.recv());
             match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
-                }
+                Either::Left((Some(msg), _)) => self
+                    .inner
+                    .handle_message(msg)
+                    .await
+                    .inspect_err(|e| error!("Error processing message {:?}", &e))?,
                 Either::Left((None, _)) => {
                     tracing::warn!("receiver channel closed");
                     break None;
