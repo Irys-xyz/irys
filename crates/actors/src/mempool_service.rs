@@ -1013,8 +1013,6 @@ impl Inner {
         parent_evm_block_hash: Option<EvmBlockHash>,
     ) -> MempoolTxs {
         let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
-        // let reth_db = mempool_state_guard.reth_db.clone();
         let mut fees_spent_per_address = HashMap::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
@@ -1064,6 +1062,9 @@ impl Inner {
 
         // Process commitments in priority order (stakes then pledges)
         // This order ensures stake transactions are processed before pledges
+
+        let mempool_state_guard = mempool_state.read().await;
+
         for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
             // Gather all commitments of current type from all addresses
             let mut sorted_commitments: Vec<_> = mempool_state_guard
@@ -1089,6 +1090,7 @@ impl Inner {
 
         // Prepare storage transactions for inclusion after commitments
         let mut all_storage_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
+
         drop(mempool_state_guard);
 
         // Sort storage transactions by fee (highest first) to maximize revenue
