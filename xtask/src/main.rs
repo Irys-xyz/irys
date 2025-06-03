@@ -168,7 +168,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 },
                 sh,
             )?;
-            run_command(Commands::Check { args: vec![] }, sh)?;
+            {
+                // push -D warnings for just this command to mimic CI
+                let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
+                run_command(Commands::Check { args: vec![] }, sh)?;
+            }
             run_command(Commands::Clippy { args: vec![] }, sh)?;
             run_command(Commands::UnusedDeps, sh)?;
             if with_tests {

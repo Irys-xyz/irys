@@ -768,7 +768,7 @@ impl IrysNode {
         ServiceHandleWithShutdownSignal,
     )> {
         // initialize the databases
-        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
+        let (reth_node, _) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
 
         // start service senders/receivers
