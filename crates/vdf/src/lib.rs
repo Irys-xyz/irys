@@ -6,6 +6,7 @@ use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use tracing::debug;
 
 #[inline]
 pub fn vdf_sha(
@@ -21,12 +22,20 @@ pub fn vdf_sha(
     for checkpoint_idx in 0..num_checkpoints {
         salt.to_little_endian(&mut local_salt);
 
+        if checkpoint_idx == 0 {
+            debug!("Local salt: {:?}", local_salt);
+            debug!("Seed: {:?}", seed);
+        }
+
         for _ in 0..num_iterations {
             hasher.update(local_salt);
             hasher.update(seed.as_bytes());
             *seed = H256(hasher.finalize_reset().into());
         }
 
+        if checkpoint_idx == 0 {
+            debug!("Local result: {:?}", seed);
+        }
         // Store the result at the correct checkpoint index
         checkpoints[checkpoint_idx] = *seed;
 
@@ -96,6 +105,9 @@ pub fn warn_mismatches(a: &H256List, b: &H256List) {
             .filter(|(_i, (a, b))| a != b)
             .collect();
 
+    debug!("a: {:?}", a);
+    debug!("b: {:?}", b);
+
     for (index, (a, b)) in mismatches {
         tracing::error!(
             "Mismatched hashes at index {}: expected {:?} got {:?}",
@@ -140,6 +152,7 @@ pub async fn last_step_checkpoints_is_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
 ) -> eyre::Result<()> {
+    debug!("VDF: {:?}", vdf_info);
     let mut seed = if vdf_info.steps.len() >= 2 {
         vdf_info.steps[vdf_info.steps.len() - 2]
     } else {
@@ -219,11 +232,21 @@ pub async fn last_step_checkpoints_is_valid(
                     let mut seed = cp[i];
                     let mut hasher = Sha256::new();
 
+                    if i == 0 {
+                        debug!("Reset salt: {:?}", salt_buff);
+                        debug!("Reset seed: {:?}", seed);
+                    }
+
                     for _ in 0..num_iterations {
                         hasher.update(&salt_buff);
                         hasher.update(seed.as_bytes());
                         seed = H256(hasher.finalize_reset().into());
                     }
+
+                    if i == 0 {
+                        debug!("Reset result: {:?}", seed);
+                    }
+
                     seed
                 })
                 .collect::<Vec<H256>>()

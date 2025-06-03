@@ -53,6 +53,7 @@ pub fn run_vdf_for_genesis_block(
                 H256::from_base58("5mRzwP4eqmGjXmxmCGvW2y1PeNKURNxUKnQE53q27moC")
             );
             genesis_block.vdf_limiter_info.prev_output = hash;
+            // genesis_block.vdf_limiter_info.seed = hash;
         } else {
             assert_eq!(salt, U256::from(26));
             assert_eq!(
@@ -121,7 +122,7 @@ pub fn run_vdf(
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
-    let mut global_step_number = /* global_step_number */ 0;
+    let mut global_step_number = global_step_number;
     // FIXME: The reset seed is the same as the seed... which I suspect is incorrect!
     let reset_seed = initial_reset_seed;
     info!(
@@ -222,6 +223,8 @@ pub fn run_vdf(
         if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
             panic!("Unable to send new Seed to VDF service: {:?}", e);
         }
+        debug!("Sending checkpoints:");
+        debug!("{:?}", checkpoints);
         broadcast_mining_service.do_send(BroadcastMiningSeed {
             seed: Seed(hash),
             checkpoints: H256List(checkpoints.clone()),

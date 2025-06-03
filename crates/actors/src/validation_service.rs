@@ -158,7 +158,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
                     block_prev_step_number, block_hash
                 );
                 if let Err(vdf_error) =
-                    wait_for_vdf_step(vdf_service_sender.clone(), block_prev_step_number)
+                    wait_for_vdf_step(vdf_service_sender.clone(), block_prev_step_number + 1)
                         .await
                 {
                     error!(
@@ -177,11 +177,11 @@ impl Handler<RequestValidationMessage> for ValidationService {
                 let stored_steps =
                     match vdf_steps_guard_for_recall_validation.read().get_steps(ii(
                         block_prev_step_number,
-                        block_prev_step_number,
+                        block_prev_step_number + 1,
                     )) {
                         Ok(steps) => steps,
                         Err(error) => {
-                            error!("{:?}", error);
+                            error!("No stored steps: {:?}", error);
                             block_tree_service.do_send(ValidationResultMessage {
                                 block_hash,
                                 validation_result: ValidationResult::Invalid,
@@ -189,10 +189,11 @@ impl Handler<RequestValidationMessage> for ValidationService {
                             return;
                         }
                     };
+                debug!("stored_steps: {:?}", stored_steps);
                 if let Some(stored_previous_output) = stored_steps.get(0) {
                     if *stored_previous_output != prev_output {
                         error!(
-                            "Block validation {} failed: Expected stored step {} to be {}, but got {}",
+                            "Block validation {:?} failed: Expected stored step {:?} to be {:?}, but got {:?}",
                             block_hash, block_first_step_number, stored_previous_output, prev_output
                         );
                         block_tree_service.do_send(ValidationResultMessage {
