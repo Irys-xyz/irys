@@ -2,7 +2,8 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{
-    evm::IrysEvmConfig, IrysEthereumNode, IrysSystemTxValidator, SystemTxPriorityOrdering,
+    evm::IrysEvmConfig, payload::SystemTxRequest, IrysEthereumNode, IrysSystemTxValidator,
+    SystemTxPriorityOrdering,
 };
 use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
@@ -145,9 +146,13 @@ pub async fn run_node(
         .with_database(database.clone())
         .with_launch_context(task_executor.clone());
 
+    // Create the MPSC channel for system transaction requests
+    let (system_tx_sender, _system_tx_receiver) = std::sync::mpsc::channel::<SystemTxRequest>();
+
     let handle = builder
         .node(IrysEthereumNode {
             allowed_system_tx_origin: node_config.miner_address(),
+            system_tx_requester: system_tx_sender,
         })
         .launch_with_debug_capabilities()
         .await?;

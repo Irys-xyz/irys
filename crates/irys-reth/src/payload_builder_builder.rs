@@ -11,20 +11,21 @@ use reth_node_api::{FullNodeTypes, NodeTypes, PrimitivesTy, TxTy};
 use reth_node_builder::{
     components::PayloadBuilderBuilder, BuilderContext, PayloadBuilderConfig, PayloadTypes,
 };
-use reth_transaction_pool::{PoolTransaction, TransactionPool};
+use reth_transaction_pool::{EthPooledTransaction, PoolTransaction, TransactionPool};
+
+use crate::payload::SystemTxRequest;
 
 /// A basic ethereum payload service.
-#[derive(Clone, Default, Debug)]
-#[non_exhaustive]
-pub struct IrysPayloadBuilderBuilder;
+#[derive(Clone, Debug)]
+pub struct IrysPayloadBuilderBuilder {
+    pub system_tx_requester: std::sync::mpsc::Sender<SystemTxRequest>,
+}
 
 impl<Types, Node, Pool, Evm> PayloadBuilderBuilder<Node, Pool, Evm> for IrysPayloadBuilderBuilder
 where
     Types: NodeTypes<ChainSpec: EthereumHardforks, Primitives = EthPrimitives>,
     Node: FullNodeTypes<Types = Types>,
-    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Node::Types>>>
-        + Unpin
-        + 'static,
+    Pool: TransactionPool<Transaction = EthPooledTransaction> + Unpin + 'static,
     Evm: ConfigureEvm<
             Primitives = PrimitivesTy<Types>,
             NextBlockEnvCtx = reth_evm::NextBlockEnvAttributes,
@@ -49,6 +50,7 @@ where
             pool,
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(conf.gas_limit()),
+            self.system_tx_requester.clone(),
         ))
     }
 }

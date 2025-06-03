@@ -14,20 +14,25 @@ use reth_evm::{
     ConfigureEvm, Evm, NextBlockEnvAttributes,
 };
 use reth_evm_ethereum::EthEvmConfig;
-use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes};
+use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadId};
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
     error::InvalidPoolTransactionError, BestTransactions, BestTransactionsAttributes,
-    PoolTransaction, TransactionPool, ValidPoolTransaction,
+    EthPooledTransaction, PoolTransaction, TransactionPool, ValidPoolTransaction,
 };
 use revm::context_interface::Block as _;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use tracing::{debug, trace, warn};
 
-use reth_ethereum_payload_builder::{EthereumBuilderConfig, EthereumPayloadBuilder};
+use reth_ethereum_payload_builder::{
+    default_ethereum_payload, EthereumBuilderConfig, EthereumPayloadBuilder,
+};
 use reth_node_ethereum::{
     node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes,
@@ -35,14 +40,29 @@ use reth_node_ethereum::{
 use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use reth_transaction_pool::error::Eip4844PoolTransactionError;
 
-type BestTransactionsIter<Pool> = Box<
-    dyn BestTransactions<Item = Arc<ValidPoolTransaction<<Pool as TransactionPool>::Transaction>>>,
->;
+type BestTransactionsIter =
+    Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<EthPooledTransaction>>>>;
 
 /// Ethereum payload builder
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
-    inner: EthereumPayloadBuilder<Pool, Client, EvmConfig>,
+    /// Client providing access to node state.
+    client: Client,
+    /// Transaction pool.
+    pool: Pool,
+    /// The type responsible for creating the evm.
+    evm_config: EvmConfig,
+    /// Payload builder configuration.
+    builder_config: EthereumBuilderConfig,
+    /// System txs don't live inside the tx pool, so they need to be handled separately.
+    system_tx_requester: std::sync::mpsc::Sender<SystemTxRequest>,
+}
+
+pub struct SystemTxRequest {
+    /// Payload id
+    payload_id: PayloadId,
+    /// oneshot channel to receive the system txs
+    system_txs: tokio::sync::oneshot::Receiver<Vec<ValidPoolTransaction<EthPooledTransaction>>>,
 }
 
 impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
@@ -52,10 +72,31 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         pool: Pool,
         evm_config: EvmConfig,
         builder_config: EthereumBuilderConfig,
+        system_tx_requester: std::sync::mpsc::Sender<SystemTxRequest>,
     ) -> Self {
         Self {
-            inner: EthereumPayloadBuilder::new(client, pool, evm_config, builder_config),
+            client,
+            pool,
+            evm_config,
+            builder_config,
+            system_tx_requester,
         }
+    }
+}
+
+// Default implementation of [PayloadBuilder] for unit type
+impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig>
+where
+    EvmConfig: ConfigureEvm<Primitives = EthPrimitives, NextBlockEnvCtx = NextBlockEnvAttributes>,
+    Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
+    Pool: TransactionPool<Transaction = EthPooledTransaction>,
+{
+    pub fn best_transactions_with_attributes(
+        &self,
+        attributes: BestTransactionsAttributes,
+    ) -> BestTransactionsIter {
+        let txs = self.pool.best_transactions_with_attributes(attributes);
+        txs
     }
 }
 
@@ -64,7 +105,7 @@ impl<Pool, Client, EvmConfig> PayloadBuilder for IrysPayloadBuilder<Pool, Client
 where
     EvmConfig: ConfigureEvm<Primitives = EthPrimitives, NextBlockEnvCtx = NextBlockEnvAttributes>,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
-    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TransactionSigned>>,
+    Pool: TransactionPool<Transaction = EthPooledTransaction>,
 {
     type Attributes = EthPayloadBuilderAttributes;
     type BuiltPayload = EthBuiltPayload;
@@ -73,20 +114,43 @@ where
         &self,
         args: BuildArguments<EthPayloadBuilderAttributes, EthBuiltPayload>,
     ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
-        self.inner.try_build(args)
+        let result = default_ethereum_payload(
+            self.evm_config.clone(),
+            self.client.clone(),
+            self.pool.clone(),
+            self.builder_config.clone(),
+            args,
+            |attributes| self.best_transactions_with_attributes(attributes),
+        );
+        result
     }
 
     fn on_missing_payload(
         &self,
         _args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
     ) -> MissingPayloadBehaviour<Self::BuiltPayload> {
-        self.inner.on_missing_payload(_args)
+        if self.builder_config.await_payload_on_missing {
+            MissingPayloadBehaviour::AwaitInProgress
+        } else {
+            MissingPayloadBehaviour::RaceEmptyPayload
+        }
     }
 
     fn build_empty_payload(
         &self,
         config: PayloadConfig<Self::Attributes>,
     ) -> Result<EthBuiltPayload, PayloadBuilderError> {
-        self.inner.build_empty_payload(config)
+        let args = BuildArguments::new(Default::default(), config, Default::default(), None);
+
+        default_ethereum_payload(
+            self.evm_config.clone(),
+            self.client.clone(),
+            self.pool.clone(),
+            self.builder_config.clone(),
+            args,
+            |attributes| self.best_transactions_with_attributes(attributes),
+        )?
+        .into_payload()
+        .ok_or_else(|| PayloadBuilderError::MissingPayload)
     }
 }

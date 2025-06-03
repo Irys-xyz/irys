@@ -59,6 +59,8 @@ use system_tx::SystemTransaction;
 use tracing::{debug, info};
 
 use crate::{
+    payload::SystemTxRequest,
+    payload_builder_builder::IrysPayloadBuilderBuilder,
     payload_service_builder::IyrsPayloadServiceBuilder,
     system_tx_validator::{SystemTxValidator, SystemTxValidatorBuilder},
 };
@@ -74,7 +76,6 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransactio
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
     TxLegacy {
-        // gas_limit: 10,
         gas_limit: 99000,
         value: U256::ZERO,
         nonce,
@@ -86,10 +87,10 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransactio
 }
 
 /// Type configuration for an Irys-Ethereum node.
-#[derive(Debug, Default, Clone, Copy)]
-// #[non_exhaustive]
+#[derive(Debug, Clone)]
 pub struct IrysEthereumNode {
     pub allowed_system_tx_origin: Address,
+    pub system_tx_requester: std::sync::mpsc::Sender<SystemTxRequest>,
 }
 
 impl NodeTypes for IrysEthereumNode {
@@ -108,7 +109,7 @@ impl IrysEthereumNode {
     ) -> ComponentsBuilder<
         Node,
         IrysPoolBuilder,
-        IyrsPayloadServiceBuilder<EthereumPayloadBuilder>,
+        IyrsPayloadServiceBuilder<IrysPayloadBuilderBuilder>,
         EthereumNetworkBuilder,
         IrysExecutorBuilder,
         EthereumConsensusBuilder,
@@ -127,7 +128,9 @@ impl IrysEthereumNode {
                 allowed_system_tx_origin: self.allowed_system_tx_origin,
             })
             .executor(IrysExecutorBuilder)
-            .payload(IyrsPayloadServiceBuilder::default())
+            .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
+                system_tx_requester: self.system_tx_requester.clone(),
+            }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
     }
@@ -145,7 +148,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         IrysPoolBuilder,
-        IyrsPayloadServiceBuilder<EthereumPayloadBuilder>,
+        IyrsPayloadServiceBuilder<IrysPayloadBuilderBuilder>,
         EthereumNetworkBuilder,
         IrysExecutorBuilder,
         EthereumConsensusBuilder,
@@ -3002,6 +3005,11 @@ pub mod test_utils {
 
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();
+
+            // Create the MPSC channel for system transaction requests
+            let (system_tx_sender, _system_tx_receiver) =
+                std::sync::mpsc::channel::<SystemTxRequest>();
+
             let NodeHandle {
                 node,
                 node_exit_future: _,
@@ -3009,6 +3017,7 @@ pub mod test_utils {
                 .testing_node(exec.clone())
                 .node(IrysEthereumNode {
                     allowed_system_tx_origin: *allowed_system_tx_origin,
+                    system_tx_requester: system_tx_sender,
                 })
                 .launch()
                 .await?;
