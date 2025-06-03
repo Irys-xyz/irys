@@ -13,10 +13,10 @@ use irys_database::{
     {insert_tx_header, tx_header_by_txid, SystemLedger},
 };
 use irys_primitives::CommitmentType;
-use irys_reth_node_bridge::adapter::RethContext;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
-use irys_reth_node_bridge::new_reth_context;
-use irys_reth_node_bridge::node::RethNodeProvider;
+use irys_reth_node_bridge::{
+    adapter::RethContext, ext::IrysRethRpcTestContextExt as _, new_reth_context,
+    node::RethNodeProvider,
+};
 use irys_storage::StorageModulesReadGuard;
 use irys_types::EvmBlockHash;
 use irys_types::{
