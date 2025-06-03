@@ -171,32 +171,25 @@ where
             warn!("Failed to send system tx request: {}", e);
             return Vec::new();
         }
+        tracing::info!("Sent system tx request");
 
         // Try to receive system transactions with a timeout
-        // Note: This is a blocking call, but with a short timeout
-        let rt = tokio::runtime::Handle::try_current();
-
-        if let Ok(handle) = rt {
-            match handle.block_on(async {
-                tokio::time::timeout(Duration::from_millis(100), response_rx).await
-            }) {
-                Ok(Ok(system_txs)) => {
-                    debug!("Received {} system transactions", system_txs.len());
-                    system_txs
-                }
-                Ok(Err(e)) => {
-                    warn!("Failed to receive system transactions: {}", e);
-                    Vec::new()
-                }
-                Err(_) => {
-                    debug!("Timeout waiting for system transactions");
-                    Vec::new()
-                }
+        //
+        match futures::executor::block_on(async {
+            tokio::time::timeout(Duration::from_millis(100), response_rx).await
+        }) {
+            Ok(Ok(system_txs)) => {
+                debug!("Received {} system transactions", system_txs.len());
+                system_txs
             }
-        } else {
-            // If we're not in a tokio runtime, we can't await
-            warn!("Not in tokio runtime, cannot retrieve system transactions");
-            Vec::new()
+            Ok(Err(e)) => {
+                warn!("Failed to receive system transactions: {}", e);
+                Vec::new()
+            }
+            Err(_) => {
+                debug!("Timeout waiting for system transactions");
+                Vec::new()
+            }
         }
     }
 }

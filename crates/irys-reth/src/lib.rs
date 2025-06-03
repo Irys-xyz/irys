@@ -1265,11 +1265,11 @@ mod tests {
     /// - Setup: Use `setup_irys_reth` to launch node, `block_reward` to compose system tx, `sign_tx` to sign.
     /// - Action: Inject system tx with invalid origin.
     /// - Assertion: Tx is rejected with pool error.
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn external_users_cannot_submit_system_txs() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
-        let (node, ctx) = ctx.get_single_node()?;
+        let ((node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
         let mut system_tx_raw = compose_system_tx(0, 1, &system_tx);
@@ -1299,10 +1299,13 @@ mod tests {
     ///
     /// Assertion:
     /// - The system tx from second node is dropped from both pools and not included in the block.
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn stale_system_txs_get_dropped() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut first_node, mut second_node), ctx) = ctx.get_two_nodes()?;
+        let (
+            ((mut first_node, _first_node_systx_rx), (mut second_node, _second_node_systx_rx)),
+            ctx,
+        ) = ctx.get_two_nodes()?;
 
         // Submit normal transaction to first node
         let normal_tx_hash = create_and_submit_normal_tx(
@@ -1374,7 +1377,7 @@ mod tests {
         Ok(())
     }
 
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn block_gets_broadcasted_between_peers() -> eyre::Result<()> {
         let wallets = Wallet::new(2).wallet_gen();
         let trget_account = EthereumWallet::from(wallets[0].clone());
@@ -1389,8 +1392,8 @@ mod tests {
             eth_payload_attributes,
         )
         .await?;
-        let mut second_node = nodes.pop().unwrap();
-        let mut first_node = nodes.pop().unwrap();
+        let (mut second_node, second_node_systx_receiver) = nodes.pop().unwrap();
+        let (mut first_node, first_node_systx_receiver) = nodes.pop().unwrap();
         let genesis_blockhash = first_node
             .inner
             .provider
@@ -1454,7 +1457,7 @@ mod tests {
     }
 
     // assert that "incrementing" system txs update account state
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     #[rstest::rstest]
     #[case::release_stake(release_stake, signer_b())]
     #[case::release_stake_init_no_balance(release_stake, signer_random())]
@@ -1465,7 +1468,7 @@ mod tests {
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         let initial_balance = get_balance(&node.inner, target_signer.address());
         let initial_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
@@ -1513,7 +1516,7 @@ mod tests {
     }
 
     // check if the "decrementing" system txs update account state
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     #[rstest::rstest]
     #[case::stake(stake, signer_b())]
     #[case::storage_fees(storage_fees, signer_b())]
@@ -1522,7 +1525,7 @@ mod tests {
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         let initial_balance = get_balance(&node.inner, target_signer.address());
         let initial_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
@@ -1584,10 +1587,10 @@ mod tests {
     }
 
     // expect that system txs get executed first, no matter what. Normal txs get executed only afterwards
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn test_system_tx_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         // Create normal transactions with high gas price
         let normal_tx_hashes = create_and_submit_multiple_normal_txs(
@@ -1626,10 +1629,10 @@ mod tests {
     }
 
     // test decrementing when account does not exist (expect that even receipt not created)
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         // Create a random address that has never existed on chain
         let nonexistent_address = Address::random();
@@ -1686,10 +1689,10 @@ mod tests {
     }
 
     // test decrementing when account exists but not enough balance (expect failed tx receipt)
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         let funded_balance = get_balance(&node.inner, ctx.normal_signer.address());
 
@@ -1749,12 +1752,11 @@ mod tests {
     /// Asserts both txs are present in every block.
     /// Verifies sequential block production and tx inclusion.
     /// Expects latest block number to be 5 at the end.
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn mine_5_blocks_with_system_and_normal_tx() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
-        // Get genesis block hash for parent_blockhash
         let mut parent_blockhash = ctx.genesis_blockhash;
         let recipient = ctx.target_account.address();
 
@@ -1818,16 +1820,13 @@ mod tests {
     /// Asserts the system tx is rejected (not in block), normal tx is included.
     /// Expects only valid txs to be mined.
     /// Ensures parent blockhash check is enforced for system txs.
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn system_tx_with_invalid_parent_blockhash_is_rejected_by_custom_executor(
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
-        // Get genesis block hash for parent_blockhash
-        let recipient = ctx.target_account.address();
-
-        // Use a random blockhash instead of the real parent
+        // Create invalid parent blockhash (random, not actual parent block)
         let invalid_parent_blockhash = FixedBytes::random();
 
         // Create a system tx with the invalid parent blockhash
@@ -1841,7 +1840,7 @@ mod tests {
             0,
             U256::from(1234u64),
             2_000_000_000u128, // 2 Gwei
-            recipient,
+            ctx.normal_signer.address(),
             &ctx.normal_signer,
         )
         .await?;
@@ -1870,13 +1869,13 @@ mod tests {
     /// Asserts the system tx is rejected (not in block), normal tx is included.
     /// Expects only valid txs to be mined.
     /// Ensures block number check is enforced for system txs.
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn system_tx_with_invalid_block_number_is_rejected_by_custom_executor() -> eyre::Result<()>
     {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
-        // Use an invalid block number (should be 1, use 2)
+        // Use invalid block number (should be 1 for first block, but using 2)
         let invalid_block_number = 2u64;
 
         // Create a system tx with the valid parent blockhash but invalid block number
@@ -1919,12 +1918,11 @@ mod tests {
         Ok(())
     }
 
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn system_tx_with_invalid_signer_is_rejected_by_pool_validator() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
-        // Create a system tx with a valid block number and parent blockhash, but sign with a random (invalid) signer
         let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
         let invalid_signer = signer_random();
         let res = create_and_submit_system_tx(&mut node, system_tx, 0, &invalid_signer).await;
@@ -1936,10 +1934,10 @@ mod tests {
         Ok(())
     }
 
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn system_tx_with_invalid_origin_is_rejected_by_pool_validator() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (node, ctx) = ctx.get_single_node()?;
+        let ((node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         // Create a system tx with a valid block number and parent blockhash, signed by the correct signer
         let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
@@ -1962,11 +1960,12 @@ mod tests {
         Ok(())
     }
 
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
         // Setup nodes and context
         let ctx = TestContext::new().await?;
-        let ((mut node_a, mut node_b), ctx) = ctx.get_two_nodes()?;
+        let (((mut node_a, _node_a_systx_rx), (mut node_b, _node_b_systx_rx)), ctx) =
+            ctx.get_two_nodes()?;
         let reward_address = Address::random();
 
         // Node A: advance 3 blocks, 2 system txs per block
@@ -2057,7 +2056,7 @@ mod tests {
     /// 3. Roll back to block 1 via forkchoice update (safe/finalized = block 1)
     /// 4. Build a new fork block (block 2) on top of the rolled-back state
     /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn rollback_state_on_safe_blocks() -> eyre::Result<()> {
         // Setup custom payload attributes to control parent block hash
         let parent_tracker = Arc::new(Mutex::new(B256::ZERO));
@@ -2070,7 +2069,7 @@ mod tests {
         };
 
         let ctx = TestContext::new_with_payload_attributes(payload_attributes).await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         // Initial setup and baseline measurements
         let mut parent_blockhash = ctx.genesis_blockhash;
@@ -2268,7 +2267,10 @@ pub mod test_utils {
 
     /// Common setup for tests - creates wallets, nodes, and returns initialized context
     pub struct TestContext {
-        pub nodes: Vec<NodeHelperType<IrysEthereumNode>>,
+        pub nodes: Vec<(
+            NodeHelperType<IrysEthereumNode>,
+            std::sync::mpsc::Receiver<SystemTxRequest>,
+        )>,
         pub block_producer_a: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub block_producer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
@@ -2315,6 +2317,7 @@ pub mod test_utils {
             let genesis_blockhash = nodes
                 .get(0)
                 .unwrap()
+                .0
                 .inner
                 .provider
                 .consistent_provider()
@@ -2334,20 +2337,34 @@ pub mod test_utils {
             })
         }
 
-        pub fn get_single_node(mut self) -> eyre::Result<(NodeHelperType<IrysEthereumNode>, Self)> {
+        pub fn get_single_node(
+            mut self,
+        ) -> eyre::Result<(
+            (
+                NodeHelperType<IrysEthereumNode>,
+                std::sync::mpsc::Receiver<SystemTxRequest>,
+            ),
+            Self,
+        )> {
             if self.nodes.is_empty() {
                 return Err(eyre::eyre!("No nodes available"));
             }
-            let node = self.nodes.remove(0);
-            Ok((node, self))
+            let (node, system_tx_receiver) = self.nodes.remove(0);
+            Ok(((node, system_tx_receiver), self))
         }
 
         pub fn get_two_nodes(
             mut self,
         ) -> eyre::Result<(
             (
-                NodeHelperType<IrysEthereumNode>,
-                NodeHelperType<IrysEthereumNode>,
+                (
+                    NodeHelperType<IrysEthereumNode>,
+                    std::sync::mpsc::Receiver<SystemTxRequest>,
+                ),
+                (
+                    NodeHelperType<IrysEthereumNode>,
+                    std::sync::mpsc::Receiver<SystemTxRequest>,
+                ),
             ),
             Self,
         )> {
@@ -2975,7 +2992,14 @@ pub mod test_utils {
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
         attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
-    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
+    ) -> eyre::Result<(
+        Vec<(
+            NodeHelperType<IrysEthereumNode>,
+            std::sync::mpsc::Receiver<SystemTxRequest>,
+        )>,
+        TaskManager,
+        Wallet,
+    )>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
             PayloadAttributesBuilder<
@@ -2994,7 +3018,10 @@ pub mod test_utils {
         };
 
         // Create nodes and peer them
-        let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
+        let mut nodes: Vec<(
+            NodeTestContext<_, _>,
+            std::sync::mpsc::Receiver<SystemTxRequest>,
+        )> = Vec::with_capacity(num_nodes.len());
 
         for (idx, allowed_system_tx_origin) in num_nodes.iter().enumerate() {
             let node_config = NodeConfig::new(chain_spec.clone())
@@ -3007,7 +3034,7 @@ pub mod test_utils {
             let _enter = span.enter();
 
             // Create the MPSC channel for system transaction requests
-            let (system_tx_sender, _system_tx_receiver) =
+            let (system_tx_sender, system_tx_receiver) =
                 std::sync::mpsc::channel::<SystemTxRequest>();
 
             let NodeHandle {
@@ -3026,17 +3053,17 @@ pub mod test_utils {
 
             // Connect each node in a chain.
             if let Some(previous_node) = nodes.last_mut() {
-                previous_node.connect(&mut node).await;
+                previous_node.0.connect(&mut node).await;
             }
 
             // Connect last node with the first if there are more than two
             if idx + 1 == num_nodes.len() && num_nodes.len() > 2 {
                 if let Some(first_node) = nodes.first_mut() {
-                    node.connect(first_node).await;
+                    node.connect(&mut first_node.0).await;
                 }
             }
 
-            nodes.push(node);
+            nodes.push((node, system_tx_receiver));
         }
 
         Ok((
