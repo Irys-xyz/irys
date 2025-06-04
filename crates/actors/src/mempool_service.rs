@@ -6,11 +6,13 @@ use core::fmt::Display;
 use eyre::eyre;
 use futures::future::{BoxFuture, Either};
 use irys_database::{
+    all_mempool_tx_headers, clear_mempool_tx_headers,
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _, RethDbWrapper},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
+    insert_mempool_tx_header, insert_tx_header,
     submodule::get_data_size_by_data_root,
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
-    {insert_tx_header, tx_header_by_txid, SystemLedger},
+    tx_header_by_txid, SystemLedger,
 };
 use irys_primitives::CommitmentType;
 use irys_storage::StorageModulesReadGuard;
@@ -23,8 +25,11 @@ use irys_types::{
 use lru::LruCache;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::{
-    cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
-    DatabaseError,
+    cursor::DbDupCursorRO as _,
+    mdbx::{tx::Tx, RW},
+    transaction::DbTx as _,
+    transaction::DbTxMut as _,
+    Database as _, DatabaseError,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -262,6 +267,10 @@ impl MempoolService {
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting Mempool service");
 
+        if let Err(err) = self.inner.load_persisted_state().await {
+            error!(?err, "failed to load persisted mempool state");
+        }
+
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
             let mut msg_rx = pin!(self.msg_rx.recv());
@@ -287,6 +296,21 @@ impl MempoolService {
 
         // explicitly inform the TaskManager that we're shutting down
         drop(shutdown_guard);
+
+        // Persist pending transactions to a temporary table
+        let pending_txs: Vec<_> = {
+            let guard = self.inner.mempool_state.read().await;
+            guard.valid_tx.values().cloned().collect()
+        };
+        if let Err(err) = self.inner.irys_db.update_eyre(|tx| {
+            clear_mempool_tx_headers(tx)?;
+            for hdr in &pending_txs {
+                insert_mempool_tx_header(tx, hdr)?;
+            }
+            Ok(())
+        }) {
+            error!(?err, "failed to persist mempool state");
+        }
 
         tracing::info!("shutting down Mempool service");
         Ok(())
@@ -442,6 +466,26 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
+    /// Load persisted mempool transactions from the database
+    /// and then wipe the database
+    async fn load_persisted_state(&self) -> eyre::Result<()> {
+        let read_tx = self.read_tx().await?;
+        let txs = all_mempool_tx_headers(&read_tx)?;
+        read_tx.commit()?;
+
+        let mut guard = self.mempool_state.write().await;
+        for tx in txs {
+            guard.valid_tx.insert(tx.id, tx);
+        }
+        drop(guard);
+
+        self.irys_db.update_eyre(|tx| {
+            clear_mempool_tx_headers(tx)?;
+            Ok(())
+        })?;
+
+        Ok(())
+    }
     async fn handle_get_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
