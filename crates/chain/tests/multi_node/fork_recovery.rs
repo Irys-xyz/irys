@@ -189,13 +189,13 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // to trigger a reorganization. The losing peer's transaction will be evicted
     // and returned to the mempool.
     let reorg_tx: IrysTransaction;
-    let reorg_block_hash: H256;
-    let reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
+    let _reorg_block_hash: H256;
+    let _reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
         debug!(
             "GENESIS: should ignore {} and should already be on {} height: {}",
             peer2_block.block_hash, peer1_block.block_hash, genesis_block.height
         );
-        reorg_block_hash = peer1_block.block_hash;
+        _reorg_block_hash = peer1_block.block_hash;
         reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
         peer2_node.mine_block().await?;
         peer2_node.get_block_by_height(4).await?
@@ -204,7 +204,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
             "GENESIS: should ignore {} and should already be on {} height: {}",
             peer1_block.block_hash, peer2_block.block_hash, genesis_block.height
         );
-        reorg_block_hash = peer2_block.block_hash;
+        _reorg_block_hash = peer2_block.block_hash;
         reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
         peer1_node.mine_block().await?;
         peer1_node.get_block_by_height(4).await?
