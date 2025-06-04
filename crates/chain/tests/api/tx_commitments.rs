@@ -217,7 +217,6 @@ async fn get_commitment_status(
         response: oneshot_tx,
     });
 
-    
     oneshot_rx
         .await
         .expect("to receive CommitmentStatus from GetCommitmentStatus message")

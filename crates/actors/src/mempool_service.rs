@@ -1048,7 +1048,8 @@ impl Inner {
                 .values()
                 .flat_map(|txs| {
                     txs.iter()
-                        .filter(|tx| tx.commitment_type == *commitment_type).cloned()
+                        .filter(|tx| tx.commitment_type == *commitment_type)
+                        .cloned()
                 })
                 .collect();
 
@@ -1269,7 +1270,7 @@ impl Inner {
     async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
-        
+
         if mempool_state_guard.valid_tx.contains_key(&txid) {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
@@ -1280,7 +1281,6 @@ impl Inner {
         } else {
             drop(mempool_state_guard);
             let read_tx = self.read_tx().await;
-            
 
             if read_tx.is_err() {
                 Err(TxIngressError::DatabaseError)

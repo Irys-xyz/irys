@@ -279,7 +279,6 @@ async fn heavy_double_root_data_promotion_test() {
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
-    
     let _next_tx_index: usize;
 
     // if block_tx1.block_hash == block_tx2.block_hash {
@@ -356,10 +355,7 @@ async fn heavy_double_root_data_promotion_test() {
     debug!("P2 block {}", &blk.0.height);
 
     // ensure the ingress proof still exists
-    let ingress_proofs = db
-        .view(walk_all::<IngressProofs, _>)
-        .unwrap()
-        .unwrap();
+    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 1);
 
     // same chunks as tx1
@@ -511,8 +507,6 @@ async fn heavy_double_root_data_promotion_test() {
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
-    
-
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
@@ -575,10 +569,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     mine_blocks(&node.node_ctx, 5).await.unwrap();
     // ensure the ingress proof is gone
-    let ingress_proofs = db
-        .view(walk_all::<IngressProofs, _>)
-        .unwrap()
-        .unwrap();
+    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 0);
 
     node.node_ctx.stop().await;

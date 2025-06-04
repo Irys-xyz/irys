@@ -227,12 +227,11 @@ impl Handler<ConnectToPeerMessage> for RethServiceActor {
 
     fn handle(&mut self, msg: ConnectToPeerMessage, _ctx: &mut Self::Context) -> Self::Result {
         debug!("Connecting to {:?}", &msg);
-        self
-        .handle
-        .clone()
-        .ok_or_eyre("reth service uninitialized")?
-        .network
-        .add_peer(msg.peer_id, msg.peering_tcp_addr);
+        self.handle
+            .clone()
+            .ok_or_eyre("reth service uninitialized")?
+            .network
+            .add_peer(msg.peer_id, msg.peering_tcp_addr);
         Ok(())
     }
 }

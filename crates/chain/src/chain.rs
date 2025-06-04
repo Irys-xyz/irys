@@ -727,7 +727,6 @@ impl IrysNode {
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
                     debug!("Waiting for the main actor thread to finish");
-                    
 
                     actor_main_thread_handle
                         .join()
@@ -1122,7 +1121,7 @@ impl IrysNode {
         storage_modules_guard: StorageModulesReadGuard,
     ) -> Arc<ChunkProvider> {
         let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard.clone());
-        
+
         Arc::new(chunk_provider)
     }
 
@@ -1236,11 +1235,7 @@ impl IrysNode {
         storage_modules_guard: &StorageModulesReadGuard,
     ) -> (Arc<AtomicU64>, actix::Addr<PackingActor>) {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let sm_ids = storage_modules_guard
-            .read()
-            .iter()
-            .map(|s| s.id)
-            .collect();
+        let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let packing_config = PackingConfig::new(config);
         let packing_actor_addr = PackingActor::new(
             reth_node.task_executor.clone(),
@@ -1298,7 +1293,7 @@ impl IrysNode {
             )),
             // note: depending on the oracle, it may require spawning an async background service.
         };
-        
+
         Arc::new(price_oracle)
     }
 

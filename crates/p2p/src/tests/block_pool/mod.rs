@@ -204,7 +204,8 @@ async fn should_process_block() {
     .expect("can't process block");
 
     let block_header_in_discovery = block_discovery_stub
-        .get_blocks().first()
+        .get_blocks()
+        .first()
         .expect("to have a block")
         .clone();
     assert_eq!(block_header_in_discovery, test_header);

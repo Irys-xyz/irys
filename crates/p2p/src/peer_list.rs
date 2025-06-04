@@ -571,7 +571,9 @@ where
         let gossip_addr = peer.address.gossip;
         let peer_address = peer.address;
 
-        if let std::collections::hash_map::Entry::Vacant(e) = self.peer_list_cache.entry(mining_addr) {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.peer_list_cache.entry(mining_addr)
+        {
             debug!("Adding peer {:?} to the peer list", mining_addr);
             e.insert(peer);
             self.gossip_addr_to_mining_addr_map
@@ -1964,9 +1966,7 @@ mod tests {
             true,
             None,
         );
-        let known_peers: HashSet<_> = vec![peer1.address, peer2.address]
-            .into_iter()
-            .collect();
+        let known_peers: HashSet<_> = vec![peer1.address, peer2.address].into_iter().collect();
         let version_request = VersionRequest::default();
 
         PeerListServiceWithClient::announce_yourself_to_all_peers(

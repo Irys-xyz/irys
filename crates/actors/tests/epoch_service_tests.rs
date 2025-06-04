@@ -461,7 +461,8 @@ async fn partition_expiration_and_repacking_test() {
         let capacity_partitions: Vec<H256> = partition_assignments_read
             .read()
             .capacity_partitions
-            .keys().copied()
+            .keys()
+            .copied()
             .collect();
 
         assert!(
@@ -582,13 +583,16 @@ async fn partition_expiration_and_repacking_test() {
         println!("{}", serde_json::to_string_pretty(&sub_slots).unwrap());
 
         let publish_partition = *pub_slots[0]
-            .partitions.first()
+            .partitions
+            .first()
             .expect("publish ledger slot 0 should have a partition assigned");
         let submit_partition = *sub_slots[1]
-            .partitions.first()
+            .partitions
+            .first()
             .expect("submit ledger slot 1 should have a partition assigned");
         let submit_partition2 = *sub_slots[2]
-            .partitions.first()
+            .partitions
+            .first()
             .expect("submit ledger slot 2 should have a partition assigned");
 
         (publish_partition, submit_partition, submit_partition2)

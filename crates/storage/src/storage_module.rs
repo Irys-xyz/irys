@@ -405,9 +405,7 @@ impl StorageModule {
             .wrap_err("Could not update submodule interval files")?;
 
         for (_interval, submodule) in self.submodules.iter() {
-            submodule
-                .db
-                .update_eyre(clear_submodule_database)?;
+            submodule.db.update_eyre(clear_submodule_database)?;
         }
 
         Ok(storage_interval)
@@ -779,11 +777,7 @@ impl StorageModule {
                     // Add the tx_path_hash to every offset in the intersecting range
                     for offset in *range.start()..=*range.end() {
                         let part_offset = PartitionChunkOffset::from(offset);
-                        add_tx_path_hash_to_offset_index(
-                            tx,
-                            part_offset,
-                            Some(tx_path_hash),
-                        )?;
+                        add_tx_path_hash_to_offset_index(tx, part_offset, Some(tx_path_hash))?;
                     }
                     // Also update the start offset by data_root index
                     add_start_offset_to_data_root_index(tx, data_root, relative_offset)?;
@@ -1280,7 +1274,8 @@ pub fn get_overlapped_storage_modules(
                 .partition_assignment
                 .read()
                 .unwrap()
-                .and_then(|pa| pa.ledger_id) == Some(ledger as u32))
+                .and_then(|pa| pa.ledger_id)
+                == Some(ledger as u32))
                 && module
                     .get_storage_module_ledger_range()
                     .is_ok_and(|range| range.overlaps(tx_chunk_range))
@@ -1304,7 +1299,8 @@ pub fn get_storage_module_at_offset(
                 .partition_assignment
                 .read()
                 .unwrap()
-                .and_then(|pa| pa.ledger_id) == Some(ledger as u32))
+                .and_then(|pa| pa.ledger_id)
+                == Some(ledger as u32))
                 && module
                     .get_storage_module_ledger_range()
                     .is_ok_and(|range| range.contains_point(chunk_offset))

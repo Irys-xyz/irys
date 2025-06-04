@@ -437,9 +437,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             //if transaction exists
             if oneshot_rx
-                    .await
-                    .expect("to process ChunkIngressMessage")
-                    .expect("boolean response to transaction existence")
+                .await
+                .expect("to process ChunkIngressMessage")
+                .expect("boolean response to transaction existence")
             {
                 break;
             }
@@ -849,7 +849,6 @@ pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction
         ..Default::default()
     };
 
-    
     signer.sign_commitment(stake_tx).unwrap()
 }
 
@@ -862,7 +861,6 @@ pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransactio
         ..Default::default()
     };
 
-    
     signer.sign_commitment(stake_tx).unwrap()
 }
 

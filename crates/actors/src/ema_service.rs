@@ -585,7 +585,6 @@ mod price_cache_context {
             //    which will be reported to other systems querying for EMA prices.
 
             // calculate the new EMA using historical oracle price + ema price
-            
 
             oracle_price_to_use
                 .calculate_ema(
@@ -823,7 +822,7 @@ mod tests {
 
     pub(crate) fn rand_price(height: u64) -> IrysTokenPrice {
         let amount = TOKEN_SCALE + IrysTokenPrice::token(Decimal::from(height)).unwrap().amount;
-        
+
         IrysTokenPrice::new(amount)
     }
 
@@ -842,12 +841,7 @@ mod tests {
             block_hash = H256::random();
             block.block_hash = block_hash;
             block_tree_cache
-                .add_common(
-                    block.block_hash,
-                    block,
-                    Arc::new(Vec::new()),
-                    state.clone(),
-                )
+                .add_common(block.block_hash, block, Arc::new(Vec::new()), state.clone())
                 .unwrap();
         }
         let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));

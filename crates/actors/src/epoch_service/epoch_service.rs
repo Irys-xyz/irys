@@ -306,7 +306,6 @@ impl EpochServiceActor {
     /// than the `epoch_length` (term length) of the ledger.
     fn expire_term_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
-        
 
         let mut ledgers = self.ledgers.write().unwrap();
         let expired_hashes: Vec<H256> = ledgers.get_expired_partition_hashes(epoch_height);

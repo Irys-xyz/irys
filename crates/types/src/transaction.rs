@@ -419,7 +419,6 @@ mod tests {
     }
 
     fn mock_header(config: &ConsensusConfig) -> IrysTransactionHeader {
-        
         IrysTransactionHeader {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
@@ -438,7 +437,6 @@ mod tests {
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
-        
         CommitmentTransaction {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),

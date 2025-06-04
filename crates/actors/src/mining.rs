@@ -645,7 +645,7 @@ mod tests {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                partition_hash: partition_hash,
+                partition_hash,
                 miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0

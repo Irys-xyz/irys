@@ -53,11 +53,13 @@ pub async fn post_version(
     let is_new_peer = !peers.iter().any(|peer| peer == &peer_address);
 
     // Only update if it's a new peer
-    if is_new_peer && state
+    if is_new_peer
+        && state
             .peer_list
             .add_peer(mining_addr, peer_list_entry)
             .await
-            .is_err() {
+            .is_err()
+    {
         let response = PeerResponse::Rejected(RejectedResponse {
             reason: RejectionReason::InternalError,
             message: Some("Could not update peer list".to_string()),

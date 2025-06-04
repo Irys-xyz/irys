@@ -58,7 +58,8 @@ impl ChunkProvider {
                 sm.partition_assignment
                     .read()
                     .unwrap()
-                    .and_then(|sm| sm.ledger_id) == Some(ledger as u32)
+                    .and_then(|sm| sm.ledger_id)
+                    == Some(ledger as u32)
             })
             .collect::<Vec<_>>();
 
@@ -100,7 +101,8 @@ impl ChunkProvider {
                 sm.partition_assignment
                     .read()
                     .unwrap()
-                    .and_then(|sm| sm.ledger_id) == Some(ledger as u32)
+                    .and_then(|sm| sm.ledger_id)
+                    == Some(ledger as u32)
             })
             .collect::<Vec<_>>();
 

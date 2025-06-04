@@ -166,10 +166,7 @@ impl CommitmentCacheInner {
             }
 
             // Get or create miner commitments entry
-            let miner_commitments = self
-                .cache
-                .entry(*signer)
-                .or_default();
+            let miner_commitments = self.cache.entry(*signer).or_default();
 
             // Check if already has pending stake
             if miner_commitments.stake.is_some() {
@@ -185,10 +182,7 @@ impl CommitmentCacheInner {
             // First check if staked in current epoch
             if is_staked_in_epoch {
                 // Address is staked in current epoch, add pledge
-                let miner_commitments = self
-                    .cache
-                    .entry(*signer)
-                    .or_default();
+                let miner_commitments = self.cache.entry(*signer).or_default();
 
                 miner_commitments.pledges.push(commitment_tx.clone());
                 return CommitmentCacheStatus::Accepted;

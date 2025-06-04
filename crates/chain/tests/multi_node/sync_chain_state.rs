@@ -719,7 +719,7 @@ async fn start_genesis_node(
     // add accounts with balances to genesis node
     add_account_to_config(&mut genesis_node.cfg, account);
     // start genesis node
-    
+
     genesis_node.start().await
 }
 

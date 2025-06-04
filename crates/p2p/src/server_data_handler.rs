@@ -348,8 +348,7 @@ where
             match mempool_response.map_err(GossipError::from) {
                 Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                     debug!("Transaction sent to mempool");
-                    self
-                        .cache
+                    self.cache
                         .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?
                 }
                 Err(error) => {
@@ -399,8 +398,7 @@ where
                     .await
                     .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?;
 
-                let maybe_block = block_result
-                    .map_err(GossipError::BlockPool)?;
+                let maybe_block = block_result.map_err(GossipError::BlockPool)?;
 
                 match maybe_block {
                     Some(block) => {

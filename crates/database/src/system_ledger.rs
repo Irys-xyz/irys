@@ -106,8 +106,6 @@ fn create_pledge_commitment_transaction(
         ..Default::default()
     };
 
-    
-
     signer
         .sign_commitment(pledge_commitment)
         .expect("commitment transaction to be signable")

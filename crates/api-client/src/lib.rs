@@ -179,9 +179,8 @@ impl ApiClient for IrysApiClient {
         block_hash: H256,
     ) -> Result<Option<CombinedBlockHeader>> {
         let path = format!("/block/{}", block_hash.0.to_base58());
-        
-        self
-            .make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
+
+        self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
             .await
     }
 
