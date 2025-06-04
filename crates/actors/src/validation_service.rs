@@ -1,4 +1,5 @@
 use crate::{
+    block_tree_service::BlockTreeServiceMessage,
     services::ServiceSenders,
     vdf_service::{vdf_steps_are_valid, VdfStepsReadGuard},
 };
@@ -123,12 +124,10 @@ impl Handler<RequestValidationMessage> for ValidationService {
                 };
 
                 block_tree_sender
-                    .send(
-                        crate::block_tree_service::BlockTreeServiceMessage::ValidationComplete {
-                            block_hash,
-                            validation_result,
-                        },
-                    )
+                    .send(BlockTreeServiceMessage::BlockValidationFinished {
+                        block_hash,
+                        validation_result,
+                    })
                     .unwrap();
             }
             .into_actor(self),

@@ -7,7 +7,10 @@ use tracing::debug;
 #[actix_web::test]
 async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var(
+        "RUST_LOG",
+        "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
+    );
     initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
@@ -177,39 +180,101 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         peer2_block_after.block_hash.0.to_base58(),
         peer2_block_after.cumulative_diff,
     );
-    debug!("\nGENESIS: {:?}", genesis_block.block_hash.0.to_base58());
+    debug!(
+        "\nGENESIS: {:?} height: {}",
+        genesis_block.block_hash, genesis_block.height
+    );
 
     // Determine which peer lost the fork race and extend the other peer's chain
     // to trigger a reorganization. The losing peer's transaction will be evicted
     // and returned to the mempool.
     let reorg_tx: IrysTransaction;
+    let reorg_block_hash: H256;
     let reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
+        debug!(
+            "GENESIS: should ignore {} and should already be on {} height: {}",
+            peer2_block.block_hash, peer1_block.block_hash, genesis_block.height
+        );
+        reorg_block_hash = peer1_block.block_hash;
         reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
         peer2_node.mine_block().await?;
         peer2_node.get_block_by_height(4).await?
     } else {
+        debug!(
+            "GENESIS: should ignore {} and should already be on {} height: {}",
+            peer1_block.block_hash, peer2_block.block_hash, genesis_block.height
+        );
+        reorg_block_hash = peer2_block.block_hash;
         reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
         peer1_node.mine_block().await?;
         peer1_node.get_block_by_height(4).await?
     };
 
+    let canon_before = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_canonical_chain();
+
     // GENESIS occasionally doesn't arrive at block 4 - 10s for gossip is too slow!
-    let _reorg_event = genesis_node.wait_for_reorg(seconds_to_wait * 2).await?;
-    let genesis_block = genesis_node.get_block_by_height(4).await?;
+    let reorg_event = genesis_node.wait_for_reorg(seconds_to_wait * 2).await?;
+    let _genesis_block = genesis_node.get_block_by_height(4).await?;
+
+    debug!("{:?}", reorg_event);
+    let canon = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_canonical_chain();
+
+    println!("\nreorg_tx: {:?}", reorg_tx.header.id);
+    println!("canonical_before:");
+    for entry in &canon_before.0 {
+        println!("  {:?}", entry)
+    }
+    println!("canonical_after:");
+    for entry in &canon.0 {
+        println!("  {:?}", entry)
+    }
+
+    // assert_eq!(reorg_event.orphaned_blocks, vec![reorg_block_hash]);
 
     // Make sure the reorg_tx is back in the mempool ready to be included in the next block
-    let pending_tx = genesis_node.get_best_mempool_tx().await;
-    let tx = pending_tx
-        .storage_tx
-        .iter()
-        .find(|tx| tx.id == reorg_tx.header.id);
-    assert_eq!(tx, Some(&reorg_tx.header));
+    // NOTE: It turns out the reorg_tx is actually in the block because all tx are gossiped
+    //       along with their blocks even if they are a fork, so when the peer
+    //       extends their fork, they have the fork tx in their mempool already
+    //       and it gets included in the block.
+    // let pending_tx = genesis_node.get_best_mempool_tx().await;
+    // let tx = pending_tx
+    //     .storage_tx
+    //     .iter()
+    //     .find(|tx| tx.id == reorg_tx.header.id);
+    // assert_eq!(tx, Some(&reorg_tx.header));
 
-    debug!(
-        "reorg_block: {}\nnew_genesis: {}",
-        reorg_block.block_hash.0.to_base58(),
-        genesis_block.block_hash.0.to_base58()
+    // Validate the ReorgEvent with the canonical chains
+    let old_fork: Vec<_> = reorg_event
+        .old_fork
+        .iter()
+        .map(|bh| bh.block_hash)
+        .collect();
+
+    let new_fork: Vec<_> = reorg_event
+        .new_fork
+        .iter()
+        .map(|bh| bh.block_hash)
+        .collect();
+
+    println!("\nfork_parent: {:?}", reorg_event.fork_parent.block_hash);
+    println!("old_fork:\n  {:?}", old_fork);
+    println!("new_fork:\n  {:?}", new_fork);
+
+    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().0]);
+    assert_eq!(
+        new_fork,
+        vec![canon.0[canon.0.len() - 2].0, canon.0.last().unwrap().0]
     );
+
+    assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());
 
     // Wind down test
     genesis_node.stop().await;

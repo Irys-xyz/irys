@@ -117,11 +117,23 @@ impl BlockIndex {
         {
             (0, sub_chunks_added)
         } else {
-            let prev_block = self.get_item(block.height.saturating_sub(1)).unwrap();
-            (
-                prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
-                prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
-            )
+            let prev_block = self.get_item(block.height.saturating_sub(1));
+            if let Some(prev_block) = prev_block {
+                (
+                    prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
+                    prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
+                )
+            } else {
+                // Use println! here because errors and tracing are not getting propagated
+                println!(
+                    "Panic: prev_block at index {} not found in block_index",
+                    block.height.saturating_sub(1)
+                );
+                return Err(eyre::eyre!(
+                    "prev_block at index {} not found in block_index",
+                    block.height.saturating_sub(1)
+                ));
+            }
         };
 
         let block_index_item = BlockIndexItem {

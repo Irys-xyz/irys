@@ -66,7 +66,7 @@ pub enum BlockTreeServiceMessage {
         all_txs: Arc<Vec<IrysTransactionHeader>>,
         response: oneshot::Sender<eyre::Result<()>>,
     },
-    ValidationComplete {
+    BlockValidationFinished {
         block_hash: H256,
         validation_result: ValidationResult,
     },
@@ -101,8 +101,9 @@ pub struct BlockTreeServiceInner {
 
 #[derive(Debug, Clone)]
 pub struct ReorgEvent {
-    pub orphaned_blocks: Vec<BlockHash>,
-    pub fork_height: u64,
+    pub old_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
+    pub new_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
+    pub fork_parent: Arc<IrysBlockHeader>,
     pub new_tip: BlockHash,
     pub timestamp: SystemTime,
 }
@@ -205,11 +206,11 @@ impl BlockTreeServiceInner {
                 let result = self.on_block_prevalidated(block, all_txs).await;
                 let _ = response.send(result);
             }
-            BlockTreeServiceMessage::ValidationComplete {
+            BlockTreeServiceMessage::BlockValidationFinished {
                 block_hash,
                 validation_result,
             } => {
-                self.on_block_validation_complete(block_hash, validation_result);
+                self.on_block_validation_finished(block_hash, validation_result);
             }
         }
         Ok(())
@@ -271,7 +272,7 @@ impl BlockTreeServiceInner {
         all_tx: Arc<Vec<IrysTransactionHeader>>,
     ) {
         debug!(
-            "JESSEDEBUG confirming irys block {} ({})",
+            "JESSEDEBUG confirming irys block evm_block_hash: {} ({})",
             &confirmed_block.evm_block_hash, &confirmed_block.height
         );
         if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
@@ -389,6 +390,17 @@ impl BlockTreeServiceInner {
         let should_update_ema = {
             let mut cache = self.cache.write().expect("cache lock poisoned");
 
+            //  Do we already have this block
+            let existing = cache.get_block(block_hash);
+            if let Some(existing) = existing {
+                // TODO: block_discovery should not be sending us blocks we already know about >_<
+                debug!(
+                    "on_block_prevalidated: {} at height: {} already in block_tree",
+                    existing.block_hash, existing.height
+                );
+                return Ok(());
+            }
+
             // Handle block addition differently based on origin
             let add_result = if block.miner_address == miner_address {
                 // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
@@ -435,13 +447,29 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    fn on_block_validation_complete(
+    /// Handles the completion of full block validation.
+    ///
+    /// When a block passes validation:
+    /// 1. Updates the block's state in the cache to `ValidBlock`
+    /// 2. Moves the tip of the chain to this block if it is now the head of the longest chain
+    /// 3. If the tip moves, checks whether it's a simple extension or a reorganization:
+    ///    - **Extension**: The new tip's parent is the current tip
+    ///    - **Reorg**: The new tip's parent is not the current tip (fork switch)
+    /// 4. For reorgs, broadcasts a `ReorgEvent` containing:
+    ///    - Blocks from the old fork (now orphaned)
+    ///    - Blocks from the new fork (now canonical)
+    ///    - The common ancestor where the fork occurred
+    /// 5. Notifies services of the new confirmed block
+    /// 6. Checks if any blocks are deep enough to be finalized to storage
+    ///
+    /// Invalid blocks are logged but currently remain in the cache.
+    fn on_block_validation_finished(
         &mut self,
         block_hash: H256,
         validation_result: ValidationResult,
     ) {
         debug!(
-            "On validation complete : result {} {:?}",
+            "\u{001b}[32mOn validation complete : result {} {:?}\u{001b}[0m",
             block_hash, validation_result
         );
         match validation_result {
@@ -454,15 +482,14 @@ impl BlockTreeServiceInner {
                 let mut cache = binding.write().unwrap();
 
                 // Get the current tip before any changes
+                // Note: We cant rely on canonical chain here, because the canonical chain was already updated when this
+                //       block arrived and was added after pre-validation. The tip only moves after full validation.
                 let old_tip = cache.tip.clone();
                 let old_tip_block = cache.get_block(&old_tip).unwrap().clone();
 
                 // Mark block as validated in cache, this will update the canonical chain
-                if let Err(_) = cache.mark_block_as_valid(&block_hash) {
-                    error!(
-                        "Unable to mark block as Validated: {}",
-                        block_hash.0.to_base58()
-                    );
+                if let Err(err) = cache.mark_block_as_valid(&block_hash) {
+                    error!("{}", err);
                     return;
                 }
 
@@ -470,7 +497,22 @@ impl BlockTreeServiceInner {
                 let Some((_block_entry, fork_blocks, _)) =
                     cache.get_earliest_not_onchain_in_longest_chain()
                 else {
-                    debug!("No new tip found {}", block_hash);
+                    if block_hash == old_tip {
+                        debug!(
+                            "\u{001b}[32mSame Tip Marked current tip {} cdiff: {} height: {}\u{001b}[0m",
+                            block_hash,
+                            old_tip_block.cumulative_diff,
+                            old_tip_block.height
+                         );
+                    } else {
+                        debug!(
+                            "\u{001b}[32mNo new tip found {}, current tip {} cdiff: {} height: {}\u{001b}[0m",
+                            block_hash,
+                            old_tip_block.block_hash,
+                            old_tip_block.cumulative_diff,
+                            old_tip_block.height
+                        );
+                    }
                     return;
                 };
 
@@ -488,19 +530,55 @@ impl BlockTreeServiceInner {
                 // Now do mutable operations
                 if cache.mark_tip(&block_hash).is_ok() {
                     if is_reorg {
-                        let orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
-                        let fork_hash = orphaned_blocks.first().unwrap().previous_block_hash;
-                        let fork_height = cache.get_block(&fork_hash).unwrap().height;
+                        let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
+                        orphaned_blocks.push(&old_tip_block);
+
+                        let fork_hash = orphaned_blocks.first().unwrap().block_hash;
+                        let fork_block = cache.get_block(&fork_hash).unwrap();
+                        let fork_height = fork_block.height;
+
+                        // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
+                        let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
+                        for block in &orphaned_blocks {
+                            let entry = make_chain_cache_entry(*block);
+                            old_canonical.push(entry);
+                        }
+                        let new_canonical = cache.get_canonical_chain();
+
+                        let (old_fork, new_fork) = prune_chains_at_ancestor(
+                            old_canonical,
+                            new_canonical.0,
+                            fork_hash,
+                            fork_height,
+                        );
+
+                        // Build Arc'd IrysBlockHeader lists for the ReorgEvent to minimize overhead of cloning
+                        let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
+                            .iter()
+                            .map(|e| {
+                                let mut block = cache.get_block(&e.0).unwrap().clone();
+                                block.poa.chunk = None; // Strip out the chunk
+                                Arc::new(block)
+                            })
+                            .collect();
+
+                        let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
+                            .iter()
+                            .map(|e| {
+                                let mut block = cache.get_block(&e.0).unwrap().clone();
+                                block.poa.chunk = None; // Strip out the chunk
+                                Arc::new(block)
+                            })
+                            .collect();
+
                         debug!(
-                            "Reorg when block height {} fully validated {}",
+                            "\u{001b}[32mReorg at block height {} with {}\u{001b}[0m",
                             arc_block.height, arc_block.block_hash
                         );
                         let event = ReorgEvent {
-                            orphaned_blocks: orphaned_blocks
-                                .iter()
-                                .map(|bh| bh.block_hash)
-                                .collect(),
-                            fork_height,
+                            old_fork: Arc::new(old_fork_blocks),
+                            new_fork: Arc::new(new_fork_blocks),
+                            fork_parent: Arc::new(fork_block.clone()),
                             new_tip: block_hash,
                             timestamp: SystemTime::now(),
                         };
@@ -511,19 +589,54 @@ impl BlockTreeServiceInner {
                         }
                     } else {
                         debug!(
-                            "\u{001b}[32mExtending longest chain to height {} {}\u{001b}[0m",
-                            arc_block.height, arc_block.block_hash
+                            "\u{001b}[32mExtending longest chain to height {} with {} parent: {} height: {}\u{001b}[0m",
+                            arc_block.height, arc_block.block_hash, old_tip_block.block_hash, old_tip_block.height
                         );
                     }
 
                     self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
 
-                // Handle block finalization
+                // Handle block finalization (move chunks to disk and add to block_index)
                 self.try_notify_services_of_block_finalization(&arc_block, &cache);
             }
         }
     }
+}
+
+fn make_chain_cache_entry(block: &IrysBlockHeader) -> ChainCacheEntry {
+    let publish_txs = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+
+    let submit_txs = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+
+    (block.block_hash, block.height, publish_txs, submit_txs)
+}
+
+/// Prunes two canonical chains at the specified common ancestor, returning only the divergent portions
+/// Returns (old_chain_from_fork, new_chain_from_fork)
+pub fn prune_chains_at_ancestor(
+    old_chain: Vec<ChainCacheEntry>,
+    new_chain: Vec<ChainCacheEntry>,
+    ancestor_hash: BlockHash,
+    ancestor_height: u64,
+) -> (Vec<ChainCacheEntry>, Vec<ChainCacheEntry>) {
+    // Find the ancestor index in the old chain
+    let old_ancestor_idx = old_chain
+        .iter()
+        .position(|(hash, height, _, _)| *hash == ancestor_hash && *height == ancestor_height)
+        .expect("Common ancestor should exist in old chain");
+
+    // Find the ancestor index in the new chain
+    let new_ancestor_idx = new_chain
+        .iter()
+        .position(|(hash, height, _, _)| *hash == ancestor_hash && *height == ancestor_height)
+        .expect("Common ancestor should exist in new chain");
+
+    // Return the portions after the common ancestor (excluding the ancestor itself)
+    let old_divergent = old_chain[old_ancestor_idx + 1..].to_vec();
+    let new_divergent = new_chain[new_ancestor_idx + 1..].to_vec();
+
+    (old_divergent, new_divergent)
 }
 
 #[derive(Debug)]
@@ -852,9 +965,8 @@ impl BlockTreeCache {
         let hash = block.block_hash;
 
         debug!(
-            "adding block: {} height: {}",
-            block.block_hash.0.to_base58(),
-            block.height
+            "add_block() - {} height: {}",
+            block.block_hash, block.height
         );
 
         if matches!(
@@ -997,7 +1109,7 @@ impl BlockTreeCache {
 
         let mut current = self.max_cumulative_difficulty.1;
         let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
-        tracing::debug!(
+        debug!(
             "updating canonical chain cache latest_cache_tip: {}",
             current
         );
@@ -1016,15 +1128,8 @@ impl BlockTreeCache {
 
                 ChainState::Onchain => {
                     // Include OnChain blocks in pairs
-                    let publish_txs = entry.block.data_ledgers[DataLedger::Publish]
-                        .tx_ids
-                        .0
-                        .clone();
-                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
-                        .tx_ids
-                        .0
-                        .clone();
-                    pairs.push((current, entry.block.height, publish_txs, submit_txs));
+                    let chain_cache_entry = make_chain_cache_entry(&entry.block);
+                    pairs.push(chain_cache_entry);
 
                     if blocks_to_collect == 0 {
                         break;
@@ -1034,15 +1139,8 @@ impl BlockTreeCache {
 
                 // For Validated or other NotOnchain states
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
-                    let publish_txs = entry.block.data_ledgers[DataLedger::Publish]
-                        .tx_ids
-                        .0
-                        .clone();
-                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
-                        .tx_ids
-                        .0
-                        .clone();
-                    pairs.push((current, entry.block.height, publish_txs, submit_txs));
+                    let chain_cache_entry = make_chain_cache_entry(&entry.block);
+                    pairs.push(chain_cache_entry);
                     not_onchain_count += 1;
 
                     if blocks_to_collect == 0 {
@@ -1112,6 +1210,7 @@ impl BlockTreeCache {
 
     /// Marks a block as the new tip
     pub fn mark_tip(&mut self, block_hash: &BlockHash) -> eyre::Result<bool> {
+        debug!("mark_tip({})", block_hash);
         // Get the current block
         let block_entry = self
             .blocks
@@ -1133,9 +1232,8 @@ impl BlockTreeCache {
         self.update_longest_chain_cache();
 
         debug!(
-            "mark tip: hash:{} height: {}",
-            block_hash.0.to_base58(),
-            block.height
+            "\u{001b}[32mmark tip: hash:{} height: {}\u{001b}[0m",
+            block_hash, block.height
         );
 
         Ok(old_tip != *block_hash)
@@ -1159,13 +1257,31 @@ impl BlockTreeCache {
 
     pub fn mark_block_as_valid(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
         if let Some(entry) = self.blocks.get_mut(block_hash) {
-            if entry.chain_state == ChainState::NotOnchain(BlockState::ValidationScheduled) {
-                entry.chain_state = ChainState::NotOnchain(BlockState::ValidBlock);
-                self.update_longest_chain_cache();
-                return Ok(());
+            match entry.chain_state {
+                ChainState::NotOnchain(BlockState::ValidationScheduled) => {
+                    entry.chain_state = ChainState::NotOnchain(BlockState::ValidBlock);
+                    self.update_longest_chain_cache();
+                    Ok(())
+                }
+                // When we add blocks to the block tree that we produced locally, they are added
+                // as ChainState::Validated but we can still schedule them for full validation
+                // with their BlockState.
+                ChainState::Validated(BlockState::ValidationScheduled) => {
+                    entry.chain_state = ChainState::Validated(BlockState::ValidBlock);
+                    self.update_longest_chain_cache();
+                    Ok(())
+                }
+                _ => Err(eyre::eyre!(
+                    "unable to mark block as valid: chain_state {:?} {}",
+                    entry.chain_state,
+                    entry.block.block_hash,
+                )),
             }
+        } else {
+            Err(eyre::eyre!(
+                "unable to mark block as valid: block not found"
+            ))
         }
-        Err(eyre::eyre!("unable to mark block as valid"))
     }
 
     /// Gets block by hash
@@ -1221,8 +1337,8 @@ impl BlockTreeCache {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
-                "get_earliest_not_onchain: prev_entry.chain_state: {:?} {}",
-                prev_entry.chain_state, prev_hash
+                "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
+                prev_entry.chain_state, prev_hash, prev_entry.block.height
             );
             match prev_entry.chain_state {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
@@ -1251,7 +1367,7 @@ impl BlockTreeCache {
         &self,
     ) -> Option<(&BlockEntry, Vec<&IrysBlockHeader>, SystemTime)> {
         // Get the block with max cumulative difficulty
-        let (_, max_diff_hash) = self.max_cumulative_difficulty;
+        let (_max_cdiff, max_diff_hash) = self.max_cumulative_difficulty;
 
         // Get the tip's cumulative difficulty
         let tip_entry = self.blocks.get(&self.tip)?;
@@ -1265,11 +1381,13 @@ impl BlockTreeCache {
         // Get the block with max difficulty
         let entry = self.blocks.get(&max_diff_hash)?;
 
-        // Check if it's not validated
-        if let ChainState::NotOnchain(_) | ChainState::Validated(BlockState::ValidationScheduled) =
-            &entry.chain_state
-        {
-            // Get earliest not validated walking back the chain
+        debug!(
+            "get_earliest_not_onchain_in_longest_chain() with max_diff_hash: {} height: {} state: {:?}",
+            max_diff_hash, entry.block.height, entry.chain_state
+        );
+
+        // Check if it's part of a fork and get the start of the fork
+        if let ChainState::NotOnchain(_) | ChainState::Validated(_) = &entry.chain_state {
             self.get_earliest_not_onchain(entry)
         } else {
             None
@@ -1400,7 +1518,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
                 .expect("u64 must fit into usize"),
         );
         let mut current = cache.max_cumulative_difficulty.1;
-        tracing::debug!(latest_cache_tip =? current, "updating canonical chain cache");
+        debug!("get_optimistic_chain with latest_cache_tip: {}", current);
 
         while let Some(entry) = cache.blocks.get(&current) {
             chain_cache.push((current, entry.block.height));
@@ -1783,7 +1901,15 @@ mod tests {
 
         // b3->b2->b1 fork is still heaviest
         assert_matches!(cache.mark_tip(&b2_2.block_hash), Ok(_));
-        assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
+        assert_eq!(
+            cache
+                .get_earliest_not_onchain_in_longest_chain()
+                .unwrap()
+                .0
+                .block
+                .block_hash,
+            b3.block_hash
+        );
         assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(_));
 
         // add not validated b4, b3->b2->b1 fork is still heaviest

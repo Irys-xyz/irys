@@ -286,11 +286,6 @@ impl MempoolService {
                 reorg_result = self.reorg_rx.recv() => {
                     match reorg_result {
                         Ok(reorg_event) => {
-                            tracing::info!(
-                                "Mempool handling reorg: {} orphaned blocks at height {}",
-                                reorg_event.orphaned_blocks.len(),
-                                reorg_event.fork_height
-                            );
                             self.inner.handle_reorg(reorg_event).await?;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
@@ -755,14 +750,18 @@ impl Inner {
     async fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing reorg: {} orphaned blocks from height {}",
-            event.orphaned_blocks.len(),
-            event.fork_height
+            event.old_fork.len(),
+            event.fork_parent.height
         );
 
         // TODO: Implement mempool-specific reorg handling
-        // 1. Return transactions from orphaned blocks to mempool
-        // 2. Revalidate transactions against new chain state
-        // 3. Remove any invalidated transactions
+        // 1. Check to see that orphaned submit ledger tx are available in the mempool if not included in the new fork (canonical chain)
+        // 2. Re-post any reorged submit ledger transactions though handle_tx_ingress_message so account balances and anchors are checked
+        // 3. Filter out any invalidated transactions
+        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
+        // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
+        // 6. Similar work with commitment transactions (stake and pledge)
+        //    - This may require adding some features to the commitment_cache so that stake/pledge tx can be rolled back and new ones applied
 
         tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
 

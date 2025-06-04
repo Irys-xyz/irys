@@ -407,8 +407,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             Ok(Ok(reorg_event)) => {
                 info!(
                     "Reorg detected: {} blocks orphaned at height {}, new tip: {}",
-                    reorg_event.orphaned_blocks.len(),
-                    reorg_event.fork_height,
+                    reorg_event.old_fork.len(),
+                    reorg_event.fork_parent.height,
                     reorg_event.new_tip.0.to_base58()
                 );
                 Ok(reorg_event)
