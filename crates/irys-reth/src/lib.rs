@@ -59,27 +59,24 @@ use system_tx::SystemTransaction;
 use tracing::{debug, info};
 
 use crate::{
-    payload::SystemTxStore,
-    payload_builder_builder::IrysPayloadBuilderBuilder,
+    payload::SystemTxStore, payload_builder_builder::IrysPayloadBuilderBuilder,
     payload_service_builder::IyrsPayloadServiceBuilder,
-    system_tx_validator::{SystemTxValidator, SystemTxValidatorBuilder},
 };
 
 pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod system_tx;
-pub mod system_tx_validator;
 
 #[must_use]
 pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransaction) -> TxLegacy {
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
     TxLegacy {
-        gas_limit: 99000,
+        gas_limit: 0_u64,
         value: U256::ZERO,
         nonce,
-        gas_price: 875000000_u128,
+        gas_price: 0_u128,
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
         input: system_tx_rlp.into(),
@@ -226,7 +223,6 @@ where
             .local_transactions_config
             .local_addresses
             .insert(self.allowed_system_tx_origin);
-        dbg!(&pool_config);
 
         let blob_cache_size = if let Some(blob_cache_size) = pool_config.blob_cache_size {
             blob_cache_size
@@ -261,12 +257,9 @@ where
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
-        let system_tx_validator = SystemTxValidatorBuilder::new(ctx.provider().clone()).build();
         let validator = TransactionValidationTaskExecutor {
             validator: IrysSystemTxValidator {
                 eth_tx_validator: validator.validator,
-                allowed_system_tx_origin: self.allowed_system_tx_origin,
-                system_tx_validator,
             },
             to_validation_task: validator.to_validation_task,
         };
@@ -328,113 +321,15 @@ where
                     },
                 ),
             );
-
-            // spawn system txs maintenance task
-            ctx.task_executor().spawn_critical(
-                "txpool system tx maintenance task",
-                maintain_system_txs::<Node, _>(
-                    pool.clone(),
-                    ctx.provider().canonical_state_stream(),
-                ),
-            );
-
-            debug!(target: "reth::cli", "Spawned txpool maintenance task");
         };
 
         Ok(transaction_pool)
     }
 }
 
-#[expect(clippy::type_complexity, reason = "original trait definition")]
-pub async fn maintain_system_txs<Node, St>(
-    pool: Pool<
-        TransactionValidationTaskExecutor<
-            IrysSystemTxValidator<Node::Provider, EthPooledTransaction>,
-        >,
-        SystemTxPriorityOrdering<EthPooledTransaction>,
-        DiskFileBlobStore,
-    >,
-    mut events: St,
-) where
-    Node: FullNodeTypes<Types = IrysEthereumNode>,
-    St: Stream<Item = CanonStateNotification<EthPrimitives>> + Send + Unpin + 'static,
-{
-    use futures::StreamExt as _;
-    loop {
-        let event = events.next().await;
-        let Some(event) = event else {
-            break;
-        };
-        match event {
-            CanonStateNotification::Commit { new } => {
-                use alloy_consensus::BlockHeader as _;
-                let new_tip_header = new.tip().sealed_block().header();
-                let block_number = new_tip_header.number();
-                let parent_hash = new_tip_header.parent_hash();
-                dbg!(&new_tip_header);
-                let stale_system_txs = pool
-                    .all_transactions()
-                    .all()
-                    .filter_map(|tx| {
-                        use alloy_consensus::transaction::Transaction;
-                        let input = tx.inner().input();
-                        let Ok(system_tx) = SystemTransaction::decode(&mut &input[..]) else {
-                            return None;
-                        };
-
-                        // Remove if block number >= valid_for_block, or parent hash changed
-                        if block_number >= system_tx.valid_for_block_height
-                            || parent_hash != system_tx.parent_blockhash
-                        {
-                            dbg!(
-                                block_number,
-                                parent_hash,
-                                system_tx.valid_for_block_height,
-                                system_tx.parent_blockhash
-                            );
-                            return Some(*tx.hash());
-                        }
-                        None
-                    })
-                    .collect::<Vec<_>>();
-                if stale_system_txs.is_empty() {
-                    continue;
-                }
-
-                tracing::warn!(?stale_system_txs, "dropping stale system transactions");
-                pool.remove_transactions(stale_system_txs);
-            }
-            CanonStateNotification::Reorg { .. } => {
-                let stale_system_txs = pool
-                    .all_transactions()
-                    .all()
-                    .filter_map(|tx| {
-                        use alloy_consensus::transaction::Transaction as _;
-                        let input = tx.inner().input();
-                        let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
-                            return None;
-                        };
-
-                        Some(*tx.hash())
-                    })
-                    .collect::<Vec<_>>();
-                if stale_system_txs.is_empty() {
-                    continue;
-                }
-
-                tracing::warn!(?stale_system_txs, "dropping stale system transactions");
-                pool.remove_transactions(stale_system_txs);
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct IrysSystemTxValidator<Client, T> {
-    allowed_system_tx_origin: Address,
-    /// The type that performs the actual validation.
     eth_tx_validator: EthTransactionValidator<Client, T>,
-    system_tx_validator: SystemTxValidator<Client, T>,
 }
 
 impl<Client, Tx> TransactionValidator for IrysSystemTxValidator<Client, Tx>
@@ -456,31 +351,13 @@ where
             return self.eth_tx_validator.validate_one(origin, transaction);
         };
 
-        if transaction.sender() != self.allowed_system_tx_origin {
-            tracing::warn!(
-                sender = ?transaction.sender(),
-                allowed_system_tx_origin = ?self.allowed_system_tx_origin,
-                "got system tx that was not signed by the allowed origin");
-            return TransactionValidationOutcome::Invalid(
-                transaction,
-                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                    InvalidTransactionError::SignerAccountHasBytecode,
-                ),
-            );
-        }
-
-        if !matches!(origin, TransactionOrigin::Private) {
-            tracing::warn!(received_origin = ?origin, "system txs can only be generated via private origin");
-            return TransactionValidationOutcome::Invalid(
-                transaction,
-                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                    InvalidTransactionError::SignerAccountHasBytecode,
-                ),
-            );
-        }
-
-        let result = self.system_tx_validator.validate_one(origin, transaction);
-        result
+        tracing::error!("system txs submitted to the pool. Not supported.");
+        return TransactionValidationOutcome::Invalid(
+            transaction,
+            reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                InvalidTransactionError::SignerAccountHasBytecode,
+            ),
+        );
     }
 
     async fn validate_transactions(
@@ -718,10 +595,6 @@ pub mod evm {
                 }
                 drop(guard);
 
-                // Handle the signer nonce increment
-                let mut new_state =
-                    self.adjust_signer_nonce(&tx, |nonce| nonce.saturating_add(1))?;
-
                 // Process different system transaction types
                 let topic = system_tx.inner.topic();
                 let target;
@@ -753,32 +626,9 @@ pub mod evm {
                         target = balance_decrement.target;
                         self.handle_balance_decrement(log, tx_envelope.hash(), &balance_decrement)?
                     }
-                    system_tx::TransactionPacket::ResetSystemTxNonce(reset_system_tx_nonce) => {
-                        // in this arm we update the nonce of the signer and do an early return.
-                        let state = self.adjust_signer_nonce(&tx, |nonce| {
-                            nonce.saturating_sub(reset_system_tx_nonce.decrement_nonce_by)
-                        })?;
-                        let execution_result = ExecutionResult::Success {
-                            reason: revm::context::result::SuccessReason::Return,
-                            gas_used: 0,
-                            gas_refunded: 0,
-                            logs: vec![],
-                            output: Output::Call([].into()),
-                        };
-                        on_result_f(&execution_result);
-                        self.system_tx_receipts
-                            .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
-                                tx: tx_envelope,
-                                evm: self.inner.evm(),
-                                result: execution_result,
-                                state: &state,
-                                cumulative_gas_used: 0,
-                            }));
-
-                        return Ok(0);
-                    }
                 };
 
+                let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
                 // at this point, the system tx has been processed, and it was valid *enough*
                 // that we should generate a receipt for it even in a failure state
                 let execution_result = match new_account_state {
@@ -868,55 +718,6 @@ pub mod evm {
                 data: LogData::new(topics, encoded_data.into())
                     .expect("System log creation should not fail"),
             }
-        }
-
-        /// Increments the signer's nonce for system transactions
-        fn adjust_signer_nonce<T: ExecutableTx<Self>>(
-            &mut self,
-            tx: &T,
-            action: impl Fn(u64) -> u64,
-        ) -> Result<alloy_primitives::map::foldhash::HashMap<Address, Account>, BlockExecutionError>
-        {
-            let evm = self.inner.evm_mut();
-            let db = evm.db_mut();
-            let signer = tx.signer();
-            let state = db.load_cache_account(*signer).map_err(|_err| {
-                BlockExecutionError::Internal(reth_evm::block::InternalBlockExecutionError::msg(
-                    "Could not load signer account",
-                ))
-            })?;
-
-            let Some(plain_account) = state.account.as_ref() else {
-                tracing::warn!("signer account does not exist");
-                return Err(BlockExecutionError::Validation(
-                    BlockValidationError::InvalidTx {
-                        hash: *tx.tx().hash(),
-                        error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
-                    },
-                ));
-            };
-
-            let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
-            let storage = plain_account
-                .storage
-                .iter()
-                .map(|(key, value)| (*key, EvmStorageSlot::new(*value)))
-                .collect();
-
-            let mut new_account_info = plain_account.info.clone();
-            new_account_info.set_nonce(action(tx.tx().nonce()));
-
-            new_state.insert(
-                *signer,
-                Account {
-                    info: new_account_info,
-                    storage,
-                    status: revm::state::AccountStatus::Touched,
-                },
-            );
-
-            db.commit(new_state.clone());
-            Ok(new_state)
         }
 
         /// Handles system transaction that increases account balance
@@ -1239,8 +1040,8 @@ mod tests {
     use crate::test_utils::*;
     use crate::test_utils::{
         advance_blocks, block_reward, custom_chain, eth_payload_attributes,
-        eth_payload_attributes_with_parent, get_balance, nonce_reset, release_stake,
-        setup_irys_reth, sign_tx, stake, storage_fees,
+        eth_payload_attributes_with_parent, get_balance, release_stake, setup_irys_reth, sign_tx,
+        stake, storage_fees,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
     use alloy_eips::Encodable2718;
@@ -2616,7 +2417,6 @@ pub mod test_utils {
             RELEASE_STAKE_ID => release_stake(address, valid_for_block_height, parent_blockhash),
             STAKE_ID => stake(address, valid_for_block_height, parent_blockhash),
             STORAGE_FEES_ID => storage_fees(address, valid_for_block_height, parent_blockhash),
-            RESET_SYS_SIGNER_NONCE_ID => nonce_reset(100, valid_for_block_height, parent_blockhash),
             _ => panic!("Unknown system transaction type: {}", tx_type),
         }
     }
@@ -2696,21 +2496,6 @@ pub mod test_utils {
             inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
-            }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
-    }
-
-    /// Compose a system tx for resetting the system tx nonce.
-    pub fn nonce_reset(
-        decrement_nonce_by: u64,
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-    ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::ResetSystemTxNonce(system_tx::ResetSystemTxNonce {
-                decrement_nonce_by,
             }),
             valid_for_block_height,
             parent_blockhash,
