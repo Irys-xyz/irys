@@ -36,3 +36,11 @@ impl SimpleRNG {
         rand % max
     }
 }
+
+impl Iterator for SimpleRNG {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.next())
+    }
+}

@@ -1,6 +1,7 @@
 // Recursive expansion of fixed_hash::construct_fixed_hash! macro
 // with some tweaks to de-expand assert_eq! and override Debug & Display
 // ===================================================
+#![allow(clippy::all)] // disable lints - this is a macro expansion that I want to keep as close to the original as possible
 
 use base58::ToBase58 as _;
 
