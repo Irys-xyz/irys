@@ -25,11 +25,8 @@ use irys_types::{
 use lru::LruCache;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::{
-    cursor::DbDupCursorRO as _,
-    mdbx::{tx::Tx, RW},
-    transaction::DbTx as _,
-    transaction::DbTxMut as _,
-    Database as _, DatabaseError,
+    cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
+    DatabaseError,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -81,8 +78,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .send(MempoolServiceMessage::GetTransaction(tx, oneshot_tx))
             .map_err(|_| TxReadError::Other("Error sending GetTransaction ".to_owned()))?;
 
-        let response = oneshot_rx.await;
-        if let Ok(response) = response {
+        if let Ok(response) = oneshot_rx.await {
             match response {
                 Some(response) => Ok(response),
                 None => Err(TxReadError::NotInMempool),

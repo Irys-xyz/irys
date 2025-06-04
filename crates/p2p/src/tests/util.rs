@@ -11,7 +11,7 @@ use eyre::{eyre, Result};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
     broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError},
+    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
 };
 use irys_api_client::ApiClient;
 use irys_primitives::Address;
@@ -88,6 +88,13 @@ impl MempoolFacade for MempoolStub {
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
+    }
+
+    async fn handle_get_transaction(
+        &self,
+        _tx_header: H256,
+    ) -> std::result::Result<IrysTransactionHeader, TxReadError> {
+        Ok(IrysTransactionHeader::default())
     }
 
     async fn handle_chunk(
