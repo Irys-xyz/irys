@@ -5099,6 +5099,7 @@ dependencies = [
  "bytes",
  "eyre",
  "futures",
+ "lru 0.14.0",
  "reth",
  "reth-basic-payload-builder",
  "reth-chain-state",

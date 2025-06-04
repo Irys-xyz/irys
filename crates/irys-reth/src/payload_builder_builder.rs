@@ -13,12 +13,12 @@ use reth_node_builder::{
 };
 use reth_transaction_pool::{EthPooledTransaction, PoolTransaction, TransactionPool};
 
-use crate::payload::SystemTxRequest;
+use crate::payload::SystemTxStore;
 
 /// A basic ethereum payload service.
 #[derive(Clone, Debug)]
 pub struct IrysPayloadBuilderBuilder {
-    pub system_tx_requester: std::sync::mpsc::Sender<SystemTxRequest>,
+    pub system_tx_store: SystemTxStore,
 }
 
 impl<Types, Node, Pool, Evm> PayloadBuilderBuilder<Node, Pool, Evm> for IrysPayloadBuilderBuilder
@@ -50,7 +50,7 @@ where
             pool,
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(conf.gas_limit()),
-            self.system_tx_requester.clone(),
+            self.system_tx_store.clone(),
         ))
     }
 }

@@ -22,20 +22,20 @@ use tracing::{error, info};
 
 use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
-#[test_log::test(tokio::test)]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async().await;
     let account1 = IrysSigner::random_signer(&node.cfg.consensus_config());
     let account2 = IrysSigner::random_signer(&node.cfg.consensus_config());
     let account3 = IrysSigner::random_signer(&node.cfg.consensus_config());
     node.cfg.consensus.extend_genesis_accounts(vec![
-        (
-            node.cfg.signer().address(),
-            GenesisAccount {
-                balance: U256::from(u128::MAX),
-                ..Default::default()
-            },
-        ),
+        // (
+        //     node.cfg.signer().address(),
+        //     GenesisAccount {
+        //         balance: U256::from(u128::MAX),
+        //         ..Default::default()
+        //     },
+        // ),
         (
             account1.address(),
             GenesisAccount {
@@ -85,7 +85,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     dbg!(&block.evm_block_hash);
     dbg!(&reth_exec_env.block().hash());
     let txs = reth_exec_env.block().transaction_count();
-    // dbg!(&txs);
+    dbg!(&txs);
 
     let mut context = new_reth_context(irys_node.node_ctx.reth_handle.clone().into())
         .await

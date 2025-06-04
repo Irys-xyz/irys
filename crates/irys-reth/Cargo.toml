@@ -19,7 +19,6 @@ alloy-genesis.workspace = true
 alloy-network.workspace = true
 alloy-rpc-types.workspace = true
 alloy-rpc-types-eth.workspace = true
-
 reth-node-ethereum.workspace = true
 reth-tracing.workspace = true
 reth-chainspec.workspace = true
@@ -57,6 +56,7 @@ futures.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
+lru = "0.14"
 
 [dev-dependencies]
 reth-e2e-test-utils = { workspace = true }

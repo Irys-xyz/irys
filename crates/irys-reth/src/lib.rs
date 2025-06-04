@@ -59,7 +59,7 @@ use system_tx::SystemTransaction;
 use tracing::{debug, info};
 
 use crate::{
-    payload::SystemTxRequest,
+    payload::SystemTxStore,
     payload_builder_builder::IrysPayloadBuilderBuilder,
     payload_service_builder::IyrsPayloadServiceBuilder,
     system_tx_validator::{SystemTxValidator, SystemTxValidatorBuilder},
@@ -90,7 +90,7 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransactio
 #[derive(Debug, Clone)]
 pub struct IrysEthereumNode {
     pub allowed_system_tx_origin: Address,
-    pub system_tx_requester: std::sync::mpsc::Sender<SystemTxRequest>,
+    pub system_tx_store: SystemTxStore,
 }
 
 impl NodeTypes for IrysEthereumNode {
@@ -129,7 +129,7 @@ impl IrysEthereumNode {
             })
             .executor(IrysExecutorBuilder)
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
-                system_tx_requester: self.system_tx_requester.clone(),
+                system_tx_store: self.system_tx_store.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -2267,10 +2267,7 @@ pub mod test_utils {
 
     /// Common setup for tests - creates wallets, nodes, and returns initialized context
     pub struct TestContext {
-        pub nodes: Vec<(
-            NodeHelperType<IrysEthereumNode>,
-            std::sync::mpsc::Receiver<SystemTxRequest>,
-        )>,
+        pub nodes: Vec<(NodeHelperType<IrysEthereumNode>, SystemTxStore)>,
         pub block_producer_a: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub block_producer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
@@ -2339,13 +2336,7 @@ pub mod test_utils {
 
         pub fn get_single_node(
             mut self,
-        ) -> eyre::Result<(
-            (
-                NodeHelperType<IrysEthereumNode>,
-                std::sync::mpsc::Receiver<SystemTxRequest>,
-            ),
-            Self,
-        )> {
+        ) -> eyre::Result<((NodeHelperType<IrysEthereumNode>, SystemTxStore), Self)> {
             if self.nodes.is_empty() {
                 return Err(eyre::eyre!("No nodes available"));
             }
@@ -2357,14 +2348,8 @@ pub mod test_utils {
             mut self,
         ) -> eyre::Result<(
             (
-                (
-                    NodeHelperType<IrysEthereumNode>,
-                    std::sync::mpsc::Receiver<SystemTxRequest>,
-                ),
-                (
-                    NodeHelperType<IrysEthereumNode>,
-                    std::sync::mpsc::Receiver<SystemTxRequest>,
-                ),
+                (NodeHelperType<IrysEthereumNode>, SystemTxStore),
+                (NodeHelperType<IrysEthereumNode>, SystemTxStore),
             ),
             Self,
         )> {
@@ -2993,10 +2978,7 @@ pub mod test_utils {
         is_dev: bool,
         attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
     ) -> eyre::Result<(
-        Vec<(
-            NodeHelperType<IrysEthereumNode>,
-            std::sync::mpsc::Receiver<SystemTxRequest>,
-        )>,
+        Vec<(NodeHelperType<IrysEthereumNode>, SystemTxStore)>,
         TaskManager,
         Wallet,
     )>
@@ -3018,10 +3000,8 @@ pub mod test_utils {
         };
 
         // Create nodes and peer them
-        let mut nodes: Vec<(
-            NodeTestContext<_, _>,
-            std::sync::mpsc::Receiver<SystemTxRequest>,
-        )> = Vec::with_capacity(num_nodes.len());
+        let mut nodes: Vec<(NodeTestContext<_, _>, SystemTxStore)> =
+            Vec::with_capacity(num_nodes.len());
 
         for (idx, allowed_system_tx_origin) in num_nodes.iter().enumerate() {
             let node_config = NodeConfig::new(chain_spec.clone())
@@ -3034,8 +3014,7 @@ pub mod test_utils {
             let _enter = span.enter();
 
             // Create the MPSC channel for system transaction requests
-            let (system_tx_sender, system_tx_receiver) =
-                std::sync::mpsc::channel::<SystemTxRequest>();
+            let (system_tx_store, _system_tx_receiver) = SystemTxStore::new_with_notifications();
 
             let NodeHandle {
                 node,
@@ -3044,7 +3023,7 @@ pub mod test_utils {
                 .testing_node(exec.clone())
                 .node(IrysEthereumNode {
                     allowed_system_tx_origin: *allowed_system_tx_origin,
-                    system_tx_requester: system_tx_sender,
+                    system_tx_store: system_tx_store.clone(),
                 })
                 .launch()
                 .await?;
@@ -3063,7 +3042,7 @@ pub mod test_utils {
                 }
             }
 
-            nodes.push((node, system_tx_receiver));
+            nodes.push((node, system_tx_store));
         }
 
         Ok((

@@ -15,10 +15,14 @@ use irys_database::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_system_tx;
+use irys_reth::payload::DeterministicSystemTxKey;
+use irys_reth::payload::SystemTxRequest;
+use irys_reth::payload::SystemTxStore;
 use irys_reth::system_tx::BalanceDecrement;
 use irys_reth::system_tx::BalanceIncrement;
 use irys_reth::system_tx::SystemTransaction;
 use irys_reth::system_tx::TransactionPacket;
+use irys_reth_node_bridge::ext::IrysRethPayloadTestContextExt;
 use irys_reth_node_bridge::{
     ext::IrysRethTestContextExt as _, new_reth_context, node::RethNodeProvider,
 };
@@ -32,14 +36,21 @@ use irys_types::{
 };
 use nodit::interval::ii;
 use openssl::sha;
+use reth::payload::EthPayloadBuilderAttributes;
 use reth::providers::AccountReader;
 use reth::revm::primitives::ruint::Uint;
 use reth::transaction_pool::TransactionPool;
 use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
+use reth_transaction_pool::identifier::SenderId;
+use reth_transaction_pool::identifier::TransactionId;
 use reth_transaction_pool::BestTransactionsAttributes;
 use reth_transaction_pool::EthPooledTransaction;
+use reth_transaction_pool::TransactionOrigin;
+use reth_transaction_pool::ValidPoolTransaction;
+use std::sync::Mutex;
+use std::time::Instant;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -101,6 +112,8 @@ pub struct BlockProducerActor {
     pub blocks_remaining_for_test: Option<u64>,
     /// Tracing span
     pub span: Span,
+    /// System transaction store
+    pub system_tx_store: SystemTxStore,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -176,6 +189,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             block_tree_guard,
             price_oracle,
             reward_curve,
+            system_tx_store,
             ..
         } = self.clone();
 
@@ -517,27 +531,37 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     .unwrap();
                 let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
                 pooled_tx
-            }).map(|tx| {
-                context.inner.pool.add_transaction(
-                    reth_transaction_pool::TransactionOrigin::Local,
-                    tx,
-                )
-            });
-            let txs_hashes = futures::future::try_join_all(system_txs).await.expect("all system txs must be accepted by reth");
-
+            }).collect::<Vec<_>>();
 
             // generate payload attributes
-            let timestamp = now.as_secs() + 100;
-            dbg!(&timestamp);
+            let timestamp = now.as_secs();
             let payload_attrs = PayloadAttributes {
                 timestamp, // tie timestamp together **THIS HAS TO BE SECONDS**
                 prev_randao: parent.header.mix_hash,
                 suggested_fee_recipient: config.node_config.reward_address,
                 withdrawals: None, // these should ALWAYS be none
-                parent_beacon_block_root: Some(B256::ZERO),
-                // parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+                // parent_beacon_block_root: Some(B256::ZERO),
+                parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             };
-            let built = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
+            let attributes = EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, payload_attrs);
+            tracing::error!("new payload");
+            let key = DeterministicSystemTxKey::new(
+                prev_block_header.block_hash.into(),
+                timestamp,
+                prev_block_header.evm_block_hash,
+            );
+            system_tx_store.set_system_txs(key, system_txs);
+            let payload_id = context
+                .payload
+                .build_new_payload_irys(attributes.clone())
+                .await?;
+
+            let payload = context
+                .payload
+                .payload_builder
+                .best_payload(payload_id)
+                .await
+                .unwrap()?;
             let pending = context.inner.pool.pending_transactions();
             dbg!(&pending);
             let queued = context.inner.pool.queued_transactions();
@@ -548,14 +572,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             for best_tx in best_txs {
                 dbg!(& best_tx.hash());
             }
-            let block_hash = context.submit_payload(built.clone()).await?;
+            let block_hash = context.submit_payload(payload.clone()).await?;
 
             // trigger forkchoice update via engine api to commit the block to the blockchain
             context
                 .update_forkchoice(prev_block_header.evm_block_hash, block_hash)
                 .await?;
 
-            let evm_block_hash =  built.block().hash();
+            let evm_block_hash =  payload.block().hash();
 
             // build a new block header
             let mut irys_block = IrysBlockHeader {
@@ -642,7 +666,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
 
-            Ok(Some((block.clone(), built)))
+            Ok(Some((block.clone(), payload)))
         }
         .into_actor(self)
         .map(|result, actor, _ctx| {

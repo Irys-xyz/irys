@@ -71,10 +71,13 @@ async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
     let (block_hash, block_number) = {
+        todo!();
         // make the node advance
-        let payload = genctx.advance_block_irys().await?;
+        // let payload = genctx
+        //     .advance_block_irys(&mut genctx.system_tx_producer, vec![], instant::now())
+        //     .await?;
 
-        (payload.block().hash(), payload.block().number)
+        // (payload.block().hash(), payload.block().number)
     };
 
     genctx
@@ -145,67 +148,68 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     // genctx.connect(&mut p1ctx).await;
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
-    let (block_hash, block_number) = {
-        let p1_latest = genctx
-            .rpc
-            .inner
-            .eth_api()
-            .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
-            .await
-            .unwrap()
-            .unwrap();
+    // let (block_hash, block_number) = {
+    //     let p1_latest = genctx
+    //         .rpc
+    //         .inner
+    //         .eth_api()
+    //         .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
+    //         .await
+    //         .unwrap()
+    //         .unwrap();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    //     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
-        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
-            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-            prev_randao: B256::ZERO,
-            suggested_fee_recipient: Address::ZERO,
-            withdrawals: None,
-            parent_beacon_block_root: Some(B256::ZERO), // this is required now (Cancun fork activation)
-        };
+    //     let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
+    //         timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+    //         prev_randao: B256::ZERO,
+    //         suggested_fee_recipient: Address::ZERO,
+    //         withdrawals: None,
+    //         parent_beacon_block_root: Some(B256::ZERO), // this is required now (Cancun fork activation)
+    //     };
 
-        let built = genctx
-            .new_payload_irys(p1_latest.header.hash, payload_attrs)
-            .await?;
+    //     // let built = genctx
+    //     //     .new_payload_irys(p1_latest.header.hash, payload_attrs)
+    //     //     .await?;
 
-        let block_hash = genctx.submit_payload(built.clone()).await?;
+    //     let block_hash = genctx.submit_payload(built.clone()).await?;
 
-        // trigger forkchoice update via engine api to commit the block to the blockchain
-        genctx.update_forkchoice(block_hash, block_hash).await?;
+    //     // trigger forkchoice update via engine api to commit the block to the blockchain
+    //     genctx.update_forkchoice(block_hash, block_hash).await?;
 
-        (built.block().hash(), built.block().number)
-    };
+    //     (built.block().hash(), built.block().number)
+    // };
+    todo!();
 
-    // assert the block has been committed to the blockchain
-    genctx
-        .assert_new_block_irys(block_hash, block_number)
-        .await?;
+    // // assert the block has been committed to the blockchain
+    // genctx
+    //     .assert_new_block_irys(block_hash, block_number)
+    //     .await?;
 
-    // only send forkchoice update to second node
-    p1ctx.update_forkchoice(block_hash, block_hash).await?;
+    // // only send forkchoice update to second node
+    // p1ctx.update_forkchoice(block_hash, block_hash).await?;
 
-    // expect second node advanced via p2p gossip
+    // // expect second node advanced via p2p gossip
 
-    p1ctx
-        .assert_new_block_irys(block_hash, block_number)
-        .await?;
+    // p1ctx
+    //     .assert_new_block_irys(block_hash, block_number)
+    //     .await?;
 
-    let a2 = p1ctx
-        .rpc
-        .inner
-        .eth_api()
-        .block_by_hash(block_hash, false)
-        .await?;
+    // let a2 = p1ctx
+    //     .rpc
+    //     .inner
+    //     .eth_api()
+    //     .block_by_hash(block_hash, false)
+    //     .await?;
 
-    assert!(
-        a2.is_some_and(|b| b.header.hash == block_hash),
-        "Retrieved blocks hash is correct"
-    );
+    // assert!(
+    //     a2.is_some_and(|b| b.header.hash == block_hash),
+    //     "Retrieved blocks hash is correct"
+    // );
 
-    peer1.stop().await;
-    peer2.stop().await;
-    genesis.stop().await;
+    // peer1.stop().await;
+    // peer2.stop().await;
+    // genesis.stop().await;
 
     Ok(())
 }

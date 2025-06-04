@@ -1,9 +1,12 @@
+use std::time::Instant;
+
 use crate::node::{RethNodeAdapter, RethNodeAddOns};
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{BlockNumber, B256, U256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes};
-use irys_reth::IrysEthereumNode;
+use irys_reth::{payload::SystemTxRequest, IrysEthereumNode};
 use irys_types::Address;
+use reth::transaction_pool::EthPooledTransaction;
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::{
     node::NodeTestContext, payload::PayloadTestContext, rpc::RpcTestContext,
@@ -25,13 +28,18 @@ pub trait IrysRethTestContextExt {
 
     async fn advance_block_irys(
         &mut self,
-        // aaaaaa
+        system_tx_producer: &mut tokio::sync::mpsc::Receiver<SystemTxRequest>,
+        system_txs: Vec<EthPooledTransaction>,
+        now: Instant,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>;
 
     async fn new_payload_irys(
         &mut self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+        system_tx_producer: &mut tokio::sync::mpsc::Receiver<SystemTxRequest>,
+        system_txs: Vec<EthPooledTransaction>,
+        now: Instant,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>;
 
     async fn update_forkchoice_full(
@@ -45,6 +53,9 @@ pub trait IrysRethTestContextExt {
         &mut self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+        system_tx_producer: &mut tokio::sync::mpsc::Receiver<SystemTxRequest>,
+        system_txs: Vec<EthPooledTransaction>,
+        now: Instant,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>;
 }
 
@@ -86,6 +97,9 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
 
     async fn advance_block_irys(
         &mut self,
+        system_tx_producer: &mut tokio::sync::mpsc::Receiver<SystemTxRequest>,
+        system_txs: Vec<EthPooledTransaction>,
+        now: Instant,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
         let attrs = self.payload.new_attributes()?;
@@ -99,6 +113,9 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
                     withdrawals: Some(attrs.withdrawals.to_vec()),
                     parent_beacon_block_root: attrs.parent_beacon_block_root,
                 },
+                system_tx_producer,
+                system_txs,
+                now,
             )
             .await?;
 
@@ -113,6 +130,9 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
         &mut self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+        system_tx_producer: &mut tokio::sync::mpsc::Receiver<SystemTxRequest>,
+        system_txs: Vec<EthPooledTransaction>,
+        now: Instant,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
         let attributes = EthPayloadBuilderAttributes::new(parent, attributes);
@@ -120,6 +140,19 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
             .payload
             .build_new_payload_irys(attributes.clone())
             .await?;
+
+        let request = system_tx_producer
+            .recv()
+            .await
+            .expect("failed to receive system tx request. Reth-Irys link is dead.");
+        // eyre::ensure!(
+        //     request.payload_id == payload_id,
+        //     "payload id mismatch. Did another service request a payload at the same time?"
+        // );
+        request
+            .response_tx
+            .send((system_txs, now))
+            .expect("failed to send system txs");
 
         let payload = self
             .payload
@@ -174,9 +207,14 @@ impl IrysRethTestContextExt for NodeTestContext<RethNodeAdapter, RethNodeAddOns>
         &mut self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
+        system_tx_producer: &mut tokio::sync::mpsc::Receiver<SystemTxRequest>,
+        system_txs: Vec<EthPooledTransaction>,
+        now: Instant,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
-        let payload = self.new_payload_irys(parent, attributes).await?;
+        let payload = self
+            .new_payload_irys(parent, attributes, system_tx_producer, system_txs, now)
+            .await?;
 
         self.submit_payload(payload.clone()).await?;
 
