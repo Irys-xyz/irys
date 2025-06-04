@@ -146,7 +146,7 @@ pub fn capacity_pack_range_cuda_c(
 #[cfg(feature = "nvidia")]
 /// 2D Packing CUDA C implementation
 pub fn capacity_pack_range_with_data_cuda_c(
-    data: &mut Vec<u8>,
+    data: &mut [u8],
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
