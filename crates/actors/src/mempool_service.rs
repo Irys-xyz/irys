@@ -764,8 +764,7 @@ impl Inner {
             {
                 // Retrieve the promoted transactions header from mempool or database
                 // else continue loop to skip this transaction
-                let mut tx_header = match self.get_tx_from_mempool_or_database(&mut_tx, txid).await
-                {
+                let mut tx_header = match self.handle_get_transaction_message(*txid).await {
                     None => continue,
                     Some(tx_hdr) => tx_hdr,
                 };
@@ -1433,30 +1432,6 @@ impl Inner {
             }
             Ok(())
         })
-    }
-
-    // retrieve a txn from the mempool or the database, in that order
-    async fn get_tx_from_mempool_or_database(
-        &self,
-        mut_tx: &Tx<RW>,
-        txid: &H256,
-    ) -> Option<IrysTransactionHeader> {
-        let mempool_state_read_guard = self.mempool_state.read().await;
-        if let Some(hdr) = mempool_state_read_guard.valid_tx.get(txid) {
-            Some(hdr.clone())
-        } else {
-            match tx_header_by_txid(mut_tx, txid) {
-                Ok(Some(header)) => Some(header),
-                Ok(None) => {
-                    error!("No transaction header found for txid: {}", txid);
-                    None
-                }
-                Err(e) => {
-                    error!("Error fetching transaction header for txid {}: {}", txid, e);
-                    None
-                }
-            }
-        }
     }
 
     /// Opens a read-only database transaction from the Irys mempool state.
