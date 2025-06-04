@@ -16,7 +16,6 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     epoch_service::{EpochServiceActor, NewEpochMessage},
-    vdf_service::{VdfState, VdfStepsReadGuard},
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -34,6 +33,7 @@ use irys_types::{
     partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
 };
 use irys_types::{Config, U256};
+use irys_vdf::state::{VdfState, VdfStateReadonly};
 
 #[actix::test]
 async fn genesis_test() {
@@ -385,7 +385,7 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStepsReadGuard::new(Arc::new(RwLock::new(VdfState {
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
         capacity: 10,
         global_step: 0,
         seeds: VecDeque::new(),
@@ -430,7 +430,7 @@ async fn partition_expiration_and_repacking_test() {
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
-            .map(|(hash, _)| hash.clone())
+            .map(|(hash, _)| *hash)
             .expect("There should be a partition assigned to submit ledger");
 
         partition_hash
@@ -462,7 +462,7 @@ async fn partition_expiration_and_repacking_test() {
             .read()
             .capacity_partitions
             .keys()
-            .map(|partition| partition.clone())
+            .copied()
             .collect();
 
         assert!(
@@ -561,7 +561,7 @@ async fn partition_expiration_and_repacking_test() {
 
         assert_eq!(sub_slots.len(), 3, "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!");
         assert!(
-            sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
+            sub_slots[0].is_expired && sub_slots[0].partitions.is_empty(),
             "Slot 0 should have expired and have no assigned partition!"
         );
 
@@ -582,21 +582,18 @@ async fn partition_expiration_and_repacking_test() {
 
         println!("{}", serde_json::to_string_pretty(&sub_slots).unwrap());
 
-        let publish_partition = pub_slots[0]
+        let publish_partition = *pub_slots[0]
             .partitions
-            .get(0)
-            .expect("publish ledger slot 0 should have a partition assigned")
-            .clone();
-        let submit_partition = sub_slots[1]
+            .first()
+            .expect("publish ledger slot 0 should have a partition assigned");
+        let submit_partition = *sub_slots[1]
             .partitions
-            .get(0)
-            .expect("submit ledger slot 1 should have a partition assigned")
-            .clone();
-        let submit_partition2 = sub_slots[2]
+            .first()
+            .expect("submit ledger slot 1 should have a partition assigned");
+        let submit_partition2 = *sub_slots[2]
             .partitions
-            .get(0)
-            .expect("submit ledger slot 2 should have a partition assigned")
-            .clone();
+            .first()
+            .expect("submit ledger slot 2 should have a partition assigned");
 
         (publish_partition, submit_partition, submit_partition2)
     };
@@ -766,10 +763,6 @@ async fn epoch_blocks_reinitialization_test() {
     // Capacity +---+
     //          |sm2|
     //          +-+-+
-
-    let ledgers = epoch_service.ledgers.read().unwrap();
-    debug!("{:#?}", ledgers);
-    drop(ledgers);
 
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();

@@ -419,7 +419,7 @@ mod tests {
     }
 
     fn mock_header(config: &ConsensusConfig) -> IrysTransactionHeader {
-        let original_header = IrysTransactionHeader {
+        IrysTransactionHeader {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
             signer: Address::default(),
@@ -433,12 +433,11 @@ mod tests {
             version: 0,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),
-        };
-        original_header
+        }
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
-        let original_header = CommitmentTransaction {
+        CommitmentTransaction {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
             signer: Address::default(),
@@ -447,8 +446,7 @@ mod tests {
             fee: 1,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
-        };
-        original_header
+        }
     }
 }
 

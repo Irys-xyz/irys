@@ -4,7 +4,6 @@ use crate::{
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
-    vdf_service::VdfStepsReadGuard,
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
     GetCommitmentStateGuardMessage,
 };
@@ -21,6 +20,7 @@ use irys_types::{
     CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
     IrysBlockHeader, IrysTransactionHeader,
 };
+use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database;
 use std::sync::Arc;
 use tracing::{debug, error, info, Instrument, Span};
@@ -41,7 +41,7 @@ pub struct BlockDiscoveryActor {
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// Store last VDF Steps
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStateReadonly,
     /// Service Senders
     pub service_senders: ServiceSenders,
     /// Tracing span
@@ -293,7 +293,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .await
                             .expect("to receive CommitmentStatus from AddCommitment message");
 
-                        if matches!(status, CommitmentCacheStatus::Accepted) == false {
+                        if !matches!(status, CommitmentCacheStatus::Accepted) {
                             // Something went wrong with the commitments validation, it's time to roll back
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             let _ = commitment_cache_sender.send(

@@ -1,15 +1,11 @@
 use crate::{
-    block_tree_service::{BlockTreeServiceMessage, ReorgEvent},
-    broadcast_mining_service::BroadcastMiningSeed,
-    cache_service::CacheServiceAction,
-    ema_service::EmaServiceMessage,
-    mempool_service::MempoolServiceMessage,
-    vdf_service::VdfServiceMessage,
-    CommitmentCacheMessage, StorageModuleServiceMessage,
+    cache_service::CacheServiceAction, ema_service::EmaServiceMessage,
+    mempool_service::MempoolServiceMessage, CommitmentCacheMessage, StorageModuleServiceMessage,
 };
 use actix::Message;
 use core::ops::Deref;
 use irys_types::GossipData;
+use irys_vdf::StepWithCheckpoints;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
@@ -47,9 +43,8 @@ pub struct ServiceReceivers {
     pub ema: UnboundedReceiver<EmaServiceMessage>,
     pub commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
     pub mempool: UnboundedReceiver<MempoolServiceMessage>,
-    pub vdf: UnboundedReceiver<VdfServiceMessage>,
     pub vdf_mining: Receiver<bool>,
-    pub vdf_seed: Receiver<BroadcastMiningSeed>,
+    pub vdf_fast_forward: Receiver<StepWithCheckpoints>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipData>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
@@ -62,9 +57,8 @@ pub struct ServiceSendersInner {
     pub ema: UnboundedSender<EmaServiceMessage>,
     pub commitment_cache: UnboundedSender<CommitmentCacheMessage>,
     pub mempool: UnboundedSender<MempoolServiceMessage>,
-    pub vdf: UnboundedSender<VdfServiceMessage>,
     pub vdf_mining: Sender<bool>,
-    pub vdf_seed: Sender<BroadcastMiningSeed>,
+    pub vdf_fast_forward: Sender<StepWithCheckpoints>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipData>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
@@ -80,11 +74,11 @@ impl ServiceSendersInner {
             unbounded_channel::<CommitmentCacheMessage>();
 
         let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
-        let (vdf_sender, vdf_receiver) = unbounded_channel::<VdfServiceMessage>();
         // enabling/disabling VDF mining thread
         let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
         // vdf channel for fast forwarding steps during node sync
-        let (vdf_seed_sender, vdf_seed_receiver) = channel::<BroadcastMiningSeed>(1);
+        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
+            channel::<StepWithCheckpoints>(1);
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipData>();
@@ -98,9 +92,8 @@ impl ServiceSendersInner {
             ema: ema_sender,
             commitment_cache: commitments_cache_sender,
             mempool: mempool_sender,
-            vdf: vdf_sender,
             vdf_mining: vdf_mining_sender,
-            vdf_seed: vdf_seed_sender,
+            vdf_fast_forward: vdf_fast_forward_sender,
             storage_modules: sm_sender,
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
@@ -111,9 +104,8 @@ impl ServiceSendersInner {
             ema: ema_receiver,
             commitments_cache: commitments_cached_receiver,
             mempool: mempool_receiver,
-            vdf: vdf_receiver,
             vdf_mining: vdf_mining_receiver,
-            vdf_seed: vdf_seed_receiver,
+            vdf_fast_forward: vdf_fast_forward_receiver,
             storage_modules: sm_receiver,
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,

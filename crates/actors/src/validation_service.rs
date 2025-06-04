@@ -1,12 +1,8 @@
-use crate::{
-    block_tree_service::BlockTreeServiceMessage,
-    services::ServiceSenders,
-    vdf_service::{vdf_steps_are_valid, VdfStepsReadGuard},
-};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, Supervised, SystemService, WrapFuture,
 };
 use irys_types::{Config, IrysBlockHeader};
+use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use std::sync::Arc;
 use tracing::error;
 
@@ -22,7 +18,7 @@ pub struct ValidationService {
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// VDF steps read guard
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStateReadonly,
     /// Reference to global config for node
     pub config: Config,
     /// Service channels
@@ -40,7 +36,7 @@ impl ValidationService {
     pub fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        vdf_steps_guard: VdfStepsReadGuard,
+        vdf_steps_guard: VdfStateReadonly,
         config: &Config,
         service_senders: &ServiceSenders,
     ) -> Self {

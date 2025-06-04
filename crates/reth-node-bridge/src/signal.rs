@@ -49,17 +49,17 @@ where
         tokio::select! {
             _ = ctrl_c => {
                 trace!(target: "reth::cli", "Received ctrl-c");
-                return Ok(())
+                Ok(())
             },
             _ = sigterm => {
                 trace!(target: "reth::cli", "Received SIGTERM");
-                return Ok(())
+                Ok(())
             },
             _ = termination_message => {
                 trace!(target: "reth::cli", "Received termination message");
-                return Ok(())
+                Ok(())
             },
-            res = fut => return Ok(res?),
+            res = fut => res,
         }
     }
 

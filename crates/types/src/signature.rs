@@ -33,9 +33,8 @@ impl IrysSignature {
     /// Validates this signature by performing signer recovery  
     /// NOTE: This will silently short circuit to `false` if any part of the recovery operation errors
     pub fn validate_signature(&self, prehash: [u8; 32], expected_address: Address) -> bool {
-        recover_signer(&self.0, prehash.into()).map_or(false, |recovered_address| {
-            expected_address == recovered_address
-        })
+        recover_signer(&self.0, prehash.into())
+            .is_ok_and(|recovered_address| expected_address == recovered_address)
     }
 }
 

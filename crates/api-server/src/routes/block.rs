@@ -22,7 +22,7 @@ pub async fn get_block(
 
     // all roads lead to block hash
     let block_hash: H256 = match tag_param {
-        BlockParam::Latest => state.block_tree.read().tip.clone(),
+        BlockParam::Latest => state.block_tree.read().tip,
         BlockParam::BlockHeight(height) => 'outer: {
             let in_block_tree = state
                 .block_tree
@@ -36,7 +36,7 @@ pub async fn get_block(
                 })
                 .cloned();
             if let Some(hash) = in_block_tree {
-                break 'outer hash.clone();
+                break 'outer hash;
             }
             state
                 .block_index
@@ -46,7 +46,7 @@ pub async fn get_block(
                     id: path.to_string(),
                     err: String::from("Invalid block height"),
                 })
-                .map(|b| (*b).block_hash)?
+                .map(|b| b.block_hash)?
         }
         BlockParam::Finalized | BlockParam::Pending => {
             return Err(ApiError::Internal {
@@ -95,7 +95,7 @@ fn get_block_by_hash(
         .body
         .transactions
         .iter()
-        .map(|tx| tx.hash().clone())
+        .map(|tx| *tx.hash())
         .collect::<Vec<TxHash>>();
 
     let cbh = CombinedBlockHeader {

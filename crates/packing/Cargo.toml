@@ -10,3 +10,6 @@ rand.workspace = true
 
 [features]
 nvidia = ["irys-c/nvidia"]
+
+[lints]
+workspace = true
