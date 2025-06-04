@@ -162,6 +162,10 @@ impl BlockIndexService {
 
         let chunk_size = self.chunk_size;
 
+        // this fails with a "range end index 1 out of range for slice of length 0"
+        //error!("block {:?}", block);
+        error!("all_txs {:?}", all_txs); // this is empty when it should not be
+        error!("chunk_size {:?}", chunk_size);
         self.block_index
             .clone()
             .unwrap()

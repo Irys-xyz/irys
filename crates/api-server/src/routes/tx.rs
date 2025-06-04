@@ -27,7 +27,12 @@ pub async fn post_tx(
 
     // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx, oneshot_tx);
+    let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx.clone(), oneshot_tx);
+    use base58::ToBase58;
+    tracing::error!(
+        "Sending TX ingress message to mempool service {:?}",
+        tx.id.0.to_base58()
+    );
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)

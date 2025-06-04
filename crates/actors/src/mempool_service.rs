@@ -148,7 +148,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
 #[derive(Debug)]
 pub struct MempoolState {
-    /// Temporary mempool stubs - will replace with proper data models - `DMac`
+    /// todo: Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
@@ -193,7 +193,7 @@ pub enum MempoolServiceMessage {
     /// Return filtered list of candidate txns
     /// Filtering based on funding status etc
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<MempoolTxs>),
-    /// Confirm if tx exists in database
+    /// Confirm if tx exists in mempool or database
     TxExistenceQuery(
         H256,
         tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
@@ -535,15 +535,23 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
         // if tx exists in mempool valid_tx (temporary storage)
         if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+            tracing::error!(
+                "handle_get_transaction_message() {:?} FOUND in guard.valid_tx",
+                tx
+            );
             return Some(tx_header.clone());
         }
         drop(mempool_state_guard);
+        tracing::error!(
+            "handle_get_transaction_message() {:?} NOT FOUND in guard.valid_tx",
+            tx
+        );
 
         // if tx exists in database (permanent storage)
-        if let Ok(read_tx) = self.read_tx().await {
-            let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
-            return tx_header.clone();
-        }
+        //if let Ok(read_tx) = self.read_tx().await {
+        //    let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
+        //    return tx_header.clone();
+        //}
 
         None
     }
@@ -759,6 +767,7 @@ impl Inner {
         }
 
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+        tracing::error!("published_txids ids? {:?}", published_txids);
 
         // Loop though the promoted transactions and remove their ingress proofs
         // from the mempool. In the future on a multi node network we may keep
@@ -797,6 +806,7 @@ impl Inner {
                 tx_header.ingress_proofs = Some(proof);
 
                 // Update the header record in the database to include the ingress
+                // todo this would be an insert and not an update as in the new world the mempool is where txns live until they are in the database
                 // proof, indicating it is promoted
                 if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
                     error!(
@@ -1230,11 +1240,9 @@ impl Inner {
         // Validate anchor
         let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
             Err(e) => {
-                error!(
-                    "Validation failed: {:?} - mapped to: {:?}",
-                    e,
-                    TxIngressError::DatabaseError
-                );
+                error!("Validation failed: {:?}", e,);
+                //todo: should this not return the error?
+                //return Err(e);
                 return Ok(());
             }
             Ok(v) => v,
@@ -1306,6 +1314,7 @@ impl Inner {
         drop(mempool_state_write_guard);
 
         // Cache the data_root in the database
+        // Persisting transaction headers happens on shutdown
         match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, &tx)?;
             // TODO: tx headers should not immediately be added to the database
@@ -1313,6 +1322,8 @@ impl Inner {
             // during shutdown. Currently this has the potential to create
             // orphaned tx headers in the database with expired anchors and
             // not linked to any blocks.
+            // so at what point in the mempool service should they be added to database? block confirmation?
+            //irys_database::insert_tx_header(db_tx, &tx)?;
             Ok(())
         }) {
             Ok(()) => {
@@ -1369,6 +1380,7 @@ impl Inner {
         Ok(())
     }
 
+    /// check the mempool, and then the database for tx
     async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
@@ -1382,6 +1394,7 @@ impl Inner {
             // Still has it, just invalid
             Ok(true)
         } else {
+            //todo: should this just return false? i.e. only check mempool and not database?
             drop(mempool_state_guard);
             let read_tx = self.read_tx().await;
 
@@ -1403,6 +1416,7 @@ impl Inner {
         &'a mut self,
         msg: MempoolServiceMessage,
     ) -> BoxFuture<'a, eyre::Result<()>> {
+        //tracing::error!("MempoolServiceMessage handler recieved {:?}", msg);
         Box::pin(async move {
             match msg {
                 MempoolServiceMessage::GetTransaction(tx, response) => {
