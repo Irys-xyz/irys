@@ -4,7 +4,6 @@ use crate::{
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
-    vdf_service::VdfStateReadonly,
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
     GetCommitmentStateGuardMessage,
 };
@@ -21,6 +20,7 @@ use irys_types::{
     CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
     IrysBlockHeader, IrysTransactionHeader,
 };
+use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database;
 use std::sync::Arc;
 use tracing::{debug, error, info, Instrument, Span};

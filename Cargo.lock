@@ -5024,6 +5024,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-vdf",
  "rand 0.8.5",
  "reqwest 0.11.27",
  "reth-tasks",
@@ -5248,15 +5249,23 @@ dependencies = [
 name = "irys-vdf"
 version = "0.1.0"
 dependencies = [
+ "actix",
+ "actix-rt",
  "base58",
  "eyre",
  "hex",
+ "irys-database",
+ "irys-efficient-sampling",
+ "irys-storage",
  "irys-types",
+ "nodit",
  "openssl",
  "rayon",
+ "reth-db",
  "sha2 0.10.9",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.19",
 ]
 
 [[package]]

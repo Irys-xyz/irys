@@ -6,7 +6,6 @@ use crate::broadcast_mining_service::{
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::PackingRequest;
-use crate::vdf_service::VdfStateReadonly;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr;
@@ -18,6 +17,7 @@ use irys_types::{
     partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
     PartitionChunkOffset, PartitionChunkRange,
 };
+use irys_vdf::state::VdfStateReadonly;
 use openssl::sha;
 use tracing::{debug, error, info, warn, Span};
 
@@ -399,7 +399,6 @@ mod tests {
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
         packing::PackingActor,
-        vdf_service::test_helpers::mocked_vdf_service,
     };
     use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
@@ -414,6 +413,7 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
         NodeConfig,
     };
+    use irys_vdf::state::test_helpers::mocked_vdf_service;
     use reth::payload::EthBuiltPayload;
     use std::any::Any;
     use std::sync::atomic::AtomicU64;
@@ -538,7 +538,7 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new(None);
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        let (vdf_state, _task_manager) = mocked_vdf_service(&config).await;
+        let vdf_state = mocked_vdf_service(&config).await;
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
@@ -658,7 +658,7 @@ mod tests {
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
-        let (vdf_state, _task_manager) = mocked_vdf_service(&config).await;
+        let vdf_state = mocked_vdf_service(&config).await;
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let hash: H256 = H256::random();

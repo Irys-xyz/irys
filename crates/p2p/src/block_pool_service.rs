@@ -6,12 +6,12 @@ use actix::{
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::vdf_service::VdfStateReadonly;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
+use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::StepWithCheckpoints;
 use std::collections::HashMap;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info};
@@ -44,7 +44,7 @@ where
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
-    pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+    pub(crate) vdf_sender: Option<Sender<StepWithCheckpoints>>,
     pub(crate) vdf_state: Option<VdfStateReadonly>,
 
     sync_state: SyncState,
@@ -109,7 +109,7 @@ where
         db: DatabaseProvider,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
-        vdf_sender: Option<Sender<BroadcastMiningSeed>>,
+        vdf_sender: Option<Sender<StepWithCheckpoints>>,
         sync_state: SyncState,
         vdf_state: VdfStateReadonly,
     ) -> Self {

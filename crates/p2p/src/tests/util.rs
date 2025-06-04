@@ -8,11 +8,8 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use irys_actors::vdf_service::test_helpers::mocked_vdf_service;
-use irys_actors::vdf_service::VdfStateReadonly;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
-    broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError},
 };
 use irys_api_client::ApiClient;
@@ -27,6 +24,9 @@ use irys_types::{
     PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
+use irys_vdf::state::test_helpers::mocked_vdf_service;
+use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::StepWithCheckpoints;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -381,8 +381,8 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
-        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
-        let (vdf_state, _task_manager) = mocked_vdf_service(&self.config).await;
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<StepWithCheckpoints>(1);
+        let vdf_state = mocked_vdf_service(&self.config).await;
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service

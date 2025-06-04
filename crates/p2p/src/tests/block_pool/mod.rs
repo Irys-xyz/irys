@@ -6,8 +6,6 @@ use actix::Actor;
 use async_trait::async_trait;
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::vdf_service::test_helpers::mocked_vdf_service;
-use irys_actors::vdf_service::VdfStateReadonly;
 use irys_api_client::ApiClient;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, insert_block_header};
@@ -18,6 +16,8 @@ use irys_types::{
     Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
     NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
+use irys_vdf::state::test_helpers::mocked_vdf_service;
+use irys_vdf::state::VdfStateReadonly;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -133,7 +133,7 @@ async fn should_process_block() {
     let peer_addr = peer_list_service.start();
 
     let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
-    let (vdf_state, _task_manager) = mocked_vdf_service(&config).await;
+    let vdf_state = mocked_vdf_service(&config).await;
     let vdf_state_readonly = VdfStateReadonly::new(vdf_state.clone());
     let sync_state = SyncState::new(false);
     let service = BlockPoolService::new_with_client(
@@ -294,7 +294,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("can't send message to peer list");
 
     let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
-    let (vdf_state, _task_manager) = mocked_vdf_service(&config).await;
+    let vdf_state = mocked_vdf_service(&config).await;
     let vdf_state_readonly = VdfStateReadonly::new(vdf_state.clone());
     let sync_state = SyncState::new(false);
 

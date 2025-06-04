@@ -17,7 +17,6 @@ use irys_actors::{
     block_validation,
     mempool_service::{MempoolServiceMessage, TxIngressError},
     packing::wait_for_packing,
-    vdf_service::VdfStateReadonly,
     SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
@@ -41,6 +40,7 @@ use irys_types::{
     IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
     NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
+use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
 use reth_db::cursor::*;

@@ -1,8 +1,8 @@
-use crate::vdf_service::{vdf_steps_are_valid, VdfStateReadonly};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, Supervised, SystemService, WrapFuture,
 };
 use irys_types::{Config, IrysBlockHeader};
+use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use std::sync::Arc;
 use tracing::error;
 

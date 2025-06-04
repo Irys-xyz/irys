@@ -16,7 +16,6 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     epoch_service::{EpochServiceActor, NewEpochMessage},
-    vdf_service::{VdfState, VdfStateReadonly},
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -34,6 +33,7 @@ use irys_types::{
     partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
 };
 use irys_types::{Config, U256};
+use irys_vdf::state::{VdfState, VdfStateReadonly};
 
 #[actix::test]
 async fn genesis_test() {

@@ -1,9 +1,8 @@
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;
-use irys_actors::vdf_service::AtomicVdfState;
+use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
@@ -11,7 +10,7 @@ use irys_actors::{
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
+    broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
@@ -24,7 +23,6 @@ use irys_actors::{
     },
     services::ServiceSenders,
     validation_service::ValidationService,
-    vdf_service::VdfStateReadonly,
 };
 use irys_actors::{
     ActorAddresses, CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage,
@@ -57,6 +55,9 @@ use irys_types::{
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, H256, U256,
 };
+use irys_vdf::state::{AtomicVdfState, VdfStateReadonly};
+use irys_vdf::vdf::run_vdf;
+use irys_vdf::StepWithCheckpoints;
 use reth::{
     chainspec::ChainSpec,
     tasks::{TaskExecutor, TaskManager},
@@ -885,7 +886,7 @@ impl IrysNode {
         );
 
         // Spawn VDF service
-        let vdf_state = Arc::new(RwLock::new(irys_actors::vdf_service::create_state(
+        let vdf_state = Arc::new(RwLock::new(irys_vdf::state::create_state(
             block_index.clone(),
             irys_db.clone(),
             service_senders.vdf_mining.clone(),
@@ -928,7 +929,7 @@ impl IrysNode {
             task_exec,
             peer_list_service.clone(),
             irys_db.clone(),
-            service_senders.vdf_seed.clone(),
+            service_senders.vdf_fast_forward.clone(),
             gossip_listener,
             vdf_state_readonly.clone(),
         )?;
@@ -979,7 +980,7 @@ impl IrysNode {
         let vdf_thread_handler = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
-            receivers.vdf_seed,
+            receivers.vdf_fast_forward,
             receivers.vdf_mining,
             latest_block,
             seed,
@@ -1120,7 +1121,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        new_seed_rx: mpsc::Receiver<BroadcastMiningSeed>,
+        new_seed_rx: mpsc::Receiver<StepWithCheckpoints>,
         vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
@@ -1166,7 +1167,7 @@ impl IrysNode {
                     new_seed_rx,
                     vdf_mining_state_rx,
                     vdf_shutdown_receiver,
-                    broadcast_mining_actor.clone(),
+                    MiningServiceBroadcaster::from(broadcast_mining_actor.clone()),
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
                 )

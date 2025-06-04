@@ -1,3 +1,4 @@
+use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::eyre;
 use irys_database::{block_header_by_hash, BlockIndex};
 use irys_efficient_sampling::num_recall_ranges_in_partition;
@@ -6,7 +7,6 @@ use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
     U256,
 };
-use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use nodit::{interval::ii, InclusiveInterval, Interval};
 use rayon::prelude::*;
 use reth_db::Database;
@@ -20,8 +20,6 @@ use tokio::{
     time::{sleep, Duration},
 };
 use tracing::{info, warn};
-
-use crate::block_index_service::BlockIndexReadGuard;
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -155,11 +153,11 @@ pub fn create_state(
     vdf_mining_state_sender: Sender<bool>,
     config: &Config,
 ) -> VdfState {
-    let block_index = BlockIndexReadGuard::new(block_index);
     let capacity = calc_capacity(config);
 
     if let Some(block_hash) = block_index
         .read()
+        .expect("To unlock block index")
         .get_latest_item()
         .map(|item| item.block_hash)
     {
@@ -360,14 +358,10 @@ pub fn vdf_steps_are_valid(
 pub mod test_helpers {
     use super::*;
 
-    use reth::tasks::TaskManager;
     use std::sync::RwLock;
     use tokio::sync::mpsc::channel;
 
-    pub async fn mocked_vdf_service(config: &Config) -> (AtomicVdfState, TaskManager) {
-        // prep to spawn VDF service
-        // this is so we can send it new VDF steps as part of this test
-        let task_manager = TaskManager::new(tokio::runtime::Handle::current());
+    pub async fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
 
         let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
@@ -387,6 +381,6 @@ pub mod test_helpers {
             config,
         )));
 
-        (vdf_state, task_manager)
+        vdf_state
     }
 }

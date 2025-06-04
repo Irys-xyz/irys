@@ -5,7 +5,6 @@ use crate::{
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
-    vdf_service::VdfStateReadonly,
 };
 use base58::ToBase58;
 use eyre::ensure;
@@ -17,6 +16,7 @@ use irys_types::{
     DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
+use irys_vdf::state::VdfStateReadonly;
 use openssl::sha;
 use tracing::{debug, info};
 

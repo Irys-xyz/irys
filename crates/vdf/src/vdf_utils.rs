@@ -1,6 +1,6 @@
-use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::vdf_service::VdfStateReadonly;
-use irys_types::{block_production::Seed, H256List, VDFLimiterInfo};
+use crate::state::VdfStateReadonly;
+use crate::StepWithCheckpoints;
+use irys_types::{H256List, VDFLimiterInfo};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::time::sleep;
@@ -29,7 +29,7 @@ pub async fn wait_for_vdf_step(
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 pub async fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: VDFLimiterInfo,
-    vdf_sender: Sender<BroadcastMiningSeed>,
+    vdf_sender: Sender<StepWithCheckpoints>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;
     let len = vdf_limiter_info.steps.len();
@@ -41,9 +41,9 @@ pub async fn fast_forward_vdf_steps_from_block(
     );
     for (i, hash) in vdf_limiter_info.steps.iter().enumerate() {
         //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-        let mining_seed = BroadcastMiningSeed {
-            seed: Seed(*hash),
-            global_step: block_start_step + i as u64,
+        let mining_seed = StepWithCheckpoints {
+            step: *hash,
+            global_step_number: block_start_step + i as u64,
             checkpoints: H256List::new(),
         };
 
