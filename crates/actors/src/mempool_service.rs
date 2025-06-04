@@ -716,6 +716,28 @@ impl Inner {
         block: Arc<IrysBlockHeader>,
         all_txs: Arc<Vec<IrysTransactionHeader>>,
     ) -> Result<(), TxIngressError> {
+        // Persist all txs to the database before modifying mempool state
+        {
+            let mut_tx = self
+                .irys_db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            for tx_header in all_txs.iter() {
+                if let Err(err) = insert_tx_header(&mut_tx, tx_header) {
+                    error!(
+                        "Could not insert transaction header - txid: {} err: {}",
+                        tx_header.id, err
+                    );
+                }
+            }
+
+            mut_tx.commit().expect("expect to commit to database");
+        }
+        // remove txs from mempool
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
         for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
