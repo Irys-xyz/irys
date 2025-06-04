@@ -3,6 +3,7 @@ use crate::{
     block_tree_service::BlockTreeService,
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
+    mempool_service::{MempoolFacade, MempoolServiceFacadeImpl},
     services::ServiceSenders,
     vdf_service::VdfStepsReadGuard,
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
@@ -40,6 +41,8 @@ pub struct BlockDiscoveryActor {
     pub reward_curve: Arc<HalvingCurve>,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
+    /// Facade for interacting with the mempool
+    pub mempool: MempoolServiceFacadeImpl,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
