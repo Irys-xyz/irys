@@ -2,11 +2,72 @@ use crate::state::AtomicVdfState;
 use crate::{
     apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, StepWithCheckpoints,
 };
-use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
+use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, VDFLimiterInfo, H256, U256};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
+
+pub fn run_vdf_for_genesis_block(
+    genesis_block: &mut IrysBlockHeader,
+    config: &irys_types::VdfConfig,
+) {
+    let last_epoch_block_hash = genesis_block.last_epoch_hash;
+    genesis_block.vdf_limiter_info = VDFLimiterInfo {
+        global_step_number: 1,
+        prev_output: last_epoch_block_hash,
+        ..VDFLimiterInfo::default()
+    };
+
+    let mut hash: H256 = genesis_block.vdf_limiter_info.seed;
+    let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+
+    for global_step_number in 0..=1 {
+        let mut hasher = Sha256::new();
+        let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
+
+        if global_step_number == 0 {
+            assert_eq!(salt, U256::from(0));
+            assert_eq!(hash, H256::from_base58("11111111111111111111111111111111"))
+        } else {
+            assert_eq!(salt, U256::from(1));
+            assert_eq!(
+                hash,
+                H256::from_base58("5mRzwP4eqmGjXmxmCGvW2y1PeNKURNxUKnQE53q27moC")
+            )
+        }
+
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut hash,
+            config.num_checkpoints_in_vdf_step,
+            config.sha_1s_difficulty,
+            &mut checkpoints,
+        );
+
+        if global_step_number == 0 {
+            assert_eq!(salt, U256::from(25));
+            assert_eq!(
+                hash,
+                H256::from_base58("5mRzwP4eqmGjXmxmCGvW2y1PeNKURNxUKnQE53q27moC")
+            );
+            genesis_block.vdf_limiter_info.prev_output = hash;
+            // genesis_block.vdf_limiter_info.seed = hash;
+        } else {
+            assert_eq!(salt, U256::from(26));
+            assert_eq!(
+                hash,
+                H256::from_base58("B9wNvK2xTfspfHhqoBW3PPD1Avkv8v8jc9kQDQBKCG9U")
+            );
+            println!("Bibao {:?} == {:?}", hash, checkpoints.last().unwrap());
+            genesis_block.vdf_limiter_info.global_step_number = 1;
+            genesis_block.vdf_limiter_info.output = hash;
+            genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints.clone();
+            genesis_block.vdf_limiter_info.steps.0 = vec![hash];
+        }
+    }
+}
 
 pub fn run_vdf(
     config: &irys_types::VdfConfig,

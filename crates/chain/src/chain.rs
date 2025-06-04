@@ -77,6 +77,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn, Instrument as _, Span};
+use irys_vdf::vdf::run_vdf_for_genesis_block;
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -392,6 +393,8 @@ impl IrysNode {
 
         // Add commitment transactions to genesis block
         add_genesis_commitments(&mut genesis_block, &self.config);
+
+        run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
 
         (genesis_block, commitments)
     }
