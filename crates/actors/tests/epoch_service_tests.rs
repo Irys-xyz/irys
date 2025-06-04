@@ -430,7 +430,7 @@ async fn partition_expiration_and_repacking_test() {
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
-            .map(|(hash, _)| hash.clone())
+            .map(|(hash, _)| *hash)
             .expect("There should be a partition assigned to submit ledger");
 
         partition_hash
@@ -461,8 +461,7 @@ async fn partition_expiration_and_repacking_test() {
         let capacity_partitions: Vec<H256> = partition_assignments_read
             .read()
             .capacity_partitions
-            .keys()
-            .map(|partition| partition.clone())
+            .keys().copied()
             .collect();
 
         assert!(
@@ -561,7 +560,7 @@ async fn partition_expiration_and_repacking_test() {
 
         assert_eq!(sub_slots.len(), 3, "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!");
         assert!(
-            sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
+            sub_slots[0].is_expired && sub_slots[0].partitions.is_empty(),
             "Slot 0 should have expired and have no assigned partition!"
         );
 
@@ -582,21 +581,15 @@ async fn partition_expiration_and_repacking_test() {
 
         println!("{}", serde_json::to_string_pretty(&sub_slots).unwrap());
 
-        let publish_partition = pub_slots[0]
-            .partitions
-            .get(0)
-            .expect("publish ledger slot 0 should have a partition assigned")
-            .clone();
-        let submit_partition = sub_slots[1]
-            .partitions
-            .get(0)
-            .expect("submit ledger slot 1 should have a partition assigned")
-            .clone();
-        let submit_partition2 = sub_slots[2]
-            .partitions
-            .get(0)
-            .expect("submit ledger slot 2 should have a partition assigned")
-            .clone();
+        let publish_partition = *pub_slots[0]
+            .partitions.first()
+            .expect("publish ledger slot 0 should have a partition assigned");
+        let submit_partition = *sub_slots[1]
+            .partitions.first()
+            .expect("submit ledger slot 1 should have a partition assigned");
+        let submit_partition2 = *sub_slots[2]
+            .partitions.first()
+            .expect("submit ledger slot 2 should have a partition assigned");
 
         (publish_partition, submit_partition, submit_partition2)
     };

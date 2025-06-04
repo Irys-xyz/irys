@@ -455,7 +455,7 @@ impl IrysNode {
         write_tx.inner.commit()?;
 
         block_index.push_block(
-            &genesis_block,
+            genesis_block,
             &Vec::new(), // Assuming no data transactions in genesis block
             self.config.consensus.chunk_size,
         )?;
@@ -473,7 +473,7 @@ impl IrysNode {
         let (chain_spec, genesis_block) = IrysChainSpecBuilder::from_config(&self.config).build();
 
         // In all startup modes, irys_db and block_index are prerequisites
-        let irys_db = init_irys_db(&config).expect("could not open irys db");
+        let irys_db = init_irys_db(config).expect("could not open irys db");
         let mut block_index = BlockIndex::new(&config.node_config)
             .await
             .expect("initializing a new block index should be doable");
@@ -603,7 +603,7 @@ impl IrysNode {
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn({
-                let irys_provider = Arc::clone(&irys_provider);
+                let irys_provider = Arc::clone(irys_provider);
                 move || {
                     System::new().block_on(async move {
                         // read the latest block info
@@ -727,11 +727,11 @@ impl IrysNode {
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
                     debug!("Waiting for the main actor thread to finish");
-                    let reth_node_handle = actor_main_thread_handle
-                        .join()
-                        .expect("to successfully join the actor thread handle");
+                    
 
-                    reth_node_handle
+                    actor_main_thread_handle
+                        .join()
+                        .expect("to successfully join the actor thread handle")
                 };
 
                 let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
@@ -744,7 +744,7 @@ impl IrysNode {
                 info!("Reth thread finished");
             })?;
 
-        return Ok(reth_thread_handler);
+        Ok(reth_thread_handler)
     }
 
     async fn init_services(
@@ -797,7 +797,7 @@ impl IrysNode {
         debug!("Reth Service Actor updated about fork choice");
 
         let _handle = ChunkCacheService::spawn_service(
-            &task_exec,
+            task_exec,
             irys_db.clone(),
             receivers.chunk_cache,
             config.clone(),
@@ -847,11 +847,11 @@ impl IrysNode {
 
         // Spawn EMA service
         let _handle =
-            EmaService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.ema, &config);
+            EmaService::spawn_service(task_exec, block_tree_guard.clone(), receivers.ema, &config);
 
         // Spawn the CommitmentCache service
         let _commitcache_handle = CommitmentCache::spawn_service(
-            &task_exec,
+            task_exec,
             receivers.commitments_cache,
             commitment_state_guard.clone(),
         );
@@ -862,7 +862,7 @@ impl IrysNode {
 
         // Spawn mempool service
         let _mempool_handle = MempoolService::spawn_service(
-            &task_exec,
+            task_exec,
             &irys_db,
             reth_db,
             &storage_modules_guard,
@@ -885,7 +885,7 @@ impl IrysNode {
 
         // Spawn VDF service
         let _handle = VdfService::spawn_service(
-            &task_exec,
+            task_exec,
             irys_db.clone(),
             block_index_guard.clone(),
             receivers.vdf,
@@ -1037,7 +1037,7 @@ impl IrysNode {
         // - Coordinates with the epoch service for runtime updates
         debug!("Starting StorageModuleService");
         let _handle = StorageModuleService::spawn_service(
-            &task_exec,
+            task_exec,
             receivers.storage_modules,
             storage_modules,
             &irys_node_ctx.actor_addresses,
@@ -1122,8 +1122,8 @@ impl IrysNode {
         storage_modules_guard: StorageModulesReadGuard,
     ) -> Arc<ChunkProvider> {
         let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard.clone());
-        let chunk_provider = Arc::new(chunk_provider);
-        chunk_provider
+        
+        Arc::new(chunk_provider)
     }
 
     fn init_vdf_thread(
@@ -1197,7 +1197,7 @@ impl IrysNode {
         let mut arbiters = Vec::new();
         for sm in storage_modules_guard.read().iter() {
             let partition_mining_actor = PartitionMiningActor::new(
-                &config,
+                config,
                 block_producer_addr.clone().recipient(),
                 packing_actor_addr.clone().recipient(),
                 sm.clone(),
@@ -1239,9 +1239,9 @@ impl IrysNode {
         let sm_ids = storage_modules_guard
             .read()
             .iter()
-            .map(|s| (*s).id)
+            .map(|s| s.id)
             .collect();
-        let packing_config = PackingConfig::new(&config);
+        let packing_config = PackingConfig::new(config);
         let packing_actor_addr = PackingActor::new(
             reth_node.task_executor.clone(),
             sm_ids,
@@ -1298,8 +1298,8 @@ impl IrysNode {
             )),
             // note: depending on the oracle, it may require spawning an async background service.
         };
-        let price_oracle = Arc::new(price_oracle);
-        price_oracle
+        
+        Arc::new(price_oracle)
     }
 
     fn init_block_discovery_service(
@@ -1399,7 +1399,7 @@ impl IrysNode {
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
         let mut storage_modules = Vec::new();
         for info in storage_module_infos {
-            let arc_module = Arc::new(StorageModule::new(&info, &config)?);
+            let arc_module = Arc::new(StorageModule::new(&info, config)?);
             storage_modules.push(arc_module.clone());
         }
 
@@ -1416,12 +1416,12 @@ impl IrysNode {
         actix::Addr<EpochServiceActor>,
     )> {
         let (genesis_block, commitments, epoch_replay_data) =
-            EpochReplayData::query_replay_data(irys_db, block_index_guard, &config)?;
+            EpochReplayData::query_replay_data(irys_db, block_index_guard, config)?;
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
         let mut epoch_service =
-            EpochServiceActor::new(service_senders, &storage_submodules_config, &config);
+            EpochServiceActor::new(service_senders, &storage_submodules_config, config);
 
         let _ = epoch_service.initialize(genesis_block, commitments)?;
         let storage_module_infos = epoch_service.replay_epoch_data(epoch_replay_data)?;

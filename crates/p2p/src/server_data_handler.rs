@@ -273,7 +273,7 @@ where
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
-            .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+            .map_err(GossipError::BlockPool)?;
 
         if has_block_already_been_processed {
             debug!(
@@ -348,12 +348,9 @@ where
             match mempool_response.map_err(GossipError::from) {
                 Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                     debug!("Transaction sent to mempool");
-                    if let Err(error) = self
+                    self
                         .cache
-                        .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))
-                    {
-                        return Err(error);
-                    }
+                        .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?
                 }
                 Err(error) => {
                     error!("Error when sending transaction to mempool: {:?}", error);
@@ -368,7 +365,7 @@ where
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
-            .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+            .map_err(GossipError::BlockPool)?;
         Ok(())
     }
 
@@ -403,7 +400,7 @@ where
                     .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?;
 
                 let maybe_block = block_result
-                    .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+                    .map_err(GossipError::BlockPool)?;
 
                 match maybe_block {
                     Some(block) => {

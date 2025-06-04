@@ -174,7 +174,7 @@ impl StorageModuleServiceInner {
         }
 
         // Get the assignment
-        let assignment = module.partition_assignment().unwrap().clone();
+        let assignment = module.partition_assignment().unwrap();
 
         // Load parameters from disk
         let params_path = module_path.join("packing_params.toml");

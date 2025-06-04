@@ -1699,8 +1699,8 @@ mod tests {
     fn signer_b() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
         let wallets = Wallet::new(2).wallet_gen();
         let signer_b = EthereumWallet::from(wallets[1].clone());
-        let signer_b = signer_b.default_signer();
-        signer_b
+        
+        (signer_b.default_signer()) as _
     }
 
     #[rstest::fixture]
@@ -2274,8 +2274,7 @@ pub mod test_utils {
             )
             .await?;
 
-            let genesis_blockhash = nodes
-                .get(0)
+            let genesis_blockhash = nodes.first()
                 .unwrap()
                 .inner
                 .provider
@@ -2745,15 +2744,15 @@ pub mod test_utils {
         AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
         N::Types: NodeTypes<Primitives: FullNodePrimitives>,
     {
-        let signer_balance = node
+        
+        node
             .provider
             .basic_account(&addr)
             .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
             .unwrap_or_else(|err| {
                 tracing::warn!("Failed to get signer_b balance: {}", err);
                 U256::ZERO
-            });
-        signer_balance
+            })
     }
 
     /// Get the nonce of an address from a node.
@@ -2763,15 +2762,15 @@ pub mod test_utils {
         AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
         N::Types: NodeTypes<Primitives: FullNodePrimitives>,
     {
-        let signer_balance = node
+        
+        node
             .provider
             .basic_account(&addr)
             .map(|account_info| account_info.map_or(0, |acc| acc.nonce))
             .unwrap_or_else(|err| {
                 tracing::warn!("Failed to get nonce: {}", err);
                 0
-            });
-        signer_balance
+            })
     }
 
     /// Sign a legacy transaction with the provided signer.
@@ -2786,7 +2785,7 @@ pub mod test_utils {
 
         let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
 
-        return pooled_tx;
+        pooled_tx
     }
 
     /// Returns a custom chain spec for testing.

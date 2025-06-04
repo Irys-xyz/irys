@@ -366,14 +366,14 @@ where
                     // Clone or copy the fields we need for the async operation
                     let peer_item = peer.clone();
                     let mining_addr = *mining_addr;
-                    let peer_addr = peer_item.address.clone();
+                    let peer_addr = peer_item.address;
                     (mining_addr, peer_item, peer_addr.gossip)
                 })
                 .collect();
 
             for (mining_addr, peer, ..) in inactive_peers {
                 // Clone the peer address to use in the async block
-                let peer_address = peer.address.clone();
+                let peer_address = peer.address;
                 let client = act.gossip_client.clone();
                 // Create the future that does the health check
                 let fut = async move { check_health(peer_address, client).await }
@@ -514,7 +514,7 @@ where
                 }
                 Ok(())
             })
-            .map_err(|e| PeerListServiceError::Database(e))?
+            .map_err(PeerListServiceError::Database)?
         } else {
             Err(PeerListServiceError::DatabaseNotConnected)
         }
@@ -569,11 +569,11 @@ where
     /// Add a peer to the peer list. Returns true if the peer was added, false if it already exists.
     fn add_peer(&mut self, mining_addr: Address, peer: PeerListItem) -> bool {
         let gossip_addr = peer.address.gossip;
-        let peer_address = peer.address.clone();
+        let peer_address = peer.address;
 
-        if !self.peer_list_cache.contains_key(&mining_addr) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.peer_list_cache.entry(mining_addr) {
             debug!("Adding peer {:?} to the peer list", mining_addr);
-            self.peer_list_cache.insert(mining_addr, peer);
+            e.insert(peer);
             self.gossip_addr_to_mining_addr_map
                 .insert(gossip_addr.ip(), mining_addr);
             self.api_addr_to_mining_addr_map
@@ -1964,7 +1964,7 @@ mod tests {
             true,
             None,
         );
-        let known_peers: HashSet<_> = vec![peer1.address.clone(), peer2.address.clone()]
+        let known_peers: HashSet<_> = vec![peer1.address, peer2.address]
             .into_iter()
             .collect();
         let version_request = VersionRequest::default();
@@ -2017,7 +2017,7 @@ mod tests {
         };
 
         let initial_peer = PeerListItem {
-            address: initial_peer_addr.clone(),
+            address: initial_peer_addr,
             reputation_score: PeerScore::new(50),
             response_time: 100,
             last_seen: 123,
@@ -2053,7 +2053,7 @@ mod tests {
         };
 
         let updated_peer = PeerListItem {
-            address: new_peer_addr.clone(),
+            address: new_peer_addr,
             reputation_score: PeerScore::new(50),
             response_time: 100,
             last_seen: 123,
@@ -2133,7 +2133,7 @@ mod tests {
             address: PeerAddress {
                 gossip: "127.0.0.1:8080".parse().unwrap(),
                 api: "127.0.0.1:8081".parse().unwrap(),
-                execution: test_reth_peer_info.clone(),
+                execution: test_reth_peer_info,
             },
             reputation_score: PeerScore::new(50),
             response_time: 100,
@@ -2503,7 +2503,7 @@ mod tests {
 
         // Create config with trusted peers
         let mut node_config = NodeConfig::testnet();
-        node_config.trusted_peers = vec![trusted_peer1.clone(), trusted_peer2.clone()];
+        node_config.trusted_peers = vec![trusted_peer1, trusted_peer2];
         let config = Config::new(node_config);
 
         let db = DatabaseProvider(Arc::new(

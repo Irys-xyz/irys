@@ -436,8 +436,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             mempool_service.send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))?;
 
             //if transaction exists
-            if true
-                == oneshot_rx
+            if oneshot_rx
                     .await
                     .expect("to process ChunkIngressMessage")
                     .expect("boolean response to transaction existence")
@@ -499,10 +498,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         match oneshot_rx.await {
-            Ok(Ok(())) => return Ok(tx),
-            Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
-            Err(e) => return Err(AddTxError::Mailbox(e)),
-        };
+            Ok(Ok(())) => Ok(tx),
+            Ok(Err(tx_error)) => Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => Err(AddTxError::Mailbox(e)),
+        }
     }
 
     pub fn create_signed_data_tx(
@@ -555,14 +554,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .iter()
             .find(|(_, blk_height, _, _)| *blk_height == height)
-            .map(|(blk_hash, _, _, _)| {
+            .and_then(|(blk_hash, _, _, _)| {
                 self.node_ctx
                     .block_tree_guard
                     .read()
                     .get_block(blk_hash)
                     .cloned()
             })
-            .flatten()
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
@@ -847,12 +845,12 @@ pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction
         commitment_type: CommitmentType::Stake,
         // TODO: real staking amounts
         fee: 1,
-        anchor: anchor.clone(),
+        anchor: *anchor,
         ..Default::default()
     };
 
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
-    stake_tx
+    
+    signer.sign_commitment(stake_tx).unwrap()
 }
 
 pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
@@ -860,12 +858,12 @@ pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransactio
         commitment_type: CommitmentType::Pledge,
         // TODO: real pledging amounts
         fee: 1,
-        anchor: anchor.clone(),
+        anchor: *anchor,
         ..Default::default()
     };
 
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
-    stake_tx
+    
+    signer.sign_commitment(stake_tx).unwrap()
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.

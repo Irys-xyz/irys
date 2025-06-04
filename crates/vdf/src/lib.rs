@@ -212,7 +212,7 @@ pub async fn last_step_checkpoints_is_valid(
                     let mut hasher = Sha256::new();
 
                     for _ in 0..num_iterations {
-                        hasher.update(&salt_buff);
+                        hasher.update(salt_buff);
                         hasher.update(seed.as_bytes());
                         seed = H256(hasher.finalize_reset().into());
                     }

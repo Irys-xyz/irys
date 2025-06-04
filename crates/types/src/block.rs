@@ -727,7 +727,7 @@ mod tests {
         // action
         let mut buffer = vec![];
         data.to_compact(&mut buffer);
-        let (decoded, ..) = VDFLimiterInfo::from_compact(&mut buffer.as_slice(), buffer.len());
+        let (decoded, ..) = VDFLimiterInfo::from_compact(buffer.as_slice(), buffer.len());
 
         // Assert
         assert_eq!(data, decoded);

@@ -348,7 +348,7 @@ impl Inner {
         .into_iter()
         .find(|hdr| hdr.height == desired_height);
         let block_header = if let Some(cached_header) = cached_header {
-            Arc::clone(&cached_header)
+            Arc::clone(cached_header)
         } else {
             let chain = T::get_chain(self.block_tree_read_guard.clone()).await?;
             let (_, latest_block_height, ..) = chain.last().expect("optimistic chain is empty");
@@ -485,7 +485,7 @@ mod price_cache_context {
                 max_height,
                 block_tree_read_guard,
                 blocks_in_price_adjustment_interval,
-                &canonical_chain_subset,
+                canonical_chain_subset,
             )
             .await
         }
@@ -536,7 +536,7 @@ mod price_cache_context {
                 fetch_block_with_height(
                     height,
                     block_tree_read_guard.clone(),
-                    &canonical_chain,
+                    canonical_chain,
                     latest_block_height,
                 )
                 .await
@@ -585,7 +585,9 @@ mod price_cache_context {
             //    which will be reported to other systems querying for EMA prices.
 
             // calculate the new EMA using historical oracle price + ema price
-            let new_ema = oracle_price_to_use
+            
+
+            oracle_price_to_use
                 .calculate_ema(
                     // note: we calculate the EMA for each block, but we don't calculate relative intervals between them
                     blocks_in_interval,
@@ -594,9 +596,7 @@ mod price_cache_context {
                 .unwrap_or_else(|err| {
                     tracing::warn!(?err, "price overflow, using previous EMA price");
                     self.block_latest_ema.ema_irys_price
-                });
-
-            new_ema
+                })
         }
     }
 
@@ -814,8 +814,8 @@ mod tests {
         let prices = blocks
             .iter()
             .map(|block| PriceInfo {
-                oracle: block.oracle_irys_price.clone(),
-                ema: block.ema_irys_price.clone(),
+                oracle: block.oracle_irys_price,
+                ema: block.ema_irys_price,
             })
             .collect::<Vec<_>>();
         (blocks, prices)
@@ -823,8 +823,8 @@ mod tests {
 
     pub(crate) fn rand_price(height: u64) -> IrysTokenPrice {
         let amount = TOKEN_SCALE + IrysTokenPrice::token(Decimal::from(height)).unwrap().amount;
-        let oracle_price = IrysTokenPrice::new(amount);
-        oracle_price
+        
+        IrysTokenPrice::new(amount)
     }
 
     pub(crate) fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
@@ -834,7 +834,7 @@ mod tests {
         genesis_block.block_hash = block_hash;
         genesis_block.cumulative_diff = 0.into();
 
-        let mut block_tree_cache = BlockTreeCache::new(&genesis_block);
+        let mut block_tree_cache = BlockTreeCache::new(genesis_block);
         block_tree_cache.mark_tip(&block_hash).unwrap();
         for (block, state) in iter {
             block.previous_block_hash = block_hash;
@@ -843,7 +843,7 @@ mod tests {
             block.block_hash = block_hash;
             block_tree_cache
                 .add_common(
-                    block.block_hash.clone(),
+                    block.block_hash,
                     block,
                     Arc::new(Vec::new()),
                     state.clone(),
@@ -1148,12 +1148,12 @@ mod tests {
                 // action
                 let new_block_height = max_height + 1;
                 let capped_oracle_price = ctx
-                    .get_prices_for_new_block(new_block_height, oracle_price.clone())
+                    .get_prices_for_new_block(new_block_height, *oracle_price)
                     .await
                     .unwrap()
                     .range_adjusted_oracle_price;
                 let price_status_original = ctx
-                    .validate_oracle_price(new_block_height, oracle_price.clone())
+                    .validate_oracle_price(new_block_height, *oracle_price)
                     .await
                     .unwrap();
                 let price_status_capped = ctx
@@ -1342,7 +1342,7 @@ mod tests {
             latest_block_hash = H256::random();
             block.block_hash = latest_block_hash;
             tree.add_common(
-                block.block_hash.clone(),
+                block.block_hash,
                 &block,
                 Arc::new(Vec::new()),
                 ChainState::Onchain,

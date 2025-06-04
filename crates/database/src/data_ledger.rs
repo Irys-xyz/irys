@@ -169,7 +169,7 @@ impl LedgerCore for TermLedger {
     /// 3. Comparing against max_chunk_offset to assess if we're approaching capacity
     ///    (within half a partition of maximum) and need to add additional slots
     fn slot_count(&self) -> usize {
-        self.slots.len() as usize
+        self.slots.len()
     }
     fn ledger_id(&self) -> u32 {
         self.ledger_id

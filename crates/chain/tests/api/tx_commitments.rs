@@ -217,10 +217,10 @@ async fn get_commitment_status(
         response: oneshot_tx,
     });
 
-    let status = oneshot_rx
+    
+    oneshot_rx
         .await
-        .expect("to receive CommitmentStatus from GetCommitmentStatus message");
-    status
+        .expect("to receive CommitmentStatus from GetCommitmentStatus message")
 }
 
 #[actix_web::test]
@@ -459,7 +459,7 @@ async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
     info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
 
     // Submit stake commitment via API
-    post_commitment_tx_request(&uri, &stake_tx).await;
+    post_commitment_tx_request(uri, &stake_tx).await;
 }
 
 async fn post_pledge_commitment(
@@ -477,7 +477,7 @@ async fn post_pledge_commitment(
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
     // Submit pledge commitment via API
-    post_commitment_tx_request(&uri, &pledge_tx).await;
+    post_commitment_tx_request(uri, &pledge_tx).await;
 
     pledge_tx
 }

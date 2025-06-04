@@ -69,7 +69,7 @@ impl BlockIndex {
 
     /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
     pub fn get_latest_item(&self) -> Option<&BlockIndexItem> {
-        if self.items.len() == 0 {
+        if self.items.is_empty() {
             return None;
         };
         self.items.last()
@@ -212,7 +212,7 @@ pub struct BlockBounds {
 }
 
 fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
-    match OpenOptions::new().append(true).open(&file_path) {
+    match OpenOptions::new().append(true).open(file_path) {
         Ok(mut file) => {
             file.write_all(&item.to_bytes())?;
             Ok(())
@@ -277,7 +277,7 @@ mod tests {
         block_index_items: &[BlockIndexItem],
         config: &NodeConfig,
     ) -> eyre::Result<()> {
-        fs::create_dir_all(&config.block_index_dir())?;
+        fs::create_dir_all(config.block_index_dir())?;
         let path = config.block_index_dir().join(FILE_NAME);
         let mut file = File::create(path)?;
         for item in block_index_items {

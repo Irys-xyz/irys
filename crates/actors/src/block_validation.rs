@@ -145,7 +145,7 @@ pub async fn prevalidate_block(
     // commitment states looked like when this block was produced. For now
     // we just accept any valid signature.
     ensure!(
-        block.is_signature_valid() == true,
+        block.is_signature_valid(),
         "block signature is not valid"
     );
 
@@ -239,17 +239,14 @@ pub fn check_poa_data_expiration(
     partitions_guard: &PartitionAssignmentsReadGuard,
 ) -> eyre::Result<()> {
     // if is a data chunk
-    if poa.data_path.is_some() && poa.tx_path.is_some() && poa.ledger_id.is_some() {
-        if partitions_guard
+    if poa.data_path.is_some() && poa.tx_path.is_some() && poa.ledger_id.is_some() && partitions_guard
             .read()
             .data_partitions
             .get(&poa.partition_hash)
-            .is_none()
-        {
-            return Err(eyre::eyre!(
-                "Invalid data PoA, partition hash is not a data partition, it may have expired"
-            ));
-        }
+            .is_none() {
+        return Err(eyre::eyre!(
+            "Invalid data PoA, partition hash is not a data partition, it may have expired"
+        ));
     };
     Ok(())
 }

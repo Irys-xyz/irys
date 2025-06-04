@@ -308,7 +308,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
         let ema_service = self.service_senders.ema.clone();
         let cache = self.cache.clone().expect("cache to be initialised");
 
-        return Box::pin(async move {
+        Box::pin(async move {
             let block = msg.0;
             let all_txs = msg.1;
             let block_hash = &block.block_hash;
@@ -352,7 +352,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
             }
 
             Ok(())
-        });
+        })
     }
 }
 
@@ -1294,7 +1294,7 @@ pub async fn get_block(
             .read()
             .get_block(&block_hash)
             .cloned()
-            .map(|block| Arc::new(block))
+            .map(Arc::new)
     })
     .await?;
     Ok(res)

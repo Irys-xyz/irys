@@ -347,7 +347,7 @@ pub fn generate_ingress_leaves(
     for chunk in chunks {
         let chunk = chunk?;
         let chunk = chunk.as_ref(); // double-binding required
-        let data_hash = hash_ingress_sha256(&chunk, address)?;
+        let data_hash = hash_ingress_sha256(chunk, address)?;
         let max_byte_range = min_byte_range + &chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
@@ -362,7 +362,7 @@ pub fn generate_ingress_leaves(
         });
 
         if and_regular {
-            let data_hash = hash_sha256(&chunk)?;
+            let data_hash = hash_sha256(chunk)?;
             let id = hash_all_sha256(vec![&data_hash, &offset])?;
             regular_leaves.push(Node {
                 id,

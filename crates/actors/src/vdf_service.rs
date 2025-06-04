@@ -373,7 +373,7 @@ pub fn vdf_steps_are_valid(
         vdf_info.prev_output, vdf_info.seed
     );
 
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
+    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1_u64;
     let end: u64 = vdf_info.global_step_number;
 
     match vdf_steps_guard.read().get_steps(ii(start, end)) {
@@ -523,7 +523,7 @@ pub mod test_helpers {
             block_index_guard.clone(),
             rx,
             vdf_mining_state_sender,
-            &config,
+            config,
         );
 
         (tx, vdf_service_handle, task_manager)

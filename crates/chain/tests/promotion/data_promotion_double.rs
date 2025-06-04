@@ -279,7 +279,7 @@ async fn heavy_double_root_data_promotion_test() {
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
-    let first_tx_index: usize;
+    
     let _next_tx_index: usize;
 
     // if block_tx1.block_hash == block_tx2.block_hash {
@@ -307,7 +307,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
     println!("1:{}", block_tx1);
     //     println!("2:{}", block_tx2);
@@ -357,7 +357,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     // ensure the ingress proof still exists
     let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
+        .view(walk_all::<IngressProofs, _>)
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 1);
@@ -370,7 +370,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
-    for (_i, chunks) in data_chunks.iter().enumerate() {
+    for chunks in data_chunks.iter() {
         let mut data: Vec<u8> = Vec::new();
         for chunk in chunks {
             data.extend_from_slice(chunk);
@@ -511,11 +511,11 @@ async fn heavy_double_root_data_promotion_test() {
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
-    let first_tx_index: usize;
+    
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
     println!("1:{}", block_tx1);
     //     println!("2:{}", block_tx2);
@@ -576,7 +576,7 @@ async fn heavy_double_root_data_promotion_test() {
     mine_blocks(&node.node_ctx, 5).await.unwrap();
     // ensure the ingress proof is gone
     let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
+        .view(walk_all::<IngressProofs, _>)
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 0);

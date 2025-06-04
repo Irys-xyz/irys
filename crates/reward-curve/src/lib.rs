@@ -219,7 +219,7 @@ mod tests {
         let expected = expected_reward(&curve, from_year, to_year)?;
 
         assert_eq!(
-            U256::from(actual),
+            actual,
             U256::from(expected),
             "Δ[{from_year},{to_year}]: expected {expected}, got {actual}"
         );
@@ -247,7 +247,7 @@ mod tests {
         let expected = expected_reward(&curve, from_year, to_year)?;
 
         assert_eq!(
-            U256::from(actual),
+            actual,
             U256::from(expected),
             "Δ[{from_year},{to_year}]: expected {expected}, got {actual}"
         );

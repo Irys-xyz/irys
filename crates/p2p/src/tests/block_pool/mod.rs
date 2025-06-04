@@ -187,15 +187,12 @@ async fn should_process_block() {
 
     tokio::spawn(async move {
         let message = vdf_service_rx.recv().await.expect("to receive message");
-        match message {
-            VdfServiceMessage::GetVdfStateMessage { response } => {
-                response
-                    .send(VdfStepsReadGuard::new(Arc::new(RwLock::new(
-                        VdfState::default(),
-                    ))))
-                    .expect("to send a response");
-            }
-            _ => {}
+        if let VdfServiceMessage::GetVdfStateMessage { response } = message {
+            response
+                .send(VdfStepsReadGuard::new(Arc::new(RwLock::new(
+                    VdfState::default(),
+                ))))
+                .expect("to send a response");
         }
     });
 
@@ -207,8 +204,7 @@ async fn should_process_block() {
     .expect("can't process block");
 
     let block_header_in_discovery = block_discovery_stub
-        .get_blocks()
-        .get(0)
+        .get_blocks().first()
         .expect("to have a block")
         .clone();
     assert_eq!(block_header_in_discovery, test_header);
@@ -391,7 +387,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // The blocks should be received in order of processing: first block2, then block3
-    let discovered_block2 = block_discovery_stub.get_blocks().get(0).unwrap().clone();
+    let discovered_block2 = block_discovery_stub.get_blocks().first().unwrap().clone();
     let discovered_block3 = block_discovery_stub
         .get_blocks()
         .get(1)

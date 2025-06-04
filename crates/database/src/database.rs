@@ -286,7 +286,7 @@ pub fn insert_peer_list_item<T: DbTxMut>(
     mining_address: &Address,
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<PeerListItems>(mining_address.clone(), peer_list_entry.clone().into())?)
+    Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
 }
 
 pub fn walk_all<T: Table, TX: DbTx>(

@@ -179,14 +179,10 @@ impl ApiClient for IrysApiClient {
         block_hash: H256,
     ) -> Result<Option<CombinedBlockHeader>> {
         let path = format!("/block/{}", block_hash.0.to_base58());
-        let response = self
+        
+        self
             .make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
-            .await;
-        match response {
-            Ok(Some(block)) => Ok(Some(block)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
-        }
+            .await
     }
 
     async fn get_block_index(
@@ -288,7 +284,7 @@ mod tests {
 
     /// Mock implementation of the API client for testing
     #[derive(Default, Clone)]
-    pub struct MockApiClient {
+    pub(crate) struct MockApiClient {
         pub expected_transactions: std::collections::HashMap<H256, IrysTransactionResponse>,
     }
 
