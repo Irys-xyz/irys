@@ -1253,7 +1253,6 @@ impl Inner {
             // during shutdown. Currently this has the potential to create
             // orphaned tx headers in the database with expired anchors and
             // not linked to any blocks.
-            irys_database::insert_tx_header(db_tx, &tx)?;
             Ok(())
         }) {
             Ok(()) => {
