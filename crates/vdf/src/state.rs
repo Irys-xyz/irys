@@ -374,13 +374,12 @@ pub mod test_helpers {
 
         // spawn VDF service
         // this is so we can send it new VDF steps as part of this test
-        let vdf_state = Arc::new(RwLock::new(create_state(
+
+        Arc::new(RwLock::new(create_state(
             block_index.clone(),
             irys_db,
             vdf_mining_state_sender,
             config,
-        )));
-
-        vdf_state
+        )))
     }
 }

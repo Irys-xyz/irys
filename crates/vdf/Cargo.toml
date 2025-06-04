@@ -20,7 +20,6 @@ openssl.workspace = true
 hex.workspace = true
 base58.workspace = true
 nodit.workspace = true
-actix.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
