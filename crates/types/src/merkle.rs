@@ -188,7 +188,7 @@ pub fn validate_path(
 }
 
 /// Utility method for logging a proof out to the terminal.
-pub fn print_debug(proof: &Vec<u8>, target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
+pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
     // Split proof into branches and leaf. Leaf is at the end and branches are
     // ordered from root to leaf.
     let (branches, leaf) = proof.split_at(proof.len() - HASH_SIZE - NOTE_SIZE);
@@ -317,7 +317,7 @@ pub fn generate_leaves_from_chunks(
     for chunk in chunks {
         let chunk = chunk?;
         let data_hash = hash_sha256(&chunk)?;
-        let max_byte_range = min_byte_range + &chunk.len();
+        let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
 
@@ -348,7 +348,7 @@ pub fn generate_ingress_leaves(
         let chunk = chunk?;
         let chunk = chunk.as_ref(); // double-binding required
         let data_hash = hash_ingress_sha256(chunk, address)?;
-        let max_byte_range = min_byte_range + &chunk.len();
+        let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
 
@@ -385,9 +385,7 @@ pub struct DataRootLeave {
 }
 
 /// Generates merkle leaves from data roots
-pub fn generate_leaves_from_data_roots(
-    data_roots: &Vec<DataRootLeave>,
-) -> Result<Vec<Node>, Error> {
+pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for data_root in data_roots.iter() {

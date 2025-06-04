@@ -1054,7 +1054,7 @@ impl Inner {
                 .collect();
 
             // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
             // Select fundable commitments in fee-priority order
             for tx in sorted_commitments {
@@ -1069,7 +1069,7 @@ impl Inner {
         drop(mempool_state_guard);
 
         // Sort storage transactions by fee (highest first) to maximize revenue
-        all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+        all_storage_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
         // Apply block size constraint and funding checks to storage transactions
         let mut storage_tx = Vec::new();
@@ -1271,6 +1271,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
+        #[allow(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard.valid_tx.contains_key(&txid) {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {

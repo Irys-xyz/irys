@@ -239,11 +239,10 @@ pub fn check_poa_data_expiration(
     if poa.data_path.is_some()
         && poa.tx_path.is_some()
         && poa.ledger_id.is_some()
-        && partitions_guard
+        && !partitions_guard
             .read()
             .data_partitions
-            .get(&poa.partition_hash)
-            .is_none()
+            .contains_key(&poa.partition_hash)
     {
         return Err(eyre::eyre!(
             "Invalid data PoA, partition hash is not a data partition, it may have expired"
@@ -694,7 +693,11 @@ mod tests {
 
     async fn poa_test(
         context: &TestContext,
-        txs: &Vec<IrysTransaction>,
+        txs: &[IrysTransaction],
+        #[allow(
+            clippy::ptr_arg,
+            reason = "we need to clone this so it needs to be a Vec"
+        )]
         poa_chunk: &mut Vec<u8>,
         poa_tx_num: usize,
         poa_chunk_num: usize,

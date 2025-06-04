@@ -242,6 +242,7 @@ impl StorageModule {
                     .read(true)
                     .write(true)
                     .create(true) // Optional: creates file if it doesn't exist
+                    .truncate(false)
                     .open(&path)
                     .map_err(|e| {
                         eyre!(
@@ -1181,6 +1182,7 @@ fn ensure_default_intervals(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(intervals_path)
         .wrap_err_with(|| {
             format!(
@@ -1207,6 +1209,7 @@ pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .wrap_err_with(|| {
             format!(
@@ -1246,6 +1249,7 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
     let mut info_file = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(path)
         .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
 
@@ -1378,7 +1382,7 @@ mod tests {
 
     #[test]
     fn storage_module_test() -> eyre::Result<()> {
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: None,
             submodules: vec![
@@ -1583,7 +1587,7 @@ mod tests {
 
     #[test]
     fn pending_writes_test() -> eyre::Result<()> {
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![
@@ -1793,7 +1797,7 @@ mod tests {
 
     #[test]
     fn data_path_test() -> eyre::Result<()> {
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![

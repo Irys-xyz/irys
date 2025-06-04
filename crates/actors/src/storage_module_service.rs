@@ -18,7 +18,7 @@ use irys_storage::{PackingParams, StorageModule, StorageModuleInfo};
 use irys_types::{Config, PartitionChunkRange};
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{
-    path::PathBuf,
+    path::Path,
     pin::pin,
     sync::{Arc, RwLock},
 };
@@ -161,7 +161,7 @@ impl StorageModuleServiceInner {
     fn validate_packing_params(
         &self,
         module: &StorageModule,
-        module_path: &PathBuf,
+        module_path: &Path,
         index: usize,
     ) -> eyre::Result<()> {
         // Skip modules without partition assignments

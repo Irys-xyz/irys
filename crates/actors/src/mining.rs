@@ -484,7 +484,7 @@ mod tests {
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
         // Set up the storage geometry for this test
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
@@ -642,7 +642,7 @@ mod tests {
 
         let partition_hash = H256::random();
 
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,

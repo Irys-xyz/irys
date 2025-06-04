@@ -12,6 +12,10 @@ impl SimpleRNG {
     }
 
     /// Generates next pseudorandom number
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "We do implement Iterator for SimpleRNG"
+    )]
     pub fn next(&mut self) -> u32 {
         // Xorshift algorithm
         let mut x = self.seed;

@@ -88,7 +88,7 @@ impl BlockIndex {
     pub fn push_block(
         &mut self,
         block: &IrysBlockHeader,
-        all_txs: &Vec<IrysTransactionHeader>,
+        all_txs: &[IrysTransactionHeader],
         chunk_size: u64,
     ) -> eyre::Result<()> {
         /// Inner function: Calculates the total number of full chunks needed to store transactions
@@ -145,8 +145,10 @@ impl BlockIndex {
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
     pub fn get_block_bounds(&self, ledger: DataLedger, chunk_offset: u64) -> BlockBounds {
-        let mut block_bounds: BlockBounds = Default::default();
-        block_bounds.ledger = ledger;
+        let mut block_bounds = BlockBounds {
+            ledger,
+            ..Default::default()
+        };
 
         let result = self.get_block_index_item(ledger, chunk_offset);
         if let Ok((block_height, found_item)) = result {
@@ -231,6 +233,7 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(file_path)?;
 
     // Determine the file size

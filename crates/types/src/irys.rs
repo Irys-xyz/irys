@@ -26,10 +26,7 @@ impl IrysSigner {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
             chain_id: config.chain_id,
-            chunk_size: config
-                .chunk_size
-                .try_into()
-                .expect("invalid chunk size specified"),
+            chunk_size: config.chunk_size,
         }
     }
 
@@ -54,6 +51,7 @@ impl IrysSigner {
         transaction.header.term_fee = 1;
 
         // Fetch and set last_tx if not provided (primarily for testing).
+        #[allow(clippy::manual_unwrap_or_default, reason = "TODO")]
         let anchor = if let Some(anchor) = anchor {
             anchor
         } else {
@@ -141,7 +139,6 @@ impl IrysSigner {
             data: Some(Base64(data)),
             chunks,
             proofs,
-            ..Default::default()
         })
     }
 }

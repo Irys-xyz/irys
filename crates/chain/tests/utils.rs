@@ -770,7 +770,7 @@ pub async fn post_chunk<T, B>(
     app: &T,
     tx: &IrysTransaction,
     chunk_index: usize,
-    chunks: &Vec<[u8; 32]>,
+    chunks: &[[u8; 32]],
 ) where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
 {

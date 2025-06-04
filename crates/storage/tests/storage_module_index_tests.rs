@@ -421,11 +421,10 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             .try_into()
             .expect("Value exceeds u32::MAX");
 
-        let mut chunks_added = 0;
         // loop though the assigned partitions
         for storage_module in &storage_modules {
             let _ = db.view(|tx| {
-                for i in chunks_added..num_chunks {
+                for i in 0..num_chunks {
                     let tx_chunk_offset = TxChunkOffset::from(i);
                     // first make sure the ledger_offset falls within the bounds
                     // of the storage_module. Sometime txs contain ledger relative
@@ -455,12 +454,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                             panic!("{}", err);
                         }
                     }
-
                     ledger_offset += 1;
-                    chunks_added += 1;
                 }
             });
-
             //storage_module.print_pending_writes();
         }
     }

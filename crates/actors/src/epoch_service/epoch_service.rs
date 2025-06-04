@@ -145,7 +145,7 @@ impl EpochServiceActor {
 
     fn validate_commitments(
         block_header: &IrysBlockHeader,
-        commitments: &Vec<CommitmentTransaction>,
+        commitments: &[CommitmentTransaction],
     ) -> eyre::Result<()> {
         // Extract the commitments ledger from the system ledgers in the epoch block
         let commitment_ledger = block_header

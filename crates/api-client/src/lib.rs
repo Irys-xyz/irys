@@ -8,6 +8,7 @@ use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 
+#[allow(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
 enum Method {
     GET,
     POST,

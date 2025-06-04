@@ -2377,7 +2377,6 @@ pub mod test_utils {
             chain_id: Some(1),
             input: vec![123].into(),
             to: TxKind::Call(recipient),
-            ..Default::default()
         };
         let signed_normal = signer.sign_transaction(&mut normal_tx_raw).await.unwrap();
         let normal_tx =
@@ -2723,7 +2722,7 @@ pub mod test_utils {
                     log.data
                         .topics()
                         .iter()
-                        .any(|topic| topic == &storage_fees_topic)
+                        .any(|topic| topic == storage_fees_topic)
                 }) {
                     storage_fees_receipt_count += 1;
                 }
@@ -2779,8 +2778,6 @@ pub mod test_utils {
         let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
             .try_into_recovered()
             .unwrap();
-
-        
 
         EthPooledTransaction::new(tx.clone(), 300)
     }

@@ -114,7 +114,7 @@ impl IrysNodeCtx {
     }
 
     pub async fn stop(self) {
-        let _ = self.stop_mining();
+        let _ = self.stop_mining().await;
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
@@ -1144,7 +1144,7 @@ impl IrysNode {
             .node_config
             .base_directory
             .parent()
-            .is_some_and(|p| p.ends_with(".tmp"));
+            .is_some_and(|p| p.extension().is_some_and(|ext| ext == "tmp"));
         let span = Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
