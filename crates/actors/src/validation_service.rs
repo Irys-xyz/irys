@@ -190,7 +190,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
                         }
                     };
                 debug!("stored_steps: {:?}", stored_steps);
-                if let Some(stored_previous_output) = stored_steps.get(0) {
+                if let Some(stored_previous_output) = stored_steps.get(1) {
                     if *stored_previous_output != prev_output {
                         error!(
                             "Block validation {:?} failed: Expected stored step {:?} to be {:?}, but got {:?}",

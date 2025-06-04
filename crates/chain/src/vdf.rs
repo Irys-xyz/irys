@@ -60,6 +60,7 @@ pub fn run_vdf_for_genesis_block(
                 hash,
                 H256::from_base58("B9wNvK2xTfspfHhqoBW3PPD1Avkv8v8jc9kQDQBKCG9U")
             );
+            println!("Bibao {:?} == {:?}", hash, checkpoints.last().unwrap());
             genesis_block.vdf_limiter_info.global_step_number = 1;
             genesis_block.vdf_limiter_info.output = hash;
             genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints.clone();
