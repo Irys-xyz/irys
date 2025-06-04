@@ -120,6 +120,7 @@ table IrysTxHeaders {
 }
 
 /// Stores tx headers that are awaiting confirmation in the mempool
+/// Populated at graceful service shutdown and emptied again at service start
 table MempoolTxHeaders {
     type Key = H256;
     type Value = CompactTxHeader;
