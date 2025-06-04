@@ -532,12 +532,13 @@ impl Inner {
     async fn handle_get_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
-        // if tx exists
+        // if tx exists in mempool valid_tx (temporary storage)
         if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
             return Some(tx_header.clone());
         }
         drop(mempool_state_guard);
 
+        // if tx exists in database (permanent storage)
         if let Ok(read_tx) = self.read_tx().await {
             let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
             return tx_header.clone();
@@ -1277,6 +1278,7 @@ impl Inner {
         // check the result and error handle
         let _ = self.validate_signature(&tx).await;
 
+        // Having passed the above checks, we now consider this a valid tx. Add it in the mempool state
         let mut mempool_state_write_guard = mempool_state.write().await;
         mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
         mempool_state_write_guard.recent_valid_tx.insert(tx.id);
