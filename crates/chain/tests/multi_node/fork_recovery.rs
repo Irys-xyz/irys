@@ -148,7 +148,9 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     };
 
     // GENESIS occasionally doesn't arrive at block 4 - 10s for gossip is too slow!
-    genesis_node.wait_until_height(4, seconds_to_wait).await?;
+    genesis_node
+        .wait_until_height(4, /* seconds_to_wait */ 120)
+        .await?;
     let genesis_block = genesis_node.get_block_by_height(4).await?;
 
     debug!(
