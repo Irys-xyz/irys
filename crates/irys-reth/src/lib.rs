@@ -2236,7 +2236,6 @@ pub mod test_utils {
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub target_account: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub genesis_blockhash: FixedBytes<32>,
-        #[allow(dead_code)]
         pub tasks: TaskManager,
     }
 
