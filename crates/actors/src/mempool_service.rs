@@ -49,6 +49,10 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError>;
+    async fn handle_get_transaction(
+        &self,
+        tx_header: H256,
+    ) -> Result<IrysTransactionHeader, TxReadError>;
     async fn handle_commitment_transaction(
         &self,
         tx_header: CommitmentTransaction,
@@ -70,6 +74,26 @@ impl From<UnboundedSender<MempoolServiceMessage>> for MempoolServiceFacadeImpl {
 
 #[async_trait::async_trait]
 impl MempoolFacade for MempoolServiceFacadeImpl {
+    // get/read transaction from mempool
+    async fn handle_get_transaction(&self, tx: H256) -> Result<IrysTransactionHeader, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::GetTransaction(tx, oneshot_tx))
+            .map_err(|_| TxReadError::Other("Error sending GetTransaction ".to_owned()))?;
+
+        let response = oneshot_rx.await;
+        if let Ok(response) = response {
+            match response {
+                Some(response) => Ok(response),
+                None => Err(TxReadError::NotInMempool),
+            }
+        } else {
+            Err(TxReadError::Other(
+                "Error reading GetTransaction response ".to_owned(),
+            ))
+        }
+    }
+
     async fn handle_data_transaction(
         &self,
         tx_header: IrysTransactionHeader,
@@ -337,6 +361,29 @@ pub enum TxIngressError {
 }
 
 impl TxIngressError {
+    /// Returns an other error with the given message.
+    pub fn other(err: impl Into<String>) -> Self {
+        Self::Other(err.into())
+    }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display) -> Self {
+        Self::Other(err.to_string())
+    }
+}
+
+/// Reasons why reading a transaction might fail
+pub enum TxReadError {
+    /// Some database error occurred when reading
+    DatabaseError,
+    /// The service is uninitialized
+    ServiceUninitialized,
+    /// The transaction is not found in the mempool
+    NotInMempool,
+    /// Catch-all variant for other errors.
+    Other(String),
+}
+
+impl TxReadError {
     /// Returns an other error with the given message.
     pub fn other(err: impl Into<String>) -> Self {
         Self::Other(err.into())
