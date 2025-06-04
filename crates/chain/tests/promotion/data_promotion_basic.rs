@@ -203,7 +203,7 @@ async fn heavy_data_promotion_test() {
         txs[2].header.id.as_bytes().to_base58(),
         txs[0].header.id.as_bytes().to_base58(),
     ];
-    tracing::error!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
+    tracing::info!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
 
     for attempts in 1..20 {
         // Do we have any unconfirmed promotions?
@@ -222,7 +222,7 @@ async fn heavy_data_promotion_test() {
 
         if resp.status() == StatusCode::OK {
             let tx_header: IrysTransactionHeader = test::read_body_json(resp).await;
-            tracing::error!("Transaction was retrieved ok after {} attempts", attempts);
+            tracing::info!("Transaction was retrieved ok after {} attempts", attempts);
             if let Some(_proof) = tx_header.ingress_proofs {
                 assert_eq!(tx_header.id.as_bytes().to_base58(), *txid);
                 println!("Confirming... {}", tx_header.id.as_bytes().to_base58());

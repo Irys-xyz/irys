@@ -202,12 +202,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 for data_root in ingress_proofs.keys() {
                     let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                     if let Some(cached_data_root) = cached_data_root {
-                        error!(tx_ids = ?cached_data_root.txid_set, "publishing");
+                        debug!(tx_ids = ?cached_data_root.txid_set, "publishing");
                         publish_txids.extend(cached_data_root.txid_set);
                     }
                 }
-
-                tracing::error!("Handler SolutionFoundMessage: publish_txids: {:?}", publish_txids);
 
                 // Loop though all the pending tx to see which haven't been promoted
                 for txid in &publish_txids {
