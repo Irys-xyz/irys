@@ -1,4 +1,5 @@
-use futures::future::Either;
+use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
+use eyre::eyre;
 use irys_database::{block_header_by_hash, BlockIndex};
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -6,25 +7,19 @@ use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
     U256,
 };
-use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use nodit::{interval::ii, InclusiveInterval, Interval};
 use rayon::prelude::*;
-use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database;
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
-    pin::pin,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::{
-    sync::mpsc::{Sender, UnboundedReceiver},
-    task::JoinHandle,
+    sync::mpsc::Sender,
     time::{sleep, Duration},
 };
 use tracing::{info, warn};
-
-use crate::block_index_service::BlockIndexReadGuard;
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -91,15 +86,33 @@ impl VdfState {
                 .collect::<Vec<H256>>(),
         ))
     }
+
+    pub async fn start_mining(&self) -> eyre::Result<()> {
+        self.mining_state_sender
+            .as_ref()
+            .ok_or(eyre!("Mining state sender isn't set!"))?
+            .send(true)
+            .await
+            .map_err(|err| eyre!("failed to send false to mining_state_sender: {:?}", err))
+    }
+
+    pub async fn stop_mining(&self) -> eyre::Result<()> {
+        self.mining_state_sender
+            .as_ref()
+            .ok_or(eyre!("Mining state sender isn't set!"))?
+            .send(false)
+            .await
+            .map_err(|err| eyre!("failed to send false to mining_state_sender: {:?}", err))
+    }
 }
 
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone)]
-pub struct VdfStepsReadGuard(AtomicVdfState);
+pub struct VdfStateReadonly(AtomicVdfState);
 
-impl VdfStepsReadGuard {
+impl VdfStateReadonly {
     /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
         Self(state)
@@ -133,151 +146,9 @@ impl VdfStepsReadGuard {
     }
 }
 
-/// Messages that the VDF service supports
-#[derive(Debug)]
-pub enum VdfServiceMessage {
-    /// Send the most recent mining step to all the `PartitionMiningActors`
-    VdfSeed(Seed),
-    /// Retrieve a read only reference to the ledger partition assignments
-    GetVdfStateMessage {
-        response: tokio::sync::oneshot::Sender<VdfStepsReadGuard>,
-    },
-    /// pause the VDF thread via mpsc
-    StopMiningMessage,
-    /// start/resume the VDF thread via mpsc
-    StartMiningMessage,
-}
-
-#[derive(Debug)]
-struct Inner {
-    vdf_state: AtomicVdfState,
-}
-
-#[derive(Debug)]
-pub struct VdfService {
-    shutdown: GracefulShutdown,
-    msg_rx: UnboundedReceiver<VdfServiceMessage>,
-    inner: Inner,
-}
-
-impl Default for VdfService {
-    fn default() -> Self {
-        unimplemented!("do not rely on the default implementation of the `VdfService`");
-    }
-}
-
-impl VdfService {
-    /// Spawn a new VDF service
-    pub fn spawn_service(
-        exec: &TaskExecutor,
-        irys_db: DatabaseProvider,
-        block_index_read_guard: BlockIndexReadGuard,
-        rx: UnboundedReceiver<VdfServiceMessage>,
-        vdf_mining_state_sender: Sender<bool>,
-        config: &Config,
-    ) -> JoinHandle<()> {
-        let vdf_state = create_state(
-            block_index_read_guard.clone(),
-            irys_db,
-            vdf_mining_state_sender,
-            config,
-        );
-        exec.spawn_critical_with_graceful_shutdown_signal("VDF Service", |shutdown| async move {
-            let vdf_service = Self {
-                shutdown,
-                msg_rx: rx,
-                inner: Inner {
-                    vdf_state: Arc::new(RwLock::new(vdf_state)),
-                },
-            };
-            vdf_service
-                .start()
-                .await
-                .expect("vdf service encountered an irrecoverable error")
-        })
-    }
-
-    async fn start(mut self) -> eyre::Result<()> {
-        tracing::info!("starting VDF service");
-
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
-                }
-                Either::Left((None, _)) => {
-                    tracing::warn!("receiver channel closed");
-                    break None;
-                }
-                Either::Right((shutdown, _)) => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
-                }
-            }
-        };
-
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdwon");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
-        }
-
-        // explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
-
-        tracing::info!("shutting down VDFS service");
-        Ok(())
-    }
-}
-
-impl Inner {
-    #[tracing::instrument(skip_all, err)]
-    async fn handle_message(&mut self, msg: VdfServiceMessage) -> eyre::Result<()> {
-        match msg {
-            VdfServiceMessage::VdfSeed(seed) => {
-                self.vdf_state.write().unwrap().increment_step(seed);
-            }
-            VdfServiceMessage::GetVdfStateMessage { response } => {
-                let guard = VdfStepsReadGuard::new(self.vdf_state.clone());
-                if let Err(e) = response.send(guard) {
-                    tracing::error!("response.send(guard) error: {:?}", e);
-                };
-            }
-            VdfServiceMessage::StopMiningMessage => {
-                let sender = self
-                    .vdf_state
-                    .read()
-                    .expect("expected to get read lock on vdf state")
-                    .mining_state_sender
-                    .clone()
-                    .expect("expected valid mining_state_sender");
-
-                if let Err(e) = sender.send(false).await {
-                    tracing::error!("failed to send false to mining_state_sender: {:?}", e);
-                }
-            }
-            VdfServiceMessage::StartMiningMessage => {
-                let sender = self
-                    .vdf_state
-                    .read()
-                    .expect("expected to get read lock on vdf state")
-                    .mining_state_sender
-                    .clone()
-                    .expect("expected valid mining_state_sender");
-
-                if let Err(e) = sender.send(true).await {
-                    tracing::error!("failed to send true to mining_state_sender: {:?}", e);
-                }
-            }
-        };
-        Ok(())
-    }
-}
-
 /// create VDF state using the latest block in db
-fn create_state(
-    block_index: BlockIndexReadGuard,
+pub fn create_state(
+    block_index: Arc<RwLock<BlockIndex>>,
     db: DatabaseProvider,
     vdf_mining_state_sender: Sender<bool>,
     config: &Config,
@@ -286,6 +157,7 @@ fn create_state(
 
     if let Some(block_hash) = block_index
         .read()
+        .expect("To unlock block index")
         .get_latest_item()
         .map(|item| item.block_hash)
     {
@@ -366,7 +238,7 @@ fn calc_capacity(config: &Config) -> usize {
 pub fn vdf_steps_are_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
-    vdf_steps_guard: VdfStepsReadGuard,
+    vdf_steps_guard: VdfStateReadonly,
 ) -> eyre::Result<()> {
     info!(
         "Checking seed {:?} reset_seed {:?}",
@@ -485,31 +357,16 @@ pub fn vdf_steps_are_valid(
 
 pub mod test_helpers {
     use super::*;
-    use crate::vdf_service::{VdfService, VdfServiceMessage};
 
-    use reth::tasks::TaskManager;
     use std::sync::RwLock;
-    use tokio::sync::mpsc::{channel, unbounded_channel, UnboundedSender};
+    use tokio::sync::mpsc::channel;
 
-    pub async fn mocked_vdf_service(
-        config: &Config,
-    ) -> (
-        UnboundedSender<VdfServiceMessage>,
-        JoinHandle<()>,
-        TaskManager,
-    ) {
-        // prep to spawn VDF service
-        // this is so we can send it new VDF steps as part of this test
-        let task_manager = TaskManager::new(tokio::runtime::Handle::current());
-        let task_executor = task_manager.executor();
-        let (tx, rx) = unbounded_channel();
+    pub async fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
 
         let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
             BlockIndex::new(&config.node_config).await.unwrap(),
         ));
-
-        let block_index_guard = BlockIndexReadGuard::new(block_index);
 
         let irys_db_env =
             open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir());
@@ -517,98 +374,12 @@ pub mod test_helpers {
 
         // spawn VDF service
         // this is so we can send it new VDF steps as part of this test
-        let vdf_service_handle = VdfService::spawn_service(
-            &task_executor,
+
+        Arc::new(RwLock::new(create_state(
+            block_index.clone(),
             irys_db,
-            block_index_guard.clone(),
-            rx,
             vdf_mining_state_sender,
             config,
-        );
-
-        (tx, vdf_service_handle, task_manager)
-    }
-}
-
-// Tests
-#[cfg(test)]
-mod tests {
-    use crate::vdf_service::test_helpers::mocked_vdf_service;
-    use irys_storage::ii;
-    use irys_testing_utils::setup_tracing_and_temp_dir;
-    use irys_types::{H256List, NodeConfig, H256};
-
-    use super::*;
-
-    #[actix_rt::test]
-    /// Tests vdf deque populates via FIFO and shows steps being dropped from the deque
-    async fn test_vdf_fifo_steps_deque() {
-        let temp_dir = setup_tracing_and_temp_dir(Some("test_vdf_fifo_steps_deque"), false);
-        let mut node_config = NodeConfig::testnet();
-        node_config.base_directory = temp_dir.path().to_path_buf();
-
-        // set queue to length 4 with 8/2 occurring within the vdf spawn
-        node_config.consensus.get_mut().num_chunks_in_partition = 8;
-        node_config.consensus.get_mut().num_chunks_in_recall_range = 2;
-        // set queue to length 4 so old steps are discarded FIFO
-        node_config
-            .consensus
-            .get_mut()
-            .vdf
-            .max_allowed_vdf_fork_steps = 4;
-        let testnet_config: Config = node_config.into();
-
-        // start service senders/receivers
-        let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&testnet_config).await;
-
-        // Send 8 seeds 1,2..,8 (capacity is 4)
-        for i in 0..8 {
-            if let Err(e) = tx.send(VdfServiceMessage::VdfSeed(Seed(H256([(i + 1) as u8; 32])))) {
-                panic!("error sending VdfServiceMessage::VdfSeed: {:?}", e);
-            }
-        }
-
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            panic!(
-                "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
-                e
-            );
-        }
-        let state = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
-
-        let steps = state.read().seeds.iter().cloned().collect::<Vec<_>>();
-
-        // Should only contain last 4 seeds
-        assert_eq!(steps.len(), 4);
-
-        // Check last 4 seeds are stored
-        for i in 0..4 {
-            assert_eq!(steps[i], Seed(H256([(i + 5) as u8; 32])));
-        }
-
-        // range not stored
-        let get_error = state.read().get_steps(ii(3, 5));
-        assert!(get_error.is_err());
-
-        // ok inner range
-        let get = state.read().get_steps(ii(6, 7)).unwrap();
-        assert_eq!(H256List(vec![H256([6; 32]), H256([7; 32])]), get);
-
-        // complete stored range
-        let get_all = state.read().get_steps(ii(5, 8)).unwrap();
-        assert_eq!(
-            H256List(vec![
-                H256([5; 32]),
-                H256([6; 32]),
-                H256([7; 32]),
-                H256([8; 32])
-            ]),
-            get_all
-        );
+        )))
     }
 }

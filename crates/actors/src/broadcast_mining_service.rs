@@ -1,9 +1,9 @@
 use crate::mining::PartitionMiningActor;
 use actix::prelude::*;
 use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
+use irys_vdf::MiningBroadcaster;
 use std::sync::Arc;
 use tracing::{debug, info, Span};
-
 // Message types
 
 /// Subscribes a `PartitionMiningActor` so the broadcaster to receive broadcast messages
@@ -130,5 +130,23 @@ impl Handler<BroadcastPartitionsExpiration> for BroadcastMiningService {
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MiningServiceBroadcaster(Addr<BroadcastMiningService>);
+impl MiningBroadcaster for MiningServiceBroadcaster {
+    fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64) {
+        self.0.do_send(BroadcastMiningSeed {
+            seed,
+            checkpoints,
+            global_step,
+        })
+    }
+}
+
+impl From<Addr<BroadcastMiningService>> for MiningServiceBroadcaster {
+    fn from(addr: Addr<BroadcastMiningService>) -> Self {
+        Self(addr)
     }
 }
