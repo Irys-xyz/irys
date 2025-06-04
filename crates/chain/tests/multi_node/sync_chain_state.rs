@@ -697,7 +697,7 @@ fn init_configs() -> (
 }
 
 /// add a single account to the supplied node config
-fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner) -> () {
+fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner) {
     irys_node_config.consensus.extend_genesis_accounts(vec![(
         account.address(),
         GenesisAccount {
@@ -717,10 +717,10 @@ async fn start_genesis_node(
     // init genesis node
     let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone());
     // add accounts with balances to genesis node
-    add_account_to_config(&mut genesis_node.cfg, &account);
+    add_account_to_config(&mut genesis_node.cfg, account);
     // start genesis node
-    let ctx_genesis_node = genesis_node.start().await;
-    ctx_genesis_node
+
+    genesis_node.start().await
 }
 
 /// start peer nodes with an account
@@ -733,14 +733,14 @@ async fn start_peer_nodes(
         let span = span!(Level::DEBUG, "peer1");
         let _enter = span.enter();
         let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone());
-        add_account_to_config(&mut peer1_node.cfg, &account);
+        add_account_to_config(&mut peer1_node.cfg, account);
         peer1_node.start().await
     };
     let ctx_peer2_node = {
         let span = span!(Level::DEBUG, "peer2");
         let _enter = span.enter();
         let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone());
-        add_account_to_config(&mut peer2_node.cfg, &account);
+        add_account_to_config(&mut peer2_node.cfg, account);
         peer2_node.start().await
     };
     (ctx_peer1_node, ctx_peer2_node)
@@ -758,7 +758,7 @@ async fn generate_test_transaction_and_add_to_block(
 ) -> HashMap<IrysTxId, irys_types::IrysTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
-    match node.create_submit_data_tx(&account, data_bytes).await {
+    match node.create_submit_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
         }
@@ -838,7 +838,7 @@ async fn poll_peer_list(
             .await
             .expect("valid PeerAddress");
         peer_list_items.sort(); //sort peer list so we have sane comparisons in asserts
-        if &trusted_peers == &peer_list_items {
+        if trusted_peers == peer_list_items {
             break;
         }
     }

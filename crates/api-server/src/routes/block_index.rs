@@ -12,7 +12,7 @@ pub async fn block_index_route(
     let block_index_read = state.block_index.read();
     let requested_blocks: Vec<&BlockIndexItem> = block_index_read
         .items
-        .into_iter()
+        .iter()
         .enumerate()
         .filter(|(i, _)| *i >= height && *i < height + limit)
         .map(|(_, block)| block)

@@ -64,3 +64,6 @@ pretty_assertions.workspace = true
 
 [build-dependencies]
 build-print = "0"
+
+[lints]
+workspace = true

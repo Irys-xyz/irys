@@ -146,7 +146,7 @@ pub fn capacity_pack_range_cuda_c(
 #[cfg(feature = "nvidia")]
 /// 2D Packing CUDA C implementation
 pub fn capacity_pack_range_with_data_cuda_c(
-    data: &mut Vec<u8>,
+    data: &mut [u8],
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
@@ -190,7 +190,7 @@ pub const PACKING_TYPE: PackingType = PackingType::CUDA;
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
-    data: &mut Vec<ChunkBytes>,
+    data: &mut [ChunkBytes],
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
@@ -218,7 +218,7 @@ pub fn capacity_pack_range_with_data(
 
 /// 2D Packing C implementation
 pub fn capacity_pack_range_with_data_c(
-    data: &mut Vec<ChunkBytes>,
+    data: &mut [ChunkBytes],
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
@@ -243,7 +243,7 @@ pub fn capacity_pack_range_with_data_c(
 }
 
 #[inline]
-pub fn xor_vec_u8_arrays_in_place(a: &mut Vec<u8>, b: &Vec<u8>) {
+pub fn xor_vec_u8_arrays_in_place(a: &mut [u8], b: &[u8]) {
     for i in 0..a.len() {
         a[i] = a[i].bitxor(b[i]);
     }

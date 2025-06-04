@@ -108,7 +108,7 @@ impl Compact for RethPeerInfo {
 
     fn from_compact(buf: &[u8], _: usize) -> (Self, &[u8]) {
         let mut buf = buf;
-        let (peering_tcp_addr, consumed) = decode_address(&buf);
+        let (peering_tcp_addr, consumed) = decode_address(buf);
         buf.advance(consumed);
         let (peer_id, buf) = reth_transaction_pool::PeerId::from_compact(buf, buf.len());
         (
@@ -226,7 +226,7 @@ impl Compact for PeerListItem {
         let response_time = u16::from_be_bytes(buf[0..2].try_into().unwrap());
         buf.advance(2);
 
-        if buf.len() < 1 {
+        if buf.is_empty() {
             return (
                 Self {
                     reputation_score,
@@ -243,14 +243,14 @@ impl Compact for PeerListItem {
             );
         }
 
-        let (gossip_address, consumed) = decode_address(&buf);
+        let (gossip_address, consumed) = decode_address(buf);
         buf.advance(consumed);
 
-        let (api_address, consumed) = decode_address(&buf);
+        let (api_address, consumed) = decode_address(buf);
         buf.advance(consumed);
 
         // let (reth_peering_tcp, consumed) = decode_address(&buf[total_consumed..]);
-        let (reth_peer_info, buf) = RethPeerInfo::from_compact(&buf, buf.len());
+        let (reth_peer_info, buf) = RethPeerInfo::from_compact(buf, buf.len());
         // total_consumed += consumed;
 
         let address = PeerAddress {
@@ -268,7 +268,7 @@ impl Compact for PeerListItem {
 
         let total_consumed = 8;
 
-        let is_online = if buf.len() >= total_consumed + 1 {
+        let is_online = if buf.len() > total_consumed {
             buf[total_consumed] == 1
         } else {
             false

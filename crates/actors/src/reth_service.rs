@@ -227,12 +227,12 @@ impl Handler<ConnectToPeerMessage> for RethServiceActor {
 
     fn handle(&mut self, msg: ConnectToPeerMessage, _ctx: &mut Self::Context) -> Self::Result {
         debug!("Connecting to {:?}", &msg);
-        Ok(self
-            .handle
+        self.handle
             .clone()
             .ok_or_eyre("reth service uninitialized")?
             .network
-            .add_peer(msg.peer_id, msg.peering_tcp_addr))
+            .add_peer(msg.peer_id, msg.peering_tcp_addr);
+        Ok(())
     }
 }
 
@@ -251,7 +251,7 @@ impl Handler<GetPeeringInfoMessage> for RethServiceActor {
         // TODO: we need to store the external socketaddr somewhere and use that instead
         Ok(RethPeerInfo {
             peer_id: *handle.network.peer_id(),
-            peering_tcp_addr: handle.network.local_addr().clone(),
+            peering_tcp_addr: handle.network.local_addr(),
         })
     }
 }

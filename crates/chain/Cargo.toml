@@ -80,3 +80,6 @@ semver.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]
+
+[lints]
+workspace = true

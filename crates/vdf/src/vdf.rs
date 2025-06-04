@@ -75,7 +75,7 @@ pub fn run_vdf(
 
         let now = Instant::now();
 
-        let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
+        let mut salt = U256::from(step_number_to_salt_number(config, global_step_number));
 
         vdf_sha(
             &mut hasher,

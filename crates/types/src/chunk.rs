@@ -15,7 +15,6 @@ use std::ops::{Add, Deref, DerefMut};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 // tag is to produce better JSON serialization, it flattens { "Packed": {...}} to {type: "packed", ... }
 #[serde(tag = "type", rename_all = "camelCase")]
-
 pub enum ChunkFormat {
     Unpacked(UnpackedChunk),
     Packed(PackedChunk),
