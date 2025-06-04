@@ -1,7 +1,7 @@
 use crate::{
     broadcast_mining_service::BroadcastMiningSeed, cache_service::CacheServiceAction,
-    ema_service::EmaServiceMessage, mempool_service::MempoolServiceMessage,
-    vdf_service::VdfServiceMessage, CommitmentCacheMessage, StorageModuleServiceMessage,
+    ema_service::EmaServiceMessage, mempool_service::MempoolServiceMessage, CommitmentCacheMessage,
+    StorageModuleServiceMessage,
 };
 use actix::Message;
 use core::ops::Deref;
@@ -38,7 +38,6 @@ pub struct ServiceReceivers {
     pub ema: UnboundedReceiver<EmaServiceMessage>,
     pub commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
     pub mempool: UnboundedReceiver<MempoolServiceMessage>,
-    pub vdf: UnboundedReceiver<VdfServiceMessage>,
     pub vdf_mining: Receiver<bool>,
     pub vdf_seed: Receiver<BroadcastMiningSeed>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
@@ -51,7 +50,6 @@ pub struct ServiceSendersInner {
     pub ema: UnboundedSender<EmaServiceMessage>,
     pub commitment_cache: UnboundedSender<CommitmentCacheMessage>,
     pub mempool: UnboundedSender<MempoolServiceMessage>,
-    pub vdf: UnboundedSender<VdfServiceMessage>,
     pub vdf_mining: Sender<bool>,
     pub vdf_seed: Sender<BroadcastMiningSeed>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
@@ -67,7 +65,6 @@ impl ServiceSendersInner {
             unbounded_channel::<CommitmentCacheMessage>();
 
         let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
-        let (vdf_sender, vdf_receiver) = unbounded_channel::<VdfServiceMessage>();
         // enabling/disabling VDF mining thread
         let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
         // vdf channel for fast forwarding steps during node sync
@@ -81,7 +78,6 @@ impl ServiceSendersInner {
             ema: ema_sender,
             commitment_cache: commitments_cache_sender,
             mempool: mempool_sender,
-            vdf: vdf_sender,
             vdf_mining: vdf_mining_sender,
             vdf_seed: vdf_seed_sender,
             storage_modules: sm_sender,
@@ -92,7 +88,6 @@ impl ServiceSendersInner {
             ema: ema_receiver,
             commitments_cache: commitments_cached_receiver,
             mempool: mempool_receiver,
-            vdf: vdf_receiver,
             vdf_mining: vdf_mining_receiver,
             vdf_seed: vdf_seed_receiver,
             storage_modules: sm_receiver,

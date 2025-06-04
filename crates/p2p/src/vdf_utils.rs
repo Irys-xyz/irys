@@ -1,14 +1,14 @@
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::vdf_service::VdfServiceMessage;
+use irys_actors::vdf_service::VdfStateReadonly;
 use irys_types::{block_production::Seed, H256List, VDFLimiterInfo};
 use std::time::Duration;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::mpsc::Sender;
 use tokio::time::sleep;
 use tracing::error;
 
 /// Polls VDF service for `VdfState` until `global_step` >= `desired_step`, with a 30s timeout.
 pub async fn wait_for_vdf_step(
-    vdf_service_sender: UnboundedSender<VdfServiceMessage>,
+    vdf_steps_guard: VdfStateReadonly,
     desired_step: u64,
 ) -> eyre::Result<()> {
     let seconds_to_wait = 30;
@@ -16,18 +16,6 @@ pub async fn wait_for_vdf_step(
     let total_retries = seconds_to_wait * retries_per_second;
     for _ in 0..total_retries {
         tracing::trace!("looping waiting for step {}", desired_step);
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            tracing::error!(
-                "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
-                e
-            );
-        };
-        let vdf_steps_guard = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
         if vdf_steps_guard.read().global_step >= desired_step {
             return Ok(());
         }
@@ -54,7 +42,7 @@ pub async fn fast_forward_vdf_steps_from_block(
     for (i, hash) in vdf_limiter_info.steps.iter().enumerate() {
         //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
         let mining_seed = BroadcastMiningSeed {
-            seed: Seed { 0: *hash },
+            seed: Seed(*hash),
             global_step: block_start_step + i as u64,
             checkpoints: H256List::new(),
         };

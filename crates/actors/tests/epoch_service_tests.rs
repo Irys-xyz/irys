@@ -16,7 +16,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     epoch_service::{EpochServiceActor, NewEpochMessage},
-    vdf_service::{VdfState, VdfStepsReadGuard},
+    vdf_service::{VdfState, VdfStateReadonly},
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -385,7 +385,7 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStepsReadGuard::new(Arc::new(RwLock::new(VdfState {
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
         capacity: 10,
         global_step: 0,
         seeds: VecDeque::new(),

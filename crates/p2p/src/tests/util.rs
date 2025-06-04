@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
+use irys_actors::vdf_service::test_helpers::mocked_vdf_service;
+use irys_actors::vdf_service::VdfStateReadonly;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
     broadcast_mining_service::BroadcastMiningSeed,
@@ -251,6 +253,7 @@ impl Default for ApiClientStub {
 }
 
 pub(crate) struct GossipServiceTestFixture {
+    pub config: Config,
     pub gossip_port: u16,
     pub api_port: u16,
     pub execution: RethPeerInfo,
@@ -331,6 +334,7 @@ impl GossipServiceTestFixture {
         let task_executor = task_manager.executor();
 
         Self {
+            config,
             // temp_dir,
             gossip_port,
             api_port,
@@ -378,7 +382,8 @@ impl GossipServiceTestFixture {
         };
 
         let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
-        let (vdf_service_tx, _vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (vdf_state, _task_manager) = mocked_vdf_service(&self.config).await;
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
@@ -390,7 +395,7 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
-                vdf_service_tx,
+                vdf_steps_guard,
             )
             .expect("failed to run gossip service");
 

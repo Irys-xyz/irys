@@ -17,7 +17,7 @@ use irys_actors::{
     block_validation,
     mempool_service::{MempoolServiceMessage, TxIngressError},
     packing::wait_for_packing,
-    vdf_service::VdfStepsReadGuard,
+    vdf_service::VdfStateReadonly,
     SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
@@ -56,7 +56,7 @@ use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
-    vdf_steps_guard: VdfStepsReadGuard,
+    vdf_steps_guard: VdfStateReadonly,
     config: &Config,
 ) -> SolutionContext {
     let max_retries = 20;

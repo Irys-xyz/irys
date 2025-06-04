@@ -21,9 +21,10 @@ use crate::{
 use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
+use irys_actors::vdf_service::VdfStateReadonly;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade, broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::MempoolFacade, vdf_service::VdfServiceMessage,
+    mempool_service::MempoolFacade,
 };
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
@@ -31,7 +32,7 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -162,7 +163,7 @@ impl P2PService {
         db: DatabaseProvider,
         vdf_sender: Sender<BroadcastMiningSeed>,
         listener: TcpListener,
-        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
+        vdf_state: VdfStateReadonly,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -176,7 +177,7 @@ impl P2PService {
             block_discovery.clone(),
             Some(vdf_sender),
             self.sync_state.clone(),
-            vdf_service_sender,
+            vdf_state,
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =

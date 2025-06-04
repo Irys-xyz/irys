@@ -1,13 +1,11 @@
 use actix::Addr;
-use irys_actors::{
-    broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf_service::VdfServiceMessage,
-};
+use irys_actors::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
+use irys_actors::vdf_service::AtomicVdfState;
 use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{Receiver, UnboundedSender};
+use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
 pub fn run_vdf(
@@ -19,7 +17,7 @@ pub fn run_vdf(
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
-    vdf_service: UnboundedSender<VdfServiceMessage>,
+    vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
     let mut hasher = Sha256::new();
@@ -99,8 +97,11 @@ pub fn run_vdf(
             hash.clone(),
             global_step_number
         );
-        if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
-            panic!("Unable to send new Seed to VDF service: {:?}", e);
+        {
+            vdf_state
+                .write()
+                .expect("to write to VDF")
+                .increment_step(Seed(hash));
         }
         broadcast_mining_service.do_send(BroadcastMiningSeed {
             seed: Seed(hash),
@@ -124,6 +125,7 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
+    use irys_actors::vdf_service::VdfStateReadonly;
     use irys_actors::{
         vdf_service::test_helpers::mocked_vdf_service, vdf_service::vdf_steps_are_valid,
     };
@@ -200,18 +202,8 @@ mod tests {
         let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let (_, mining_state_rx) = mpsc::channel::<bool>(1);
 
-        let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;
-
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            panic!("error: {:?}", e);
-        };
-
-        let vdf_steps = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
+        let (vdf_state, _task_manager) = mocked_vdf_service(&config).await;
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -229,7 +221,7 @@ mod tests {
                     mining_state_rx,
                     shutdown_rx,
                     broadcast_mining_service,
-                    tx,
+                    vdf_state.clone(),
                     atomic_global_step_number,
                 )
             }
@@ -238,7 +230,7 @@ mod tests {
         // wait for some vdf steps
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let step_num = vdf_steps.read().global_step;
+        let step_num = vdf_steps_guard.read().global_step;
 
         assert!(
             step_num > 4,
@@ -247,7 +239,7 @@ mod tests {
         );
 
         // get last 4 steps
-        let steps = vdf_steps
+        let steps = vdf_steps_guard
             .read()
             .get_steps(ii(step_num - 3, step_num))
             .unwrap();
@@ -285,7 +277,7 @@ mod tests {
         };
 
         assert!(
-            vdf_steps_are_valid(&vdf_info, &config.consensus.vdf, vdf_steps).is_ok(),
+            vdf_steps_are_valid(&vdf_info, &config.consensus.vdf, vdf_steps_guard).is_ok(),
             "Invalid VDF"
         );
 

@@ -3,6 +3,7 @@ use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;
+use irys_actors::vdf_service::AtomicVdfState;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
@@ -23,7 +24,7 @@ use irys_actors::{
     },
     services::ServiceSenders,
     validation_service::ValidationService,
-    vdf_service::{VdfService, VdfServiceMessage, VdfStepsReadGuard},
+    vdf_service::VdfStateReadonly,
 };
 use irys_actors::{
     ActorAddresses, CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage,
@@ -85,7 +86,7 @@ pub struct IrysNodeCtx {
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub block_tree_guard: BlockTreeReadGuard,
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
@@ -884,30 +885,20 @@ impl IrysNode {
         );
 
         // Spawn VDF service
-        let _handle = VdfService::spawn_service(
-            &task_exec,
+        let vdf_state = Arc::new(RwLock::new(irys_actors::vdf_service::create_state(
+            block_index.clone(),
             irys_db.clone(),
-            block_index_guard.clone(),
-            receivers.vdf,
             service_senders.vdf_mining.clone(),
             &config,
-        );
-
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let vdf_service_sender = service_senders.vdf.clone();
-        let _ = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        });
-        let vdf_steps_guard = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard response from GetVdfStateMessage");
+        )));
+        let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
         // spawn the validation service
         let validation_arbiter = Self::init_validation_service(
             &config,
             &block_index_guard,
             &partition_assignments_guard,
-            &vdf_steps_guard,
+            &vdf_state_readonly,
         );
 
         // create the block reward curve
@@ -925,7 +916,7 @@ impl IrysNode {
             &epoch_service_actor,
             &block_index_guard,
             partition_assignments_guard,
-            &vdf_steps_guard,
+            &vdf_state_readonly,
             Arc::clone(&reward_curve),
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
@@ -939,7 +930,7 @@ impl IrysNode {
             irys_db.clone(),
             service_senders.vdf_seed.clone(),
             gossip_listener,
-            service_senders.vdf.clone(),
+            vdf_state_readonly.clone(),
         )?;
 
         // set up the price oracle
@@ -955,12 +946,12 @@ impl IrysNode {
             &service_senders,
             &epoch_service_actor,
             &block_tree_guard,
-            &vdf_steps_guard,
+            &vdf_state_readonly,
             block_discovery.clone(),
             price_oracle,
         );
 
-        let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
+        let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
         let seed = seed
             .map(|x| x.0)
             .unwrap_or(latest_block.vdf_limiter_info.seed);
@@ -977,7 +968,7 @@ impl IrysNode {
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
             &config,
             &storage_modules_guard,
-            &vdf_steps_guard,
+            &vdf_state_readonly,
             &block_producer_addr,
             &atomic_global_step_number,
             &packing_actor_addr,
@@ -994,7 +985,7 @@ impl IrysNode {
             seed,
             global_step_number,
             broadcast_mining_actor,
-            service_senders.vdf.clone(),
+            vdf_state,
             atomic_global_step_number,
         );
 
@@ -1018,7 +1009,7 @@ impl IrysNode {
             db: irys_db.clone(),
             chunk_provider: chunk_provider.clone(),
             block_index_guard: block_index_guard.clone(),
-            vdf_steps_guard: vdf_steps_guard.clone(),
+            vdf_steps_guard: vdf_state_readonly.clone(),
             service_senders: service_senders.clone(),
             reth_shutdown_sender,
             reth_thread_handle: None,
@@ -1135,7 +1126,7 @@ impl IrysNode {
         seed: H256,
         global_step_number: u64,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
-        vdf_service: tokio::sync::mpsc::UnboundedSender<VdfServiceMessage>,
+        vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
@@ -1176,7 +1167,7 @@ impl IrysNode {
                     vdf_mining_state_rx,
                     vdf_shutdown_receiver,
                     broadcast_mining_actor.clone(),
-                    vdf_service.clone(),
+                    vdf_state.clone(),
                     atomic_global_step_number.clone(),
                 )
             }
@@ -1187,7 +1178,7 @@ impl IrysNode {
     fn init_partition_mining_actor(
         config: &Config,
         storage_modules_guard: &StorageModulesReadGuard,
-        vdf_steps_guard: &VdfStepsReadGuard,
+        vdf_steps_guard: &VdfStateReadonly,
         block_producer_addr: &actix::Addr<BlockProducerActor>,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
@@ -1259,7 +1250,7 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         epoch_service_actor: &actix::Addr<EpochServiceActor>,
         block_tree_guard: &BlockTreeReadGuard,
-        vdf_steps_guard: &VdfStepsReadGuard,
+        vdf_steps_guard: &VdfStateReadonly,
         block_discovery: actix::Addr<BlockDiscoveryActor>,
         price_oracle: Arc<IrysPriceOracle>,
     ) -> (actix::Addr<BlockProducerActor>, Arbiter) {
@@ -1309,7 +1300,7 @@ impl IrysNode {
         epoch_service: &Addr<EpochServiceActor>,
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
-        vdf_steps_guard: &VdfStepsReadGuard,
+        vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
@@ -1335,7 +1326,7 @@ impl IrysNode {
         config: &Config,
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: &irys_actors::epoch_service::PartitionAssignmentsReadGuard,
-        vdf_steps_guard: &VdfStepsReadGuard,
+        vdf_steps_guard: &VdfStateReadonly,
     ) -> Arbiter {
         let validation_service = ValidationService::new(
             block_index_guard.clone(),

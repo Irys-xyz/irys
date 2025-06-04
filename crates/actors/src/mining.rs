@@ -6,7 +6,7 @@ use crate::broadcast_mining_service::{
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::PackingRequest;
-use crate::vdf_service::VdfStepsReadGuard;
+use crate::vdf_service::VdfStateReadonly;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr;
@@ -30,7 +30,7 @@ pub struct PartitionMiningActor {
     should_mine: bool,
     difficulty: U256,
     ranges: Ranges,
-    steps_guard: VdfStepsReadGuard,
+    steps_guard: VdfStateReadonly,
     atomic_global_step_number: AtomicVdfStepNumber,
     span: Span,
 }
@@ -45,7 +45,7 @@ impl PartitionMiningActor {
         packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
-        steps_guard: VdfStepsReadGuard,
+        steps_guard: VdfStateReadonly,
         atomic_global_step_number: AtomicVdfStepNumber,
         initial_difficulty: U256,
         span: Option<Span>,
@@ -399,7 +399,7 @@ mod tests {
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
         packing::PackingActor,
-        vdf_service::{test_helpers::mocked_vdf_service, VdfServiceMessage},
+        vdf_service::test_helpers::mocked_vdf_service,
     };
     use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
@@ -538,17 +538,8 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new(None);
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;
-
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            panic!("error: {:?}", e);
-        };
-        let vdf_steps_guard = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
+        let (vdf_state, _task_manager) = mocked_vdf_service(&config).await;
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
@@ -667,31 +658,24 @@ mod tests {
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
-        let (tx, _vdf_service_handle, _task_manager) = mocked_vdf_service(&config).await;
-
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {
-            response: oneshot_tx,
-        }) {
-            panic!("error: {:?}", e);
-        };
-        let vdf_steps_guard = oneshot_rx
-            .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
+        let (vdf_state, _task_manager) = mocked_vdf_service(&config).await;
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let hash: H256 = H256::random();
         for _ in 0..5 {
             // seeds 1 to 5
-            if let Err(e) = tx.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
-                panic!("error: {:?}", e);
-            };
+            vdf_state
+                .write()
+                .expect("to write to vdf state")
+                .increment_step(Seed(hash));
         }
         // reset occurs at step 5
         for _ in 0..2 {
             // seeds 6 and 7
-            if let Err(e) = tx.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
-                panic!("error: {:?}", e);
-            };
+            vdf_state
+                .write()
+                .expect("to write to vdf state")
+                .increment_step(Seed(hash));
         }
 
         sleep(Duration::from_secs(1)).await;

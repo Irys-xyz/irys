@@ -39,7 +39,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    vdf_service::VdfStepsReadGuard,
+    vdf_service::VdfStateReadonly,
     CommitmentCacheMessage,
 };
 
@@ -68,7 +68,7 @@ pub struct BlockProducerActor {
     /// The block reward curve
     pub reward_curve: Arc<HalvingCurve>,
     /// Store last VDF Steps
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStateReadonly,
     /// Get the head of the chain
     pub block_tree_guard: BlockTreeReadGuard,
     /// The Irys price oracle

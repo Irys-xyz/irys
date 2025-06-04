@@ -7,13 +7,13 @@ use actix::{
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::vdf_service::VdfServiceMessage;
+use irys_actors::vdf_service::VdfStateReadonly;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ where
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
     pub(crate) vdf_sender: Option<Sender<BroadcastMiningSeed>>,
-    pub(crate) vdf_service_sender: Option<UnboundedSender<VdfServiceMessage>>,
+    pub(crate) vdf_state: Option<VdfStateReadonly>,
 
     sync_state: SyncState,
 }
@@ -64,7 +64,7 @@ where
             block_producer: None,
             peer_list: None,
             vdf_sender: None,
-            vdf_service_sender: None,
+            vdf_state: None,
             sync_state: SyncState::default(),
         }
     }
@@ -111,7 +111,7 @@ where
         block_producer_addr: B,
         vdf_sender: Option<Sender<BroadcastMiningSeed>>,
         sync_state: SyncState,
-        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
+        vdf_state: VdfStateReadonly,
     ) -> Self {
         Self {
             db: Some(db),
@@ -121,7 +121,7 @@ where
             block_producer: Some(block_producer_addr),
             vdf_sender,
             sync_state,
-            vdf_service_sender: Some(vdf_service_sender),
+            vdf_state: Some(vdf_state),
         }
     }
 
@@ -143,10 +143,7 @@ where
         let block_discovery = self.block_producer.clone();
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
-        let vdf_service_sender = self
-            .vdf_service_sender
-            .clone()
-            .expect("valid vdf service sender");
+        let vdf_service_sender = self.vdf_state.clone().expect("valid vdf service sender");
 
         // Adding the block to the pool, so if a block depending on that block arrives,
         // this block won't be requested from the network
