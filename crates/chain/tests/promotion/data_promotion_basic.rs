@@ -206,10 +206,7 @@ async fn heavy_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
-    let mut unconfirmed_promotions = vec![
-        txs[2].header.id.as_bytes().to_base58(),
-        txs[0].header.id.as_bytes().to_base58(),
-    ];
+    let mut unconfirmed_promotions = vec![txs[2].header.id, txs[0].header.id];
     tracing::info!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
 
     for attempts in 1..20 {
@@ -219,24 +216,31 @@ async fn heavy_data_promotion_test() {
             break;
         };
 
-        // Attempt to retrieve the transactions from the node endpoint
-        println!("Attempting... {}", txid);
-        let req = test::TestRequest::get()
-            .uri(&format!("/v1/tx/{}", &txid))
-            .to_request();
+        // setup read lock for for database
+        let mut_tx = node
+            .node_ctx
+            .db
+            .as_ref()
+            .tx()
+            .map_err(|e| {
+                tracing::error!("Failed to create mdbx transaction: {}", e);
+            })
+            .unwrap();
 
-        let resp = test::call_service(&app, req).await;
-
-        if resp.status() == StatusCode::OK {
-            let tx_header: IrysTransactionHeader = test::read_body_json(resp).await;
-            tracing::info!("Transaction was retrieved ok after {} attempts", attempts);
-            if let Some(_proof) = tx_header.ingress_proofs {
-                assert_eq!(tx_header.id.as_bytes().to_base58(), *txid);
-                println!("Confirming... {}", tx_header.id.as_bytes().to_base58());
-                unconfirmed_promotions.remove(0);
-                println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
+        // Retrieve the transaction header from database
+        match tx_header_by_txid(&mut_tx, txid) {
+            Ok(Some(header)) => {
+                assert_eq!(header.id, *txid);
+                if header.ingress_proofs.is_some() {
+                    info!(
+                        "Transaction was retrieved with proofs ok after {} attempts",
+                        attempts
+                    );
+                    unconfirmed_promotions.remove(0);
+                }
             }
-        }
+            _ => {}
+        };
 
         sleep(delay).await;
     }
