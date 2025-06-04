@@ -160,7 +160,7 @@ mod tests {
         let signer = IrysSigner::random_signer(&testnet_config);
         let chunks: Vec<Vec<u8>> = data_bytes
             .chunks(testnet_config.chunk_size as usize)
-            .map(|c| Vec::from(c))
+            .map(Vec::from)
             .collect();
         let proof = generate_ingress_proof(
             signer.clone(),

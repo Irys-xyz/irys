@@ -441,6 +441,8 @@ mod tests {
     }
 
     #[test_log::test(actix_rt::test)]
+    #[allow(clippy::await_holding_lock, reason = "test")]
+
     async fn test_solution() {
         let chunk_count = 4;
         let chunk_size = 32;
@@ -449,7 +451,7 @@ mod tests {
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size,
-                num_chunks_in_partition: chunk_count.into(),
+                num_chunks_in_partition: chunk_count,
                 num_chunks_in_recall_range: 2,
                 num_partitions_per_slot: 1,
                 entropy_packing_iterations: 1,
@@ -484,7 +486,7 @@ mod tests {
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
         // Set up the storage geometry for this test
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
@@ -642,10 +644,10 @@ mod tests {
 
         let partition_hash = H256::random();
 
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                partition_hash: partition_hash.clone(),
+                partition_hash,
                 miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
@@ -657,7 +659,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = Arc::new(StorageModule::new(&storage_module_info, &config).unwrap());
+        let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
         let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
         let arc_rwlock = Arc::new(rwlock);

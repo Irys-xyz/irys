@@ -1,3 +1,5 @@
+#![allow(clippy::manual_div_ceil, clippy::assign_op_pattern)]
+
 use crate::{Arbitrary, IrysSignature};
 use alloy_primitives::{bytes, Address};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
@@ -264,9 +266,7 @@ impl Encode for H256 {
 
 impl Decode for H256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        Ok(Self::from_slice(
-            value.try_into().map_err(|_| DatabaseError::Decode)?,
-        ))
+        Ok(Self::from_slice(value))
     }
 }
 

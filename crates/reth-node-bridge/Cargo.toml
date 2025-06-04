@@ -29,3 +29,6 @@ reth-payload-builder.workspace = true
 reth-cli-commands.workspace = true
 async-trait.workspace = true
 base58.workspace = true
+
+[lints]
+workspace = true

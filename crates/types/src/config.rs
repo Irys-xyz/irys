@@ -219,9 +219,9 @@ pub struct NodeConfig {
     pub genesis_peer_discovery_timeout_millis: u64,
 }
 
-impl Into<Config> for NodeConfig {
-    fn into(self) -> Config {
-        Config::new(self)
+impl From<NodeConfig> for Config {
+    fn from(val: NodeConfig) -> Self {
+        Config::new(val)
     }
 }
 

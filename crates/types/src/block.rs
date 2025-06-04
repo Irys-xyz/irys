@@ -635,11 +635,11 @@ impl BlockIndexItem {
 
     // Deserialize bytes to BlockIndexItem
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self::default();
-
-        // Read fixed fields
-        item.block_hash = H256::from_slice(&bytes[0..32]);
-        item.num_ledgers = bytes[32];
+        let mut item = BlockIndexItem {
+            block_hash: H256::from_slice(&bytes[0..32]),
+            num_ledgers: bytes[32],
+            ..Default::default()
+        };
 
         // Read ledger items
         let num_ledgers = item.num_ledgers as usize;
@@ -729,7 +729,7 @@ mod tests {
         // action
         let mut buffer = vec![];
         data.to_compact(&mut buffer);
-        let (decoded, ..) = VDFLimiterInfo::from_compact(&mut buffer.as_slice(), buffer.len());
+        let (decoded, ..) = VDFLimiterInfo::from_compact(buffer.as_slice(), buffer.len());
 
         // Assert
         assert_eq!(data, decoded);

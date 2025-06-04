@@ -26,7 +26,7 @@ impl IrysChainSpecBuilder {
         };
         Self {
             reth_builder: ChainSpecBuilder::mainnet()
-                .chain(config.consensus.reth.chain.clone())
+                .chain(config.consensus.reth.chain)
                 .genesis(config.consensus.reth.genesis.clone())
                 .with_forks(IRYS_TESTNET.hardforks.clone()),
             genesis,
