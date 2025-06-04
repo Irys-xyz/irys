@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use eyre::eyre;
 use futures::future;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, SystemLedger,
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
+    SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
@@ -199,6 +200,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
+
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
@@ -212,14 +214,34 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .await
             .map_err(|e| eyre::eyre!("Failed to collect submit tx headers: {:?}", e))?;
 
-            // Collect publish ledger transactions from the mempool
-            let publish_txs = future::try_join_all(
-                publish_txids
-                    .iter()
-                    .map(|txid| mempool.handle_get_transaction(*txid)),
-            )
-            .await
-            .map_err(|e| eyre::eyre!("Failed to collect publish tx headers: {:?}", e))?;
+            let mut_tx = db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            // Collect publish ledger transactions from the database
+            let publish_txs: Vec<IrysTransactionHeader> = publish_txids
+                .iter()
+                .filter_map(|txid| match tx_header_by_txid(&mut_tx, txid) {
+                    Ok(Some(header)) => Some(header),
+                    Ok(None) => {
+                        error!("publish tx not found in the database: {}", txid);
+                        None
+                    }
+                    Err(e) => {
+                        error!(
+                            "Error fetching transaction header for txid {}: {}",
+                            txid.clone(),
+                            e
+                        );
+                        None
+                    }
+                })
+                .collect();
+
+            drop(mut_tx);
 
             if !publish_txs.is_empty() {
                 let publish_proofs = match &publish_proofs_opt {
