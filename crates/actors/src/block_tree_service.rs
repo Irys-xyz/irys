@@ -409,7 +409,6 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                     finalized_hash: None,
                 });
                 if mark_tip.is_ok() {
-                    //might need to insert txs here
                     self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
 
