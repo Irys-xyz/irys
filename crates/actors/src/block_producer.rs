@@ -5,7 +5,7 @@ use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
-    insert_commitment_tx, tables::IngressProofs, SystemLedger,
+    insert_commitment_tx, tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth_node_bridge::{
@@ -210,19 +210,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 // Loop though all the pending tx to see which haven't been promoted
                 for txid in &publish_txids {
-                    // TODO replace with mempool facade usage
-                    //      self.mempool.handle_get_transaction(txid);
-                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    service_senders.mempool
-                        .send(MempoolServiceMessage::GetTransaction(*txid, oneshot_tx))
-                        .expect("Error sending GetTransaction");
-
-                    let response = oneshot_rx.await.expect("");
-
-                    let tx_header = match response {
-                        Some(header) => header,
-                        None => {
+                    let tx_header = match tx_header_by_txid(&read_tx, txid) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => {
                             error!("No transaction header found for txid: {}", txid);
+                            continue;
+                        },
+                        Err(e) => {
+                            error!("Error fetching transaction header for txid {}: {}", txid, e);
                             continue;
                         }
                     };
