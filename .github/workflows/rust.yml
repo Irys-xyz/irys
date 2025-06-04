@@ -216,7 +216,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo clippy
-        run: cargo xtask clippy -- --all-features
+        run: cargo xtask clippy -- --all-features -- -Dwarnings
 
   cargo-doc:
     name: cargo doc

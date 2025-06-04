@@ -14,7 +14,7 @@ pub fn vdf_sha(
     seed: &mut H256,
     num_checkpoints: usize,
     num_iterations: u64,
-    checkpoints: &mut Vec<H256>,
+    checkpoints: &mut [H256],
 ) {
     let mut local_salt: [u8; 32] = [0; 32];
 
@@ -212,7 +212,7 @@ pub async fn last_step_checkpoints_is_valid(
                     let mut hasher = Sha256::new();
 
                     for _ in 0..num_iterations {
-                        hasher.update(&salt_buff);
+                        hasher.update(salt_buff);
                         hasher.update(seed.as_bytes());
                         seed = H256(hasher.finalize_reset().into());
                     }

@@ -419,7 +419,7 @@ mod tests {
         let config = Config::new(node_config);
         let packing_config = PackingConfig::new(&config);
 
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
@@ -485,7 +485,7 @@ mod tests {
             let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
             compute_entropy_chunk(
                 config.node_config.miner_address(),
-                i as u64,
+                i,
                 partition_hash.0,
                 config.consensus.entropy_packing_iterations,
                 config.consensus.chunk_size.try_into().unwrap(),

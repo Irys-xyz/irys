@@ -28,3 +28,6 @@ eyre.workspace = true
 [dev-dependencies]
 irys-testing-utils.workspace = true
 test-log.workspace = true
+
+[lints]
+workspace = true

@@ -63,7 +63,7 @@ pub async fn fetch_genesis_block(
         .await
         .expect("expected a valid json deserialize");
 
-    let fetched_genesis_block = fetch_block(peer, &client, &block_index_genesis.get(0).unwrap())
+    let fetched_genesis_block = fetch_block(peer, client, block_index_genesis.first().unwrap())
         .await
         .unwrap();
     Some(fetched_genesis_block)

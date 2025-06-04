@@ -17,7 +17,7 @@ pub fn save_genesis_block_to_disk(
         .expect("genesis block should convert to json string");
     // ensure base_directory exists and create if not
     // TODO this dir creation should be handled in a single place in the application, it's currently also done by the storage module
-    if let Err(e) = create_dir_all(&base_directory) {
+    if let Err(e) = create_dir_all(base_directory) {
         panic!(
             "unable to recursively read or create directory \"{:?}\" error {}",
             base_directory, e

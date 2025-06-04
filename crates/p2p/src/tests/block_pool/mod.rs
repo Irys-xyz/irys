@@ -144,15 +144,19 @@ async fn should_process_block() {
     );
     let addr = service.start();
 
-    let mut parent_block_header = IrysBlockHeader::default();
-    parent_block_header.block_hash = BlockHash::random();
-    parent_block_header.height = 1;
+    let parent_block_header = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        height: 1,
+        ..Default::default()
+    };
     let parent_block_hash = parent_block_header.block_hash;
 
-    let mut test_header = IrysBlockHeader::default();
-    test_header.block_hash = BlockHash::random();
-    test_header.previous_block_hash = parent_block_header.block_hash;
-    test_header.height = parent_block_header.height + 1;
+    let test_header = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        previous_block_hash: parent_block_hash,
+        height: parent_block_header.height + 1,
+        ..Default::default()
+    };
 
     // Inserting parent block header to the db, so the current block should go to the
     //  block producer
@@ -187,15 +191,12 @@ async fn should_process_block() {
 
     tokio::spawn(async move {
         let message = vdf_service_rx.recv().await.expect("to receive message");
-        match message {
-            VdfServiceMessage::GetVdfStateMessage { response } => {
-                response
-                    .send(VdfStepsReadGuard::new(Arc::new(RwLock::new(
-                        VdfState::default(),
-                    ))))
-                    .expect("to send a response");
-            }
-            _ => {}
+        if let VdfServiceMessage::GetVdfStateMessage { response } = message {
+            response
+                .send(VdfStepsReadGuard::new(Arc::new(RwLock::new(
+                    VdfState::default(),
+                ))))
+                .expect("to send a response");
         }
     });
 
@@ -208,7 +209,7 @@ async fn should_process_block() {
 
     let block_header_in_discovery = block_discovery_stub
         .get_blocks()
-        .get(0)
+        .first()
         .expect("to have a block")
         .clone();
     assert_eq!(block_header_in_discovery, test_header);
@@ -241,34 +242,41 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // block3: test block to be processed
 
     // Create block1 (will be in database)
-    let mut block1 = IrysBlockHeader::default();
-    block1.block_hash = BlockHash::random();
+    let block1 = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        ..Default::default()
+    };
+
     let block1_hash = block1.block_hash;
 
     // Create block2 (will be in API client)
-    let mut block2 = IrysBlockHeader::default();
-    block2.block_hash = BlockHash::random();
-    block2.previous_block_hash = block1.block_hash;
+    let block2 = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        previous_block_hash: block1.block_hash,
+        ..Default::default()
+    };
 
     // Create block3 (test block)
-    let mut block3 = IrysBlockHeader::default();
-    block3.block_hash = BlockHash::random();
-    block3.previous_block_hash = block2.block_hash;
+    let block3 = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        previous_block_hash: block2.block_hash,
+        ..Default::default()
+    };
 
-    debug!("Block 1: {:?}", block1.block_hash.0.to_base58());
-    debug!("Block 2: {:?}", block2.block_hash.0.to_base58());
-    debug!("Block 3: {:?}", block3.block_hash.0.to_base58());
+    debug!("Block 1: {:?}", block1.block_hash);
+    debug!("Block 2: {:?}", block2.block_hash);
+    debug!("Block 3: {:?}", block3.block_hash);
     debug!(
         "Block 1 previous_block_hash: {:?}",
-        block1.previous_block_hash.0.to_base58()
+        block1.previous_block_hash
     );
     debug!(
         "Block 2 previous_block_hash: {:?}",
-        block2.previous_block_hash.0.to_base58()
+        block2.previous_block_hash
     );
     debug!(
         "Block 3 previous_block_hash: {:?}",
-        block3.previous_block_hash.0.to_base58()
+        block3.previous_block_hash
     );
 
     // Setup MockApiClient to return block2 when queried
@@ -391,7 +399,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // The blocks should be received in order of processing: first block2, then block3
-    let discovered_block2 = block_discovery_stub.get_blocks().get(0).unwrap().clone();
+    let discovered_block2 = block_discovery_stub.get_blocks().first().unwrap().clone();
     let discovered_block3 = block_discovery_stub
         .get_blocks()
         .get(1)

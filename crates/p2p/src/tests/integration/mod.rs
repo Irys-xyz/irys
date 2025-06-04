@@ -235,7 +235,7 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
             .read()
             .expect("Failed to read service 2 mempool transactions for reputation check");
         eyre::ensure!(
-            service2_mempool_txs.len() == 0,
+            service2_mempool_txs.is_empty(),
             "Expected 0 transactions in low reputation peer mempool, but found {}",
             service2_mempool_txs.len()
         );
@@ -362,7 +362,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
         // Check that service 2 rejected the block due to missing transactions
         let service2_mempool_txs = fixture2.mempool_txs.read().expect("to get mempool txs");
         eyre::ensure!(
-            service2_mempool_txs.len() == 0,
+            service2_mempool_txs.is_empty(),
             "Expected {} transaction(s), but found {}",
             0,
             service2_mempool_txs.len()

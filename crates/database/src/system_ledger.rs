@@ -106,11 +106,9 @@ fn create_pledge_commitment_transaction(
         ..Default::default()
     };
 
-    let pledge_tx = signer
+    signer
         .sign_commitment(pledge_commitment)
-        .expect("commitment transaction to be signable");
-
-    pledge_tx
+        .expect("commitment transaction to be signable")
 }
 
 /// Generates commitment transactions for genesis block
@@ -172,7 +170,7 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
-        anchor = pledge_tx.id.clone();
+        anchor = pledge_tx.id;
 
         commitments.push(pledge_tx);
     }
@@ -217,7 +215,7 @@ pub fn add_genesis_commitments(
     genesis_block: &mut IrysBlockHeader,
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
-    let commitments = get_genesis_commitments(&config);
+    let commitments = get_genesis_commitments(config);
     let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
 
     // Add the commitment txids to the commitment ledger one by one
@@ -280,7 +278,7 @@ pub fn add_test_commitments(
         let pledge_tx = create_pledge_commitment_transaction(&signer, anchor);
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
-        anchor = pledge_tx.id.clone();
+        anchor = pledge_tx.id;
         commitments.push(pledge_tx);
     }
 

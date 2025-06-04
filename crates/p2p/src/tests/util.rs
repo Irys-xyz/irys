@@ -587,7 +587,7 @@ impl FakeGossipServer {
         .bind(address)
         .expect("to bind");
 
-        let addr = server.addrs()[0].clone();
+        let addr = server.addrs()[0];
         let server = server.run();
         (server, addr)
     }

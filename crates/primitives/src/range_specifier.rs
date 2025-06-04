@@ -170,7 +170,6 @@ mod range_specifier_tests {
 
     use crate::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
     use alloy_primitives::aliases::U200;
-    use std::{u16, u32};
 
     #[test]
     fn test_encode_decode_roundtrip() -> eyre::Result<()> {
@@ -270,8 +269,6 @@ impl ByteRangeSpecifier {
 
 #[cfg(test)]
 mod bytes_range_specifier_tests {
-    use std::u16;
-
     use super::*;
 
     #[test]

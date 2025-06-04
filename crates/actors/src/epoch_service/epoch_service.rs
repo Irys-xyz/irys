@@ -145,7 +145,7 @@ impl EpochServiceActor {
 
     fn validate_commitments(
         block_header: &IrysBlockHeader,
-        commitments: &Vec<CommitmentTransaction>,
+        commitments: &[CommitmentTransaction],
     ) -> eyre::Result<()> {
         // Extract the commitments ledger from the system ledgers in the epoch block
         let commitment_ledger = block_header
@@ -158,7 +158,7 @@ impl EpochServiceActor {
         if let Some(commitment_ledger) = commitment_ledger {
             for txid in commitment_ledger.tx_ids.iter() {
                 // If we can't find the commitment transaction for a referenced txid, return an error
-                if commitments.iter().find(|c| c.id == *txid).is_none() {
+                if !commitments.iter().any(|c| c.id == *txid) {
                     return Err(eyre::eyre!(
                         "Missing commitment transaction {} for block {}",
                         txid.0.to_base58(),
@@ -210,7 +210,7 @@ impl EpochServiceActor {
         }
 
         // Validate the commitments
-        Self::validate_commitments(&new_epoch_block, &new_epoch_commitments)
+        Self::validate_commitments(new_epoch_block, &new_epoch_commitments)
             .map_err(|_| EpochServiceError::InvalidCommitments)?;
 
         debug!(
@@ -306,10 +306,9 @@ impl EpochServiceActor {
     /// than the `epoch_length` (term length) of the ledger.
     fn expire_term_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
-        let expired_hashes: Vec<H256>;
 
         let mut ledgers = self.ledgers.write().unwrap();
-        expired_hashes = ledgers.get_expired_partition_hashes(epoch_height);
+        let expired_hashes: Vec<H256> = ledgers.get_expired_partition_hashes(epoch_height);
         drop(ledgers);
 
         // Return early if there's no more work to do
@@ -614,10 +613,10 @@ impl EpochServiceActor {
             // Register the commitment in the state
             // Assumption: Commitments are pre-validated, so we don't check for duplicates
             let value = CommitmentStateEntry {
-                id: stake_commitment.id.into(),
+                id: stake_commitment.id,
                 commitment_status: CommitmentStatus::Active,
                 partition_hash: None,
-                signer: stake_commitment.signer.clone(),
+                signer: stake_commitment.signer,
                 // TODO: implement the staking cost lookups and use that value here
                 amount: 0,
             };
@@ -648,7 +647,7 @@ impl EpochServiceActor {
 
             // Create the state entry for the pledge commitment
             let value = CommitmentStateEntry {
-                id: pledge_commitment.id.into(),
+                id: pledge_commitment.id,
                 commitment_status: CommitmentStatus::Active,
                 partition_hash: None,
                 signer: pledge_commitment.signer,
@@ -660,7 +659,7 @@ impl EpochServiceActor {
             commitment_state
                 .pledge_commitments
                 .entry(address)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(value);
         }
     }

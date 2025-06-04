@@ -378,7 +378,7 @@ mod tests {
             };
 
             let mut node_config = NodeConfig::testnet();
-            node_config.trusted_peers = vec![fake_peer_address.clone()];
+            node_config.trusted_peers = vec![fake_peer_address];
             let config = Config::new(node_config);
 
             let api_client_stub = ApiClientStub::new();
