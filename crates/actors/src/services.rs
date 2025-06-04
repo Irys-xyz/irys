@@ -68,7 +68,8 @@ impl ServiceSendersInner {
         // enabling/disabling VDF mining thread
         let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
         // vdf channel for fast forwarding steps during node sync
-        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = channel::<StepWithCheckpoints>(1);
+        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
+            channel::<StepWithCheckpoints>(1);
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipData>();
