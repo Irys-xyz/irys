@@ -19,11 +19,12 @@ use rand::Rng;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
-
+use irys_testing_utils::initialize_tracing;
 use crate::utils::IrysNodeTest;
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
+    initialize_tracing();
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {

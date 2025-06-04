@@ -960,9 +960,12 @@ impl IrysNode {
         );
 
         let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
-        let seed = seed
-            .map(|x| x.0)
-            .unwrap_or(latest_block.vdf_limiter_info.seed);
+        let seed = seed.0;
+        // if seed != latest_block.vdf_limiter_info.seed || global_step_number != 0 {
+        //     panic!("HSOIOEIK:OLJKA:LFKJ");
+        // }
+        // let global_step_number = 0;
+        // let seed = latest_block.vdf_limiter_info.seed;
 
         // set up packing actor
         let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(

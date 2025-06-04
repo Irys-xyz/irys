@@ -81,6 +81,9 @@ pub fn run_vdf(
     vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
+    debug!("Running VDF: {}", global_step_number);
+    debug!("Atomic global step: {}", atomic_vdf_global_step.load(std::sync::atomic::Ordering::Relaxed));
+
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
@@ -147,23 +150,22 @@ pub fn run_vdf(
             &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
         );
 
-        global_step_number += 1;
-        atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
-
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
 
+        global_step_number = {
+            vdf_state
+                .write()
+                .expect("to write to VDF")
+                .increment_step(Seed(hash))
+        };
+        atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
         info!(
             "Seed created {} step number {}",
             hash.clone(),
             global_step_number
         );
-        {
-            vdf_state
-                .write()
-                .expect("to write to VDF")
-                .increment_step(Seed(hash));
-        }
+
         broadcast_mining_service.broadcast(
             Seed(hash),
             H256List(checkpoints.clone()),

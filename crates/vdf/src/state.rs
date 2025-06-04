@@ -19,7 +19,7 @@ use tokio::{
     sync::mpsc::Sender,
     time::{sleep, Duration},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -34,22 +34,31 @@ pub struct VdfState {
 }
 
 impl VdfState {
-    pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
-        (self.global_step, self.seeds.back().cloned())
+    pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
+        (self.global_step, self.seeds.back().cloned().expect("To have at least the genesis step to be inserted"))
     }
 
-    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
-    pub fn increment_step(&mut self, seed: Seed) {
+    pub fn store_step(&mut self, seed: Seed, global_step: u64) {
+        if self.global_step >= global_step {
+            return;
+        }
         if self.seeds.len() >= self.capacity {
             self.seeds.pop_front();
         }
-        self.global_step += 1;
-        self.seeds.push_back(seed);
-        tracing::info!(
-            "Received seed: {:?} global step: {}",
-            self.seeds.back().unwrap(),
-            self.global_step
-        );
+        if self.global_step + 1 == global_step {
+            self.seeds.push_back(seed);
+            self.global_step += 1;
+            return;
+        } else {
+            panic!("VDF steps can't have gaps and have to be inserted in sequence");
+        }
+    }
+
+    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
+    pub fn increment_step(&mut self, seed: Seed) -> u64 {
+        let new_step = self.global_step + 1;
+        self.store_step(seed, new_step);
+        new_step
     }
 
     /// Get steps in the given global steps numbers Interval
@@ -183,6 +192,12 @@ pub fn create_state(
                 .unwrap()
                 .unwrap();
         }
+
+        if block.height == 0 {
+            seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+            debug!("Ready steady");
+        }
+
         info!(
             "Initializing vdf service from block's info in step number {}",
             global_step_number
@@ -195,7 +210,8 @@ pub fn create_state(
         };
     };
 
-    info!("No block index found, initializing VdfState from zero");
+    panic!("Should always have at least the genesis block");
+    // info!("No block index found, initializing VdfState from zero");
     VdfState {
         global_step: 0,
         seeds: VecDeque::with_capacity(capacity),
