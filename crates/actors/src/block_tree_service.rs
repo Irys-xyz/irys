@@ -120,7 +120,7 @@ impl BlockTreeService {
         reth_service_actor: Addr<RethServiceActor>,
     ) -> JoinHandle<()> {
         // Dereference miner_address here, before the closure
-        let miner_address = config.node_config.miner_address().clone();
+        let miner_address = config.node_config.miner_address();
         let consensus_config = config.node_config.consensus_config().clone();
         let service_senders = service_senders.clone();
         let system = System::current();
@@ -362,7 +362,7 @@ impl BlockTreeServiceInner {
             panic!("Unable to send finalisation message to reth: {}", &e)
         }
 
-        if let Err(_) = self.send_storage_finalized_message(finalized_hash) {
+        if self.send_storage_finalized_message(finalized_hash).is_err() {
             error!("Unable to send block finalized message");
         }
     }
@@ -484,7 +484,7 @@ impl BlockTreeServiceInner {
                 // Get the current tip before any changes
                 // Note: We cant rely on canonical chain here, because the canonical chain was already updated when this
                 //       block arrived and was added after pre-validation. The tip only moves after full validation.
-                let old_tip = cache.tip.clone();
+                let old_tip = cache.tip;
                 let old_tip_block = cache.get_block(&old_tip).unwrap().clone();
 
                 // Mark block as validated in cache, this will update the canonical chain
@@ -517,10 +517,7 @@ impl BlockTreeServiceInner {
                 };
 
                 // if the old tip isn't in the fork_blocks, it's a reorg
-                let is_reorg = fork_blocks
-                    .iter()
-                    .find(|bh| bh.block_hash == old_tip)
-                    .is_none();
+                let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
 
                 // Get block info before mutable operations
                 let block_entry = cache.blocks.get(&block_hash).unwrap();
@@ -540,7 +537,7 @@ impl BlockTreeServiceInner {
                         // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
                         let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
                         for block in &orphaned_blocks {
-                            let entry = make_chain_cache_entry(*block);
+                            let entry = make_chain_cache_entry(block);
                             old_canonical.push(entry);
                         }
                         let new_canonical = cache.get_canonical_chain();
@@ -1563,7 +1560,7 @@ pub async fn get_block(
             .read()
             .get_block(&block_hash)
             .cloned()
-            .map(|block| Arc::new(block))
+            .map(Arc::new)
     })
     .await?;
     Ok(res)

@@ -844,7 +844,7 @@ impl IrysNode {
 
         // start the block tree service
         let _handle = BlockTreeService::spawn_service(
-            &task_exec,
+            task_exec,
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
