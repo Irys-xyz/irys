@@ -368,6 +368,7 @@ impl TxIngressError {
 }
 
 /// Reasons why reading a transaction might fail
+#[derive(Debug, Clone)]
 pub enum TxReadError {
     /// Some database error occurred when reading
     DatabaseError,
