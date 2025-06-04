@@ -227,7 +227,7 @@ impl MempoolService {
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
         let mempool_config = &config.consensus.mempool;
-        let mempool_state = create_state(&mempool_config);
+        let mempool_state = create_state(mempool_config);
         let exec = exec.clone();
         let commitment_state_guard = commitment_state_guard.clone();
         let storage_modules_guard = storage_modules_guard.clone();
@@ -432,7 +432,7 @@ pub fn generate_ingress_proof(
         &proof.proof, &data_root
     );
     assert_eq!(data_size, size);
-    assert_eq!(chunk_count as u32, expected_chunk_count);
+    assert_eq!({ chunk_count }, expected_chunk_count);
 
     ro_tx.commit()?;
 
@@ -480,7 +480,7 @@ impl Inner {
         let tx_exists = mempool_state_guard
             .valid_commitment_tx
             .get(&commitment_tx.signer)
-            .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
+            .is_some_and(|txs| txs.iter().any(|c| c.id == commitment_tx.id));
 
         drop(mempool_state_guard);
 
@@ -586,38 +586,36 @@ impl Inner {
                 .gossip_broadcast
                 .send(GossipData::CommitmentTransaction(commitment_tx.clone()))
                 .expect("Failed to send gossip data");
-        } else {
-            if commitment_status == CommitmentCacheStatus::Unstaked {
-                // For unstaked pledges, we cache them in a 2-level LRU structure:
-                // Level 1: Keyed by signer address (allows tracking multiple addresses)
-                // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
+        } else if commitment_status == CommitmentCacheStatus::Unstaked {
+            // For unstaked pledges, we cache them in a 2-level LRU structure:
+            // Level 1: Keyed by signer address (allows tracking multiple addresses)
+            // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
 
-                let mut mempool_state_guard = mempool_state.write().await;
-                if let Some(pledges_cache) = mempool_state_guard
-                    .pending_pledges
-                    .get_mut(&commitment_tx.signer)
-                {
-                    // Address already exists in cache - add this pledge transaction to its lru cache
-                    pledges_cache.put(commitment_tx.id, commitment_tx.clone());
-                } else {
-                    // First pledge from this address - create a new nested lru cache
-                    let max_pending_pledge_items =
-                        self.config.consensus.mempool.max_pending_pledge_items;
-                    let mut new_address_cache =
-                        LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
-
-                    // Add the pledge transaction to the new lru cache for the address
-                    new_address_cache.put(commitment_tx.id, commitment_tx.clone());
-
-                    // Add the address cache to the primary lru cache
-                    mempool_state_guard
-                        .pending_pledges
-                        .put(commitment_tx.signer, new_address_cache);
-                }
-                drop(mempool_state_guard)
+            let mut mempool_state_guard = mempool_state.write().await;
+            if let Some(pledges_cache) = mempool_state_guard
+                .pending_pledges
+                .get_mut(&commitment_tx.signer)
+            {
+                // Address already exists in cache - add this pledge transaction to its lru cache
+                pledges_cache.put(commitment_tx.id, commitment_tx.clone());
             } else {
-                return Err(TxIngressError::Skipped);
+                // First pledge from this address - create a new nested lru cache
+                let max_pending_pledge_items =
+                    self.config.consensus.mempool.max_pending_pledge_items;
+                let mut new_address_cache =
+                    LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+                // Add the pledge transaction to the new lru cache for the address
+                new_address_cache.put(commitment_tx.id, commitment_tx.clone());
+
+                // Add the address cache to the primary lru cache
+                mempool_state_guard
+                    .pending_pledges
+                    .put(commitment_tx.signer, new_address_cache);
             }
+            drop(mempool_state_guard)
+        } else {
+            return Err(TxIngressError::Skipped);
         }
         Ok(())
     }
@@ -1051,12 +1049,12 @@ impl Inner {
                 .flat_map(|txs| {
                     txs.iter()
                         .filter(|tx| tx.commitment_type == *commitment_type)
-                        .map(|tx| tx.clone())
+                        .cloned()
                 })
                 .collect();
 
             // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
             // Select fundable commitments in fee-priority order
             for tx in sorted_commitments {
@@ -1071,7 +1069,7 @@ impl Inner {
         drop(mempool_state_guard);
 
         // Sort storage transactions by fee (highest first) to maximize revenue
-        all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+        all_storage_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
         // Apply block size constraint and funding checks to storage transactions
         let mut storage_tx = Vec::new();
@@ -1272,7 +1270,9 @@ impl Inner {
     async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
-        let response_value = if mempool_state_guard.valid_tx.contains_key(&txid) {
+
+        #[allow(clippy::if_same_then_else, reason = "readability")]
+        if mempool_state_guard.valid_tx.contains_key(&txid) {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
             Ok(true)
@@ -1282,7 +1282,8 @@ impl Inner {
         } else {
             drop(mempool_state_guard);
             let read_tx = self.read_tx().await;
-            let result = if read_tx.is_err() {
+
+            if read_tx.is_err() {
                 Err(TxIngressError::DatabaseError)
             } else {
                 Ok(
@@ -1290,11 +1291,8 @@ impl Inner {
                         .map_err(|_| TxIngressError::DatabaseError)?
                         .is_some(),
                 )
-            };
-
-            result
-        };
-        response_value
+            }
+        }
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -1373,7 +1371,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mut mempool_state_guard = mempool_state.write().await;
 
-        mempool_state_guard.recent_valid_tx.remove(&txid);
+        mempool_state_guard.recent_valid_tx.remove(txid);
 
         // Create a vector of addresses to update to avoid borrowing issues
         let addresses_to_check: Vec<Address> = mempool_state_guard
@@ -1515,7 +1513,7 @@ impl Inner {
             }
             _ => {
                 let mut mempool_state_write_guard = mempool_state.write().await;
-                mempool_state_write_guard.invalid_tx.push(tx_id.clone());
+                mempool_state_write_guard.invalid_tx.push(*tx_id);
                 warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                 Err(TxIngressError::InvalidAnchor)
             }

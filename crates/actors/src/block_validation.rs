@@ -144,10 +144,7 @@ pub async fn prevalidate_block(
     // this is a little more advanced though as it requires knowing what the
     // commitment states looked like when this block was produced. For now
     // we just accept any valid signature.
-    ensure!(
-        block.is_signature_valid() == true,
-        "block signature is not valid"
-    );
+    ensure!(block.is_signature_valid(), "block signature is not valid");
 
     Ok(())
 }
@@ -239,17 +236,17 @@ pub fn check_poa_data_expiration(
     partitions_guard: &PartitionAssignmentsReadGuard,
 ) -> eyre::Result<()> {
     // if is a data chunk
-    if poa.data_path.is_some() && poa.tx_path.is_some() && poa.ledger_id.is_some() {
-        if partitions_guard
+    if poa.data_path.is_some()
+        && poa.tx_path.is_some()
+        && poa.ledger_id.is_some()
+        && !partitions_guard
             .read()
             .data_partitions
-            .get(&poa.partition_hash)
-            .is_none()
-        {
-            return Err(eyre::eyre!(
-                "Invalid data PoA, partition hash is not a data partition, it may have expired"
-            ));
-        }
+            .contains_key(&poa.partition_hash)
+    {
+        return Err(eyre::eyre!(
+            "Invalid data PoA, partition hash is not a data partition, it may have expired"
+        ));
     };
     Ok(())
 }
@@ -581,12 +578,13 @@ mod tests {
             .await
             .unwrap();
 
-        let ledgers = ledgers_guard.read();
-        debug!("ledgers: {:?}", ledgers);
+        let partition_hash = {
+            let ledgers = ledgers_guard.read();
+            debug!("ledgers: {:?}", ledgers);
+            let sub_slots = ledgers.get_slots(DataLedger::Submit);
+            sub_slots[0].partitions[0]
+        };
 
-        let sub_slots = ledgers.get_slots(DataLedger::Submit);
-
-        let partition_hash = sub_slots[0].partitions[0];
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),
@@ -696,7 +694,11 @@ mod tests {
 
     async fn poa_test(
         context: &TestContext,
-        txs: &Vec<IrysTransaction>,
+        txs: &[IrysTransaction],
+        #[allow(
+            clippy::ptr_arg,
+            reason = "we need to clone this so it needs to be a Vec"
+        )]
         poa_chunk: &mut Vec<u8>,
         poa_tx_num: usize,
         poa_chunk_num: usize,

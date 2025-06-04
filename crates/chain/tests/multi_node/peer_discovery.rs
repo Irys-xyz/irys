@@ -165,7 +165,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Verify the version response body contains the previously discovered peers
     match peer_response {
         PeerResponse::Accepted(accepted) => {
-            assert!(accepted.peers.len() >= 1, "Expected at least 1 peers");
+            assert!(!accepted.peers.is_empty(), "Expected at least 1 peers");
             debug!("Accepted peers: {:?}", accepted.peers);
             assert!(
                 accepted.peers.contains(&PeerAddress {

@@ -126,7 +126,7 @@ where
     }
 
     fn process_block(
-        self: &mut Self,
+        &mut self,
         block_header: IrysBlockHeader,
         ctx: &mut <BlockPoolService<A, R, B> as Actor>::Context,
     ) -> ResponseActFuture<Self, Result<(), BlockPoolError>> {
@@ -355,7 +355,7 @@ where
 {
     type Result = ();
 
-    fn handle(&mut self, msg: RemoveBlockFromPool, _ctx: &mut Self::Context) -> () {
+    fn handle(&mut self, msg: RemoveBlockFromPool, _ctx: &mut Self::Context) {
         if let Some(parent_hash) = self.block_hash_to_parent_hash.remove(&msg.block_hash) {
             self.orphaned_blocks_by_parent.remove(&parent_hash);
         }

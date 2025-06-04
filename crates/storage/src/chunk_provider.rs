@@ -59,7 +59,7 @@ impl ChunkProvider {
                     .read()
                     .unwrap()
                     .and_then(|sm| sm.ledger_id)
-                    .map_or(false, |ledger_id| ledger_id == ledger as u32)
+                    == Some(ledger as u32)
             })
             .collect::<Vec<_>>();
 
@@ -102,7 +102,7 @@ impl ChunkProvider {
                     .read()
                     .unwrap()
                     .and_then(|sm| sm.ledger_id)
-                    .map_or(false, |ledger_id| ledger_id == ledger as u32)
+                    == Some(ledger as u32)
             })
             .collect::<Vec<_>>();
 
@@ -157,7 +157,7 @@ mod tests {
             ..NodeConfig::testnet()
         };
         let config = Config::new(node_config);
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![

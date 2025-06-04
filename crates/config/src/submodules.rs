@@ -117,7 +117,7 @@ impl StorageSubmodulesConfig {
             let submodule_paths = &config.submodule_paths;
             for idx in 0..submodule_paths.len() {
                 let dest = submodule_paths.get(idx).unwrap();
-                if let Some(filename) = dest.components().last() {
+                if let Some(filename) = dest.components().next_back() {
                     let sm_path = base_path.join(filename.as_os_str());
 
                     // Check if path exists and is a directory (not a symlink)
@@ -132,7 +132,7 @@ impl StorageSubmodulesConfig {
                     debug_assert!(dest.exists());
 
                     #[cfg(unix)]
-                    std::os::unix::fs::symlink(&dest, &sm_path).expect("to create symlink");
+                    std::os::unix::fs::symlink(dest, &sm_path).expect("to create symlink");
                     #[cfg(windows)]
                     std::os::windows::fs::symlink_dir(&dest, &sm_path).expect("to create symlink");
                 }
