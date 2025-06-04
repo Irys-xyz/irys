@@ -578,12 +578,13 @@ mod tests {
             .await
             .unwrap();
 
-        let ledgers = ledgers_guard.read();
-        debug!("ledgers: {:?}", ledgers);
+        let partition_hash = {
+            let ledgers = ledgers_guard.read();
+            debug!("ledgers: {:?}", ledgers);
+            let sub_slots = ledgers.get_slots(DataLedger::Submit);
+            sub_slots[0].partitions[0]
+        };
 
-        let sub_slots = ledgers.get_slots(DataLedger::Submit);
-
-        let partition_hash = sub_slots[0].partitions[0];
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),

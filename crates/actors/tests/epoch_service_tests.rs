@@ -764,10 +764,6 @@ async fn epoch_blocks_reinitialization_test() {
     //          |sm2|
     //          +-+-+
 
-    let ledgers = epoch_service.ledgers.read().unwrap();
-    debug!("{:#?}", ledgers);
-    drop(ledgers);
-
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
     new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;

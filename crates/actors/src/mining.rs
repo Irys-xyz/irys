@@ -441,6 +441,8 @@ mod tests {
     }
 
     #[test_log::test(actix_rt::test)]
+    #[allow(clippy::await_holding_lock, reason = "test")]
+
     async fn test_solution() {
         let chunk_count = 4;
         let chunk_size = 32;

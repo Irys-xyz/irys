@@ -660,9 +660,12 @@ impl IrysNode {
                         }
 
                         debug!("Stopping actors");
-                        let arbiters = arbiters_guard.read().unwrap();
-                        for arbiter in arbiters.iter() {
-                            arbiter.clone().stop_and_join();
+                        {
+                            let arbiters = arbiters_guard.read().unwrap();
+                            for arbiter in arbiters.iter() {
+                                arbiter.clone().stop_and_join();
+                            }
+                            drop(arbiters);
                         }
                         debug!("Actors stopped");
 
@@ -1043,39 +1046,41 @@ impl IrysNode {
             &config,
         );
 
-        let mut arbiters_guard = irys_node_ctx.arbiters.write().unwrap();
+        {
+            let mut arbiters_guard = irys_node_ctx.arbiters.write().unwrap();
 
-        arbiters_guard.push(ArbiterHandle::new(
-            block_producer_arbiter,
-            "block_producer_arbiter".to_string(),
-        ));
-        arbiters_guard.push(ArbiterHandle::new(
-            broadcast_arbiter,
-            "broadcast_arbiter".to_string(),
-        ));
-        arbiters_guard.push(ArbiterHandle::new(
-            block_discovery_arbiter,
-            "block_discovery_arbiter".to_string(),
-        ));
-        arbiters_guard.push(ArbiterHandle::new(
-            validation_arbiter,
-            "validation_arbiter".to_string(),
-        ));
-        arbiters_guard.push(ArbiterHandle::new(
-            block_tree_arbiter,
-            "block_tree_arbiter".to_string(),
-        ));
-        arbiters_guard.push(ArbiterHandle::new(
-            peer_list_arbiter,
-            "peer_list_arbiter".to_string(),
-        ));
-        arbiters_guard.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
-        arbiters_guard.extend(
-            part_arbiters
-                .into_iter()
-                .map(|x| ArbiterHandle::new(x, "partition_arbiter".to_string())),
-        );
-        drop(arbiters_guard);
+            arbiters_guard.push(ArbiterHandle::new(
+                block_producer_arbiter,
+                "block_producer_arbiter".to_string(),
+            ));
+            arbiters_guard.push(ArbiterHandle::new(
+                broadcast_arbiter,
+                "broadcast_arbiter".to_string(),
+            ));
+            arbiters_guard.push(ArbiterHandle::new(
+                block_discovery_arbiter,
+                "block_discovery_arbiter".to_string(),
+            ));
+            arbiters_guard.push(ArbiterHandle::new(
+                validation_arbiter,
+                "validation_arbiter".to_string(),
+            ));
+            arbiters_guard.push(ArbiterHandle::new(
+                block_tree_arbiter,
+                "block_tree_arbiter".to_string(),
+            ));
+            arbiters_guard.push(ArbiterHandle::new(
+                peer_list_arbiter,
+                "peer_list_arbiter".to_string(),
+            ));
+            arbiters_guard.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
+            arbiters_guard.extend(
+                part_arbiters
+                    .into_iter()
+                    .map(|x| ArbiterHandle::new(x, "partition_arbiter".to_string())),
+            );
+            drop(arbiters_guard);
+        }
 
         let server = run_server(
             ApiState {

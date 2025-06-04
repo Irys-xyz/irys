@@ -313,43 +313,51 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
             let all_txs = msg.1;
             let block_hash = &block.block_hash;
             let _finalized_block_hash = block.previous_block_hash;
-            let mut cache = cache.write().expect("cache lock poisoined");
 
-            // Handle block addition differently based on origin
-            let add_result = if block.miner_address == miner_address {
-                // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
-                // extension while full validation is still pending. This prevents blocking
-                // new block production while validation completes.
-                cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
-            } else {
-                // For blocks from peers: Add via standard path requiring validation
-                cache.add_block(&block, all_txs)
-            };
+            // This is a separate block so that the clippy lint `await_holding_lock` doesn't flag this code as problematic (It can't reason about drop() calls before await points)
+            let new_prevalidated_block = {
+                let mut cache = cache.write().expect("cache lock poisoined");
 
-            if add_result.is_ok() {
-                // Schedule block for full validation regardless of origin
-                let validation_service = ValidationService::from_registry();
-                validation_service.do_send(RequestValidationMessage(block.clone()));
+                // Handle block addition differently based on origin
+                let add_result = if block.miner_address == miner_address {
+                    // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
+                    // extension while full validation is still pending. This prevents blocking
+                    // new block production while validation completes.
+                    cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
+                } else {
+                    // For blocks from peers: Add via standard path requiring validation
+                    cache.add_block(&block, all_txs)
+                };
 
-                // Update block state to reflect scheduled validation
-                if cache
-                    .mark_block_as_validation_scheduled(block_hash)
-                    .is_err()
-                {
-                    error!("Unable to mark block as ValidationScheduled");
+                if add_result.is_ok() {
+                    // Schedule block for full validation regardless of origin
+                    let validation_service = ValidationService::from_registry();
+                    validation_service.do_send(RequestValidationMessage(block.clone()));
+
+                    // Update block state to reflect scheduled validation
+                    if cache
+                        .mark_block_as_validation_scheduled(block_hash)
+                        .is_err()
+                    {
+                        error!("Unable to mark block as ValidationScheduled");
+                    }
+                    debug!(
+                        "scheduling block for validation: {}",
+                        block_hash.0.to_base58()
+                    );
+                    // release the lock on `cache` so that the EMA service can acquire it
+                    drop(cache);
+                    true
+                } else {
+                    false
                 }
-                debug!(
-                    "scheduling block for validation: {}",
-                    block_hash.0.to_base58()
-                );
-                // release the lock on `cache` so that the EMA service can acquire it
-                drop(cache);
-
+            };
+            if new_prevalidated_block {
                 // block until EMA service is updated
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
                 rx.await?;
-            }
+            };
 
             Ok(())
         })

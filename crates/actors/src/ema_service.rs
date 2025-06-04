@@ -1329,21 +1329,23 @@ mod tests {
         let expected_final_ema_price = new_blocks[89].ema_irys_price;
 
         // setup  -- add new blocks to the canonical chain post-initializatoin
-        let mut tree = ctx.guard.write();
-        for mut block in new_blocks {
-            block.previous_block_hash = latest_block_hash;
-            block.cumulative_diff = block.height.into();
-            latest_block_hash = H256::random();
-            block.block_hash = latest_block_hash;
-            tree.add_common(
-                block.block_hash,
-                &block,
-                Arc::new(Vec::new()),
-                ChainState::Onchain,
-            )
-            .unwrap();
-        }
-        drop(tree);
+        {
+            let mut tree = ctx.guard.write();
+            for mut block in new_blocks {
+                block.previous_block_hash = latest_block_hash;
+                block.cumulative_diff = block.height.into();
+                latest_block_hash = H256::random();
+                block.block_hash = latest_block_hash;
+                tree.add_common(
+                    block.block_hash,
+                    &block,
+                    Arc::new(Vec::new()),
+                    ChainState::Onchain,
+                )
+                .unwrap();
+            }
+            drop(tree)
+        };
 
         // Send a `NewConfirmedBlock` message
         let send_result = ctx.ema_sender.send(EmaServiceMessage::BlockConfirmed);
