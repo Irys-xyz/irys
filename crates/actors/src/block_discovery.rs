@@ -11,11 +11,10 @@ use crate::{
 };
 use actix::prelude::*;
 use async_trait::async_trait;
-use base58::ToBase58;
 use eyre::eyre;
+use futures::future;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
-    SystemLedger,
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
@@ -123,80 +122,21 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         //====================================
-        // Submit ledger TX validation
+        // Submit and Publish ledger TX Validation
         //------------------------------------
-        // Get all the submit ledger transactions for the new block, error if not found
-        // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
-        // If they are in our mempool and validated we know they are real, if not we have
-        // to retrieve and validate them from the block producer.
-        // TODO: in the future we'll retrieve the missing transactions from the block
-        // producer and validate them.
 
-        let mempool = self.mempool.clone();
-        let tx_ids = new_block_header.data_ledgers[DataLedger::Submit]
+        // Clone txids to fetch corresponding transactions from the mempool for use
+        // in the async block below. If a transaction is not found, block validation fails.
+        let submit_txids = new_block_header.data_ledgers[DataLedger::Submit]
             .tx_ids
             .clone();
-
-        let submit_txs = tokio::runtime::Handle::current().block_on(async {
-            let mut submit_txs_checked = Vec::new();
-            for txid in tx_ids.iter() {
-                match mempool.handle_get_transaction(*txid).await.map_err(|_| {
-                    eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
-                }) {
-                    Ok(v) => submit_txs_checked.push(v),
-                    Err(_) => {
-                        error!("Failed to collect submit tx headers")
-                    }
-                };
-            }
-            submit_txs_checked
-        });
-
-        //====================================
-        // Publish ledger TX Validation
-        //------------------------------------
-        // 1. Validate the proof
-        // 2. Validate the transaction
-        // 3. Update the local tx headers index so include the ingress- proof.
-        //    This keeps the transaction from getting re-promoted each block.
-        //    (this last step performed in mempool after the block is confirmed)
-        let publish_txs = match new_block_header.data_ledgers[DataLedger::Publish]
+        let publish_txids = new_block_header.data_ledgers[DataLedger::Publish]
             .tx_ids
-            .iter()
-            .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(txs) => txs,
-            Err(e) => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!("Failed to collect publish tx headers: {}", e))
-                });
-            }
-        };
-
-        if !publish_txs.is_empty() {
-            let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
-                Some(proofs) => proofs,
-                None => {
-                    return Box::pin(async move { Err(eyre::eyre!("Ingress proofs missing")) });
-                }
-            };
-
-            // Pre-Validate the ingress-proof by verifying the signature
-            for (i, tx_header) in publish_txs.iter().enumerate() {
-                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                    return Box::pin(async move {
-                        Err(eyre::eyre!("Invalid ingress proof signature: {}", e))
-                    });
-                }
-            }
-        }
+            .clone();
+        let publish_proofs_opt = new_block_header.data_ledgers[DataLedger::Publish]
+            .proofs
+            .clone();
+        let mempool = self.mempool.clone();
 
         //====================================
         // Commitment ledger TX Validation
@@ -262,6 +202,40 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
+
+            // Collect submit ledger transactions from the mempool
+            let submit_txs = future::try_join_all(
+                submit_txids
+                    .iter()
+                    .map(|txid| mempool.handle_get_transaction(*txid)),
+            )
+            .await
+            .map_err(|e| eyre::eyre!("Failed to collect submit tx headers: {:?}", e))?;
+
+            // Collect publish ledger transactions from the mempool
+            let publish_txs = future::try_join_all(
+                publish_txids
+                    .iter()
+                    .map(|txid| mempool.handle_get_transaction(*txid)),
+            )
+            .await
+            .map_err(|e| eyre::eyre!("Failed to collect publish tx headers: {:?}", e))?;
+
+            if !publish_txs.is_empty() {
+                let publish_proofs = match &publish_proofs_opt {
+                    Some(proofs) => proofs,
+                    None => {
+                        return Err(eyre::eyre!("Ingress proofs missing"));
+                    }
+                };
+
+                // Pre-Validate the ingress-proof by verifying the signature
+                for (i, tx_header) in publish_txs.iter().enumerate() {
+                    if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                        return Err(eyre::eyre!("Invalid ingress proof signature: {}", e));
+                    }
+                }
+            }
 
             info!("Pre-validating block");
 
