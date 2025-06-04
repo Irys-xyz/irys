@@ -864,7 +864,7 @@ impl IrysNode {
 
         // Spawn mempool service
         let _mempool_handle = MempoolService::spawn_service(
-            &task_exec,
+            task_exec,
             irys_db.clone(),
             reth_node.clone(),
             storage_modules_guard.clone(),

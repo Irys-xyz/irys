@@ -1036,7 +1036,7 @@ impl Inner {
             // get balance state for the block we're building off of
             let balance: U256 = self.reth_ctx.rpc.get_balance_irys(
                 signer,
-                parent_evm_block_hash.and_then(|bh| Some(BlockId::Hash(bh.into()))),
+                parent_evm_block_hash.map(|bh| BlockId::Hash(bh.into())),
             );
 
             let has_funds = balance >= U256::from(current_spent + fee);
