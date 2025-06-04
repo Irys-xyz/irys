@@ -7,8 +7,11 @@ use std::sync::Arc;
 use tracing::error;
 
 use crate::{
-    block_index_service::BlockIndexReadGuard, block_tree_service::ValidationResult,
-    block_validation::poa_is_valid, epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard,
+    block_tree_service::{BlockTreeServiceMessage, ValidationResult},
+    block_validation::poa_is_valid,
+    epoch_service::PartitionAssignmentsReadGuard,
+    services::ServiceSenders,
 };
 
 #[derive(Debug)]
@@ -18,7 +21,7 @@ pub struct ValidationService {
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// VDF steps read guard
-    pub vdf_steps_guard: VdfStateReadonly,
+    pub vdf_state_readonly: VdfStateReadonly,
     /// Reference to global config for node
     pub config: Config,
     /// Service channels
@@ -36,14 +39,14 @@ impl ValidationService {
     pub fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        vdf_steps_guard: VdfStateReadonly,
+        vdf_state_readonly: VdfStateReadonly,
         config: &Config,
         service_senders: &ServiceSenders,
     ) -> Self {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            vdf_steps_guard,
+            vdf_state_readonly,
             config: config.clone(),
             service_senders: service_senders.clone(),
         }
@@ -79,7 +82,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let block_hash = block.block_hash;
         let vdf_info = block.vdf_limiter_info.clone();
         let poa = block.poa.clone();
-        let vdf_steps_guard = self.vdf_steps_guard.clone();
+        let vdf_steps_guard = self.vdf_state_readonly.clone();
 
         // Spawn VDF validation first
         let vdf_config = self.config.consensus.vdf.clone();

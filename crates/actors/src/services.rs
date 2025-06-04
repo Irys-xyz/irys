@@ -1,6 +1,9 @@
 use crate::{
-    cache_service::CacheServiceAction, ema_service::EmaServiceMessage,
-    mempool_service::MempoolServiceMessage, CommitmentCacheMessage, StorageModuleServiceMessage,
+    block_tree_service::{BlockTreeServiceMessage, ReorgEvent},
+    cache_service::CacheServiceAction,
+    ema_service::EmaServiceMessage,
+    mempool_service::MempoolServiceMessage,
+    CommitmentCacheMessage, StorageModuleServiceMessage,
 };
 use actix::Message;
 use core::ops::Deref;
