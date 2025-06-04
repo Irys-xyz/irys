@@ -55,9 +55,11 @@ use irys_types::{
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, H256, U256,
 };
-use irys_vdf::state::{AtomicVdfState, VdfStateReadonly};
-use irys_vdf::vdf::run_vdf;
-use irys_vdf::StepWithCheckpoints;
+use irys_vdf::{
+    state::{AtomicVdfState, VdfStateReadonly},
+    vdf::run_vdf,
+    StepWithCheckpoints,
+};
 use reth::{
     chainspec::ChainSpec,
     tasks::{TaskExecutor, TaskManager},
