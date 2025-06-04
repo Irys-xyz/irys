@@ -131,27 +131,26 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // to retrieve and validate them from the block producer.
         // TODO: in the future we'll retrieve the missing transactions from the block
         // producer and validate them.
-        let submit_txs = match new_block_header.data_ledgers[DataLedger::Submit]
+
+        let mempool = self.mempool.clone();
+        let tx_ids = new_block_header.data_ledgers[DataLedger::Submit]
             .tx_ids
-            .iter()
-            .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| {
-                            eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
-                        })
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(txs) => txs,
-            Err(e) => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!("Failed to collect submit tx headers: {}", e))
-                });
+            .clone();
+
+        let submit_txs = tokio::runtime::Handle::current().block_on(async {
+            let mut submit_txs_checked = Vec::new();
+            for txid in tx_ids.iter() {
+                match mempool.handle_get_transaction(*txid).await.map_err(|_| {
+                    eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
+                }) {
+                    Ok(v) => submit_txs_checked.push(v),
+                    Err(_) => {
+                        error!("Failed to collect submit tx headers")
+                    }
+                };
             }
-        };
+            submit_txs_checked
+        });
 
         //====================================
         // Publish ledger TX Validation
