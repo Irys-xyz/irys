@@ -1249,7 +1249,7 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
     let mut info_file = OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(false)
         .open(path)
         .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
 
