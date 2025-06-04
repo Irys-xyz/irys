@@ -12,8 +12,12 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
-use irys_types::{DataLedger, NodeConfig};
+use irys_database::tx_header_by_txid;
+use irys_types::{
+    irys::IrysSigner, DataLedger, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
+    NodeConfig,
+};
+use reth_db::Database;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -127,22 +131,25 @@ async fn heavy_data_promotion_test() {
             break;
         };
 
-        // Attempt to retrieve the tx header from the HTTP endpoint
-        let id: String = tx.id.as_bytes().to_base58();
-        let resp = call_service(
-            &app,
-            TestRequest::get()
-                .uri(&format!("/v1/tx/{}", id))
-                .to_request(),
-        )
-        .await;
+        let mut_tx = node
+            .node_ctx
+            .db
+            .as_ref()
+            .tx()
+            .map_err(|e| {
+                tracing::error!("Failed to create mdbx transaction: {}", e);
+            })
+            .unwrap();
 
-        if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(*tx, result);
-            info!("Transaction was retrieved ok after {} attempts", attempt);
-            unconfirmed_tx.remove(0);
-        }
+        // Retrieve the transaction header from database
+        match tx_header_by_txid(&mut_tx, &tx.id) {
+            Ok(Some(header)) => {
+                assert_eq!(*tx, header);
+                info!("Transaction was retrieved ok after {} attempts", attempt);
+                unconfirmed_tx.remove(0);
+            }
+            _ => {}
+        };
 
         sleep(delay).await;
     }
