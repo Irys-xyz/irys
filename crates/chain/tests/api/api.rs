@@ -12,7 +12,6 @@ use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
-use irys_testing_utils::initialize_tracing;
 use irys_types::TxChunkOffset;
 use irys_types::{
     irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, UnpackedChunk,
@@ -24,7 +23,6 @@ use tracing::{debug, info};
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
-    initialize_tracing();
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
