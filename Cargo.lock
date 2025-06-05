@@ -5252,7 +5252,6 @@ dependencies = [
  "hex",
  "irys-database",
  "irys-efficient-sampling",
- "irys-storage",
  "irys-types",
  "nodit",
  "openssl",
