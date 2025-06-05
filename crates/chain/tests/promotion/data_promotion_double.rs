@@ -360,6 +360,7 @@ async fn heavy_double_root_data_promotion_test() {
     }
 
     let db = &node.node_ctx.db.clone();
+    sleep(Duration::from_secs(3)).await;
 
     // ==============================
     // Verify chunk ordering in publish ledger storage module
