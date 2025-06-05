@@ -12,15 +12,13 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_database::tx_header_by_txid;
 use irys_types::{
     irys::IrysSigner, DataLedger, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
     NodeConfig,
 };
-use reth_db::Database;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::debug;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
@@ -123,39 +121,9 @@ async fn heavy_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
-    let delay = Duration::from_secs(1);
-    for attempt in 1..20 {
-        // Do we have any unconfirmed tx?
-        let Some(tx) = unconfirmed_tx.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        let mut_tx = node
-            .node_ctx
-            .db
-            .as_ref()
-            .tx()
-            .map_err(|e| {
-                tracing::error!("Failed to create mdbx transaction: {}", e);
-            })
-            .unwrap();
-
-        // Retrieve the transaction header from database
-        match tx_header_by_txid(&mut_tx, &tx.id) {
-            Ok(Some(header)) => {
-                assert_eq!(*tx, header);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
-                unconfirmed_tx.remove(0);
-            }
-            _ => {}
-        };
-
-        sleep(delay).await;
-    }
-
+    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
-    assert_eq!(unconfirmed_tx.len(), 0);
+    assert!(result.is_ok());
 
     // ==============================
     // Post Tx chunks out of order
@@ -213,6 +181,7 @@ async fn heavy_data_promotion_test() {
     assert!(result.is_ok());
 
     // wait for the first set of chunks chunk to appear in the publish ledger
+    let delay = Duration::from_secs(1);
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
             get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
