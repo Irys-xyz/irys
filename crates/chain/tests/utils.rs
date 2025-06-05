@@ -38,9 +38,9 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{
-    Base64, CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
-    NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    Base64, CommitmentTransaction, Config, DatabaseProvider, EvmBlockHash, GossipData,
+    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset,
+    NodeConfig, NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -486,12 +486,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn get_best_mempool_tx(&self) -> MempoolTxs {
+    pub async fn get_best_mempool_tx(
+        &self,
+        parent_evm_block_hash: Option<EvmBlockHash>,
+    ) -> MempoolTxs {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(tx))
+            .send(MempoolServiceMessage::GetBestMempoolTxs(
+                parent_evm_block_hash,
+                tx,
+            ))
             .expect("to send MempoolServiceMessage");
         rx.await.expect("to receive best transactions from mempool")
     }
