@@ -12,10 +12,10 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_database::{tables::IngressProofs, walk_all};
+use irys_database::{tables::IngressProofs, tx_header_by_txid, walk_all};
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
-use reth_db::Database as _;
+use reth_db::{transaction::DbTx, Database as _};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::debug;
@@ -216,10 +216,7 @@ async fn heavy_double_root_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
-    let mut unconfirmed_promotions = vec![
-        // txs[2].header.id.as_bytes().to_base58(),
-        txs[0].header.id.as_bytes().to_base58(),
-    ];
+    let mut unconfirmed_promotions = vec![txs[0].header.id];
     println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
 
     for attempts in 1..20 {
@@ -229,25 +226,32 @@ async fn heavy_double_root_data_promotion_test() {
             break;
         };
 
-        // Attempt to retrieve the transactions from the node endpoint
-        println!("Attempting... {}", txid);
-        let req = test::TestRequest::get()
-            .uri(&format!("/v1/tx/{}", &txid))
-            .to_request();
+        // setup read lock for for database
+        let ro_tx = node
+            .node_ctx
+            .db
+            .as_ref()
+            .tx()
+            .map_err(|e| {
+                tracing::error!("Failed to create mdbx transaction: {}", e);
+            })
+            .unwrap();
 
-        let resp = test::call_service(&app, req).await;
-
-        if resp.status() == StatusCode::OK {
-            let tx_header: IrysTransactionHeader = test::read_body_json(resp).await;
-            info!("Transaction was retrieved ok after {} attempts", attempts);
-            if let Some(_proof) = tx_header.ingress_proofs {
-                assert_eq!(tx_header.id.as_bytes().to_base58(), *txid);
-                println!("Confirming... {}", tx_header.id.as_bytes().to_base58());
-                unconfirmed_promotions.remove(0);
-                println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
+        // Retrieve the transaction header from database
+        let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap().unwrap();
+        //read its ingressproof(s)
+        match ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+            Some(proof) => {
+                assert_eq!(proof.data_root, tx_header.data_root);
+                tracing::info!(
+                    "Transaction was retrieved with proofs ok after {} attempts",
+                    attempts
+                );
+                unconfirmed_promotions.pop();
             }
-        }
-        mine_block(&node.node_ctx).await.unwrap();
+            _ => {}
+        };
+
         sleep(delay).await;
     }
 
