@@ -137,42 +137,17 @@ async fn heavy_double_root_data_promotion_test() {
         assert_eq!(status, StatusCode::OK);
     }
 
-    // Wait for all the transactions to be confirmed
     let delay = Duration::from_secs(1);
-    for attempt in 1..20 {
-        // Do we have any unconfirmed tx?
-        let Some(tx) = unconfirmed_tx.first() else {
-            // if not exit the loop.
-            break;
-        };
 
-        // Attempt to retrieve the tx header from the HTTP endpoint
-        let id: String = tx.id.as_bytes().to_base58();
-        let resp = call_service(
-            &app,
-            TestRequest::get()
-                .uri(&format!("/v1/tx/{}", id))
-                .to_request(),
-        )
-        .await;
-
-        if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(*tx, result);
-            info!("Transaction was retrieved ok after {} attempts", attempt);
-            unconfirmed_tx.remove(0);
-        }
-
-        mine_block(&node.node_ctx).await.unwrap();
-    }
-
+    // Wait for all the transactions to be confirmed
+    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
-    assert_eq!(unconfirmed_tx.len(), 0);
+    assert!(result.is_ok());
 
     // ==============================
     // Post Tx chunks out of order
     // ------------------------------
-    let _tx_index = 2;
+    //let _tx_index = 2;
 
     // // Last Tx, last chunk
     // let chunk_index = 2;
@@ -368,36 +343,9 @@ async fn heavy_double_root_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
-    let delay = Duration::from_secs(1);
-    for attempt in 1..20 {
-        // Do we have any unconfirmed tx?
-        let Some(tx) = unconfirmed_tx.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the tx header from the HTTP endpoint
-        let id: String = tx.id.as_bytes().to_base58();
-        let resp = call_service(
-            &app,
-            TestRequest::get()
-                .uri(&format!("/v1/tx/{}", id))
-                .to_request(),
-        )
-        .await;
-
-        if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(*tx, result);
-            info!("Transaction was retrieved ok after {} attempts", attempt);
-            unconfirmed_tx.remove(0);
-        }
-
-        mine_blocks(&node.node_ctx, 1).await.unwrap();
-    }
-
+    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
-    assert_eq!(unconfirmed_tx.len(), 0);
+    assert!(result.is_ok());
 
     // ==============================
     // Post Tx chunks out of order
