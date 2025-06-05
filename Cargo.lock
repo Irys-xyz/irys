@@ -4923,6 +4923,7 @@ dependencies = [
  "sha2 0.10.9",
  "test-fuzz",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "toml",
  "tracing",

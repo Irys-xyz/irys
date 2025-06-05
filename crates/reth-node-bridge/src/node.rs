@@ -149,10 +149,7 @@ pub async fn run_node(
         .with_launch_context(task_executor.clone());
 
     let handle = builder
-        .node(IrysEthereumNode {
-            allowed_system_tx_origin: node_config.miner_address(),
-            system_tx_store,
-        })
+        .node(IrysEthereumNode { system_tx_store })
         .launch_with_debug_capabilities()
         .await?;
 

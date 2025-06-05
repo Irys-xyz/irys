@@ -8,12 +8,14 @@ use eyre::{eyre, OptionExt};
 use irys_actors::mempool_service::TxIngressError;
 use irys_primitives::IrysTxId;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+use irys_reth_node_bridge::irys_reth::system_tx::system_tx_topics;
 use irys_reth_node_bridge::{
     adapter::new_reth_context, reth_e2e_test_utils::transaction::TransactionTestContext,
 };
+use irys_types::IrysTransactionCommon;
 use irys_types::{irys::IrysSigner, IrysTransaction, NodeConfig};
 use k256::ecdsa::SigningKey;
-use reth::providers::ReceiptProvider;
+use reth::providers::{AccountReader, ReceiptProvider};
 use reth::rpc::api::OtterscanClient;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use std::{collections::HashMap, time::Duration};
@@ -22,142 +24,96 @@ use tracing::{error, info};
 
 use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
-#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[test_log::test(tokio::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async().await;
-    let account1 = IrysSigner::random_signer(&node.cfg.consensus_config());
-    let account2 = IrysSigner::random_signer(&node.cfg.consensus_config());
-    let account3 = IrysSigner::random_signer(&node.cfg.consensus_config());
-    node.cfg.consensus.extend_genesis_accounts(vec![
-        // (
-        //     node.cfg.signer().address(),
-        //     GenesisAccount {
-        //         balance: U256::from(u128::MAX),
-        //         ..Default::default()
-        //     },
-        // ),
-        (
-            account1.address(),
-            GenesisAccount {
-                balance: U256::from(1),
-                ..Default::default()
-            },
-        ),
-        (
-            account2.address(),
-            GenesisAccount {
-                balance: U256::from(2),
-                ..Default::default()
-            },
-        ),
-        (
-            account3.address(),
-            GenesisAccount {
-                balance: U256::from(1000),
-                ..Default::default()
-            },
-        ),
-    ]);
+    let user_account = IrysSigner::random_signer(&node.cfg.consensus_config());
+    node.cfg.consensus.extend_genesis_accounts(vec![(
+        user_account.address(),
+        GenesisAccount {
+            balance: U256::from(1000),
+            ..Default::default()
+        },
+    )]);
 
     // print all addresses
-    println!("account1: {:?}", account1.address());
-    println!("account2: {:?}", account2.address());
-    println!("account3: {:?}", account3.address());
+    println!("user_account: {:?}", user_account.address());
     println!("node: {:?}", node.cfg.signer().address());
 
-    let irys_node = node.start().await;
-    // let mut txs = Vec::new();
-    // for signer in [&account1, &account2, &account3] {
-    //     let data_bytes = "Hello, world!".as_bytes().to_vec();
-    //     match irys_node.create_submit_data_tx(&signer, data_bytes).await {
-    //         Ok(tx) => {
-    //             txs.push(tx);
-    //         }
-    //         Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-    //             assert_eq!(signer.address(), account1.address(), "account1 should fail");
-    //         }
-    //         Err(e) => panic!("unexpected error {:?}", e),
-    //     }
-    // }
-    // todo left off: system txs are getting dropped for some reason
+    let node = node.start().await;
+    let data_bytes = "Hello, world!".as_bytes().to_vec();
+    let tx = node
+        .create_submit_data_tx(&user_account, data_bytes.clone())
+        .await?;
 
-    let (block, reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
-    dbg!(&block.evm_block_hash);
-    dbg!(&reth_exec_env.block().hash());
-    let txs = reth_exec_env.block().transaction_count();
-    dbg!(&txs);
-
-    let mut context = new_reth_context(irys_node.node_ctx.reth_handle.clone().into())
+    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
         .await
         .unwrap();
-    let receipts = context
+    let reth_receipts = context
         .inner
         .provider
-        .receipts_by_block(HashOrNumber::Hash(reth_exec_env.block().hash()))
+        .receipts_by_block(HashOrNumber::Hash(reth_exec_env.block().hash()))?
         .unwrap();
-    // let receipts = receipts.last().unwrap();
-    // let (receipts) = state
-    //     .state_by_hash(reth_exec_env.block().hash())
-    //     .unwrap()
-    //     .executed_block_receipts();
-    // let receipts = receipts.last().unwrap();
-    dbg!(&receipts);
-    // dbg!(&block);
-    panic!();
 
-    // let receipts = state.receipts();
-    // dbg!(&receipts);
-    // let latest_block_receipts = receipts.last().unwrap();
-    // // First two receipts should be data transactions
-    // for (irys_receipts, reth_receipts) in txs.iter().zip(&latest_block_receipts[0..2]) {
-    //     assert_eq!(
-    //         reth_receipts.success, true,
-    //         "Data transaction should succeed"
-    //     );
-    //     // todo take the first log from the reth receipt, decode it and assert it's the same as the irys receipt
-    // }
+    // block reward
+    let block_reward_receipt = reth_receipts.last().unwrap();
+    assert!(block_reward_receipt.success);
+    assert_eq!(block_reward_receipt.logs.len(), 1);
+    assert_eq!(
+        block_reward_receipt.logs[0].topics()[0],
+        *system_tx_topics::BLOCK_REWARD,
+    );
+    assert_eq!(block_reward_receipt.cumulative_gas_used, 0);
+    assert_eq!(
+        block_reward_receipt.logs[0].address,
+        node.cfg.signer().address()
+    );
 
-    // // Third receipt should be block reward
-    // let block_reward_receipt = &latest_block_receipts[2];
-    // assert_eq!(
-    //     block_reward_receipt.status, 1,
-    //     "Block reward transaction should succeed"
-    // );
-    // assert_eq!(
-    //     block_reward_receipt.logs[0].topics[0],
-    //     system_tx_topics::BLOCK_REWARD.into(),
-    //     "Block reward transaction should have correct topic"
-    // );
+    // storage tx
+    let storage_tx_receipt = reth_receipts.first().unwrap();
+    assert!(storage_tx_receipt.success);
+    assert_eq!(storage_tx_receipt.logs.len(), 1);
+    assert_eq!(
+        storage_tx_receipt.logs[0].topics()[0],
+        *system_tx_topics::STORAGE_FEES,
+    );
+    assert_eq!(storage_tx_receipt.cumulative_gas_used, 0);
+    assert_eq!(storage_tx_receipt.logs[0].address, user_account.address());
+    assert_eq!(tx.header.signer, user_account.address());
+    assert_eq!(tx.header.data_size, data_bytes.len() as u64);
 
-    // // Fourth receipt should be nonce reset
-    // let nonce_reset_receipt = &latest_block_receipts[3];
-    // assert_eq!(
-    //     nonce_reset_receipt.status, 1,
-    //     "Nonce reset transaction should succeed"
-    // );
-    // assert_eq!(
-    //     nonce_reset_receipt.logs[0].topics[0],
-    //     system_tx_topics::RESET_SYSTEM_TX_NONCE.into(),
-    //     "Nonce reset transaction should have correct topic"
-    // );
+    // ensure that the balance for the storage user has decreased
+    let signer_balance = context
+        .inner
+        .provider
+        .basic_account(&user_account.address())
+        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get signer_b balance: {}", err);
+            U256::ZERO
+        });
+    assert_eq!(
+        signer_balance,
+        U256::from(1000) - U256::from(tx.header.total_fee())
+    );
 
-    // todo assert block reward
-    // todo assert data txs
-    // todo assert nonce reset tx
+    // ensure that block heights in reth and irys are the same
+    let reth_block = reth_exec_env.block().clone();
+    assert_eq!(reth_block.number, irys_block.height);
 
-    // todo assert block height
-    // todo assert block producers nonce is 0
+    // check irys DB for built block
+    let db_irys_block = node.get_block_by_hash(&irys_block.block_hash).unwrap();
+    assert_eq!(
+        db_irys_block.evm_block_hash,
+        reth_block.into_header().hash_slow()
+    );
 
-    // // height is hardcoded at 42 right now
-    // // assert_eq!(reth_block.number, block.height);
-
-    // // check irys DB for built block
-    // let db_irys_block = irys_node.get_block_by_hash(&block.block_hash).unwrap();
-    // assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-
-    irys_node.stop().await;
+    node.stop().await;
     Ok(())
 }
+
+// todo add tests where the user has no funds to fund the storage
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {

@@ -475,15 +475,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 current_timestamp.saturating_div(1000)
             )?;
 
-            let signer_nonce = context
-                .inner
-                .provider
-                .basic_account(&config.irys_signer().address())
-                .map(|account_info| account_info.map_or(0, |acc| acc.nonce))
-                .unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get nonce: {}", err);
-                    0
-                });
             dbg!(prev_block_header.evm_block_hash, parent.header.hash);
             let block_reward_system_tx = SystemTransaction {
                 valid_for_block_height: block_height,
@@ -494,12 +485,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         target: config.node_config.reward_address
                     }
                 )
-            };
-            let nonce_reset = SystemTransaction {
-                inner: TransactionPacket::ResetSystemTxNonce(
-                    irys_reth::system_tx::ResetSystemTxNonce { decrement_nonce_by: (submit_txs.len() as u64) + 1_u64 }
-                ),
-                ..block_reward_system_tx.clone()
             };
 
             let storage_txs = {
@@ -520,11 +505,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
             let system_txs = storage_txs.chain([
                 block_reward_system_tx,
-                nonce_reset
-            ]).enumerate().map(|(idx, tx)| {
-                let nonce = idx as u64 + signer_nonce;
-                tracing::info!(?tx, ?nonce, "system_txs");
-                let mut tx_raw = compose_system_tx(nonce, config.consensus.chain_id, &tx);
+            ]).map(|tx| {
+                let mut tx_raw = compose_system_tx( config.consensus.chain_id, &tx);
                 let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
                     .try_into_recovered()
