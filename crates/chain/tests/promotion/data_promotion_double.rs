@@ -1,5 +1,5 @@
-use crate::utils::{get_block_parent, get_chunk, mine_block, verify_published_chunk, IrysNodeTest};
-use crate::utils::{mine_blocks, post_chunk};
+use crate::utils::post_chunk;
+use crate::utils::{get_block_parent, get_chunk, verify_published_chunk, IrysNodeTest};
 use actix_web::{
     middleware::Logger,
     test::{self, call_service, TestRequest},
@@ -19,7 +19,6 @@ use reth_db::Database as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::debug;
-use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
