@@ -365,23 +365,6 @@ async fn heavy_double_root_data_promotion_test() {
     )
     .await;
 
-    // // Verify the chunks of the second promoted transaction
-    // let tx_index = next_tx_index;
-
-    // let chunk_offset = 3;
-    // let expected_bytes = &data_chunks[tx_index][0];
-    // verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
-
-    // let chunk_offset = 4;
-    // let expected_bytes = &data_chunks[tx_index][1];
-    // verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
-
-    // let chunk_offset = 5;
-    // let expected_bytes = &data_chunks[tx_index][2];
-    // verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
-
-    // println!("\n{:?}", unpacked_chunk);
-
     // ensure the ingress proof is gone
     let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 0);
