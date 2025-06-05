@@ -27,7 +27,7 @@ pub fn run_vdf_for_genesis_block(
 
     for global_step_number in 0..=1 {
         let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
+        let mut salt = U256::from(step_number_to_salt_number(config, global_step_number));
 
         if global_step_number == 0 {
             assert_eq!(salt, U256::from(0));

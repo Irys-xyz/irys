@@ -2,7 +2,6 @@ use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatch
 use eyre::eyre;
 use irys_database::{block_header_by_hash, BlockIndex};
 use irys_efficient_sampling::num_recall_ranges_in_partition;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
     U256,
@@ -19,7 +18,7 @@ use tokio::{
     sync::mpsc::Sender,
     time::{sleep, Duration},
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -54,7 +53,6 @@ impl VdfState {
         if self.global_step + 1 == global_step {
             self.seeds.push_back(seed);
             self.global_step += 1;
-            return;
         } else {
             panic!("VDF steps can't have gaps and have to be inserted in sequence");
         }
@@ -170,58 +168,48 @@ pub fn create_state(
 ) -> VdfState {
     let capacity = calc_capacity(config);
 
-    if let Some(block_hash) = block_index
+    let block_hash = block_index
         .read()
         .expect("To unlock block index")
         .get_latest_item()
         .map(|item| item.block_hash)
-    {
-        let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
-        let tx = db.tx().unwrap();
-        let mut block = block_header_by_hash(&tx, &block_hash, false)
+        .expect("To have at least genesis block");
+
+    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
+    let tx = db.tx().unwrap();
+    let mut block = block_header_by_hash(&tx, &block_hash, false)
+        .unwrap()
+        .unwrap();
+    let global_step_number = block.vdf_limiter_info.global_step_number;
+    let mut steps_remaining = capacity;
+
+    while steps_remaining > 0 && block.height > 0 {
+        // get all the steps out of the block
+        for step in block.vdf_limiter_info.steps.0.iter().rev() {
+            seeds.push_front(Seed(*step));
+            steps_remaining -= 1;
+            if steps_remaining == 0 {
+                break;
+            }
+        }
+        // get the previous block
+        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
             .unwrap()
             .unwrap();
-        let global_step_number = block.vdf_limiter_info.global_step_number;
-        let mut steps_remaining = capacity;
+    }
 
-        while steps_remaining > 0 && block.height > 0 {
-            // get all the steps out of the block
-            for step in block.vdf_limiter_info.steps.0.iter().rev() {
-                seeds.push_front(Seed(*step));
-                steps_remaining -= 1;
-                if steps_remaining == 0 {
-                    break;
-                }
-            }
-            // get the previous block
-            block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-                .unwrap()
-                .unwrap();
-        }
+    if block.height == 0 {
+        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+    }
 
-        if block.height == 0 {
-            seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
-            // seeds.push_front(Seed(block.vdf_limiter_info.prev_output));
-            debug!("Ready steady");
-        }
+    info!(
+        "Initializing vdf service from block's info in step number {}",
+        global_step_number
+    );
 
-        info!(
-            "Initializing vdf service from block's info in step number {}",
-            global_step_number
-        );
-        return VdfState {
-            global_step: global_step_number,
-            seeds,
-            capacity,
-            mining_state_sender: Some(vdf_mining_state_sender),
-        };
-    };
-
-    panic!("Should always have at least the genesis block");
-    // info!("No block index found, initializing VdfState from zero");
     VdfState {
-        global_step: 0,
-        seeds: VecDeque::with_capacity(capacity),
+        global_step: global_step_number,
+        seeds,
         capacity,
         mining_state_sender: Some(vdf_mining_state_sender),
     }
