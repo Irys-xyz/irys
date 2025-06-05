@@ -25,7 +25,7 @@ use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
-use irys_database::tx_header_by_txid;
+use irys_database::{tables::IngressProofs, tx_header_by_txid};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_primitives::CommitmentType;
@@ -46,6 +46,7 @@ use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
 use reth_db::cursor::*;
+use reth_db::transaction::DbTx;
 use reth_db::Database;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -380,6 +381,58 @@ impl IrysNodeTest<IrysNodeCtx> {
             );
             Ok(())
         }
+    }
+
+    pub async fn wait_for_ingress_proofs(
+        &self,
+        mut unconfirmed_promotions: Vec<H256>,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        tracing::info!(
+            "waiting up to {} seconds for unconfirmed_promotions: {:?}",
+            seconds,
+            unconfirmed_promotions
+        );
+        for attempts in 1..seconds {
+            // Do we have any unconfirmed promotions?
+            let Some(txid) = unconfirmed_promotions.first() else {
+                // if not return we are done
+                return Ok(());
+            };
+
+            // setup read lock for for database
+            let ro_tx = self
+                .node_ctx
+                .db
+                .as_ref()
+                .tx()
+                .map_err(|e| {
+                    tracing::error!("Failed to create mdbx transaction: {}", e);
+                })
+                .unwrap();
+
+            // Retrieve the transaction header from database
+            let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap().unwrap();
+            //read its ingressproof(s)
+            match ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+                Some(proof) => {
+                    assert_eq!(proof.data_root, tx_header.data_root);
+                    tracing::info!(
+                        "Transaction was retrieved with proofs ok after {} attempts",
+                        attempts
+                    );
+                    unconfirmed_promotions.pop();
+                }
+                _ => {}
+            };
+
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed waiting for ingress proofs. Waited {} seconds",
+            seconds,
+        ))
     }
 
     pub fn get_height_on_chain(&self) -> u64 {

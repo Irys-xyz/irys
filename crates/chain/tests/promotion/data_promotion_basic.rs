@@ -12,12 +12,12 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_database::{tables::IngressProofs, tx_header_by_txid};
+use irys_database::tx_header_by_txid;
 use irys_types::{
     irys::IrysSigner, DataLedger, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
     NodeConfig,
 };
-use reth_db::{transaction::DbTx, Database};
+use reth_db::Database;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -206,46 +206,11 @@ async fn heavy_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
-    let mut unconfirmed_promotions = vec![txs[2].header.id, txs[0].header.id];
-    tracing::info!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-
-    for attempts in 1..20 {
-        // Do we have any unconfirmed promotions?
-        let Some(txid) = unconfirmed_promotions.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // setup read lock for for database
-        let ro_tx = node
-            .node_ctx
-            .db
-            .as_ref()
-            .tx()
-            .map_err(|e| {
-                tracing::error!("Failed to create mdbx transaction: {}", e);
-            })
-            .unwrap();
-
-        // Retrieve the transaction header from database
-        let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap().unwrap();
-        //read its ingressproof(s)
-        match ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-            Some(proof) => {
-                assert_eq!(proof.data_root, tx_header.data_root);
-                tracing::info!(
-                    "Transaction was retrieved with proofs ok after {} attempts",
-                    attempts
-                );
-                unconfirmed_promotions.pop();
-            }
-            _ => {}
-        };
-
-        sleep(delay).await;
-    }
-
-    assert_eq!(unconfirmed_promotions.len(), 0);
+    let unconfirmed_promotions = vec![txs[2].header.id, txs[0].header.id];
+    let result = node
+        .wait_for_ingress_proofs(unconfirmed_promotions, 20)
+        .await;
+    assert!(result.is_ok());
 
     // wait for the first set of chunks chunk to appear in the publish ledger
     for _attempts in 1..20 {
