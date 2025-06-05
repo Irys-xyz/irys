@@ -5,13 +5,16 @@ use irys_types::{
 };
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tracing::{debug, info};
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
     config: &irys_types::VdfConfig,
 ) {
+    let reset_seed = genesis_block.vdf_limiter_info.seed;
+    let nonce_limiter_reset_frequency = config.reset_frequency as u64;
+
     let last_epoch_block_hash = genesis_block.last_epoch_hash;
     genesis_block.vdf_limiter_info.prev_output = last_epoch_block_hash;
 
@@ -39,6 +42,13 @@ pub fn run_vdf_for_genesis_block(
             genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints.clone();
             genesis_block.vdf_limiter_info.steps.0 = vec![hash];
         }
+
+        hash = process_reset(
+            global_step_number,
+            nonce_limiter_reset_frequency,
+            hash,
+            reset_seed,
+        );
     }
 }
 
@@ -47,7 +57,7 @@ pub fn run_vdf(
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
-    mut fast_forward_receiver: Receiver<VdfStep>,
+    mut fast_forward_receiver: UnboundedReceiver<VdfStep>,
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: impl MiningBroadcaster,
@@ -278,7 +288,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = MockMining;
-        let (_, ff_step_receiver) = mpsc::channel::<VdfStep>(1);
+        let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
         let (_, mining_state_rx) = mpsc::channel::<bool>(1);
 
         let vdf_state = mocked_vdf_service(&config).await;

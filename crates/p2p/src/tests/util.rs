@@ -381,7 +381,7 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
-        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<VdfStep>(1);
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::unbounded_channel::<VdfStep>();
         let vdf_state = mocked_vdf_service(&self.config).await;
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
         gossip_service.sync_state.finish_sync();

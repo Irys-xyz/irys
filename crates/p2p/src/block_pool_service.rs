@@ -13,7 +13,7 @@ use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::VdfStep;
 use std::collections::HashMap;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ where
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
-    pub(crate) vdf_sender: Option<Sender<VdfStep>>,
+    pub(crate) vdf_sender: Option<UnboundedSender<VdfStep>>,
     pub(crate) vdf_state: Option<VdfStateReadonly>,
 
     sync_state: SyncState,
@@ -109,7 +109,7 @@ where
         db: DatabaseProvider,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
-        vdf_sender: Option<Sender<VdfStep>>,
+        vdf_sender: Option<UnboundedSender<VdfStep>>,
         sync_state: SyncState,
         vdf_state: VdfStateReadonly,
     ) -> Self {
