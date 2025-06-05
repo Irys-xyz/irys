@@ -103,7 +103,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
                 let prev_output_step_number = first_step_number.saturating_sub(1);
 
                 vdf_state.wait_for_step(prev_output_step_number).await;
-                let stored_previous_step = vdf_state.get_step(prev_output_step_number).await.expect("to get the step, since we've just waited for it");
+                let stored_previous_step = vdf_state.get_step(prev_output_step_number).expect("to get the step, since we've just waited for it");
 
                 if stored_previous_step != vdf_to_fast_forward.prev_output {
                     error!("Previous output from the block is not equal to the saved step with the same index. Expected {}, got {}", stored_previous_step, vdf_to_fast_forward.prev_output);

@@ -376,7 +376,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
+                vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1))
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
             };
             steps.push(solution.seed.0);
