@@ -417,14 +417,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             match ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
                 Some(proof) => {
                     assert_eq!(proof.data_root, tx_header.data_root);
-                    tracing::info!(
-                        "Transaction was retrieved with proofs ok after {} attempts",
-                        attempts
-                    );
+                    tracing::info!("Proofs available after {} attempts", attempts);
                     unconfirmed_promotions.pop();
                 }
                 _ => {}
             };
+            drop(ro_tx);
 
             sleep(Duration::from_secs(1)).await;
         }
