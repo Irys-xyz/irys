@@ -1,10 +1,10 @@
-use crate::block_tree_service::BlockTreeReadGuard;
+use crate::block_tree_service::{BlockTreeReadGuard, ReorgEvent};
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentCacheStatus, CommitmentStateReadGuard};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
-use futures::future::{BoxFuture, Either};
+use futures::future::BoxFuture;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _, RethDbWrapper},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
@@ -32,6 +32,7 @@ use std::{
     pin::pin,
     sync::Arc,
 };
+use tokio::sync::broadcast;
 use tokio::{
     sync::{mpsc::UnboundedReceiver, mpsc::UnboundedSender, RwLock},
     task::JoinHandle,
@@ -200,7 +201,8 @@ struct Inner {
 #[derive(Debug)]
 pub struct MempoolService {
     shutdown: GracefulShutdown,
-    msg_rx: UnboundedReceiver<MempoolServiceMessage>,
+    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg receiver
     inner: Inner,
 }
 
@@ -233,12 +235,14 @@ impl MempoolService {
         let storage_modules_guard = storage_modules_guard.clone();
         let irys_db = irys_db.clone();
         let service_senders = service_senders.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
         exec.clone().spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
             |shutdown| async move {
                 let mempool_service = Self {
                     shutdown,
                     msg_rx: rx,
+                    reorg_rx,
                     inner: Inner {
                         block_tree_read_guard,
                         commitment_state_guard,
@@ -264,23 +268,49 @@ impl MempoolService {
 
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
+            tokio::select! {
+                // Handle regular mempool messages
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.inner.handle_message(msg).await?;
+                        }
+                        None => {
+                            tracing::warn!("receiver channel closed");
+                            break None;
+                        }
+                    }
                 }
-                Either::Left((None, _)) => {
-                    tracing::warn!("receiver channel closed");
-                    break None;
+
+                // Handle reorg events
+                reorg_result = self.reorg_rx.recv() => {
+                    match reorg_result {
+                        Ok(reorg_event) => {
+                            self.inner.handle_reorg(reorg_event).await?;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::debug!("Reorg channel closed");
+                            // Continue running - reorg events are not critical for mempool
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("Mempool missed {} reorg events", n);
+                            // For mempool, missing reorgs could mean stale state
+                            if n > 5 {
+                                tracing::error!("Mempool significantly lagged, consider clearing pool");
+                            }
+                        }
+                    }
                 }
-                Either::Right((shutdown, _)) => {
+
+                // Handle shutdown signal
+                shutdown = &mut shutdown_future => {
                     tracing::warn!("shutdown signal received");
                     break Some(shutdown);
                 }
             }
         };
 
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdwon");
+        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?;
         }
@@ -715,6 +745,26 @@ impl Inner {
         Ok(())
     }
 
+    async fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
+        tracing::debug!(
+            "Processing reorg: {} orphaned blocks from height {}",
+            event.old_fork.len(),
+            event.fork_parent.height
+        );
+
+        // TODO: Implement mempool-specific reorg handling
+        // 1. Check to see that orphaned submit ledger tx are available in the mempool if not included in the new fork (canonical chain)
+        // 2. Re-post any reorged submit ledger transactions though handle_tx_ingress_message so account balances and anchors are checked
+        // 3. Filter out any invalidated transactions
+        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
+        // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
+        // 6. Similar work with commitment transactions (stake and pledge)
+        //    - This may require adding some features to the commitment_cache so that stake/pledge tx can be rolled back and new ones applied
+
+        tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
+
+        Ok(())
+    }
     async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,

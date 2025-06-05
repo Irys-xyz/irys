@@ -1,14 +1,18 @@
 use crate::{
-    cache_service::CacheServiceAction, ema_service::EmaServiceMessage,
-    mempool_service::MempoolServiceMessage, CommitmentCacheMessage, StorageModuleServiceMessage,
+    block_tree_service::{BlockTreeServiceMessage, ReorgEvent},
+    cache_service::CacheServiceAction,
+    ema_service::EmaServiceMessage,
+    mempool_service::MempoolServiceMessage,
+    CommitmentCacheMessage, StorageModuleServiceMessage,
 };
 use actix::Message;
 use core::ops::Deref;
 use irys_types::GossipData;
 use irys_vdf::StepWithCheckpoints;
 use std::sync::Arc;
-use tokio::sync::mpsc::{
-    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+use tokio::sync::{
+    broadcast,
+    mpsc::{channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
 };
 
 // Only contains senders, thread-safe to clone and share
@@ -30,6 +34,10 @@ impl ServiceSenders {
         let (senders, receivers) = ServiceSendersInner::init();
         (Self(Arc::new(senders)), receivers)
     }
+
+    pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
+        self.0.subscribe_reorgs()
+    }
 }
 
 #[derive(Debug)]
@@ -42,6 +50,8 @@ pub struct ServiceReceivers {
     pub vdf_fast_forward: Receiver<StepWithCheckpoints>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipData>,
+    pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
+    pub reorg_events: broadcast::Receiver<ReorgEvent>,
 }
 
 #[derive(Debug)]
@@ -54,6 +64,8 @@ pub struct ServiceSendersInner {
     pub vdf_fast_forward: Sender<StepWithCheckpoints>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipData>,
+    pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
+    pub reorg_events: broadcast::Sender<ReorgEvent>,
 }
 
 impl ServiceSendersInner {
@@ -73,6 +85,10 @@ impl ServiceSendersInner {
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipData>();
+        let (block_tree_sender, block_tree_receiver) =
+            unbounded_channel::<BlockTreeServiceMessage>();
+        // Create broadcast channel for reorg events
+        let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -83,6 +99,8 @@ impl ServiceSendersInner {
             vdf_fast_forward: vdf_fast_forward_sender,
             storage_modules: sm_sender,
             gossip_broadcast: gossip_broadcast_sender,
+            block_tree: block_tree_sender,
+            reorg_events: reorg_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -93,8 +111,15 @@ impl ServiceSendersInner {
             vdf_fast_forward: vdf_fast_forward_receiver,
             storage_modules: sm_receiver,
             gossip_broadcast: gossip_broadcast_receiver,
+            block_tree: block_tree_receiver,
+            reorg_events: reorg_receiver,
         };
         (senders, receivers)
+    }
+
+    /// Subscribe to reorg events - can be called multiple times
+    pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
+        self.reorg_events.subscribe()
     }
 }
 

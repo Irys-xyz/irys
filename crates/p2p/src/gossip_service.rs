@@ -35,7 +35,7 @@ use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Span};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -189,6 +189,7 @@ impl P2PService {
             gossip_client: self.client.clone(),
             peer_list_service: peer_list.clone(),
             sync_state: self.sync_state.clone(),
+            span: Span::current().clone(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
