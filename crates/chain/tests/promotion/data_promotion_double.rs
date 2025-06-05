@@ -55,7 +55,6 @@ async fn heavy_double_root_data_promotion_test() {
 
     node.node_ctx.start_mining().await.unwrap();
 
-    // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app = node.start_public_api().await;
 
     // Create a bunch of TX chunks
