@@ -1133,6 +1133,7 @@ impl IrysNode {
         Arc::new(chunk_provider)
     }
 
+    #[allow(clippy::path_ends_with_ext, reason = "Core pinning logic")]
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
@@ -1152,7 +1153,7 @@ impl IrysNode {
             .node_config
             .base_directory
             .parent()
-            .is_some_and(|p| p.extension().is_some_and(|ext| ext == "tmp"));
+            .is_some_and(|p| p.ends_with(".tmp"));
         let span = Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
