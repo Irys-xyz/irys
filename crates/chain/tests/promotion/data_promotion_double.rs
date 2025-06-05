@@ -288,7 +288,7 @@ async fn heavy_double_root_data_promotion_test() {
         }
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = &signer2;
-        let tx = s.create_transaction(data, Some(tip)).unwrap();
+        let tx = s.create_transaction(data, None).unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[2] {}", tx.header.id.as_bytes().to_base58());
         txs.push(tx);
