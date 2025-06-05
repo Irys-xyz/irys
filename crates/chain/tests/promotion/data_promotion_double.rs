@@ -341,7 +341,7 @@ async fn heavy_double_root_data_promotion_test() {
     // Wait for the transactions to be promoted
     let unconfirmed_promotions = vec![txs[0].header.id];
     let result = node
-        .wait_for_ingress_proofs(unconfirmed_promotions, 30)
+        .wait_for_ingress_proofs(unconfirmed_promotions, 20)
         .await;
     assert!(result.is_ok());
 
