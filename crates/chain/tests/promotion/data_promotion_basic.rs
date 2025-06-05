@@ -12,12 +12,12 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_database::tx_header_by_txid;
+use irys_database::{tables::IngressProofs, tx_header_by_txid};
 use irys_types::{
     irys::IrysSigner, DataLedger, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
     NodeConfig,
 };
-use reth_db::Database;
+use reth_db::{transaction::DbTx, Database};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -217,7 +217,7 @@ async fn heavy_data_promotion_test() {
         };
 
         // setup read lock for for database
-        let mut_tx = node
+        let ro_tx = node
             .node_ctx
             .db
             .as_ref()
@@ -228,16 +228,16 @@ async fn heavy_data_promotion_test() {
             .unwrap();
 
         // Retrieve the transaction header from database
-        match tx_header_by_txid(&mut_tx, txid) {
-            Ok(Some(header)) => {
-                assert_eq!(header.id, *txid);
-                if header.ingress_proofs.is_some() {
-                    info!(
-                        "Transaction was retrieved with proofs ok after {} attempts",
-                        attempts
-                    );
-                    unconfirmed_promotions.remove(0);
-                }
+        let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap().unwrap();
+        //read its ingressproof(s)
+        match ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+            Some(proof) => {
+                assert_eq!(proof.data_root, tx_header.data_root);
+                tracing::info!(
+                    "Transaction was retrieved with proofs ok after {} attempts",
+                    attempts
+                );
+                unconfirmed_promotions.pop();
             }
             _ => {}
         };
