@@ -2,6 +2,7 @@ use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -9,7 +10,7 @@ use irys_actors::{
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
-    block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
+    block_tree_service::BlockTreeService,
     broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
@@ -728,7 +729,7 @@ impl IrysNode {
                         ),
                     )
                     .await
-                    .inspect_err(|e| error!("Reth thread error: {:?}", &e));
+                    .inspect_err(|e| error!("Reth thread error: {}", &e));
 
                     debug!("Sending shutdown signal to the main actor thread");
                     let _ = main_actor_thread_shutdown_tx.try_send(());
@@ -842,14 +843,24 @@ impl IrysNode {
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
-        let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
+        let _handle = BlockTreeService::spawn_service(
+            task_exec,
+            receivers.block_tree,
+            irys_db.clone(),
+            block_index_guard.clone(),
             &config,
-            &block_index,
-            &irys_db,
             &service_senders,
-            &block_index_guard,
+            reth_service_actor.clone(),
         );
-        let block_tree_guard = block_tree_service.send(GetBlockTreeGuardMessage).await?;
+
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let block_tree_sender = service_senders.block_tree.clone();
+        let _ = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+            response: oneshot_tx,
+        });
+        let block_tree_guard = oneshot_rx
+            .await
+            .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
         // Spawn EMA service
         let _handle =
@@ -905,6 +916,7 @@ impl IrysNode {
             &block_index_guard,
             &partition_assignments_guard,
             &vdf_state_readonly,
+            &service_senders,
         );
 
         // create the block reward curve
@@ -1061,10 +1073,6 @@ impl IrysNode {
                 "validation_arbiter".to_string(),
             ));
             arbiters_guard.push(ArbiterHandle::new(
-                block_tree_arbiter,
-                "block_tree_arbiter".to_string(),
-            ));
-            arbiters_guard.push(ArbiterHandle::new(
                 peer_list_arbiter,
                 "peer_list_arbiter".to_string(),
             ));
@@ -1125,6 +1133,7 @@ impl IrysNode {
         Arc::new(chunk_provider)
     }
 
+    #[allow(clippy::path_ends_with_ext, reason = "Core pinning logic")]
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
@@ -1144,7 +1153,7 @@ impl IrysNode {
             .node_config
             .base_directory
             .parent()
-            .is_some_and(|p| p.extension().is_some_and(|ext| ext == "tmp"));
+            .is_some_and(|p| p.ends_with(".tmp"));
         let span = Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
@@ -1330,13 +1339,15 @@ impl IrysNode {
         config: &Config,
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: &irys_actors::epoch_service::PartitionAssignmentsReadGuard,
-        vdf_steps_guard: &VdfStateReadonly,
+        vdf_state_readonly: &VdfStateReadonly,
+        service_senders: &ServiceSenders,
     ) -> Arbiter {
         let validation_service = ValidationService::new(
             block_index_guard.clone(),
             partition_assignments_guard.clone(),
-            vdf_steps_guard.clone(),
+            vdf_state_readonly.clone(),
             config,
+            service_senders,
         );
         let validation_arbiter = Arbiter::new();
         let validation_service =
@@ -1362,30 +1373,6 @@ impl IrysNode {
             service_senders.clone(),
         );
         SystemRegistry::set(chunk_migration_service.start());
-    }
-
-    fn init_block_tree_service(
-        config: &Config,
-        block_index: &Arc<RwLock<BlockIndex>>,
-        irys_db: &DatabaseProvider,
-        service_senders: &ServiceSenders,
-        block_index_guard: &BlockIndexReadGuard,
-    ) -> (actix::Addr<BlockTreeService>, Arbiter) {
-        let block_tree_service = BlockTreeService::new(
-            irys_db.clone(),
-            block_index.clone(),
-            &config.node_config.miner_address(),
-            block_index_guard.clone(),
-            config.consensus.clone(),
-            service_senders.clone(),
-        );
-        let block_tree_arbiter = Arbiter::new();
-        let block_tree_service =
-            BlockTreeService::start_in_arbiter(&block_tree_arbiter.handle(), |_| {
-                block_tree_service
-            });
-        SystemRegistry::set(block_tree_service.clone());
-        (block_tree_service, block_tree_arbiter)
     }
 
     fn init_storage_modules(
@@ -1512,6 +1499,6 @@ fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env =
         open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir())?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
-    debug!("Irys DB initiailsed");
+    debug!("Irys DB initialized");
     Ok(irys_db)
 }
