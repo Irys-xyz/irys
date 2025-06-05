@@ -270,9 +270,9 @@ impl Decode for H256 {
     }
 }
 
-impl Into<FixedBytes<32>> for H256 {
-    fn into(self) -> FixedBytes<32> {
-        FixedBytes(self.0)
+impl From<H256> for FixedBytes<32> {
+    fn from(val: H256) -> Self {
+        FixedBytes(val.0)
     }
 }
 

@@ -14,7 +14,6 @@ use actors::mocker::Mocker;
 use alloy_consensus::EthereumTxEnvelope;
 use alloy_consensus::SignableTransaction;
 use alloy_consensus::TxEip4844;
-use alloy_network::eip2718::Encodable2718;
 use alloy_network::TxSignerSync;
 use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_signer_local::LocalSigner;
@@ -27,16 +26,13 @@ use irys_database::{
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_system_tx;
 use irys_reth::payload::DeterministicSystemTxKey;
-use irys_reth::payload::SystemTxRequest;
 use irys_reth::payload::SystemTxStore;
 use irys_reth::system_tx::BalanceDecrement;
 use irys_reth::system_tx::BalanceIncrement;
 use irys_reth::system_tx::SystemTransaction;
 use irys_reth::system_tx::TransactionPacket;
 use irys_reth_node_bridge::ext::IrysRethPayloadTestContextExt;
-use irys_reth_node_bridge::{
-    ext::IrysRethTestContextExt as _, new_reth_context, node::RethNodeProvider,
-};
+use irys_reth_node_bridge::{new_reth_context, node::RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
 use irys_types::IrysTransactionCommon;
 use irys_types::{
@@ -49,20 +45,12 @@ use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::payload::EthPayloadBuilderAttributes;
-use reth::providers::AccountReader;
 use reth::revm::primitives::ruint::Uint;
 use reth::transaction_pool::TransactionPool;
-use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::eth::EthApiServer as _};
+use reth::{payload::EthBuiltPayload, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
-use reth_transaction_pool::identifier::SenderId;
-use reth_transaction_pool::identifier::TransactionId;
-use reth_transaction_pool::BestTransactionsAttributes;
 use reth_transaction_pool::EthPooledTransaction;
-use reth_transaction_pool::TransactionOrigin;
-use reth_transaction_pool::ValidPoolTransaction;
-use std::sync::Mutex;
-use std::time::Instant;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -485,7 +473,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let storage_txs = {
                 let block_reward_system_tx = block_reward_system_tx.clone();
                 submit_txs.storage_tx.iter().map(move |header| {
-                let system_tx = SystemTransaction {
+
+                SystemTransaction {
                     inner: TransactionPacket::StorageFees(
                         BalanceDecrement {
                             amount: Uint::from(header.total_fee()),
@@ -493,8 +482,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         }
                     ),
                     ..block_reward_system_tx.clone()
-                };
-                system_tx
+                }
             })};
 
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
@@ -504,8 +492,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
                     .try_into_recovered()
                     .unwrap();
-                let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
-                pooled_tx
+
+                EthPooledTransaction::new(tx.clone(), 300)
             }).collect::<Vec<_>>();
 
             // generate payload attributes

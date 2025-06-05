@@ -10,7 +10,7 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
-use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadId};
+use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes};
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
@@ -27,7 +27,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::warn;
 
 use reth_ethereum_payload_builder::{default_ethereum_payload, EthereumBuilderConfig};
 
@@ -122,7 +121,7 @@ impl SystemTxStore {
         {
             let mut store = self.inner.lock().unwrap();
             if let Some((system_txs, timestamp)) = store.get(&key) {
-                return (system_txs.clone(), timestamp.clone());
+                return (system_txs.clone(), *timestamp);
             }
         }
 
@@ -147,7 +146,7 @@ impl SystemTxStore {
                     self.inner
                         .lock()
                         .unwrap()
-                        .put(key, (system_txs.clone(), timestamp.clone()));
+                        .put(key, (system_txs.clone(), timestamp));
 
                     return (system_txs, timestamp);
                 }

@@ -39,7 +39,7 @@ use irys_p2p::{
     P2PService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
-use irys_reth_node_bridge::irys_reth::payload::{SystemTxRequest, SystemTxStore};
+use irys_reth_node_bridge::irys_reth::payload::SystemTxStore;
 use irys_reth_node_bridge::node::RethNode;
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::signal::{
@@ -68,7 +68,6 @@ use reth::{
 };
 use reth_db::Database as _;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use std::{
     net::TcpListener,
     sync::atomic::AtomicU64,

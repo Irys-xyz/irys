@@ -1,12 +1,9 @@
-use alloy_consensus::TxEnvelope;
-use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
+use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
-use alloy_signer_local::LocalSigner;
-use eyre::{eyre, OptionExt};
+use eyre::OptionExt;
 use irys_actors::mempool_service::TxIngressError;
-use irys_primitives::IrysTxId;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable;
 use irys_reth_node_bridge::irys_reth::system_tx::{
@@ -16,14 +13,12 @@ use irys_reth_node_bridge::{
     adapter::new_reth_context, reth_e2e_test_utils::transaction::TransactionTestContext,
 };
 use irys_types::IrysTransactionCommon;
-use irys_types::{irys::IrysSigner, IrysTransaction, NodeConfig};
-use k256::ecdsa::SigningKey;
+use irys_types::{irys::IrysSigner, NodeConfig};
 use reth::providers::{AccountReader, ReceiptProvider, TransactionsProvider};
-use reth::rpc::api::OtterscanClient;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 

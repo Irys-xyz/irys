@@ -4,10 +4,9 @@ use crate::{BuilderContext, FullNodeTypes};
 use reth::builder::components::{PayloadBuilderBuilder, PayloadServiceBuilder};
 use reth_basic_payload_builder::{BasicPayloadJobGenerator, BasicPayloadJobGeneratorConfig};
 use reth_chain_state::CanonStateSubscriptions;
-use reth_node_api::{NodeTypes, PayloadBuilderFor};
+use reth_node_api::NodeTypes;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_transaction_pool::TransactionPool;
-use std::future::Future;
 
 /// Irys payload service builder that spawns a [`BasicPayloadJobGenerator`]
 #[derive(Debug, Default, Clone)]

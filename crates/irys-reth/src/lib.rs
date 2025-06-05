@@ -22,19 +22,18 @@ use alloy_primitives::{Address, TxKind, U256};
 pub use alloy_rlp;
 use alloy_rlp::{Decodable as _, Encodable as _};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
-use futures::Stream;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
-        components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PoolBuilder},
+        components::{ComponentsBuilder, ExecutorBuilder, PoolBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
         PayloadBuilderConfig as _,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{EthPrimitives, InvalidTransactionError, SealedBlock},
     providers::{
-        providers::ProviderFactoryBuilder, CanonStateNotification, CanonStateSubscriptions as _,
-        EthStorage, StateProviderFactory,
+        providers::ProviderFactoryBuilder, CanonStateSubscriptions as _, EthStorage,
+        StateProviderFactory,
     },
     transaction_pool::TransactionValidationTaskExecutor,
 };
@@ -43,9 +42,7 @@ use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
 use reth_node_ethereum::{
-    node::{
-        EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder, EthereumPayloadBuilder,
-    },
+    node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
 };
 use reth_tracing::tracing;
@@ -53,11 +50,11 @@ use reth_transaction_pool::TransactionValidationOutcome;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
     EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering, TransactionOrigin, TransactionPool as _, TransactionValidator,
+    Priority, TransactionOrdering, TransactionOrigin, TransactionValidator,
 };
 use reth_trie_db::MerklePatriciaTrie;
 use system_tx::SystemTransaction;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::{
     payload::SystemTxStore, payload_builder_builder::IrysPayloadBuilderBuilder,
@@ -345,12 +342,12 @@ where
         };
 
         tracing::trace!("system txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
-        return TransactionValidationOutcome::Invalid(
+        TransactionValidationOutcome::Invalid(
             transaction,
             reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
                 InvalidTransactionError::SignerAccountHasBytecode,
             ),
-        );
+        )
     }
 
     async fn validate_transactions(
@@ -444,16 +441,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::payload::DeterministicSystemTxKey;
+
     use crate::system_tx::{
         BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID,
         RELEASE_STAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
-        advance_blocks, block_reward, custom_chain, eth_payload_attributes,
-        eth_payload_attributes_with_parent, get_balance, release_stake, setup_irys_reth, sign_tx,
-        stake, storage_fees,
+        advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance,
+        release_stake, sign_tx, stake, storage_fees,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
     use alloy_eips::Encodable2718;
@@ -602,7 +598,7 @@ mod tests {
                 valid_for_block_height: 1,
                 parent_blockhash: ctx.genesis_blockhash,
                 inner: TransactionPacket::BlockReward(BalanceIncrement {
-                    amount: amount.clone(),
+                    amount,
                     target: ctx.block_producer_a.address(),
                 }),
             },

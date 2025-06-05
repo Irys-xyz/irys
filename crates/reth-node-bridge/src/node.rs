@@ -2,9 +2,8 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{
-    evm::IrysEvmConfig,
-    payload::{SystemTxRequest, SystemTxStore},
-    IrysEthereumNode, IrysSystemTxValidator, SystemTxPriorityOrdering,
+    evm::IrysEvmConfig, payload::SystemTxStore, IrysEthereumNode, IrysSystemTxValidator,
+    SystemTxPriorityOrdering,
 };
 use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;

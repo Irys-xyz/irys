@@ -7,11 +7,11 @@ use reth_ethereum_engine_primitives::{
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::ConfigureEvm;
-use reth_node_api::{FullNodeTypes, NodeTypes, PrimitivesTy, TxTy};
+use reth_node_api::{FullNodeTypes, NodeTypes, PrimitivesTy};
 use reth_node_builder::{
     components::PayloadBuilderBuilder, BuilderContext, PayloadBuilderConfig, PayloadTypes,
 };
-use reth_transaction_pool::{EthPooledTransaction, PoolTransaction, TransactionPool};
+use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
 
 use crate::payload::SystemTxStore;
 
