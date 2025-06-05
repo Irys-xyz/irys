@@ -2,7 +2,10 @@ use crate::state::AtomicVdfState;
 use crate::{
     apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, StepWithCheckpoints,
 };
-use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, VDFLimiterInfo, H256, U256};
+use irys_types::{
+    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, VDFLimiterInfo, H256,
+    U256,
+};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
@@ -82,7 +85,10 @@ pub fn run_vdf(
     atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
     debug!("Running VDF: {}", global_step_number);
-    debug!("Atomic global step: {}", atomic_vdf_global_step.load(std::sync::atomic::Ordering::Relaxed));
+    debug!(
+        "Atomic global step: {}",
+        atomic_vdf_global_step.load(std::sync::atomic::Ordering::Relaxed)
+    );
 
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;

@@ -35,7 +35,13 @@ pub struct VdfState {
 
 impl VdfState {
     pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
-        (self.global_step, self.seeds.back().cloned().expect("To have at least the genesis step to be inserted"))
+        (
+            self.global_step,
+            self.seeds
+                .back()
+                .cloned()
+                .expect("To have at least the genesis step to be inserted"),
+        )
     }
 
     pub fn store_step(&mut self, seed: Seed, global_step: u64) {
@@ -381,22 +387,12 @@ pub mod test_helpers {
     pub async fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
 
-        let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-            BlockIndex::new(&config.node_config).await.unwrap(),
-        ));
-
-        let irys_db_env =
-            open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir());
-        let irys_db = DatabaseProvider(Arc::new(irys_db_env.expect("expected valid irys_db_env")));
-
-        // spawn VDF service
-        // this is so we can send it new VDF steps as part of this test
-
-        Arc::new(RwLock::new(create_state(
-            block_index.clone(),
-            irys_db,
-            vdf_mining_state_sender,
-            config,
-        )))
+        let state = VdfState {
+            global_step: 0,
+            capacity: calc_capacity(config),
+            seeds: VecDeque::default(),
+            mining_state_sender: Some(vdf_mining_state_sender),
+        };
+        Arc::new(RwLock::new(state))
     }
 }

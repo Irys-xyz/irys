@@ -55,6 +55,7 @@ use irys_types::{
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, H256, U256,
 };
+use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
     state::{AtomicVdfState, VdfStateReadonly},
     vdf::run_vdf,
@@ -77,7 +78,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn, Instrument as _, Span};
-use irys_vdf::vdf::run_vdf_for_genesis_block;
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
