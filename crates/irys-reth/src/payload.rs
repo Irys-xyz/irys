@@ -196,7 +196,6 @@ impl CombinedTransactionIterator {
         system_txs: Vec<EthPooledTransaction>,
         pool_iter: BestTransactionsIter,
     ) -> Self {
-        tracing::info!("new combined iterator");
         let system_txs = system_txs
             .into_iter()
             .map(|tx| ValidPoolTransaction {

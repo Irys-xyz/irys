@@ -8,14 +8,17 @@ use eyre::{eyre, OptionExt};
 use irys_actors::mempool_service::TxIngressError;
 use irys_primitives::IrysTxId;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
-use irys_reth_node_bridge::irys_reth::system_tx::system_tx_topics;
+use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable;
+use irys_reth_node_bridge::irys_reth::system_tx::{
+    system_tx_topics, SystemTransaction, TransactionPacket,
+};
 use irys_reth_node_bridge::{
     adapter::new_reth_context, reth_e2e_test_utils::transaction::TransactionTestContext,
 };
 use irys_types::IrysTransactionCommon;
 use irys_types::{irys::IrysSigner, IrysTransaction, NodeConfig};
 use k256::ecdsa::SigningKey;
-use reth::providers::{AccountReader, ReceiptProvider};
+use reth::providers::{AccountReader, ReceiptProvider, TransactionsProvider};
 use reth::rpc::api::OtterscanClient;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use std::{collections::HashMap, time::Duration};
@@ -28,13 +31,23 @@ use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 async fn heavy_test_blockprod() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async().await;
     let user_account = IrysSigner::random_signer(&node.cfg.consensus_config());
-    node.cfg.consensus.extend_genesis_accounts(vec![(
-        user_account.address(),
-        GenesisAccount {
-            balance: U256::from(1000),
-            ..Default::default()
-        },
-    )]);
+    node.cfg.consensus.extend_genesis_accounts(vec![
+        (
+            // ensure that the block reward address has 0 balance
+            node.cfg.signer().address(),
+            GenesisAccount {
+                balance: U256::from(0),
+                ..Default::default()
+            },
+        ),
+        (
+            user_account.address(),
+            GenesisAccount {
+                balance: U256::from(1000),
+                ..Default::default()
+            },
+        ),
+    ]);
 
     // print all addresses
     println!("user_account: {:?}", user_account.address());
@@ -57,7 +70,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .unwrap();
 
     // block reward
-    let block_reward_receipt = reth_receipts.last().unwrap();
+    let block_reward_receipt = reth_receipts.first().unwrap();
     assert!(block_reward_receipt.success);
     assert_eq!(block_reward_receipt.logs.len(), 1);
     assert_eq!(
@@ -71,7 +84,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     );
 
     // storage tx
-    let storage_tx_receipt = reth_receipts.first().unwrap();
+    let storage_tx_receipt = reth_receipts.last().unwrap();
     assert!(storage_tx_receipt.success);
     assert_eq!(storage_tx_receipt.logs.len(), 1);
     assert_eq!(
@@ -98,6 +111,23 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         U256::from(1000) - U256::from(tx.header.total_fee())
     );
 
+    // ensure that the block reward has increased the block reward address balance
+    let block_reward_address = node.cfg.signer().address();
+    let block_reward_balance = context
+        .inner
+        .provider
+        .basic_account(&block_reward_address)
+        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get block reward address balance: {}", err);
+            U256::ZERO
+        });
+    assert_eq!(
+        block_reward_balance,
+        // started with 0 balance
+        U256::from(0) + U256::try_from(irys_block.reward_amount).unwrap()
+    );
+
     // ensure that block heights in reth and irys are the same
     let reth_block = reth_exec_env.block().clone();
     assert_eq!(reth_block.number, irys_block.height);
@@ -113,9 +143,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     Ok(())
 }
 
-// todo add tests where the user has no funds to fund the storage
-
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testnet();
     let node = IrysNodeTest::new_genesis(config).start().await;
@@ -132,8 +160,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
             .block_by_hash(block.evm_block_hash)?
             .unwrap();
         assert_eq!(i, reth_block.header.number as u32);
-        // height is hardcoded at 42 right now
-        // assert_eq!(reth_block.number, block.height);
+        assert_eq!(reth_block.number, block.height);
 
         // check irys DB for built block
         let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
@@ -145,7 +172,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
 
@@ -168,7 +195,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
 
@@ -184,17 +211,17 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
         .unwrap();
 
     // height is hardcoded at 42 right now
-    // assert_eq!(reth_block.number, block.height);
+    assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
     let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     node.stop().await;
+
     Ok(())
 }
 
-#[ignore]
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
@@ -206,33 +233,17 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     config.consensus.get_mut().chunk_migration_depth = 1;
 
     let account1 = IrysSigner::random_signer(&config.consensus_config());
-    let account2 = IrysSigner::random_signer(&config.consensus_config());
-    let account3 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
     let recipient = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![
-        (
-            account1.address(),
-            GenesisAccount {
-                balance: U256::from(1),
-                ..Default::default()
-            },
-        ),
-        (
-            account2.address(),
-            GenesisAccount {
-                balance: U256::from(420000000000000_u128),
-                ..Default::default()
-            },
-        ),
-        (
-            account3.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000_u128),
-                ..Default::default()
-            },
-        ),
-    ]);
+    let account_1_balance = U256::from(1_000000000000000000_u128);
+    config.consensus.extend_genesis_accounts(vec![(
+        account1.address(),
+        GenesisAccount {
+            // 1ETH
+            balance: account_1_balance.clone(),
+            ..Default::default()
+        },
+    )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
     let _recipient_init_balance = reth_context
@@ -240,119 +251,94 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .get_balance(recipient.address(), None)
         .await?;
 
-    let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
-    let mut evm_txs: HashMap<B256, TxEnvelope> = HashMap::new();
-    for (i, a) in [(1, &account1), (2, &account2), (3, &account3)] {
-        let es: LocalSigner<SigningKey> = a.clone().into();
-        let evm_tx_req = TransactionRequest {
-            to: Some(TxKind::Call(recipient.address())),
-            max_fee_per_gas: Some(20e9 as u128),
-            max_priority_fee_per_gas: Some(20e9 as u128),
-            gas: Some(21000),
-            value: Some(U256::from(1)),
-            nonce: Some(0),
-            chain_id: Some(chain_id),
-            ..Default::default()
-        };
-        let tx_env = TransactionTestContext::sign_tx(es, evm_tx_req).await;
-        let signed_tx: Bytes = tx_env.encoded_2718().into();
-        // let signed_tx = TransactionTestContext::transfer_tx_bytes(CONFIG.irys_chain_id, es).await;
-        match i {
-            // 1 is poor, tx should fail to inject
-            1 => {
-                reth_context
-                    .rpc
-                    .inject_tx(signed_tx)
-                    .await
-                    .expect_err("tx should be rejected");
-            }
-            // 2 is less poor but should still fail
-            2 => {
-                reth_context
-                    .rpc
-                    .inject_tx(signed_tx)
-                    .await
-                    .expect_err("tx should be rejected");
-            }
-            // should succeed
-            3 => {
-                reth_context
-                    .rpc
-                    .inject_tx(signed_tx)
-                    .await
-                    .expect("tx should be accepted");
-            }
-            _ => return Err(eyre!("unknown account index")),
-        }
-        evm_txs.insert(*tx_env.tx_hash(), tx_env.clone());
+    let evm_tx_req = TransactionRequest {
+        to: Some(TxKind::Call(recipient.address())),
+        max_fee_per_gas: Some(20e9 as u128),
+        max_priority_fee_per_gas: Some(20e9 as u128),
+        gas: Some(21000),
+        value: Some(U256::from(1)),
+        nonce: Some(0),
+        chain_id: Some(chain_id),
+        ..Default::default()
+    };
+    let tx_env = TransactionTestContext::sign_tx(account1.clone().into(), evm_tx_req).await;
+    let evm_tx_hash = reth_context
+        .rpc
+        .inject_tx(tx_env.encoded_2718().into())
+        .await
+        .expect("tx should be accepted");
+    let data_bytes = "Hello, world!".as_bytes().to_vec();
+    let irys_tx = node
+        .create_submit_data_tx(&account1, data_bytes.clone())
+        .await?;
 
-        let data_bytes = "Hello, world!".as_bytes().to_vec();
-        match node.create_submit_data_tx(&a, data_bytes).await {
-            Ok(tx) => {
-                irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
-            }
-            Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-                assert_eq!(
-                    a.address(),
-                    account1.address(),
-                    "account1 should be unfunded"
-                );
-            }
-            Err(e) => panic!("unexpected error {:?}", e),
-        }
-    }
+    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
-    let (_block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    // Get the transaction hashes from the block in order
+    let block_txs = reth_exec_env
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .collect::<Vec<_>>();
 
-    let _block_reward = U256::from(0);
+    // We expect 3 receipts: storage tx, evm tx, and block reward
+    assert_eq!(block_txs.len(), 3);
+    // Assert block reward (should be the first receipt)
+    let block_reward_systx =
+        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+            .unwrap();
+    assert!(matches!(
+        block_reward_systx.inner,
+        TransactionPacket::BlockReward(_)
+    ));
 
-    error!("TODO: NEW SHADOW LOGIC");
+    // Assert storage tx is included in the receipts (should be the second receipt)
+    let storage_tx_systx =
+        SystemTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
+            .unwrap();
+    assert!(matches!(
+        storage_tx_systx.inner,
+        TransactionPacket::StorageFees(_)
+    ));
+
+    // Verify the EVM transaction hash matches
+    let reth_block = reth_exec_env.block().clone();
+    let block_txs = reth_context
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(reth_block.hash()))?
+        .unwrap();
+    let evm_tx_in_block = block_txs
+        .iter()
+        .find(|tx| *tx.hash() == evm_tx_hash)
+        .expect("EVM transaction should be included in the block");
+    assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
+
+    // Verify recipient received the transfer
+    let recipient_balance = reth_context
+        .rpc
+        .get_balance(recipient.address(), None)
+        .await?;
+    assert_eq!(recipient_balance, U256::from(1)); // The transferred amount
+
+    // Verify account1 balance decreased by storage fees and gas costs
+    let account1_balance = reth_context
+        .rpc
+        .get_balance(account1.address(), None)
+        .await?;
+    // Balance should be: initial (1000) - storage fees - gas costs - transfer amount (1)
+    let expected_balance = account_1_balance
+        - U256::from(irys_tx.header.total_fee())
+        - U256::from(21000 * 20e9 as u64) // gas_used * max_fee_per_gas
+        - U256::from(1); // transfer amount
+    assert_eq!(account1_balance, expected_balance);
+
     node.stop().await;
-    return Ok(());
-
-    // for receipt in reth_exec_env.shadow_receipts {
-    //     match receipt.tx_type {
-    //         ShadowTxType::BlockReward(block_reward_shadow) => {
-    //             assert_eq!(receipt.result, ShadowResult::Success);
-    //             block_reward = block_reward_shadow.reward;
-    //         }
-    //         ShadowTxType::Data(_data_shadow) => {
-    //             let og_tx = irys_txs.get(&receipt.tx_id).unwrap();
-    //             assert_eq!(receipt.result, ShadowResult::Success);
-    //             assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
-    //         }
-    //         _ => {
-    //             panic!("test does not expect this shadow type")
-    //         }
-    //     }
-    // }
-    // assert_ne!(block_reward, U256::from(0), "block reward cannot be 0");
-
-    // //check reth for built block
-    // let reth_block = reth_context
-    //     .inner
-    //     .provider
-    //     .block_by_hash(_block.evm_block_hash)?
-    //     .unwrap();
-
-    // assert!(evm_txs.contains_key(reth_block.body.transactions.first().unwrap().hash()));
-    // assert_eq!(
-    //     reth_context
-    //         .rpc
-    //         .get_balance(recipient.address(), None)
-    //         .await?,
-    //     _recipient_init_balance + U256::from(1)
-    // );
-    // // check irys DB for built block
-    // let db_irys_block = node.get_block_by_hash(&_block.block_hash).unwrap();
-
-    // assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-
-    // node.stop().await;
-    // Ok(())
+    Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await;
     let node = node.start().await;
@@ -379,35 +365,13 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
         // on every block *after* genesis, validate the reward shadow
         if let Some(old_ts) = prev_ts {
-            // expected reward according to the protocol’s reward curve
+            // expected reward according to the protocol's reward curve
             let _expected_reward = node
                 .node_ctx
                 .reward_curve
                 .reward_between(old_ts, new_ts)
                 .unwrap();
-
-            // find the BlockReward shadow receipt and check correctness
-            let _reward_shadow_found = false;
-            error!("TODO: NEW SHADOW LOGIC");
-            // for receipt in reth_exec_env.shadow_receipts {
-            //     if let ShadowTxType::BlockReward(br_shadow) = receipt.tx_type {
-            //         let expected_new_balance = init_balance + br_shadow.reward;
-            //         let new_balance = reth_context.rpc.get_balance(reward_address, None).await?;
-            //         assert_eq!(new_balance, expected_new_balance);
-            //         assert_eq!(
-            //             receipt.result,
-            //             ShadowResult::Success,
-            //             "block-reward shadow must succeed"
-            //         );
-            //         assert_eq!(
-            //             br_shadow.reward,
-            //             expected_reward.amount.into(),
-            //             "incorrect block-reward amount recorded in shadow"
-            //         );
-            //         reward_shadow_found = true;
-            //         break;
-            //     }
-            // }
+            // todo
             // assert!(
             //     reward_shadow_found,
             //     "BlockReward shadow transaction not found in receipts"
@@ -421,6 +385,282 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     }
 
     assert!(prev_ts.is_some());
+    node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
+    let mut node = IrysNodeTest::default_async().await;
+    let unfunded_user = IrysSigner::random_signer(&node.cfg.consensus_config());
+
+    // Set up genesis accounts - unfunded user gets zero balance
+    node.cfg.consensus.extend_genesis_accounts(vec![
+        (
+            // ensure that the block reward address has 0 balance
+            node.cfg.signer().address(),
+            GenesisAccount {
+                balance: U256::from(0),
+                ..Default::default()
+            },
+        ),
+        (
+            // unfunded user gets zero balance (but he has an entry in the reth db)
+            unfunded_user.address(),
+            GenesisAccount {
+                balance: U256::from(0),
+                ..Default::default()
+            },
+        ),
+    ]);
+
+    let node = node.start().await;
+
+    // Attempt to create and submit a transaction from the unfunded user
+    let data_bytes = "Hello, world!".as_bytes().to_vec();
+    let tx_result = node
+        .create_submit_data_tx(&unfunded_user, data_bytes.clone())
+        .await;
+
+    // Verify that the transaction was rejected due to insufficient funds
+    match tx_result {
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
+            info!("Transaction correctly rejected due to insufficient funds");
+        }
+        Ok(_) => panic!("Expected transaction to be rejected due to insufficient funds"),
+        Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
+    }
+
+    // Mine a block - should only contain block reward transaction
+    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
+        .await
+        .unwrap();
+
+    // Verify block transactions - should only contain block reward system transaction
+    let block_txs = reth_exec_env
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        block_txs.len(),
+        1,
+        "Block should only contain one transaction (block reward)"
+    );
+
+    // Verify it's a block reward system transaction
+    let system_tx =
+        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+            .unwrap();
+    assert!(
+        matches!(system_tx.inner, TransactionPacket::BlockReward(_)),
+        "Single transaction should be a block reward"
+    );
+
+    // Verify unfunded user's balance remains zero
+    let user_balance = context
+        .inner
+        .provider
+        .basic_account(&unfunded_user.address())
+        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get unfunded user balance: {}", err);
+            U256::ZERO
+        });
+    assert_eq!(
+        user_balance,
+        U256::ZERO,
+        "Unfunded user balance should remain zero"
+    );
+    node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
+    let mut node = IrysNodeTest::default_async().await;
+    let nonexistent_user = IrysSigner::random_signer(&node.cfg.consensus_config());
+
+    // Set up genesis accounts - only add the block reward address, nonexistent_user is not in genesis
+    node.cfg.consensus.extend_genesis_accounts(vec![
+        (
+            // ensure that the block reward address has 0 balance
+            node.cfg.signer().address(),
+            GenesisAccount {
+                balance: U256::from(0),
+                ..Default::default()
+            },
+        ),
+        // Note: nonexistent_user is NOT added to genesis accounts, so it has implicit zero balance
+    ]);
+
+    let node = node.start().await;
+
+    // Attempt to create and submit a transaction from the nonexistent user
+    let data_bytes = "Hello, world!".as_bytes().to_vec();
+    let tx_result = node
+        .create_submit_data_tx(&nonexistent_user, data_bytes.clone())
+        .await;
+
+    // Verify that the transaction was rejected due to insufficient funds
+    match tx_result {
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
+            info!("Transaction correctly rejected due to insufficient funds (nonexistent account)");
+        }
+        Ok(_) => panic!("Expected transaction to be rejected due to insufficient funds"),
+        Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
+    }
+
+    // Mine a block - should only contain block reward transaction
+    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
+        .await
+        .unwrap();
+
+    // Verify block transactions - should only contain block reward system transaction
+    let block_txs = reth_exec_env
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        block_txs.len(),
+        1,
+        "Block should only contain one transaction (block reward)"
+    );
+
+    // Verify it's a block reward system transaction
+    let system_tx =
+        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+            .unwrap();
+    assert!(
+        matches!(system_tx.inner, TransactionPacket::BlockReward(_)),
+        "Single transaction should be a block reward"
+    );
+
+    // Verify nonexistent user's balance is zero (account doesn't exist)
+    let user_balance = context
+        .inner
+        .provider
+        .basic_account(&nonexistent_user.address())
+        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get nonexistent user balance: {}", err);
+            U256::ZERO
+        });
+    assert_eq!(
+        user_balance,
+        U256::ZERO,
+        "Nonexistent user balance should be zero"
+    );
+
+    node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
+    let mut node = IrysNodeTest::default_async().await;
+    let user = IrysSigner::random_signer(&node.cfg.consensus_config());
+
+    // Set up genesis accounts - user gets balance 2, but total fee is 2 (perm_fee=1 + term_fee=1)
+    node.cfg.consensus.extend_genesis_accounts(vec![
+        (
+            // ensure that the block reward address has 0 balance
+            node.cfg.signer().address(),
+            GenesisAccount {
+                balance: U256::from(0),
+                ..Default::default()
+            },
+        ),
+        (
+            user.address(),
+            GenesisAccount {
+                balance: U256::from(2),
+                ..Default::default()
+            },
+        ),
+    ]);
+
+    let node = node.start().await;
+
+    // Create and submit a transaction from the user
+    let data_bytes = "Hello, world!".as_bytes().to_vec();
+    let tx = node
+        .create_submit_data_tx(&user, data_bytes.clone())
+        .await?;
+
+    // Verify the transaction was accepted (fee is 2: perm_fee=1 + term_fee=1)
+    assert_eq!(tx.header.total_fee(), 2, "Total fee should be 2");
+
+    // Mine a block - should contain block reward and storage fee transactions
+    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
+        .await
+        .unwrap();
+    let reth_receipts = context
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(reth_exec_env.block().hash()))?
+        .unwrap();
+
+    // Should have 2 receipts: block reward and storage fees
+    assert_eq!(
+        reth_receipts.len(),
+        2,
+        "Block should contain block reward and storage fee transactions"
+    );
+
+    // Verify block reward receipt (first)
+    let block_reward_receipt = &reth_receipts[0];
+    assert!(
+        block_reward_receipt.success,
+        "Block reward transaction should succeed"
+    );
+    assert_eq!(
+        block_reward_receipt.logs[0].topics()[0],
+        *system_tx_topics::BLOCK_REWARD,
+        "First transaction should be block reward"
+    );
+
+    // Verify storage fee receipt (second)
+    let storage_fee_receipt = &reth_receipts[1];
+    assert!(
+        storage_fee_receipt.success,
+        "Storage fee transaction should fail due to insufficient funds"
+    );
+    assert_eq!(
+        storage_fee_receipt.logs[0].topics()[0],
+        *system_tx_topics::STORAGE_FEES,
+        "Second transaction should be storage fees"
+    );
+    assert_eq!(
+        storage_fee_receipt.logs[0].address,
+        user.address(),
+        "Storage fee transaction should target the user's address"
+    );
+
+    // Verify user's balance
+    let user_balance = context
+        .inner
+        .provider
+        .basic_account(&user.address())
+        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get user balance: {}", err);
+            U256::ZERO
+        });
+    assert_eq!(
+        user_balance,
+        U256::from(0),
+        "User balance should go down to 0"
+    );
+
     node.stop().await;
     Ok(())
 }

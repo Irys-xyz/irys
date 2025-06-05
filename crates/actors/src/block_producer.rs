@@ -475,7 +475,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 current_timestamp.saturating_div(1000)
             )?;
 
-            dbg!(prev_block_header.evm_block_hash, parent.header.hash);
             let block_reward_system_tx = SystemTransaction {
                 valid_for_block_height: block_height,
                 parent_blockhash: prev_block_header.evm_block_hash,
@@ -503,9 +502,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             })};
 
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
-            let system_txs = storage_txs.chain([
-                block_reward_system_tx,
-            ]).map(|tx| {
+            let system_txs = [block_reward_system_tx].into_iter().chain(storage_txs).map(|tx| {
                 let mut tx_raw = compose_system_tx( config.consensus.chain_id, &tx);
                 let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
@@ -522,11 +519,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 prev_randao: parent.header.mix_hash,
                 suggested_fee_recipient: config.node_config.reward_address,
                 withdrawals: None, // these should ALWAYS be none
-                // parent_beacon_block_root: Some(B256::ZERO),
                 parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             };
             let attributes = EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, payload_attrs);
-            tracing::error!("new payload");
             let key = DeterministicSystemTxKey::new(
                 prev_block_header.block_hash.into(),
                 timestamp,
@@ -544,16 +539,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .best_payload(payload_id)
                 .await
                 .unwrap()?;
-            let pending = context.inner.pool.pending_transactions();
-            dbg!(&pending);
-            let queued = context.inner.pool.queued_transactions();
-            dbg!(&queued);
 
-            let best_transactions_attributes = BestTransactionsAttributes { basefee: 0, blob_fee: None } ;
-            let best_txs = context.inner.pool.best_transactions_with_attributes(best_transactions_attributes);
-            for best_tx in best_txs {
-                dbg!(& best_tx.hash());
-            }
             let block_hash = context.submit_payload(payload.clone()).await?;
 
             // trigger forkchoice update via engine api to commit the block to the blockchain
