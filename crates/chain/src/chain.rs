@@ -56,10 +56,11 @@ use irys_types::{
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, H256, U256,
 };
+use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
     state::{AtomicVdfState, VdfStateReadonly},
     vdf::run_vdf,
-    StepWithCheckpoints,
+    VdfStep,
 };
 use reth::{
     chainspec::ChainSpec,
@@ -393,6 +394,8 @@ impl IrysNode {
 
         // Add commitment transactions to genesis block
         add_genesis_commitments(&mut genesis_block, &self.config);
+
+        run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
 
         (genesis_block, commitments)
     }
@@ -970,9 +973,7 @@ impl IrysNode {
         );
 
         let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
-        let seed = seed
-            .map(|x| x.0)
-            .unwrap_or(latest_block.vdf_limiter_info.seed);
+        let seed = seed.0;
 
         // set up packing actor
         let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(
@@ -1137,7 +1138,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        new_seed_rx: mpsc::Receiver<StepWithCheckpoints>,
+        new_seed_rx: mpsc::UnboundedReceiver<VdfStep>,
         vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,

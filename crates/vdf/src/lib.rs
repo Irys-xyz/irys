@@ -257,9 +257,8 @@ pub const fn step_number_to_salt_number(config: &VdfConfig, step_number: u64) ->
 }
 
 #[derive(Debug, Clone)]
-pub struct StepWithCheckpoints {
+pub struct VdfStep {
     pub step: H256,
-    pub checkpoints: H256List,
     pub global_step_number: u64,
 }
 

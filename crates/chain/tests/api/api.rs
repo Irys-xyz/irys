@@ -1,3 +1,4 @@
+use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use actix_web::{
     middleware::Logger,
@@ -20,8 +21,6 @@ use rand::Rng;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
-
-use crate::utils::IrysNodeTest;
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
