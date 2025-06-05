@@ -32,8 +32,7 @@ pub async fn fast_forward_vdf_steps_from_block(
     vdf_fast_forward_sender: UnboundedSender<VdfStep>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;
-    let len = vdf_limiter_info.steps.len();
-    let block_start_step = block_end_step - len as u64 + 1;
+    let block_start_step = vdf_limiter_info.first_step_number();
     tracing::trace!(
         "VDF FF: block start-end step: {}-{}",
         block_start_step,

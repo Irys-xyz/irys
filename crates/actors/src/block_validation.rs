@@ -27,7 +27,6 @@ pub async fn prevalidate_block(
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
-    steps_guard: VdfStateReadonly,
     ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(

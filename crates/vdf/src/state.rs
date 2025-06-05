@@ -159,6 +159,15 @@ impl VdfStateReadonly {
         ))
     }
 
+    pub async fn get_step(&self, step_number: u64) -> eyre::Result<H256> {
+        self.get_steps(ii(step_number, step_number))
+            .await?
+            .0
+            .first()
+            .cloned()
+            .ok_or(eyre!("Step not found"))
+    }
+
     /// Wait for a specific step to be available for n seconds. This doesn't have the timeout.
     /// Instead, we should check that the `desired_step_number` is a reasonable number of steps
     /// to wait for. This should be ensured before calling this function

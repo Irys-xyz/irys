@@ -1,11 +1,4 @@
-use actix::{
-    Actor, AsyncContext, Context, Handler, Message, Supervised, SystemService, WrapFuture,
-};
-use irys_types::{Config, IrysBlockHeader};
-use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
-use std::sync::Arc;
-use tracing::{debug, error};
-use irys_vdf::vdf_utils::{fast_forward_vdf_steps_from_block, wait_for_vdf_step};
+use crate::block_validation::recall_recall_range_is_valid;
 use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeServiceMessage, ValidationResult},
@@ -13,7 +6,14 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard,
     services::ServiceSenders,
 };
-use crate::block_validation::recall_recall_range_is_valid;
+use actix::{
+    Actor, AsyncContext, Context, Handler, Message, Supervised, SystemService, WrapFuture,
+};
+use irys_types::{Config, IrysBlockHeader};
+use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
+use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
+use std::sync::Arc;
+use tracing::error;
 
 #[derive(Debug)]
 pub struct ValidationService {
@@ -84,22 +84,37 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let vdf_info = block.vdf_limiter_info.clone();
         let vdf_to_fast_forward = vdf_info.clone();
         let poa = block.poa.clone();
-        let vdf_steps_guard = self.vdf_state_readonly.clone();
+        let vdf_state_for_validation = self.vdf_state_readonly.clone();
         let vdf_state = self.vdf_state_readonly.clone();
 
         // Spawn VDF validation first
         let vdf_config = self.config.consensus.vdf.clone();
         let vdf_future = tokio::task::spawn_blocking(move || {
-            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps_guard)
+            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_state_for_validation)
         });
 
-        // Wait for results before processing next message
+        // Wait for results before processing the next message
         let config = self.config.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let vdf_fast_forward_sender = self.service_senders.vdf_fast_forward.clone();
         ctx.wait(
             async move {
-                vdf_state.wait_for_step(vdf_to_fast_forward.global_step_number.saturating_sub(vdf_to_fast_forward.steps.len() as u64)).await;
+                let first_step_number = vdf_to_fast_forward.first_step_number();
+                let prev_output_step_number = first_step_number.saturating_sub(1);
+
+                vdf_state.wait_for_step(prev_output_step_number).await;
+                let stored_previous_step = vdf_state.get_step(prev_output_step_number).await.expect("to get the step, since we've just waited for it");
+
+                if stored_previous_step != vdf_to_fast_forward.prev_output {
+                    error!("Previous output from the block is not equal to the saved step with the same index. Expected {}, got {}", stored_previous_step, vdf_to_fast_forward.prev_output);
+                    block_tree_sender
+                        .send(BlockTreeServiceMessage::BlockValidationFinished {
+                            block_hash,
+                            validation_result: ValidationResult::Invalid,
+                        })
+                        .unwrap();
+                    return;
+                }
 
                 let validation_result = match vdf_future.await.unwrap() {
                     Ok(_) => {
