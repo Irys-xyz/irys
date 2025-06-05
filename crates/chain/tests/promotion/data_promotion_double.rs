@@ -1,5 +1,5 @@
 use crate::utils::post_chunk;
-use crate::utils::{get_block_parent, get_chunk, verify_published_chunk, IrysNodeTest};
+use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
@@ -101,8 +101,6 @@ async fn heavy_double_root_data_promotion_test() {
         assert_eq!(status, StatusCode::OK);
     }
 
-    let delay = Duration::from_secs(1);
-
     // Wait for all the transactions to be confirmed
     let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
@@ -152,37 +150,12 @@ async fn heavy_double_root_data_promotion_test() {
     assert!(result.is_ok());
 
     // wait for the first set of chunks to appear in the publish ledger
-    let mut attempts = 20;
-    loop {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
-        {
-            println!("First set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-
-        if attempts == 0 {
-            panic!("first set of chunks did not appear");
-        }
-        attempts -= 1;
-    }
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
+    assert!(result.is_ok());
 
     // wait for the second set of chunks to appear in the publish ledger
-    let mut attempts = 20;
-    loop {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
-        {
-            println!("Second set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-        if attempts == 0 {
-            panic!("second set of chunks did not appear");
-        }
-        attempts -= 1;
-    }
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
+    assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
@@ -311,20 +284,8 @@ async fn heavy_double_root_data_promotion_test() {
     assert!(result.is_ok());
 
     // wait for the second set of chunks to appear in the publish ledger
-    let mut attempts = 20;
-    loop {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
-        {
-            tracing::info!("Second set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-        if attempts == 0 {
-            panic!("second set of chunks failed to appear");
-        }
-        attempts -= 1;
-    }
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
+    assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
     sleep(Duration::from_secs(3)).await;

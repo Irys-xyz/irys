@@ -383,6 +383,34 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    pub async fn wait_for_chunk(
+        &self,
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = ServiceResponse,
+            Error = actix_web::Error,
+        >,
+        ledger: DataLedger,
+        offset: i32,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        let delay = Duration::from_secs(1);
+        for attempt in 1..seconds {
+            if let Some(_packed_chunk) =
+                get_chunk(&app, ledger, LedgerChunkOffset::from(offset)).await
+            {
+                info!("chunk found {} attempts", attempt);
+                return Ok(());
+            }
+            sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed waiting for chunk to arrive. Waited {} seconds",
+            seconds,
+        ))
+    }
+
     pub async fn wait_for_confirmed_txs(
         &self,
         mut unconfirmed_txs: Vec<IrysTransactionHeader>,
