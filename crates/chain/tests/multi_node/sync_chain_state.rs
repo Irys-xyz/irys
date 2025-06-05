@@ -1,5 +1,5 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
-use alloy_core::primitives::ruint::aliases::U256;
+use alloy_core::primitives::{ruint::aliases::U256, B256};
 use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
@@ -11,21 +11,27 @@ use irys_chain::{
 };
 use irys_database::block_header_by_hash;
 use irys_primitives::IrysTxId;
-use irys_reth_node_bridge::adapter::new_reth_context;
-use irys_reth_node_bridge::ext::IrysRethTestContextExt as _;
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
+    irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
     NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
-use reth::rpc::eth::EthApiServer as _;
+use reth::{
+    payload::EthPayloadBuilderAttributes,
+    rpc::{eth::EthApiServer as _, types::engine::PayloadAttributes},
+};
 use reth_db::Database;
-use std::{collections::HashMap, net::TcpListener};
+use std::{
+    collections::HashMap,
+    net::TcpListener,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, span, Level};
 
 #[actix_web::test]
-async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
+async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
     let mut genesis_config = NodeConfig::testnet();
@@ -58,22 +64,20 @@ async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
 
-    let genctx = new_reth_context(genesis.node_ctx.reth_handle.clone().into()).await?;
-
-    let p1ctx = new_reth_context(peer1.node_ctx.reth_handle.clone().into()).await?;
+    let mut genctx = genesis.node_ctx.reth_node_adapter.clone();
+    let p1ctx = peer1.node_ctx.reth_node_adapter.clone();
 
     // don't use if the reth service connect messages are used
     // genctx.connect(&mut p1ctx).await;
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
     let (block_hash, block_number) = {
-        todo!();
         // make the node advance
-        // let payload = genctx
-        //     .advance_block_irys(&mut genctx.system_tx_producer, vec![], instant::now())
-        //     .await?;
+        let payload = genctx
+            .advance_block_irys(B256::ZERO, PayloadAttributes::default(), vec![])
+            .await?;
 
-        // (payload.block().hash(), payload.block().number)
+        (payload.block().hash(), payload.block().number)
     };
 
     genctx
@@ -136,76 +140,74 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
 
-    let genctx = new_reth_context(genesis.node_ctx.reth_handle.clone().into()).await?;
-
-    let p1ctx = new_reth_context(peer1.node_ctx.reth_handle.clone().into()).await?;
+    let mut genctx = genesis.node_ctx.reth_node_adapter.clone();
+    let p1ctx = peer1.node_ctx.reth_node_adapter.clone();
 
     // don't use if the reth service connect messages are used
     // genctx.connect(&mut p1ctx).await;
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
-    // let (block_hash, block_number) = {
-    //     let p1_latest = genctx
-    //         .rpc
-    //         .inner
-    //         .eth_api()
-    //         .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
-    //         .await
-    //         .unwrap()
-    //         .unwrap();
+    let (block_hash, block_number) = {
+        let p1_latest = genctx
+            .rpc
+            .inner
+            .eth_api()
+            .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
+            .await
+            .unwrap()
+            .unwrap();
 
-    //     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
-    //     let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
-    //         timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-    //         prev_randao: B256::ZERO,
-    //         suggested_fee_recipient: Address::ZERO,
-    //         withdrawals: None,
-    //         parent_beacon_block_root: Some(B256::ZERO), // this is required now (Cancun fork activation)
-    //     };
+        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
+            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: None,
+            parent_beacon_block_root: Some(B256::ZERO), // this is required now (Cancun fork activation)
+        };
 
-    //     // let built = genctx
-    //     //     .new_payload_irys(p1_latest.header.hash, payload_attrs)
-    //     //     .await?;
+        let built = genctx
+            .new_payload_irys(p1_latest.header.hash, payload_attrs, vec![])
+            .await?;
 
-    //     let block_hash = genctx.submit_payload(built.clone()).await?;
+        let block_hash = genctx.submit_payload(built.clone()).await?;
 
-    //     // trigger forkchoice update via engine api to commit the block to the blockchain
-    //     genctx.update_forkchoice(block_hash, block_hash).await?;
+        // trigger forkchoice update via engine api to commit the block to the blockchain
+        genctx.update_forkchoice(block_hash, block_hash).await?;
 
-    //     (built.block().hash(), built.block().number)
-    // };
-    todo!();
+        (built.block().hash(), built.block().number)
+    };
 
-    // // assert the block has been committed to the blockchain
-    // genctx
-    //     .assert_new_block_irys(block_hash, block_number)
-    //     .await?;
+    // assert the block has been committed to the blockchain
+    genctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
-    // // only send forkchoice update to second node
-    // p1ctx.update_forkchoice(block_hash, block_hash).await?;
+    // only send forkchoice update to second node
+    p1ctx.update_forkchoice(block_hash, block_hash).await?;
 
-    // // expect second node advanced via p2p gossip
+    // expect second node advanced via p2p gossip
 
-    // p1ctx
-    //     .assert_new_block_irys(block_hash, block_number)
-    //     .await?;
+    p1ctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
-    // let a2 = p1ctx
-    //     .rpc
-    //     .inner
-    //     .eth_api()
-    //     .block_by_hash(block_hash, false)
-    //     .await?;
+    let a2 = p1ctx
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_hash(block_hash, false)
+        .await?;
 
-    // assert!(
-    //     a2.is_some_and(|b| b.header.hash == block_hash),
-    //     "Retrieved blocks hash is correct"
-    // );
+    assert!(
+        a2.is_some_and(|b| b.header.hash == block_hash),
+        "Retrieved blocks hash is correct"
+    );
 
-    // peer1.stop().await;
-    // peer2.stop().await;
-    // genesis.stop().await;
+    peer1.stop().await;
+    peer2.stop().await;
+    genesis.stop().await;
 
     Ok(())
 }

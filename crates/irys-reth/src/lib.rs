@@ -1872,11 +1872,7 @@ pub mod test_utils {
     ) -> Result<EthBuiltPayload, eyre::Error> {
         node.payload.timestamp += 1;
         let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
-        let key = DeterministicSystemTxKey::new(
-            attributes.parent_beacon_block_root.unwrap_or_default(),
-            node.payload.timestamp,
-            attributes.parent,
-        );
+        let key = DeterministicSystemTxKey::new(attributes.payload_id());
         system_tx_store.set_system_txs(key, system_txs);
         node.payload
             .payload_builder

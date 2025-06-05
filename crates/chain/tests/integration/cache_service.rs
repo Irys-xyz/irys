@@ -8,7 +8,6 @@ use irys_api_server::routes::tx::TxOffset;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::get_cache_size;
 use irys_database::tables::CachedChunks;
-use irys_reth_node_bridge::new_reth_context;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth::providers::BlockReader as _;
@@ -176,7 +175,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     .unwrap();
 
     // mine a couple blocks
-    let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = node.node_ctx.reth_node_adapter.clone();
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;

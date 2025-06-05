@@ -33,7 +33,7 @@ use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
 use tracing::error;
 
-use crate::{new_reth_context, unwind::unwind_to};
+use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
@@ -112,7 +112,7 @@ pub async fn run_node(
     latest_block: u64,
     random_ports: bool,
     system_tx_store: SystemTxStore,
-) -> eyre::Result<RethNodeHandle> {
+) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
     reth_config.network.discovery.disable_discovery = true;
@@ -148,12 +148,13 @@ pub async fn run_node(
         .with_launch_context(task_executor.clone());
 
     let handle = builder
-        .node(IrysEthereumNode { system_tx_store })
+        .node(IrysEthereumNode {
+            system_tx_store: system_tx_store.clone(),
+        })
         .launch_with_debug_capabilities()
         .await?;
 
-    let context = new_reth_context(handle.node.clone()).await?;
-
+    let context = IrysRethNodeAdapter::new(handle.node.clone(), system_tx_store).await?;
     // check that the latest height lines up with the expected latest height from irys
 
     let latest = context
@@ -174,5 +175,5 @@ pub async fn run_node(
         return Err(eyre::eyre!("Unwound blocks"));
     };
 
-    Ok(handle)
+    Ok((handle, context))
 }

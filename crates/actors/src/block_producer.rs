@@ -31,8 +31,7 @@ use irys_reth::system_tx::BalanceDecrement;
 use irys_reth::system_tx::BalanceIncrement;
 use irys_reth::system_tx::SystemTransaction;
 use irys_reth::system_tx::TransactionPacket;
-use irys_reth_node_bridge::ext::IrysRethPayloadTestContextExt;
-use irys_reth_node_bridge::{new_reth_context, node::RethNodeProvider};
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::IrysTransactionCommon;
 use irys_types::{
@@ -76,8 +75,6 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
-    /// Reference to the reth node
-    pub reth_provider: RethNodeProvider,
     /// Global config
     pub config: Config,
     /// The block reward curve
@@ -97,8 +94,8 @@ pub struct BlockProducerActor {
     pub blocks_remaining_for_test: Option<u64>,
     /// Tracing span
     pub span: Span,
-    /// System transaction store
-    pub system_tx_store: SystemTxStore,
+    /// Reth node adapter
+    pub reth_node_adapter: IrysRethNodeAdapter,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -167,13 +164,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             block_discovery_addr,
             epoch_service,
             service_senders,
-            reth_provider,
             config,
             vdf_steps_guard,
             block_tree_guard,
             price_oracle,
             reward_curve,
-            system_tx_store,
+            reth_node_adapter,
             ..
         } = self.clone();
 
@@ -407,9 +403,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             service_senders.ema.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;
 
-            // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-            let mut context =  new_reth_context(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
-
             // try to get block by hash
             let parent = {
                 let mut attempts = 0;
@@ -418,7 +411,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         break None;
                     }
 
-                    let result = context
+                    let result = reth_node_adapter
                         .rpc
                         .inner
                         .eth_api()
@@ -505,30 +498,19 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 withdrawals: None, // these should ALWAYS be none
                 parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             };
-            let attributes = EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, payload_attrs);
-            let key = DeterministicSystemTxKey::new(
-                prev_block_header.block_hash.into(),
-                timestamp,
-                prev_block_header.evm_block_hash,
-            );
-            system_tx_store.set_system_txs(key, system_txs);
-            let payload_id = context
-                .payload
-                .build_new_payload_irys(attributes.clone())
+            let payload = reth_node_adapter
+                .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, system_txs)
                 .await?;
 
-            let payload = context
-                .payload
-                .payload_builder
-                .best_payload(payload_id)
-                .await
-                .unwrap()?;
-
-            let block_hash = context.submit_payload(payload.clone()).await?;
-
             // trigger forkchoice update via engine api to commit the block to the blockchain
-            context
-                .update_forkchoice(prev_block_header.evm_block_hash, block_hash)
+            reth_node_adapter
+                .update_forkchoice_full(
+                    payload.block().hash(),
+                    // we mark this block as confirmed because we produced it
+                    Some(payload.block().hash()),
+                    // marking a block as finalized is handled by a different service
+                    None,
+                )
                 .await?;
 
             let evm_block_hash =  payload.block().hash();
@@ -616,7 +598,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
+            info!("Finished producing block {}, ({})", &block.block_hash.0.to_base58(),&block_height);
 
             Ok(Some((block.clone(), payload)))
         }

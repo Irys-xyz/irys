@@ -7,7 +7,6 @@ use alloy_provider::Provider;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
-use irys_reth_node_bridge::new_reth_context;
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use k256::ecdsa::SigningKey;
 use rand::Rng;
@@ -66,7 +65,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         ),
     ]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    let _reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
 
     let http_url = format!(
         "http://127.0.0.1:{}",

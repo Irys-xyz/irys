@@ -4899,6 +4899,7 @@ dependencies = [
  "irys-packing",
  "irys-price-oracle",
  "irys-primitives",
+ "irys-reth",
  "irys-reth-node-bridge",
  "irys-reward-curve",
  "irys-storage",

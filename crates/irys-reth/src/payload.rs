@@ -1,7 +1,6 @@
 //! A basic Ethereum payload builder implementation.
 
 use alloy_consensus::Transaction;
-use alloy_primitives::Keccak256;
 use lru::LruCache;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -10,7 +9,7 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
-use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes};
+use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadId};
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
@@ -39,9 +38,7 @@ type BestTransactionsIter =
 /// but not found in the cache.
 #[derive(Debug)]
 pub struct SystemTxRequest {
-    pub parent_beacon_block_root: FixedBytes<32>,
-    pub timestamp: u64,
-    pub parent_evm_block_hash: FixedBytes<32>,
+    pub payload_id: PayloadId,
     pub response_tx: oneshot::Sender<(Vec<EthPooledTransaction>, Instant)>,
 }
 
@@ -53,20 +50,11 @@ pub struct SystemTxStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DeterministicSystemTxKey(FixedBytes<32>);
+pub struct DeterministicSystemTxKey(PayloadId);
 
 impl DeterministicSystemTxKey {
-    pub fn new(
-        parent_beacon_block_root: FixedBytes<32>,
-        timestamp: u64,
-        parent_evm_block_hash: FixedBytes<32>,
-    ) -> Self {
-        let mut hasher = Keccak256::new();
-        hasher.update(parent_beacon_block_root.0);
-        hasher.update(timestamp.to_be_bytes());
-        hasher.update(parent_evm_block_hash.0);
-        let hash = hasher.finalize();
-        Self(hash)
+    pub fn new(payload_id: PayloadId) -> Self {
+        Self(payload_id)
     }
 }
 
@@ -110,13 +98,10 @@ impl SystemTxStore {
     /// This version blocks until system transactions are available or timeout occurs
     pub async fn get_system_txs_blocking(
         &self,
-        parent_beacon_block_root: FixedBytes<32>,
-        timestamp: u64,
-        parent_block_hash: FixedBytes<32>,
+        payload_id: PayloadId,
         timeout: Duration,
     ) -> (Vec<EthPooledTransaction>, Instant) {
-        let key =
-            DeterministicSystemTxKey::new(parent_beacon_block_root, timestamp, parent_block_hash);
+        let key = DeterministicSystemTxKey::new(payload_id);
         // First attempt to get from cache
         {
             let mut store = self.inner.lock().unwrap();
@@ -129,9 +114,7 @@ impl SystemTxStore {
         if let Some(request_tx) = &self.request_tx {
             let (response_tx, response_rx) = oneshot::channel();
             let request = SystemTxRequest {
-                parent_beacon_block_root,
-                timestamp,
-                parent_evm_block_hash: parent_block_hash,
+                payload_id,
                 response_tx,
             };
 
@@ -294,18 +277,13 @@ where
     pub fn best_transactions_with_attributes(
         &self,
         attributes: BestTransactionsAttributes,
-        parent_beacon_block_root: FixedBytes<32>,
-        timestamp: u64,
-        parent_evm_block_hash: FixedBytes<32>,
+        payload_id: PayloadId,
     ) -> BestTransactionsIter {
         // Get system transactions from the store
-        let (system_txs, timestamp) =
-            futures::executor::block_on(self.system_tx_store.get_system_txs_blocking(
-                parent_beacon_block_root,
-                timestamp,
-                parent_evm_block_hash,
-                Duration::from_secs(1),
-            ));
+        let (system_txs, timestamp) = futures::executor::block_on(
+            self.system_tx_store
+                .get_system_txs_blocking(payload_id, Duration::from_secs(1)),
+        );
 
         // Get pool transactions iterator
         let pool_txs = self.pool.best_transactions_with_attributes(attributes);
@@ -331,28 +309,14 @@ where
         &self,
         args: BuildArguments<EthPayloadBuilderAttributes, EthBuiltPayload>,
     ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
-        tracing::info!("try_build");
-        let parent_beacon_block_root = args
-            .config
-            .attributes
-            .parent_beacon_block_root
-            .unwrap_or_default();
-        let timestamp = args.config.attributes.timestamp;
-        let parent_evm_block_hash = args.config.attributes.parent;
+        let payload_id = args.config.attributes.payload_id();
         let result = default_ethereum_payload(
             self.evm_config.clone(),
             self.client.clone(),
             self.pool.clone(),
             self.builder_config.clone(),
             args,
-            |attributes| {
-                self.best_transactions_with_attributes(
-                    attributes,
-                    parent_beacon_block_root,
-                    timestamp,
-                    parent_evm_block_hash,
-                )
-            },
+            |attributes| self.best_transactions_with_attributes(attributes, payload_id),
         )?;
         Ok(result)
     }
@@ -372,13 +336,7 @@ where
         &self,
         config: PayloadConfig<Self::Attributes>,
     ) -> Result<EthBuiltPayload, PayloadBuilderError> {
-        tracing::info!("build_empty_payload");
-        let parent_beacon_block_root = config
-            .attributes
-            .parent_beacon_block_root
-            .unwrap_or_default();
-        let timestamp = config.attributes.timestamp;
-        let parent_evm_block_hash = config.attributes.parent;
+        let payload_id = config.attributes.payload_id();
         let args = BuildArguments::new(Default::default(), config, Default::default(), None);
 
         default_ethereum_payload(
@@ -387,14 +345,7 @@ where
             self.pool.clone(),
             self.builder_config.clone(),
             args,
-            |attributes| {
-                self.best_transactions_with_attributes(
-                    attributes,
-                    parent_beacon_block_root,
-                    timestamp,
-                    parent_evm_block_hash,
-                )
-            },
+            |attributes| self.best_transactions_with_attributes(attributes, payload_id),
         )?
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
@@ -424,17 +375,10 @@ mod tests {
         });
 
         // Test blocking version
-        let parent_beacon_block_root = FixedBytes::from([5; 32]);
-        let timestamp = 1234567890;
-        let parent_evm_block_hash = FixedBytes::from([13; 32]);
+        let payload_id = PayloadId::new([5; 8]);
 
         let (txs, _) = store_clone
-            .get_system_txs_blocking(
-                parent_beacon_block_root,
-                timestamp,
-                parent_evm_block_hash,
-                Duration::from_millis(500),
-            )
+            .get_system_txs_blocking(payload_id, Duration::from_millis(500))
             .await;
         assert!(txs.is_empty()); // Should get empty response from handler
 

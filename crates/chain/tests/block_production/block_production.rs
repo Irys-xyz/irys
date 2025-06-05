@@ -9,9 +9,7 @@ use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable;
 use irys_reth_node_bridge::irys_reth::system_tx::{
     system_tx_topics, SystemTransaction, TransactionPacket,
 };
-use irys_reth_node_bridge::{
-    adapter::new_reth_context, reth_e2e_test_utils::transaction::TransactionTestContext,
-};
+use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_types::IrysTransactionCommon;
 use irys_types::{irys::IrysSigner, NodeConfig};
 use reth::providers::{AccountReader, ReceiptProvider, TransactionsProvider};
@@ -55,9 +53,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .await?;
 
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
-    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
-        .await
-        .unwrap();
+    let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
         .inner
         .provider
@@ -142,7 +138,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testnet();
     let node = IrysNodeTest::new_genesis(config).start().await;
-    let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     for i in 1..10 {
         info!("manually producing block {}", i);
@@ -172,7 +168,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
 
     node.node_ctx.start_mining().await?;
-    let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     for i in 1..10 {
         node.wait_until_height(i + 1, 60).await?;
@@ -196,7 +192,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
 
     let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
-    let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     //check reth for built block
     let reth_block = reth_context
@@ -240,7 +236,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         },
     )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
-    let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = node.node_ctx.reth_node_adapter.clone();
     let _recipient_init_balance = reth_context
         .rpc
         .get_balance(recipient.address(), None)
@@ -338,7 +334,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await;
     let node = node.start().await;
 
-    let reth_context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
@@ -428,9 +424,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 
     // Mine a block - should only contain block reward transaction
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
-    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
-        .await
-        .unwrap();
+    let context = node.node_ctx.reth_node_adapter.clone();
 
     // Verify block transactions - should only contain block reward system transaction
     let block_txs = reth_exec_env
@@ -511,9 +505,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
 
     // Mine a block - should only contain block reward transaction
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
-    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
-        .await
-        .unwrap();
+    let context = node.node_ctx.reth_node_adapter.clone();
 
     // Verify block transactions - should only contain block reward system transaction
     let block_txs = reth_exec_env
@@ -595,9 +587,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
 
     // Mine a block - should contain block reward and storage fee transactions
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
-    let context = new_reth_context(node.node_ctx.reth_handle.clone().into())
-        .await
-        .unwrap();
+    let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
         .inner
         .provider
