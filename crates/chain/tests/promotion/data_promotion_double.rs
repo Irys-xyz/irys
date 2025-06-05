@@ -60,7 +60,6 @@ async fn heavy_double_root_data_promotion_test() {
     .await
     .unwrap();
 
-    let block1 = mine_block(&node.node_ctx).await.unwrap().unwrap();
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
@@ -319,10 +318,6 @@ async fn heavy_double_root_data_promotion_test() {
     // Part 2
     debug!("PHASE 2");
 
-    // mine 1 block
-    let blk = mine_block(&node.node_ctx).await.unwrap().unwrap();
-    debug!("P2 block {}", &blk.0.height);
-
     // ensure the ingress proof still exists
     let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 1);
@@ -536,7 +531,6 @@ async fn heavy_double_root_data_promotion_test() {
 
     // println!("\n{:?}", unpacked_chunk);
 
-    mine_blocks(&node.node_ctx, 5).await.unwrap();
     // ensure the ingress proof is gone
     let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 0);
