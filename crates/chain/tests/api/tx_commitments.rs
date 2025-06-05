@@ -97,18 +97,6 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     )
     .await?;
 
-    let api_state = node.node_ctx.get_api_state();
-    let _db = api_state.db.clone();
-
-    // Start the API server
-    let _app = actix_web::test::init_service(
-        App::new()
-            .wrap(Logger::default())
-            .app_data(actix_web::web::Data::new(api_state))
-            .service(routes()),
-    )
-    .await;
-
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
     let stake_tx = CommitmentTransaction {
