@@ -43,9 +43,9 @@ impl VdfState {
         )
     }
 
-    pub fn store_step(&mut self, seed: Seed, global_step: u64) {
+    pub fn store_step(&mut self, seed: Seed, global_step: u64) -> u64 {
         if self.global_step >= global_step {
-            return;
+            return self.global_step;
         }
         if self.seeds.len() >= self.capacity {
             self.seeds.pop_front();
@@ -56,6 +56,7 @@ impl VdfState {
         } else {
             panic!("VDF steps can't have gaps and have to be inserted in sequence");
         }
+        global_step
     }
 
     /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state

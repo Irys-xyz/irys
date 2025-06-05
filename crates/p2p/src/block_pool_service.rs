@@ -11,7 +11,7 @@ use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::StepWithCheckpoints;
+use irys_vdf::VdfStep;
 use std::collections::HashMap;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info};
@@ -44,7 +44,7 @@ where
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
-    pub(crate) vdf_sender: Option<Sender<StepWithCheckpoints>>,
+    pub(crate) vdf_sender: Option<Sender<VdfStep>>,
     pub(crate) vdf_state: Option<VdfStateReadonly>,
 
     sync_state: SyncState,
@@ -109,7 +109,7 @@ where
         db: DatabaseProvider,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
-        vdf_sender: Option<Sender<StepWithCheckpoints>>,
+        vdf_sender: Option<Sender<VdfStep>>,
         sync_state: SyncState,
         vdf_state: VdfStateReadonly,
     ) -> Self {
@@ -175,6 +175,14 @@ where
                         current_block_hash.0.to_base58()
                     );
 
+                    let prev_step = block_header.vdf_limiter_info.global_step_number - block_header.vdf_limiter_info.steps.len() as u64;
+                    if let Err(vdf_error) = wait_for_vdf_step(&vdf_service_sender, prev_step).await {
+                        self_addr.do_send(RemoveBlockFromPool {
+                            block_hash: block_header.block_hash,
+                        });
+                        return Err(BlockPoolError::OtherInternal(format!("Can't process VDF steps for block: {:?}", vdf_error)))
+                    };
+
                     // process vdf steps from block
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
 
@@ -185,7 +193,7 @@ where
 
                     // wait to be sure the FF steps are saved to VdfState before we try to discover the block that requires them
                     let desired_step = block_header.vdf_limiter_info.global_step_number;
-                    if let Err(vdf_error) = wait_for_vdf_step(vdf_service_sender, desired_step).await {
+                    if let Err(vdf_error) = wait_for_vdf_step(&vdf_service_sender, desired_step).await {
                         self_addr.do_send(RemoveBlockFromPool {
                             block_hash: block_header.block_hash,
                         });

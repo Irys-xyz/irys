@@ -60,7 +60,7 @@ use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
     state::{AtomicVdfState, VdfStateReadonly},
     vdf::run_vdf,
-    StepWithCheckpoints,
+    VdfStep,
 };
 use reth::{
     chainspec::ChainSpec,
@@ -1136,7 +1136,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        new_seed_rx: mpsc::Receiver<StepWithCheckpoints>,
+        new_seed_rx: mpsc::Receiver<VdfStep>,
         vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,

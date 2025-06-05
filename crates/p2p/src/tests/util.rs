@@ -26,7 +26,7 @@ use irys_types::{
 };
 use irys_vdf::state::test_helpers::mocked_vdf_service;
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::StepWithCheckpoints;
+use irys_vdf::VdfStep;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -381,7 +381,7 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
-        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<StepWithCheckpoints>(1);
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<VdfStep>(1);
         let vdf_state = mocked_vdf_service(&self.config).await;
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
         gossip_service.sync_state.finish_sync();

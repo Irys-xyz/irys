@@ -93,13 +93,13 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     peer1_node.wait_for_packing(seconds_to_wait).await;
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
-    let chunks1 = vec![[10; 32], [20; 32], [30; 32]];
+    let chunks1 = [[10; 32], [20; 32], [30; 32]];
     let data1: Vec<u8> = chunks1.concat();
 
-    let chunks2 = vec![[40; 32], [50; 32], [60; 32]];
+    let chunks2 = [[40; 32], [50; 32], [60; 32]];
     let data2: Vec<u8> = chunks2.concat();
 
-    let chunks3 = vec![[70; 32], [80; 32], [90; 32]];
+    let chunks3 = [[70; 32], [80; 32], [90; 32]];
     let data3: Vec<u8> = chunks3.concat();
 
     // Post a transaction that should be gossiped to all peers
@@ -139,12 +139,12 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     let peer2_block = peer2_node.get_block_by_height(3).await?;
 
     let peer1_block_txids = &peer1_block.data_ledgers[DataLedger::Submit].tx_ids.0;
-    assert_eq!(peer1_block_txids.contains(&txid), true);
-    assert_eq!(peer1_block_txids.contains(&peer1_tx.header.id), true);
+    assert!(peer1_block_txids.contains(&txid));
+    assert!(peer1_block_txids.contains(&peer1_tx.header.id));
 
     let peer2_block_txids = &peer2_block.data_ledgers[DataLedger::Submit].tx_ids.0;
-    assert_eq!(peer2_block_txids.contains(&txid), true);
-    assert_eq!(peer2_block_txids.contains(&peer2_tx.header.id), true);
+    assert!(peer2_block_txids.contains(&txid));
+    assert!(peer2_block_txids.contains(&peer2_tx.header.id));
 
     // Assert both blocks have the same cumulative difficulty this will ensure
     // that the peers prefer the first block they saw with this cumulative difficulty,

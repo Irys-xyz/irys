@@ -1,6 +1,6 @@
 use crate::state::VdfStateReadonly;
-use crate::StepWithCheckpoints;
-use irys_types::{H256List, VDFLimiterInfo};
+use crate::VdfStep;
+use irys_types::VDFLimiterInfo;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::time::sleep;
@@ -8,7 +8,7 @@ use tracing::error;
 
 /// Polls VDF service for `VdfState` until `global_step` >= `desired_step`, with a 30s timeout.
 pub async fn wait_for_vdf_step(
-    vdf_steps_guard: VdfStateReadonly,
+    vdf_steps_guard: &VdfStateReadonly,
     desired_step: u64,
 ) -> eyre::Result<()> {
     let seconds_to_wait = 30;
@@ -29,25 +29,24 @@ pub async fn wait_for_vdf_step(
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 pub async fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: VDFLimiterInfo,
-    vdf_sender: Sender<StepWithCheckpoints>,
+    vdf_fast_forward_sender: Sender<VdfStep>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;
     let len = vdf_limiter_info.steps.len();
-    let block_start_step = block_end_step - len as u64;
+    let block_start_step = block_end_step - len as u64 + 1;
     tracing::trace!(
         "VDF FF: block start-end step: {}-{}",
         block_start_step,
         block_end_step
     );
     for (i, hash) in vdf_limiter_info.steps.iter().enumerate() {
-        //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-        let mining_seed = StepWithCheckpoints {
-            step: *hash,
-            global_step_number: block_start_step + i as u64,
-            checkpoints: H256List::new(),
-        };
-
-        if let Err(e) = vdf_sender.send(mining_seed).await {
+        if let Err(e) = vdf_fast_forward_sender
+            .send(VdfStep {
+                step: *hash,
+                global_step_number: block_start_step + i as u64,
+            })
+            .await
+        {
             error!("VDF FF: VDF Send Error: {:?}", e);
         }
     }

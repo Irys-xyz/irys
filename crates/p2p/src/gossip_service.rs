@@ -25,7 +25,7 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::StepWithCheckpoints;
+use irys_vdf::VdfStep;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
@@ -159,7 +159,7 @@ impl P2PService {
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
-        vdf_sender: Sender<StepWithCheckpoints>,
+        vdf_sender: Sender<VdfStep>,
         listener: TcpListener,
         vdf_state: VdfStateReadonly,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
