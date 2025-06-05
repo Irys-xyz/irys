@@ -18,7 +18,7 @@ use tokio::{
     sync::mpsc::Sender,
     time::{sleep, Duration},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -157,6 +157,21 @@ impl VdfStateReadonly {
         Err(eyre::eyre!(
             "Max. retries reached while waiting to get VDF steps!"
         ))
+    }
+
+    /// Wait for a specific step to be available for n seconds. This doesn't have the timeout.
+    /// Instead, we should check that the `desired_step_number` is a reasonable number of steps
+    /// to wait for. This should be ensured before calling this function
+    pub async fn wait_for_step(&self, desired_step_number: u64) {
+        debug!("Waiting for step {}", desired_step_number);
+        let retries_per_second = 20;
+        loop {
+            if self.read().global_step >= desired_step_number {
+                debug!("Step {} is available", desired_step_number);
+                return;
+            }
+            sleep(Duration::from_millis(1000 / retries_per_second)).await;
+        }
     }
 }
 

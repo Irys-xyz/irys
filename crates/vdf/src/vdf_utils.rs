@@ -28,7 +28,7 @@ pub async fn wait_for_vdf_step(
 
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 pub async fn fast_forward_vdf_steps_from_block(
-    vdf_limiter_info: VDFLimiterInfo,
+    vdf_limiter_info: &VDFLimiterInfo,
     vdf_fast_forward_sender: UnboundedSender<VdfStep>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;

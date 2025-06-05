@@ -4,8 +4,8 @@ use actix::{
 use irys_types::{Config, IrysBlockHeader};
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use std::sync::Arc;
-use tracing::error;
-
+use tracing::{debug, error};
+use irys_vdf::vdf_utils::{fast_forward_vdf_steps_from_block, wait_for_vdf_step};
 use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeServiceMessage, ValidationResult},
@@ -13,6 +13,7 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard,
     services::ServiceSenders,
 };
+use crate::block_validation::recall_recall_range_is_valid;
 
 #[derive(Debug)]
 pub struct ValidationService {
@@ -81,8 +82,10 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let miner_address = block.miner_address;
         let block_hash = block.block_hash;
         let vdf_info = block.vdf_limiter_info.clone();
+        let vdf_to_fast_forward = vdf_info.clone();
         let poa = block.poa.clone();
         let vdf_steps_guard = self.vdf_state_readonly.clone();
+        let vdf_state = self.vdf_state_readonly.clone();
 
         // Spawn VDF validation first
         let vdf_config = self.config.consensus.vdf.clone();
@@ -93,10 +96,28 @@ impl Handler<RequestValidationMessage> for ValidationService {
         // Wait for results before processing next message
         let config = self.config.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
+        let vdf_fast_forward_sender = self.service_senders.vdf_fast_forward.clone();
         ctx.wait(
             async move {
+                vdf_state.wait_for_step(vdf_to_fast_forward.global_step_number.saturating_sub(vdf_to_fast_forward.steps.len() as u64)).await;
+
                 let validation_result = match vdf_future.await.unwrap() {
                     Ok(_) => {
+                        fast_forward_vdf_steps_from_block(&vdf_to_fast_forward, vdf_fast_forward_sender).await;
+                        vdf_state.wait_for_step(vdf_to_fast_forward.global_step_number).await;
+
+                        // Recall range check
+                        if let Err(report) = recall_recall_range_is_valid(&block, &config.consensus, &vdf_state).await {
+                            error!("Recall range check failed: {}", report);
+                            block_tree_sender
+                                .send(BlockTreeServiceMessage::BlockValidationFinished {
+                                    block_hash,
+                                    validation_result: ValidationResult::Invalid,
+                                })
+                                .unwrap();
+                            return;
+                        }
+
                         // VDF passed, now spawn and run PoA validation
                         let poa_future = tokio::task::spawn_blocking(move || {
                             poa_is_valid(
