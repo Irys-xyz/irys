@@ -179,14 +179,16 @@ async fn heavy_double_root_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
+    //
     let unconfirmed_promotions = vec![txs[0].header.id];
     let result = node
         .wait_for_ingress_proofs(unconfirmed_promotions, 20)
         .await;
     assert!(result.is_ok());
 
-    // wait for the first set of chunks chunk to appear in the publish ledger
-    for _attempts in 1..20 {
+    // wait for the first set of chunks to appear in the publish ledger
+    let mut attempts = 20;
+    loop {
         if let Some(_packed_chunk) =
             get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
         {
@@ -194,10 +196,16 @@ async fn heavy_double_root_data_promotion_test() {
             break;
         }
         sleep(delay).await;
+
+        if attempts == 0 {
+            panic!("first set of chunks did not appear");
+        }
+        attempts -= 1;
     }
 
     // wait for the second set of chunks to appear in the publish ledger
-    for _attempts in 1..20 {
+    let mut attempts = 20;
+    loop {
         if let Some(_packed_chunk) =
             get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
         {
@@ -205,6 +213,10 @@ async fn heavy_double_root_data_promotion_test() {
             break;
         }
         sleep(delay).await;
+        if attempts == 0 {
+            panic!("second set of chunks did not appear");
+        }
+        attempts -= 1;
     }
 
     let db = &node.node_ctx.db.clone();
