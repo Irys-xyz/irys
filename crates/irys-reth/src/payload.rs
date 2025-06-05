@@ -20,7 +20,7 @@ use reth_transaction_pool::{
     TransactionPool, ValidPoolTransaction,
 };
 use revm_primitives::FixedBytes;
-use std::num::NonZeroUsize;
+use std::{collections::HashSet, num::NonZeroUsize};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -184,6 +184,7 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
 pub struct CombinedTransactionIterator {
     /// System transactions to yield first
     system_txs: VecDeque<Arc<ValidPoolTransaction<EthPooledTransaction>>>,
+    system_tx_hashes: HashSet<FixedBytes<32>>,
     /// Pool transactions iterator
     pool_iter: BestTransactionsIter,
 }
@@ -195,6 +196,7 @@ impl CombinedTransactionIterator {
         system_txs: Vec<EthPooledTransaction>,
         pool_iter: BestTransactionsIter,
     ) -> Self {
+        tracing::info!("new combined iterator");
         let system_txs = system_txs
             .into_iter()
             .map(|tx| ValidPoolTransaction {
@@ -207,9 +209,14 @@ impl CombinedTransactionIterator {
             })
             .map(Arc::new)
             .collect::<VecDeque<_>>();
+        let system_tx_hashes = system_txs
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect::<HashSet<_>>();
 
         Self {
             system_txs,
+            system_tx_hashes,
             pool_iter,
         }
     }
@@ -231,17 +238,13 @@ impl Iterator for CombinedTransactionIterator {
 
 impl BestTransactions for CombinedTransactionIterator {
     fn mark_invalid(&mut self, transaction: &Self::Item, kind: InvalidPoolTransactionError) {
-        // For system transactions, we just remove them from our queue
-        // as they cannot be marked invalid in the same way as pool transactions
-        self.system_txs.retain(|tx| {
-            warn!(
-                "mark_invalid: tx: {:?}, tx.hash(): {:?}, transaction.hash(): {:?}",
-                tx,
-                tx.hash(),
-                transaction.hash()
-            );
-            tx.hash() != transaction.hash()
-        });
+        if self.system_tx_hashes.contains(transaction.hash()) {
+            // System txs are already removed from the queue, so we don't need to do anything
+            // NOTE FOR READER: if you refactor the code here, ensure that we *never*
+            // try to mark a system tx as invalid by calling the underlying pool_iter.
+            // This for some reason `clear` the whole pool_iter.
+            return;
+        }
 
         // For pool transactions, delegate to the pool iterator
         self.pool_iter.mark_invalid(transaction, kind);
@@ -297,9 +300,6 @@ where
         timestamp: u64,
         parent_evm_block_hash: FixedBytes<32>,
     ) -> BestTransactionsIter {
-        // Get pool transactions iterator
-        let pool_txs = self.pool.best_transactions_with_attributes(attributes);
-
         // Get system transactions from the store
         let (system_txs, timestamp) =
             futures::executor::block_on(self.system_tx_store.get_system_txs_blocking(
@@ -308,6 +308,9 @@ where
                 parent_evm_block_hash,
                 Duration::from_secs(1),
             ));
+
+        // Get pool transactions iterator
+        let pool_txs = self.pool.best_transactions_with_attributes(attributes);
 
         // Create combined iterator
         Box::new(CombinedTransactionIterator::new(
@@ -330,6 +333,7 @@ where
         &self,
         args: BuildArguments<EthPayloadBuilderAttributes, EthBuiltPayload>,
     ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
+        tracing::info!("try_build");
         let parent_beacon_block_root = args
             .config
             .attributes
@@ -351,8 +355,8 @@ where
                     parent_evm_block_hash,
                 )
             },
-        );
-        result
+        )?;
+        Ok(result)
     }
 
     fn on_missing_payload(
@@ -370,6 +374,7 @@ where
         &self,
         config: PayloadConfig<Self::Attributes>,
     ) -> Result<EthBuiltPayload, PayloadBuilderError> {
+        tracing::info!("build_empty_payload");
         let parent_beacon_block_root = config
             .attributes
             .parent_beacon_block_root
