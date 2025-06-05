@@ -21,22 +21,21 @@ use crate::{
 use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
-use irys_actors::{
-    block_discovery::BlockDiscoveryFacade, broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::MempoolFacade, vdf_service::VdfServiceMessage,
-};
+use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
+use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::StepWithCheckpoints;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Span};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -160,9 +159,9 @@ impl P2PService {
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
-        vdf_sender: Sender<BroadcastMiningSeed>,
+        vdf_sender: Sender<StepWithCheckpoints>,
         listener: TcpListener,
-        vdf_service_sender: UnboundedSender<VdfServiceMessage>,
+        vdf_state: VdfStateReadonly,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -176,7 +175,7 @@ impl P2PService {
             block_discovery.clone(),
             Some(vdf_sender),
             self.sync_state.clone(),
-            vdf_service_sender,
+            vdf_state,
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =
@@ -190,6 +189,7 @@ impl P2PService {
             gossip_client: self.client.clone(),
             peer_list_service: peer_list.clone(),
             sync_state: self.sync_state.clone(),
+            span: Span::current().clone(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 

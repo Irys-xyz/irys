@@ -10,6 +10,8 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
+use irys_actors::block_tree_service::ReorgEvent;
+use irys_actors::mempool_service::MempoolTxs;
 use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
@@ -17,7 +19,6 @@ use irys_actors::{
     block_validation,
     mempool_service::{MempoolServiceMessage, TxIngressError},
     packing::wait_for_packing,
-    vdf_service::VdfStepsReadGuard,
     SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
@@ -41,6 +42,7 @@ use irys_types::{
     IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
     NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
+use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
 use reth_db::cursor::*;
@@ -56,7 +58,7 @@ use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
-    vdf_steps_guard: VdfStepsReadGuard,
+    vdf_steps_guard: VdfStateReadonly,
     config: &Config,
 ) -> SolutionContext {
     let max_retries = 20;
@@ -394,6 +396,31 @@ impl IrysNodeTest<IrysNodeCtx> {
             .1
     }
 
+    pub async fn wait_for_reorg(&self, seconds_to_wait: usize) -> eyre::Result<ReorgEvent> {
+        // Subscribe to reorg events
+        let mut reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
+
+        // Wait for reorg event with timeout
+        match tokio::time::timeout(Duration::from_secs(seconds_to_wait as u64), reorg_rx.recv())
+            .await
+        {
+            Ok(Ok(reorg_event)) => {
+                info!(
+                    "Reorg detected: {} blocks orphaned at height {}, new tip: {}",
+                    reorg_event.old_fork.len(),
+                    reorg_event.fork_parent.height,
+                    reorg_event.new_tip.0.to_base58()
+                );
+                Ok(reorg_event)
+            }
+            Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
+            Err(_) => Err(eyre::eyre!(
+                "Timeout: No reorg event received within {} seconds",
+                seconds_to_wait
+            )),
+        }
+    }
+
     pub async fn mine_block(&self) -> eyre::Result<()> {
         self.mine_blocks(1).await
     }
@@ -457,6 +484,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             info!("transaction found in mempool after {} retries", &retries);
             Ok(())
         }
+    }
+
+    pub async fn get_best_mempool_tx(&self) -> MempoolTxs {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBestMempoolTxs(tx))
+            .expect("to send MempoolServiceMessage");
+        rx.await.expect("to receive best transactions from mempool")
     }
 
     pub fn peer_address(&self) -> PeerAddress {
@@ -605,6 +642,62 @@ impl IrysNodeTest<IrysNodeCtx> {
             cfg,
             temp_dir: self.temp_dir,
         }
+    }
+
+    pub async fn post_storage_tx_without_gossip(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        let tx = self.post_storage_tx(anchor, data, signer).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        tx
+    }
+
+    pub async fn post_storage_tx(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let tx = signer
+            .create_transaction(data, Some(anchor))
+            .expect("Expect to create a storage transaction from the data");
+        let tx = signer
+            .sign_transaction(tx)
+            .expect("to sign the storage transaction");
+
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/tx", api_uri);
+        let mut response = client
+            .post(url)
+            .send_json(&tx.header) // Send the tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        if response.status() != StatusCode::OK {
+            // Read the response body
+            let body_bytes = response.body().await.expect("Failed to read response body");
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            panic!(
+                "Response status: {} - {}\nRequest Body: {}",
+                response.status(),
+                body_str,
+                serde_json::to_string_pretty(&tx.header).unwrap(),
+            );
+        } else {
+            info!(
+                "Response status: {}\n{}",
+                response.status(),
+                serde_json::to_string_pretty(&tx).unwrap()
+            );
+        }
+        tx
     }
 
     pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {

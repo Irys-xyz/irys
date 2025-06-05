@@ -6,7 +6,6 @@ use actix::Actor;
 use async_trait::async_trait;
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::vdf_service::{VdfServiceMessage, VdfState, VdfStepsReadGuard};
 use irys_api_client::ApiClient;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, insert_block_header};
@@ -17,10 +16,12 @@ use irys_types::{
     Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
     NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
+use irys_vdf::state::test_helpers::mocked_vdf_service;
+use irys_vdf::state::VdfStateReadonly;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::debug;
 
 #[derive(Clone, Default, Debug)]
 struct MockApiClient {
@@ -132,7 +133,8 @@ async fn should_process_block() {
     let peer_addr = peer_list_service.start();
 
     let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
-    let (vdf_service_tx, mut vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
+    let vdf_state = mocked_vdf_service(&config).await;
+    let vdf_state_readonly = VdfStateReadonly::new(vdf_state.clone());
     let sync_state = SyncState::new(false);
     let service = BlockPoolService::new_with_client(
         db.clone(),
@@ -140,7 +142,7 @@ async fn should_process_block() {
         block_discovery_stub.clone(),
         Some(vdf_tx),
         sync_state,
-        vdf_service_tx,
+        vdf_state_readonly,
     );
     let addr = service.start();
 
@@ -188,17 +190,6 @@ async fn should_process_block() {
         "Previous block hash: {:?}",
         test_header.previous_block_hash.0.to_base58()
     );
-
-    tokio::spawn(async move {
-        let message = vdf_service_rx.recv().await.expect("to receive message");
-        if let VdfServiceMessage::GetVdfStateMessage { response } = message {
-            response
-                .send(VdfStepsReadGuard::new(Arc::new(RwLock::new(
-                    VdfState::default(),
-                ))))
-                .expect("to send a response");
-        }
-    });
 
     addr.send(ProcessBlock {
         header: test_header.clone(),
@@ -314,26 +305,9 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("can't send message to peer list");
 
     let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
-    let (vdf_service_tx, mut vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
+    let vdf_state = mocked_vdf_service(&config).await;
+    let vdf_state_readonly = VdfStateReadonly::new(vdf_state.clone());
     let sync_state = SyncState::new(false);
-
-    tokio::spawn(async move {
-        debug!("Started vdf listener");
-        while let Some(message) = vdf_service_rx.recv().await {
-            match message {
-                VdfServiceMessage::GetVdfStateMessage { response } => {
-                    response
-                        .send(VdfStepsReadGuard::new(Arc::new(RwLock::new(
-                            VdfState::default(),
-                        ))))
-                        .expect("to send a response");
-                }
-                _ => {
-                    error!("Unexpected message")
-                }
-            }
-        }
-    });
 
     let service = BlockPoolService::new_with_client(
         db.clone(),
@@ -341,7 +315,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_discovery_stub.clone(),
         Some(vdf_tx),
         sync_state,
-        vdf_service_tx,
+        vdf_state_readonly,
     );
     let addr = service.start();
 

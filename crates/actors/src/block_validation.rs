@@ -5,7 +5,6 @@ use crate::{
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
-    vdf_service::VdfStepsReadGuard,
 };
 use base58::ToBase58;
 use eyre::ensure;
@@ -17,6 +16,7 @@ use irys_types::{
     DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
+use irys_vdf::state::VdfStateReadonly;
 use openssl::sha;
 use tracing::{debug, info};
 
@@ -27,7 +27,7 @@ pub async fn prevalidate_block(
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
-    steps_guard: VdfStepsReadGuard,
+    steps_guard: VdfStateReadonly,
     ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(
@@ -302,7 +302,7 @@ pub fn solution_hash_is_valid(
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
-    steps_guard: &VdfStepsReadGuard,
+    steps_guard: &VdfStateReadonly,
 ) -> eyre::Result<()> {
     let num_recall_ranges_in_partition =
         irys_efficient_sampling::num_recall_ranges_in_partition(config);
@@ -329,7 +329,7 @@ pub async fn recall_recall_range_is_valid(
 pub async fn get_recall_range(
     step_num: u64,
     config: &ConsensusConfig,
-    steps_guard: &VdfStepsReadGuard,
+    steps_guard: &VdfStateReadonly,
     partition_hash: &H256,
 ) -> eyre::Result<usize> {
     let num_recall_ranges_in_partition =

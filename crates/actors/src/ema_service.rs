@@ -102,7 +102,7 @@ impl EmaService {
     /// Spawn a new EMA service
     pub fn spawn_service(
         exec: &TaskExecutor,
-        block_tree_read_guard: BlockTreeReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
         rx: UnboundedReceiver<EmaServiceMessage>,
         config: &Config,
     ) -> JoinHandle<()> {
@@ -110,13 +110,13 @@ impl EmaService {
         let token_price_safe_range = config.consensus.token_price_safe_range;
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
             let confirmed_price_ctx = PriceCacheContext::<Confirmed>::from_chain(
-                block_tree_read_guard.clone(),
+                block_tree_guard.clone(),
                 blocks_in_interval,
             )
             .await
             .expect("initial PriceCacheContext restoration failed");
             let optimistic_price_ctx = PriceCacheContext::<Optimistic>::from_chain(
-                block_tree_read_guard.clone(),
+                block_tree_guard.clone(),
                 blocks_in_interval,
             )
             .await
@@ -130,7 +130,7 @@ impl EmaService {
                     confirmed_price_ctx,
                     token_price_safe_range,
                     blocks_in_interval,
-                    block_tree_read_guard,
+                    block_tree_read_guard: block_tree_guard,
                 },
             };
             ema_service

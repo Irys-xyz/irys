@@ -1,16 +1,17 @@
-use crate::vdf_service::{vdf_steps_are_valid, VdfStepsReadGuard};
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, Supervised, SystemService, WrapFuture,
 };
 use irys_types::{Config, IrysBlockHeader};
+use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use std::sync::Arc;
 use tracing::error;
 
 use crate::{
     block_index_service::BlockIndexReadGuard,
-    block_tree_service::{BlockTreeService, ValidationResult, ValidationResultMessage},
+    block_tree_service::{BlockTreeServiceMessage, ValidationResult},
     block_validation::poa_is_valid,
     epoch_service::PartitionAssignmentsReadGuard,
+    services::ServiceSenders,
 };
 
 #[derive(Debug)]
@@ -20,9 +21,11 @@ pub struct ValidationService {
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// VDF steps read guard
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_state_readonly: VdfStateReadonly,
     /// Reference to global config for node
     pub config: Config,
+    /// Service channels
+    pub service_senders: ServiceSenders,
 }
 
 impl Default for ValidationService {
@@ -36,14 +39,16 @@ impl ValidationService {
     pub fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        vdf_steps_guard: VdfStepsReadGuard,
+        vdf_state_readonly: VdfStateReadonly,
         config: &Config,
+        service_senders: &ServiceSenders,
     ) -> Self {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            vdf_steps_guard,
+            vdf_state_readonly,
             config: config.clone(),
+            service_senders: service_senders.clone(),
         }
     }
 }
@@ -77,7 +82,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let block_hash = block.block_hash;
         let vdf_info = block.vdf_limiter_info.clone();
         let poa = block.poa.clone();
-        let vdf_steps_guard = self.vdf_steps_guard.clone();
+        let vdf_steps_guard = self.vdf_state_readonly.clone();
 
         // Spawn VDF validation first
         let vdf_config = self.config.consensus.vdf.clone();
@@ -87,6 +92,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
 
         // Wait for results before processing next message
         let config = self.config.clone();
+        let block_tree_sender = self.service_senders.block_tree.clone();
         ctx.wait(
             async move {
                 let validation_result = match vdf_future.await.unwrap() {
@@ -116,11 +122,12 @@ impl Handler<RequestValidationMessage> for ValidationService {
                     }
                 };
 
-                let block_tree_service = BlockTreeService::from_registry();
-                block_tree_service.do_send(ValidationResultMessage {
-                    block_hash,
-                    validation_result,
-                });
+                block_tree_sender
+                    .send(BlockTreeServiceMessage::BlockValidationFinished {
+                        block_hash,
+                        validation_result,
+                    })
+                    .unwrap();
             }
             .into_actor(self),
         );

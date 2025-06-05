@@ -25,6 +25,9 @@ use irys_types::{
     PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
+use irys_vdf::state::test_helpers::mocked_vdf_service;
+use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::StepWithCheckpoints;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -258,6 +261,7 @@ impl Default for ApiClientStub {
 }
 
 pub(crate) struct GossipServiceTestFixture {
+    pub config: Config,
     pub gossip_port: u16,
     pub api_port: u16,
     pub execution: RethPeerInfo,
@@ -338,6 +342,7 @@ impl GossipServiceTestFixture {
         let task_executor = task_manager.executor();
 
         Self {
+            config,
             // temp_dir,
             gossip_port,
             api_port,
@@ -384,8 +389,9 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
-        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
-        let (vdf_service_tx, _vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<StepWithCheckpoints>(1);
+        let vdf_state = mocked_vdf_service(&self.config).await;
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
@@ -397,7 +403,7 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
-                vdf_service_tx,
+                vdf_steps_guard,
             )
             .expect("failed to run gossip service");
 

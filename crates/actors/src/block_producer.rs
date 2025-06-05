@@ -1,3 +1,14 @@
+use crate::{
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_tree_service::BlockTreeReadGuard,
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    ema_service::EmaServiceMessage,
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
+    mempool_service::MempoolServiceMessage,
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
+    CommitmentCacheMessage,
+};
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::PayloadAttributes;
@@ -18,6 +29,7 @@ use irys_types::{
     IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
     SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
+use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::eth::EthApiServer as _};
@@ -29,19 +41,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, error, info, warn, Span};
-
-use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    block_tree_service::BlockTreeReadGuard,
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    ema_service::EmaServiceMessage,
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool_service::MempoolServiceMessage,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
-    services::ServiceSenders,
-    vdf_service::VdfStepsReadGuard,
-    CommitmentCacheMessage,
-};
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -68,7 +67,7 @@ pub struct BlockProducerActor {
     /// The block reward curve
     pub reward_curve: Arc<HalvingCurve>,
     /// Store last VDF Steps
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStateReadonly,
     /// Get the head of the chain
     pub block_tree_guard: BlockTreeReadGuard,
     /// The Irys price oracle
