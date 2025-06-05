@@ -1,16 +1,10 @@
 use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
-use actix_web::{
-    middleware::Logger,
-    test,
-    web::{self, JsonConfig},
-    App,
-};
+use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
