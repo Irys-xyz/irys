@@ -10,7 +10,6 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
-    broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
 };
 use irys_api_client::ApiClient;
