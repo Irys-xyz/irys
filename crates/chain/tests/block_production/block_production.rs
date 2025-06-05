@@ -187,7 +187,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
         assert_eq!(i, reth_block.header.number);
         assert_eq!(i, reth_block.number);
 
-        let db_irys_block = node.get_block_by_height(i as u64).await.unwrap();
+        let db_irys_block = node.get_block_by_height(i).await.unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }

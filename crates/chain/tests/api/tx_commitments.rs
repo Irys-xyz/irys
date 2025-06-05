@@ -74,7 +74,6 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
@@ -98,7 +97,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     )
     .await?;
 
-    let api_state = node.node_ctx.get_api_state(ema_tx);
+    let api_state = node.node_ctx.get_api_state();
     let _db = api_state.db.clone();
 
     // Start the API server
@@ -218,10 +217,9 @@ async fn get_commitment_status(
         response: oneshot_tx,
     });
 
-    let status = oneshot_rx
+    oneshot_rx
         .await
-        .expect("to receive CommitmentStatus from GetCommitmentStatus message");
-    status
+        .expect("to receive CommitmentStatus from GetCommitmentStatus message")
 }
 
 #[actix_web::test]
@@ -273,8 +271,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         .await?;
 
         // Initialize API for submitting commitment transactions
-        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-        let api_state = node.node_ctx.get_api_state(ema_tx);
+        let api_state = node.node_ctx.get_api_state();
 
         let _app = actix_web::test::init_service(
             App::new()
@@ -298,18 +295,20 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // ===== PHASE 1: Verify Genesis Block Initialization =====
         // Check that the genesis block producer has the expected initial pledges
 
-        let commitment_state = commitment_state_guard.read();
-        let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
-        if let Some(pledges) = pledges {
-            assert_eq!(
-                pledges.len(),
-                3,
-                "Genesis miner should have exactly 3 pledges"
-            );
-        } else {
-            panic!("Expected genesis miner to have pledges!");
+        {
+            let commitment_state = commitment_state_guard.read();
+            let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
+            if let Some(pledges) = pledges {
+                assert_eq!(
+                    pledges.len(),
+                    3,
+                    "Genesis miner should have exactly 3 pledges"
+                );
+            } else {
+                panic!("Expected genesis miner to have pledges!");
+            }
+            drop(commitment_state); // Release lock to allow node operations
         }
-        drop(commitment_state); // Release lock to allow node operations
 
         // ===== PHASE 2: First Epoch - Create Commitments =====
         // Create stake commitment for first test signer
@@ -334,33 +333,35 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
 
         // Verify commitment state contains expected pledges and stakes
-        let commitment_state = commitment_state_guard.read();
+        {
+            let commitment_state = commitment_state_guard.read();
 
-        // Check genesis miner pledges
-        let pledges = commitment_state
-            .pledge_commitments
-            .get(&genesis_signer)
-            .expect("Expected genesis miner pledges!");
-        assert_eq!(
-            pledges.len(),
-            3,
-            "Genesis miner should still have 3 pledges after first epoch"
-        );
+            // Check genesis miner pledges
+            let pledges = commitment_state
+                .pledge_commitments
+                .get(&genesis_signer)
+                .expect("Expected genesis miner pledges!");
+            assert_eq!(
+                pledges.len(),
+                3,
+                "Genesis miner should still have 3 pledges after first epoch"
+            );
 
-        // Check signer1 pledges and stake
-        let pledges = commitment_state
-            .pledge_commitments
-            .get(&signer1.address())
-            .expect("Expected signer1 miner pledges!");
-        assert_eq!(
-            pledges.len(),
-            2,
-            "Signer1 should have 2 pledges after first epoch"
-        );
+            // Check signer1 pledges and stake
+            let pledges = commitment_state
+                .pledge_commitments
+                .get(&signer1.address())
+                .expect("Expected signer1 miner pledges!");
+            assert_eq!(
+                pledges.len(),
+                2,
+                "Signer1 should have 2 pledges after first epoch"
+            );
 
-        let stake = commitment_state.stake_commitments.get(&signer1.address());
-        assert_matches!(stake, Some(_), "Signer1 should have a stake commitment");
-        drop(commitment_state);
+            let stake = commitment_state.stake_commitments.get(&signer1.address());
+            assert_matches!(stake, Some(_), "Signer1 should have a stake commitment");
+            drop(commitment_state);
+        }
 
         // ===== PHASE 4: Second Epoch - Add More Commitments =====
         // Create pledge for second test signer
@@ -461,7 +462,7 @@ async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
     info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
 
     // Submit stake commitment via API
-    post_commitment_tx_request(&uri, &stake_tx).await;
+    post_commitment_tx_request(uri, &stake_tx).await;
 }
 
 async fn post_pledge_commitment(
@@ -479,7 +480,7 @@ async fn post_pledge_commitment(
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
     // Submit pledge commitment via API
-    post_commitment_tx_request(&uri, &pledge_tx).await;
+    post_commitment_tx_request(uri, &pledge_tx).await;
 
     pledge_tx
 }

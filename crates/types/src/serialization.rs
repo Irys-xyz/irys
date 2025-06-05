@@ -1,10 +1,11 @@
+#![allow(clippy::manual_div_ceil, clippy::assign_op_pattern)]
+
 use crate::{Arbitrary, IrysSignature};
 use alloy_primitives::{bytes, Address, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use eyre::Error;
-use fixed_hash::construct_fixed_hash;
 use openssl::sha;
 use rand::RngCore;
 use reth_codecs::Compact;
@@ -234,10 +235,8 @@ impl Compact for U256 {
 //==============================================================================
 // H256 Type
 //------------------------------------------------------------------------------
-construct_fixed_hash! {
-    /// A 256-bit hash type (32 bytes).
-    pub struct H256(32);
-}
+
+pub use crate::h256::H256;
 
 impl H256 {
     pub fn from_base58(string: &str) -> Self {
@@ -267,9 +266,7 @@ impl Encode for H256 {
 
 impl Decode for H256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        Ok(Self::from_slice(
-            value.try_into().map_err(|_| DatabaseError::Decode)?,
-        ))
+        Ok(Self::from_slice(value))
     }
 }
 

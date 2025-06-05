@@ -2,10 +2,15 @@
 //! including checkpoint validation and seed application.
 
 use eyre::Context;
+use irys_types::block_production::Seed;
 use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+
+pub mod state;
+pub mod vdf;
+pub mod vdf_utils;
 
 #[inline]
 pub fn vdf_sha(
@@ -14,7 +19,7 @@ pub fn vdf_sha(
     seed: &mut H256,
     num_checkpoints: usize,
     num_iterations: u64,
-    checkpoints: &mut Vec<H256>,
+    checkpoints: &mut [H256],
 ) {
     let mut local_salt: [u8; 32] = [0; 32];
 
@@ -212,7 +217,7 @@ pub async fn last_step_checkpoints_is_valid(
                     let mut hasher = Sha256::new();
 
                     for _ in 0..num_iterations {
-                        hasher.update(&salt_buff);
+                        hasher.update(salt_buff);
                         hasher.update(seed.as_bytes());
                         seed = H256(hasher.finalize_reset().into());
                     }
@@ -249,6 +254,17 @@ pub const fn step_number_to_salt_number(config: &VdfConfig, step_number: u64) ->
         0 => 0,
         _ => (step_number - 1) * config.num_checkpoints_in_vdf_step as u64 + 1,
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct StepWithCheckpoints {
+    pub step: H256,
+    pub checkpoints: H256List,
+    pub global_step_number: u64,
+}
+
+pub trait MiningBroadcaster {
+    fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
 }
 
 #[cfg(test)]

@@ -34,7 +34,9 @@ async fn main() -> eyre::Result<()> {
             );
             NodeConfig::testnet()
         });
-    let is_genesis = std::env::var("GENESIS").map(|_| true).unwrap_or(false);
+    let is_genesis = std::env::var("GENESIS")
+        .map(|_| true)
+        .unwrap_or(matches!(config.mode, NodeMode::Genesis));
     if is_genesis {
         config.mode = NodeMode::Genesis;
     } else {

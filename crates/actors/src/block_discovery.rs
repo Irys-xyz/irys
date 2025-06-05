@@ -1,10 +1,9 @@
 use crate::{
     block_index_service::BlockIndexReadGuard,
-    block_tree_service::BlockTreeService,
+    block_tree_service::BlockTreeServiceMessage,
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
-    vdf_service::VdfStepsReadGuard,
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
     GetCommitmentStateGuardMessage,
 };
@@ -21,6 +20,7 @@ use irys_types::{
     CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
     IrysBlockHeader, IrysTransactionHeader,
 };
+use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database;
 use std::sync::Arc;
 use tracing::{debug, error, info, Instrument, Span};
@@ -41,7 +41,7 @@ pub struct BlockDiscoveryActor {
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// Store last VDF Steps
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStateReadonly,
     /// Service Senders
     pub service_senders: ServiceSenders,
     /// Tracing span
@@ -237,7 +237,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //------------------------------------
         let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
-        let block_tree_addr = BlockTreeService::from_registry();
         let config = self.config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
@@ -247,6 +246,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
         let span2 = self.span.clone();
+        let block_tree_sender = self.service_senders.block_tree.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -293,7 +293,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .await
                             .expect("to receive CommitmentStatus from AddCommitment message");
 
-                        if matches!(status, CommitmentCacheStatus::Accepted) == false {
+                        if !matches!(status, CommitmentCacheStatus::Accepted) {
                             // Something went wrong with the commitments validation, it's time to roll back
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             let _ = commitment_cache_sender.send(
@@ -379,12 +379,16 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     // WARNING: All block pre-validation needs to be completed before
                     // sending this message.
                     info!("Block is valid, sending to block tree");
-                    block_tree_addr
-                        .send(BlockPreValidatedMessage(
-                            new_block_header.clone(),
-                            Arc::new(all_txs),
-                        ))
-                        .await??;
+
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    let _ = block_tree_sender.send(BlockTreeServiceMessage::BlockPreValidated {
+                        block: new_block_header.clone(),
+                        all_txs: Arc::new(all_txs),
+                        response: oneshot_tx,
+                    });
+                    let _ = oneshot_rx
+                        .await
+                        .expect("to send the BlockPreValidated message");
 
                     // Send the block to the gossip bus
                     tracing::trace!(

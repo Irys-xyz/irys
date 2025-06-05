@@ -40,7 +40,7 @@ pub enum CommitmentCacheMessage {
 pub enum CommitmentCacheStatus {
     Accepted,    // The commitment is valid and was added to the cache
     Unknown,     // The commitment is unknown to the cache & has no status
-    Unsupported, // The commitment is an unsupported type (pledge/unpledge)
+    Unsupported, // The commitment is an unsupported type (unstake/unpledge)
     Unstaked,    // The pledge commitment doesn't have a corresponding stake
 }
 
@@ -166,10 +166,7 @@ impl CommitmentCacheInner {
             }
 
             // Get or create miner commitments entry
-            let miner_commitments = self
-                .cache
-                .entry(signer.clone())
-                .or_insert_with(MinerCommitments::default);
+            let miner_commitments = self.cache.entry(*signer).or_default();
 
             // Check if already has pending stake
             if miner_commitments.stake.is_some() {
@@ -178,17 +175,14 @@ impl CommitmentCacheInner {
 
             // Store new stake commitment
             miner_commitments.stake = Some(commitment_tx.clone());
-            return CommitmentCacheStatus::Accepted;
+            CommitmentCacheStatus::Accepted
         } else {
             // Handle pledge commitments - only accept if address has a stake
 
             // First check if staked in current epoch
             if is_staked_in_epoch {
                 // Address is staked in current epoch, add pledge
-                let miner_commitments = self
-                    .cache
-                    .entry(signer.clone())
-                    .or_insert_with(MinerCommitments::default);
+                let miner_commitments = self.cache.entry(*signer).or_default();
 
                 miner_commitments.pledges.push(commitment_tx.clone());
                 return CommitmentCacheStatus::Accepted;
@@ -204,7 +198,7 @@ impl CommitmentCacheInner {
             }
 
             // No stake found, reject pledge
-            return CommitmentCacheStatus::Unstaked;
+            CommitmentCacheStatus::Unstaked
         }
     }
 
@@ -250,14 +244,14 @@ impl CommitmentCacheInner {
 
         // First collect all stake transactions in address order
         // BTreeMap is already ordered by keys (addresses)
-        for (_, miner_commitments) in &self.cache {
+        for miner_commitments in self.cache.values() {
             if let Some(stake) = &miner_commitments.stake {
                 commitment_tx.push(stake.clone());
             }
         }
 
         // Then collect all pledge transactions in address order
-        for (_, miner_commitments) in &self.cache {
+        for miner_commitments in self.cache.values() {
             // Add all pledges for this miner
             for pledge in &miner_commitments.pledges {
                 commitment_tx.push(pledge.clone());

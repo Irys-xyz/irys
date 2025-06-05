@@ -90,7 +90,7 @@ pub static IRYS_TESTNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
         //    make_genesis_header(&genesis, &hardforks),
         //    MAINNET_GENESIS_HASH,
         //),
-        genesis: genesis,
+        genesis,
 
         paris_block_and_final_difficulty: None,
         hardforks,

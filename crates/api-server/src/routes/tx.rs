@@ -5,7 +5,7 @@ use actix_web::{
     HttpResponse, Result,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
@@ -26,11 +26,18 @@ pub async fn post_tx(
     let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
-    let tx_ingress_msg = TxIngressMessage(tx);
-    let msg_result = state.mempool.send(tx_ingress_msg).await;
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx, oneshot_tx);
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        tracing::error!("API: {:?}", err);
+        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(format!("Failed to deliver chunk: {:?}", err)));
+    }
+    let msg_result = oneshot_rx.await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
+        tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body(format!("Failed to deliver transaction: {:?}", err)));
     }
@@ -38,6 +45,7 @@ pub async fn post_tx(
     // If message delivery succeeded, check for validation errors within the response
     let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
+        tracing::warn!("API: {:?}", err);
         return match err {
             TxIngressError::InvalidSignature => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid Signature: {:?}", err))),
@@ -46,16 +54,19 @@ pub async fn post_tx(
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
+                tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
             TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid Anchor: {:?}", err))),
             TxIngressError::DatabaseError => {
+                tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal database error: {:?}", err)))
             }
             TxIngressError::ServiceUninitialized => {
+                tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal service error: {:?}", err)))
             }

@@ -4,9 +4,6 @@ name = "irys-types"
 version = "0.1.0"
 
 [features]
-dev = [
-
-] # Empty list defined to prevent a warning that the macro `construct_fixed_hash!` generates without it. fixed-hash = "0.8.0"
 test-utils = []
 
 [dependencies]
@@ -22,7 +19,7 @@ derive_more = { version = "2.0.1", features = [
     "into",
 ], default-features = true }
 eyre = "0.6.8"
-fixed-hash = "0.8.0" # TODO: if removing the dependency, ensure you also remove the [features] dev = [] section above.
+fixed-hash = "0.8.0"
 rand = "0.8.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.107"
@@ -46,19 +43,19 @@ rust_decimal_macros.workspace = true
 bytemuck.workspace = true
 hex.workspace = true
 toml.workspace = true
-alloy-primitives.workspace=true
-reth-codecs.workspace=true
-reth-primitives.workspace=true
-reth-chainspec.workspace=true
-alloy-eips.workspace=true
-alloy-genesis.workspace=true
-irys-primitives.workspace=true
-reth-db.workspace=true
-reth-db-api.workspace=true
-alloy-signer.workspace=true
-alloy-core.workspace=true
-alloy-signer-local.workspace=true
-reth.workspace=true
+alloy-primitives.workspace = true
+reth-codecs.workspace = true
+reth-primitives.workspace = true
+reth-chainspec.workspace = true
+alloy-eips.workspace = true
+alloy-genesis.workspace = true
+irys-primitives.workspace = true
+reth-db.workspace = true
+reth-db-api.workspace = true
+alloy-signer.workspace = true
+alloy-core.workspace = true
+alloy-signer-local.workspace = true
+reth.workspace = true
 
 [dev-dependencies]
 test-fuzz.workspace = true
@@ -67,3 +64,6 @@ pretty_assertions.workspace = true
 
 [build-dependencies]
 build-print = "0"
+
+[lints]
+workspace = true

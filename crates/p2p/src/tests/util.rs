@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade,
+    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError},
+};
 use irys_api_client::ApiClient;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -23,6 +24,9 @@ use irys_types::{
     PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
+use irys_vdf::state::test_helpers::mocked_vdf_service;
+use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::StepWithCheckpoints;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -249,6 +253,7 @@ impl Default for ApiClientStub {
 }
 
 pub(crate) struct GossipServiceTestFixture {
+    pub config: Config,
     pub gossip_port: u16,
     pub api_port: u16,
     pub execution: RethPeerInfo,
@@ -329,6 +334,7 @@ impl GossipServiceTestFixture {
         let task_executor = task_manager.executor();
 
         Self {
+            config,
             // temp_dir,
             gossip_port,
             api_port,
@@ -375,8 +381,9 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
-        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
-        let (vdf_service_tx, _vdf_service_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<StepWithCheckpoints>(1);
+        let vdf_state = mocked_vdf_service(&self.config).await;
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
@@ -388,7 +395,7 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
-                vdf_service_tx,
+                vdf_steps_guard,
             )
             .expect("failed to run gossip service");
 
@@ -578,7 +585,7 @@ impl FakeGossipServer {
         .bind(address)
         .expect("to bind");
 
-        let addr = server.addrs()[0].clone();
+        let addr = server.addrs()[0];
         let server = server.run();
         (server, addr)
     }

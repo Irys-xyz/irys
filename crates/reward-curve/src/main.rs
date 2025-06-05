@@ -42,7 +42,7 @@ fn main() -> eyre::Result<()> {
     let mut cumulative: U256 = U256::zero();
 
     let mut wtr = csv::Writer::from_writer(File::create(&args.output)?);
-    wtr.write_record(&[
+    wtr.write_record([
         "block_number",
         "timestamp_secs",
         "emission_per_block",

@@ -219,9 +219,9 @@ pub struct NodeConfig {
     pub genesis_peer_discovery_timeout_millis: u64,
 }
 
-impl Into<Config> for NodeConfig {
-    fn into(self) -> Config {
-        Config::new(self)
+impl From<NodeConfig> for Config {
+    fn from(val: NodeConfig) -> Self {
+        Config::new(val)
     }
 }
 
@@ -327,7 +327,10 @@ pub struct EmaConfig {
 /// Settings for the time-delay proof mechanism used in consensus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VdfConfig {
-    /// How often the VDF parameters are reset (in blocks)
+    /// VDF reset frequency in global steps
+    /// Formula: blocks_between_resets × vdf_steps_per_block
+    /// Example: 50 blocks × 12 steps = 600 global steps
+    /// At 12s/block target, resets occur every ~10 minutes
     pub reset_frequency: usize,
 
     /// Maximum number of threads to use for parallel VDF verification
@@ -515,7 +518,9 @@ impl ConsensusConfig {
                 max_chunks_per_item: 500,
             },
             vdf: VdfConfig {
-                reset_frequency: 10 * 120,
+                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
+                // With 12s target block time, this resets approximately every 10 minutes
+                reset_frequency: 50 * 12,
                 parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
@@ -916,7 +921,7 @@ mod tests {
         min_difficulty_adjustment_factor = 0.25
 
         [vdf]
-        reset_frequency = 1200
+        reset_frequency = 600
         max_allowed_vdf_fork_steps = 60000
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25

@@ -1,21 +1,25 @@
-use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
-use crate::cache::GossipCacheKey;
-use crate::peer_list::PeerListFacade;
-use crate::sync::SyncState;
-use crate::types::{GossipDataRequest, InternalGossipError, InvalidDataError};
-use crate::{cache::GossipCache, GossipClient, GossipError, GossipResult};
+use crate::{
+    block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock},
+    cache::{GossipCache, GossipCacheKey},
+    peer_list::PeerListFacade,
+    sync::SyncState,
+    types::{GossipDataRequest, InternalGossipError, InvalidDataError},
+    GossipClient, GossipError, GossipResult,
+};
 use actix::{Actor, Addr, Context, Handler};
 use base58::ToBase58;
 use core::net::SocketAddr;
-use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade,
+    mempool_service::{ChunkIngressError, MempoolFacade},
+};
 use irys_api_client::ApiClient;
 use irys_types::{
     CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionResponse, RethPeerInfo, UnpackedChunk, H256,
 };
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, Span};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -33,6 +37,8 @@ where
     pub gossip_client: GossipClient,
     pub peer_list_service: PeerListFacade<TApiClient, R>,
     pub sync_state: SyncState,
+    /// Tracing span
+    pub span: Span,
 }
 
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
@@ -51,6 +57,7 @@ where
             gossip_client: self.gossip_client.clone(),
             peer_list_service: self.peer_list_service.clone(),
             sync_state: self.sync_state.clone(),
+            span: self.span.clone(),
         }
     }
 }
@@ -224,14 +231,17 @@ where
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
     ) -> GossipResult<()> {
+        let span = self.span.clone();
+        let _span = span.enter();
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
         debug!(
-            "Node {}: Gossip block received from peer {}: {:?}",
+            "Node {}: Gossip block received from peer {}: {} height: {}",
             self.gossip_client.mining_address,
             source_miner_address,
-            block_hash.0.to_base58()
+            block_hash,
+            block_header.height
         );
 
         if self.sync_state.is_syncing()
@@ -239,8 +249,7 @@ where
         {
             debug!(
                 "Node {}: Block {} is out of the sync range, skipping",
-                self.gossip_client.mining_address,
-                block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_hash
             );
             return Ok(());
         }
@@ -269,7 +278,7 @@ where
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
-            .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+            .map_err(GossipError::BlockPool)?;
 
         if has_block_already_been_processed {
             debug!(
@@ -344,12 +353,8 @@ where
             match mempool_response.map_err(GossipError::from) {
                 Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                     debug!("Transaction sent to mempool");
-                    if let Err(error) = self
-                        .cache
-                        .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))
-                    {
-                        return Err(error);
-                    }
+                    self.cache
+                        .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?
                 }
                 Err(error) => {
                     error!("Error when sending transaction to mempool: {:?}", error);
@@ -364,7 +369,7 @@ where
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
-            .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+            .map_err(GossipError::BlockPool)?;
         Ok(())
     }
 
@@ -398,8 +403,7 @@ where
                     .await
                     .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?;
 
-                let maybe_block = block_result
-                    .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+                let maybe_block = block_result.map_err(GossipError::BlockPool)?;
 
                 match maybe_block {
                     Some(block) => {

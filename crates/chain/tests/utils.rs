@@ -1,4 +1,3 @@
-use actix::MailboxError;
 use actix_http::Request;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
@@ -11,14 +10,15 @@ use actix_web::{
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
+use irys_actors::block_tree_service::ReorgEvent;
+use irys_actors::mempool_service::MempoolTxs;
 use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
     block_validation,
-    mempool_service::{TxExistenceQuery, TxIngressError, TxIngressMessage},
+    mempool_service::{MempoolServiceMessage, TxIngressError},
     packing::wait_for_packing,
-    vdf_service::VdfStepsReadGuard,
     SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
@@ -42,6 +42,7 @@ use irys_types::{
     IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
     NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
+use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
 use reth_db::cursor::*;
@@ -52,12 +53,12 @@ use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
-use tokio::time::sleep;
+use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
-    vdf_steps_guard: VdfStepsReadGuard,
+    vdf_steps_guard: VdfStateReadonly,
     config: &Config,
 ) -> SolutionContext {
     let max_retries = 20;
@@ -165,7 +166,7 @@ pub enum AddTxError {
     #[error("Failed to add transaction to mempool")]
     TxIngress(TxIngressError),
     #[error("Failed to send transaction to mailbox")]
-    Mailbox(MailboxError),
+    Mailbox(RecvError),
 }
 
 // TODO: add an "name" field for debug logging
@@ -337,8 +338,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn start_public_api(
         &self,
     ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
-        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-        let api_state = self.node_ctx.get_api_state(ema_tx);
+        let api_state = self.node_ctx.get_api_state();
 
         actix_web::test::init_service(
             App::new()
@@ -399,6 +399,31 @@ impl IrysNodeTest<IrysNodeCtx> {
             .1
     }
 
+    pub async fn wait_for_reorg(&self, seconds_to_wait: usize) -> eyre::Result<ReorgEvent> {
+        // Subscribe to reorg events
+        let mut reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
+
+        // Wait for reorg event with timeout
+        match tokio::time::timeout(Duration::from_secs(seconds_to_wait as u64), reorg_rx.recv())
+            .await
+        {
+            Ok(Ok(reorg_event)) => {
+                info!(
+                    "Reorg detected: {} blocks orphaned at height {}, new tip: {}",
+                    reorg_event.old_fork.len(),
+                    reorg_event.fork_parent.height,
+                    reorg_event.new_tip.0.to_base58()
+                );
+                Ok(reorg_event)
+            }
+            Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
+            Err(_) => Err(eyre::eyre!(
+                "Timeout: No reorg event received within {} seconds",
+                seconds_to_wait
+            )),
+        }
+    }
+
     pub async fn mine_block(&self) -> eyre::Result<()> {
         self.mine_blocks(1).await
     }
@@ -432,15 +457,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx_id: IrysTransactionId,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
-        let mempool_service = self.node_ctx.actor_addresses.mempool.clone();
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
 
-        while mempool_service
-            .send(TxExistenceQuery(tx_id))
-            .await?
-            .is_ok_and(|f| f == false)
-        {
+        for _ in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            mempool_service.send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))?;
+
+            //if transaction exists
+            if oneshot_rx
+                .await
+                .expect("to process ChunkIngressMessage")
+                .expect("boolean response to transaction existence")
+            {
+                break;
+            }
+
             sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
@@ -454,6 +487,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             info!("transaction found in mempool after {} retries", &retries);
             Ok(())
         }
+    }
+
+    pub async fn get_best_mempool_tx(&self) -> MempoolTxs {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBestMempoolTxs(tx))
+            .expect("to send MempoolServiceMessage");
+        rx.await.expect("to receive best transactions from mempool")
     }
 
     pub fn peer_address(&self) -> PeerAddress {
@@ -481,17 +524,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             .map_err(AddTxError::CreateTx)?;
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
-        match self
-            .node_ctx
-            .actor_addresses
-            .mempool
-            .send(TxIngressMessage(tx.header.clone()))
-            .await
-        {
-            Ok(Ok(())) => return Ok(tx),
-            Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
-            Err(e) => return Err(AddTxError::Mailbox(e)),
-        };
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let response =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::TxIngressMessage(
+                    tx.header.clone(),
+                    oneshot_tx,
+                ));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+
+        match oneshot_rx.await {
+            Ok(Ok(())) => Ok(tx),
+            Ok(Err(tx_error)) => Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => Err(AddTxError::Mailbox(e)),
+        }
     }
 
     pub fn create_signed_data_tx(
@@ -544,14 +594,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .iter()
             .find(|(_, blk_height, _, _)| *blk_height == height)
-            .map(|(blk_hash, _, _, _)| {
+            .and_then(|(blk_hash, _, _, _)| {
                 self.node_ctx
                     .block_tree_guard
                     .read()
                     .get_block(blk_hash)
                     .cloned()
             })
-            .flatten()
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
@@ -596,6 +645,62 @@ impl IrysNodeTest<IrysNodeCtx> {
             cfg,
             temp_dir: self.temp_dir,
         }
+    }
+
+    pub async fn post_storage_tx_without_gossip(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        let tx = self.post_storage_tx(anchor, data, signer).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        tx
+    }
+
+    pub async fn post_storage_tx(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let tx = signer
+            .create_transaction(data, Some(anchor))
+            .expect("Expect to create a storage transaction from the data");
+        let tx = signer
+            .sign_transaction(tx)
+            .expect("to sign the storage transaction");
+
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/tx", api_uri);
+        let mut response = client
+            .post(url)
+            .send_json(&tx.header) // Send the tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        if response.status() != StatusCode::OK {
+            // Read the response body
+            let body_bytes = response.body().await.expect("Failed to read response body");
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            panic!(
+                "Response status: {} - {}\nRequest Body: {}",
+                response.status(),
+                body_str,
+                serde_json::to_string_pretty(&tx.header).unwrap(),
+            );
+        } else {
+            info!(
+                "Response status: {}\n{}",
+                response.status(),
+                serde_json::to_string_pretty(&tx).unwrap()
+            );
+        }
+        tx
     }
 
     pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {
@@ -761,7 +866,7 @@ pub async fn post_chunk<T, B>(
     app: &T,
     tx: &IrysTransaction,
     chunk_index: usize,
-    chunks: &Vec<[u8; 32]>,
+    chunks: &[[u8; 32]],
 ) where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
 {
@@ -836,12 +941,11 @@ pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction
         commitment_type: CommitmentType::Stake,
         // TODO: real staking amounts
         fee: 1,
-        anchor: anchor.clone(),
+        anchor: *anchor,
         ..Default::default()
     };
 
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
-    stake_tx
+    signer.sign_commitment(stake_tx).unwrap()
 }
 
 pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
@@ -849,12 +953,11 @@ pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransactio
         commitment_type: CommitmentType::Pledge,
         // TODO: real pledging amounts
         fee: 1,
-        anchor: anchor.clone(),
+        anchor: *anchor,
         ..Default::default()
     };
 
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
-    stake_tx
+    signer.sign_commitment(stake_tx).unwrap()
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.

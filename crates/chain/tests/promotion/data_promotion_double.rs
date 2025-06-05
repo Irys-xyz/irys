@@ -23,7 +23,6 @@ use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let chunk_size = 32; // 32 byte chunks
     config.consensus.get_mut().chunk_size = chunk_size;
@@ -65,7 +64,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
-        ema_service: ema_tx,
+        ema_service: node.node_ctx.service_senders.ema.clone(),
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
@@ -76,7 +75,7 @@ async fn heavy_double_root_data_promotion_test() {
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        mempool_service: node.node_ctx.service_senders.mempool.clone(),
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),
@@ -280,7 +279,6 @@ async fn heavy_double_root_data_promotion_test() {
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
-    let first_tx_index: usize;
     let _next_tx_index: usize;
 
     // if block_tx1.block_hash == block_tx2.block_hash {
@@ -308,7 +306,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
     println!("1:{}", block_tx1);
     //     println!("2:{}", block_tx2);
@@ -357,10 +355,7 @@ async fn heavy_double_root_data_promotion_test() {
     debug!("P2 block {}", &blk.0.height);
 
     // ensure the ingress proof still exists
-    let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
-        .unwrap()
-        .unwrap();
+    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 1);
 
     // same chunks as tx1
@@ -371,7 +366,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
-    for (_i, chunks) in data_chunks.iter().enumerate() {
+    for chunks in data_chunks.iter() {
         let mut data: Vec<u8> = Vec::new();
         for chunk in chunks {
             data.extend_from_slice(chunk);
@@ -512,11 +507,9 @@ async fn heavy_double_root_data_promotion_test() {
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
-    let first_tx_index: usize;
-
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
     println!("1:{}", block_tx1);
     //     println!("2:{}", block_tx2);
@@ -576,10 +569,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     mine_blocks(&node.node_ctx, 5).await.unwrap();
     // ensure the ingress proof is gone
-    let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
-        .unwrap()
-        .unwrap();
+    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 0);
 
     node.node_ctx.stop().await;

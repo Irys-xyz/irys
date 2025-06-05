@@ -17,7 +17,7 @@ use reth_db::{tables, Database};
 use reth_db::{TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
-use std::{fmt, u128};
+use std::fmt;
 
 impl_compression_for_compact!(CachedChunk2);
 

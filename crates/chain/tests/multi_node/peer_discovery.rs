@@ -22,7 +22,6 @@ use tracing::{debug, error};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     config.trusted_peers = vec![];
     config.consensus.get_mut().chunk_size = 32;
@@ -51,7 +50,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     node.node_ctx.start_mining().await.unwrap();
 
     let app_state = ApiState {
-        ema_service: ema_tx,
+        ema_service: node.node_ctx.service_senders.ema.clone(),
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
@@ -62,7 +61,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        mempool_service: node.node_ctx.service_senders.mempool.clone(),
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.clone().into(),
@@ -166,7 +165,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Verify the version response body contains the previously discovered peers
     match peer_response {
         PeerResponse::Accepted(accepted) => {
-            assert!(accepted.peers.len() >= 1, "Expected at least 1 peers");
+            assert!(!accepted.peers.is_empty(), "Expected at least 1 peers");
             debug!("Accepted peers: {:?}", accepted.peers);
             assert!(
                 accepted.peers.contains(&PeerAddress {
