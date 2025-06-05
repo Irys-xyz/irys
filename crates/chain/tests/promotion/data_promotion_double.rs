@@ -60,6 +60,9 @@ async fn heavy_double_root_data_promotion_test() {
     .await
     .unwrap();
 
+    node.node_ctx.start_mining().await.unwrap();
+
+    let delay = Duration::from_secs(1);
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
