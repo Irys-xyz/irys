@@ -278,7 +278,6 @@ async fn heavy_double_root_data_promotion_test() {
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
     let tree_guard = node.node_ctx.block_tree_guard.clone();
-    let tip = tree_guard.read().tip;
     drop(tree_guard);
 
     for chunks in data_chunks.iter() {
