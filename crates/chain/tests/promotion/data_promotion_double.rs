@@ -308,6 +308,10 @@ async fn heavy_double_root_data_promotion_test() {
 
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
+    let tree_guard = node.node_ctx.block_tree_guard.clone();
+    let tip = tree_guard.read().tip;
+    drop(tree_guard);
+
     for chunks in data_chunks.iter() {
         let mut data: Vec<u8> = Vec::new();
         for chunk in chunks {
@@ -315,9 +319,7 @@ async fn heavy_double_root_data_promotion_test() {
         }
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = &signer2;
-        let tx = s
-            .create_transaction(data, Some(block1.0.block_hash))
-            .unwrap();
+        let tx = s.create_transaction(data, Some(tip)).unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[2] {}", tx.header.id.as_bytes().to_base58());
         txs.push(tx);
