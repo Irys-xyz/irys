@@ -349,7 +349,7 @@ async fn heavy_double_root_data_promotion_test() {
         if let Some(_packed_chunk) =
             get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
         {
-            println!("Second set of chunks found!");
+            tracing::info!("Second set of chunks found!");
             break;
         }
         sleep(delay).await;
