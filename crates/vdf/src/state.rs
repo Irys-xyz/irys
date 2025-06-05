@@ -195,6 +195,7 @@ pub fn create_state(
 
         if block.height == 0 {
             seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+            // seeds.push_front(Seed(block.vdf_limiter_info.prev_output));
             debug!("Ready steady");
         }
 
