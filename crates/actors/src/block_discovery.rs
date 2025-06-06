@@ -238,7 +238,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let config = self.config.clone();
-        let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
         let commitment_cache_sender = self.service_senders.commitment_cache.clone();
@@ -270,7 +269,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     partitions_guard,
                     config,
                     reward_curve,
-                    vdf_steps_guard,
                     ema_service_sender,
                 )
                 .instrument(span2)

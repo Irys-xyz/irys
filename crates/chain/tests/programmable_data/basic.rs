@@ -9,7 +9,6 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use base58::ToBase58;
-use irys_reth_node_bridge::new_reth_context;
 use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer;
 use std::time::Duration;
@@ -310,8 +309,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     assert_eq!(&message, &stored_message);
 
-    let context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
-
+    let context = node.node_ctx.reth_node_adapter.clone();
     let latest = context
         .rpc
         .inner

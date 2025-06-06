@@ -66,6 +66,16 @@ pub struct VDFLimiterInfo {
     pub next_vdf_difficulty: Option<u64>,
 }
 
+impl VDFLimiterInfo {
+    /// Returns the global step number for the first step in the block.
+    pub fn first_step_number(&self) -> u64 {
+        // It is + 1 because there's always at least one step. I.e., in case if there's only
+        // one step, the first step and the last step are the same, in case if there are two
+        // steps, the first step is the last step - 1, and so on.
+        self.global_step_number - self.steps.len() as u64 + 1
+    }
+}
+
 /// Stores deserialized fields from a JSON formatted Irys block header.
 #[derive(
     Clone,

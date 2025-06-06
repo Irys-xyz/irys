@@ -8,7 +8,7 @@ use crate::{
 use actix::Message;
 use core::ops::Deref;
 use irys_types::GossipData;
-use irys_vdf::StepWithCheckpoints;
+use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
@@ -47,7 +47,7 @@ pub struct ServiceReceivers {
     pub commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
     pub mempool: UnboundedReceiver<MempoolServiceMessage>,
     pub vdf_mining: Receiver<bool>,
-    pub vdf_fast_forward: Receiver<StepWithCheckpoints>,
+    pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipData>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
@@ -61,7 +61,7 @@ pub struct ServiceSendersInner {
     pub commitment_cache: UnboundedSender<CommitmentCacheMessage>,
     pub mempool: UnboundedSender<MempoolServiceMessage>,
     pub vdf_mining: Sender<bool>,
-    pub vdf_fast_forward: Sender<StepWithCheckpoints>,
+    pub vdf_fast_forward: UnboundedSender<VdfStep>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipData>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
@@ -80,8 +80,7 @@ impl ServiceSendersInner {
         // enabling/disabling VDF mining thread
         let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
         // vdf channel for fast forwarding steps during node sync
-        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
-            channel::<StepWithCheckpoints>(1);
+        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipData>();

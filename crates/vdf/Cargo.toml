@@ -7,7 +7,6 @@ rust-version.workspace = true
 [dependencies]
 irys-types.workspace = true
 irys-database.workspace = true
-irys-storage.workspace = true
 irys-efficient-sampling.workspace = true
 
 sha2.workspace = true

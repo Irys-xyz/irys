@@ -13,28 +13,28 @@
 //! - Balance decrements correspond to storage transaction fees
 //! - Every block ends with a nonce reset system tx
 
-use core::marker::PhantomData;
 use std::{sync::Arc, time::SystemTime};
 
 use alloy_consensus::TxLegacy;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, TxKind, U256};
+pub use alloy_rlp;
 use alloy_rlp::{Decodable as _, Encodable as _};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
-use futures::Stream;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
-        components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PoolBuilder},
+        components::{ComponentsBuilder, ExecutorBuilder, PoolBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
         PayloadBuilderConfig as _,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{EthPrimitives, InvalidTransactionError, SealedBlock},
     providers::{
-        providers::ProviderFactoryBuilder, CanonStateNotification, CanonStateSubscriptions as _,
-        EthStorage, StateProviderFactory,
+        providers::ProviderFactoryBuilder, CanonStateSubscriptions as _, EthStorage,
+        StateProviderFactory,
     },
+    rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
@@ -42,33 +42,45 @@ use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
 use reth_node_ethereum::{
-    node::{
-        EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder, EthereumPayloadBuilder,
-    },
+    node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
 };
+use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 use reth_tracing::tracing;
-use reth_transaction_pool::TransactionValidationOutcome;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering, TransactionOrigin, TransactionPool as _, TransactionValidator,
+    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
+    TransactionValidator,
 };
+use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use reth_trie_db::MerklePatriciaTrie;
 use system_tx::SystemTransaction;
-use tracing::{debug, info};
+use tracing::info;
 
+use crate::{
+    payload::SystemTxStore, payload_builder_builder::IrysPayloadBuilderBuilder,
+    payload_service_builder::IyrsPayloadServiceBuilder,
+};
+
+pub mod evm;
+pub mod payload;
+pub mod payload_builder_builder;
+pub mod payload_service_builder;
 pub mod system_tx;
 
 #[must_use]
-pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransaction) -> TxLegacy {
+pub fn compose_system_tx(chain_id: u64, system_tx: &SystemTransaction) -> TxLegacy {
+    // allocate 512 bytes for the system tx rlp, misc optimisation
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
     TxLegacy {
-        gas_limit: 99000,
+        // large enough to not be rejected by the payload builder
+        gas_limit: MINIMUM_GAS_LIMIT,
         value: U256::ZERO,
-        nonce,
-        gas_price: 1_000_000_000_u128, // 1 Gwei
+        // nonce is always 0 for system txs
+        nonce: 0_u64,
+        // large enough to not be rejected by the payload builder
+        gas_price: DEFAULT_TX_FEE_CAP_WEI,
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
         input: system_tx_rlp.into(),
@@ -76,10 +88,9 @@ pub fn compose_system_tx(nonce: u64, chain_id: u64, system_tx: &SystemTransactio
 }
 
 /// Type configuration for an Irys-Ethereum node.
-#[derive(Debug, Default, Clone, Copy)]
-// #[non_exhaustive]
+#[derive(Debug, Clone)]
 pub struct IrysEthereumNode {
-    pub allowed_system_tx_origin: Address,
+    pub system_tx_store: SystemTxStore,
 }
 
 impl NodeTypes for IrysEthereumNode {
@@ -98,7 +109,7 @@ impl IrysEthereumNode {
     ) -> ComponentsBuilder<
         Node,
         IrysPoolBuilder,
-        BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
+        IyrsPayloadServiceBuilder<IrysPayloadBuilderBuilder>,
         EthereumNetworkBuilder,
         IrysExecutorBuilder,
         EthereumConsensusBuilder,
@@ -113,11 +124,11 @@ impl IrysEthereumNode {
     {
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(IrysPoolBuilder {
-                allowed_system_tx_origin: self.allowed_system_tx_origin,
-            })
+            .pool(IrysPoolBuilder::default())
             .executor(IrysExecutorBuilder)
-            .payload(BasicPayloadServiceBuilder::default())
+            .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
+                system_tx_store: self.system_tx_store.clone(),
+            }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
     }
@@ -135,7 +146,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         IrysPoolBuilder,
-        BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
+        IyrsPayloadServiceBuilder<IrysPayloadBuilderBuilder>,
         EthereumNetworkBuilder,
         IrysExecutorBuilder,
         EthereumConsensusBuilder,
@@ -181,9 +192,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 /// A custom pool builder for Irys system transaction validation and pool configuration.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct IrysPoolBuilder {
-    pub allowed_system_tx_origin: Address,
-}
+pub struct IrysPoolBuilder;
 
 /// Implement the [`PoolBuilder`] trait for the Irys pool builder
 ///
@@ -192,8 +201,7 @@ pub struct IrysPoolBuilder {
 /// Original code from:
 /// <https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322>
 ///
-/// Notable changes from the original: we evict system txs on every block and frokchoice. They would be deemed stale.
-/// A system tx can only live for a single block.
+/// Notable changes from the original: we reject all system txs, as they are not allowed to land in a the pool.
 impl<Node> PoolBuilder<Node> for IrysPoolBuilder
 where
     Node: FullNodeTypes<Types = IrysEthereumNode>,
@@ -202,7 +210,7 @@ where
         TransactionValidationTaskExecutor<
             IrysSystemTxValidator<Node::Provider, EthPooledTransaction>,
         >,
-        SystemTxPriorityOrdering<EthPooledTransaction>,
+        CoinbaseTipOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
     >;
 
@@ -245,13 +253,12 @@ where
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
         let validator = TransactionValidationTaskExecutor {
             validator: IrysSystemTxValidator {
-                inner: validator.validator,
-                allowed_system_tx_origin: self.allowed_system_tx_origin,
+                eth_tx_validator: validator.validator,
             },
             to_validation_task: validator.to_validation_task,
         };
 
-        let ordering = SystemTxPriorityOrdering::default();
+        let ordering = CoinbaseTipOrdering::default();
         let transaction_pool =
             reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
@@ -308,96 +315,15 @@ where
                     },
                 ),
             );
-
-            // spawn system txs maintenance task
-            ctx.task_executor().spawn_critical(
-                "txpool system tx maintenance task",
-                maintain_system_txs::<Node, _>(
-                    pool.clone(),
-                    ctx.provider().canonical_state_stream(),
-                ),
-            );
-
-            debug!(target: "reth::cli", "Spawned txpool maintenance task");
         };
 
         Ok(transaction_pool)
     }
 }
 
-#[expect(clippy::type_complexity, reason = "original trait definition")]
-pub async fn maintain_system_txs<Node, St>(
-    pool: Pool<
-        TransactionValidationTaskExecutor<
-            IrysSystemTxValidator<Node::Provider, EthPooledTransaction>,
-        >,
-        SystemTxPriorityOrdering<EthPooledTransaction>,
-        DiskFileBlobStore,
-    >,
-    mut events: St,
-) where
-    Node: FullNodeTypes<Types = IrysEthereumNode>,
-    St: Stream<Item = CanonStateNotification<EthPrimitives>> + Send + Unpin + 'static,
-{
-    use futures::StreamExt as _;
-    loop {
-        let event = events.next().await;
-        let Some(event) = event else {
-            break;
-        };
-        match event {
-            CanonStateNotification::Commit { .. } => {
-                // Get the new block's number and parent hash
-                let stale_system_txs = pool
-                    .all_transactions()
-                    .all()
-                    .filter_map(|tx| {
-                        use alloy_consensus::transaction::Transaction as _;
-                        let input = tx.inner().input();
-                        let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
-                            return None;
-                        };
-
-                        Some(*tx.hash())
-                    })
-                    .collect::<Vec<_>>();
-                if stale_system_txs.is_empty() {
-                    continue;
-                }
-
-                tracing::warn!(?stale_system_txs, "dropping stale system transactions");
-                pool.remove_transactions(stale_system_txs);
-            }
-            CanonStateNotification::Reorg { .. } => {
-                let stale_system_txs = pool
-                    .all_transactions()
-                    .all()
-                    .filter_map(|tx| {
-                        use alloy_consensus::transaction::Transaction as _;
-                        let input = tx.inner().input();
-                        let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
-                            return None;
-                        };
-
-                        Some(*tx.hash())
-                    })
-                    .collect::<Vec<_>>();
-                if stale_system_txs.is_empty() {
-                    continue;
-                }
-
-                tracing::warn!(?stale_system_txs, "dropping stale system transactions");
-                pool.remove_transactions(stale_system_txs);
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct IrysSystemTxValidator<Client, T> {
-    allowed_system_tx_origin: Address,
-    /// The type that performs the actual validation.
-    inner: EthTransactionValidator<Client, T>,
+    eth_tx_validator: EthTransactionValidator<Client, T>,
 }
 
 impl<Client, Tx> TransactionValidator for IrysSystemTxValidator<Client, Tx>
@@ -416,91 +342,30 @@ where
         let input = transaction.input();
         let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
             tracing::trace!(hash = ?transaction.hash(), "non system tx, passing to eth validator");
-            return self.inner.validate_one(origin, transaction);
+            return self.eth_tx_validator.validate_one(origin, transaction);
         };
 
-        if transaction.sender() != self.allowed_system_tx_origin {
-            tracing::warn!(
-                sender = ?transaction.sender(),
-                allowed_system_tx_origin = ?self.allowed_system_tx_origin,
-                "got system tx that was not signed by the allowed origin");
-            return TransactionValidationOutcome::Invalid(
-                transaction,
-                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                    InvalidTransactionError::SignerAccountHasBytecode,
-                ),
-            );
-        }
-
-        if !matches!(origin, TransactionOrigin::Private) {
-            tracing::warn!(received_origin = ?origin, "system txs can only be generated via private origin");
-            return TransactionValidationOutcome::Invalid(
-                transaction,
-                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                    InvalidTransactionError::SignerAccountHasBytecode,
-                ),
-            );
-        }
-
-        self.inner.validate_one(origin, transaction)
+        tracing::trace!("system txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
+        TransactionValidationOutcome::Invalid(
+            transaction,
+            reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                InvalidTransactionError::SignerAccountHasBytecode,
+            ),
+        )
     }
 
     async fn validate_transactions(
         &self,
         transactions: Vec<(TransactionOrigin, Self::Transaction)>,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.inner.validate_all(transactions)
+        self.eth_tx_validator.validate_all(transactions)
     }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
     where
         B: reth_primitives_traits::Block,
     {
-        self.inner.on_new_head_block(new_tip_block);
-    }
-}
-
-/// System txs go to the top
-/// The transactions are ordered by their coinbase tip.
-/// The higher the coinbase tip is, the higher the priority of the transaction.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct SystemTxPriorityOrdering<T>(PhantomData<T>);
-
-impl<T> TransactionOrdering for SystemTxPriorityOrdering<T>
-where
-    T: PoolTransaction + 'static,
-{
-    type PriorityValue = U256;
-    type Transaction = T;
-
-    /// Source: <https://github.com/ethereum/go-ethereum/blob/7f756dc1185d7f1eeeacb1d12341606b7135f9ea/core/txpool/legacypool/list.go#L469-L482>.
-    fn priority(
-        &self,
-        transaction: &Self::Transaction,
-        base_fee: u64,
-    ) -> Priority<Self::PriorityValue> {
-        let tx_envelope_input_buf = transaction.input();
-        let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
-        if rlp_decoded_system_tx.is_ok() {
-            return Priority::Value(U256::MAX);
-        }
-        transaction
-            .effective_tip_per_gas(base_fee)
-            .map(U256::from)
-            .into()
-    }
-}
-
-impl<T> Default for SystemTxPriorityOrdering<T> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<T> Clone for SystemTxPriorityOrdering<T> {
-    fn clone(&self) -> Self {
-        Self::default()
+        self.eth_tx_validator.on_new_head_block(new_tip_block);
     }
 }
 
@@ -533,681 +398,23 @@ where
     }
 }
 
-pub mod evm {
-
-    use core::convert::Infallible;
-
-    use alloy_consensus::{Block, Header, Transaction as _};
-    use alloy_dyn_abi::DynSolValue;
-    use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
-    use alloy_evm::eth::receipt_builder::ReceiptBuilder as _;
-
-    use alloy_evm::eth::EthBlockExecutor;
-    use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-
-    use alloy_primitives::{Bytes, FixedBytes, Log, LogData};
-    use reth::primitives::{SealedBlock, SealedHeader};
-    use reth::providers::BlockExecutionResult;
-    use reth::revm::context::result::ExecutionResult;
-    use reth::revm::context::TxEnv;
-    use reth::revm::primitives::hardfork::SpecId;
-    use reth::revm::{Inspector, State};
-    use reth_ethereum_primitives::Receipt;
-    use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, BlockValidationError};
-    use reth_evm::eth::receipt_builder::ReceiptBuilderCtx;
-
-    use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
-    use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
-    use reth_evm::precompiles::PrecompilesMap;
-    use reth_evm::{
-        ConfigureEvm, EthEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes,
-    };
-    use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
-    use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
-    use revm::context::{BlockEnv, CfgEnv};
-
-    use revm::database::states::plain_account::PlainStorage;
-    use revm::database::PlainAccount;
-    use revm::inspector::NoOpInspector;
-    use revm::precompile::{PrecompileSpecId, Precompiles};
-    use revm::state::{Account, EvmStorageSlot};
-    use revm::Database as _;
-    use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
-    use tracing::error_span;
-
-    use super::*;
-
-    /// Irys block executor: handles execution of both regular and system transactions, enforcing protocol rules.
-    #[derive(Debug)]
-    pub struct IrysBlockExecutor<'a, Evm> {
-        receipt_builder: &'a RethReceiptBuilder,
-        system_tx_receipts: Vec<Receipt>,
-        inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
-    }
-
-    impl<'a, Evm> IrysBlockExecutor<'a, Evm> {
-        /// Access the inner block executor
-        pub const fn inner(
-            &self,
-        ) -> &EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder> {
-            &self.inner
-        }
-
-        /// Access the inner block executor mutably
-        pub const fn inner_mut(
-            &mut self,
-        ) -> &mut EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder> {
-            &mut self.inner
-        }
-    }
-
-    impl<'db, DB, E> BlockExecutor for IrysBlockExecutor<'_, E>
-    where
-        DB: Database + 'db,
-        E: Evm<
-            DB = &'db mut State<DB>,
-            Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
-        >,
-    {
-        type Transaction = TransactionSigned;
-        type Receipt = Receipt;
-        type Evm = E;
-
-        fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-            self.inner.apply_pre_execution_changes()
-        }
-
-        //NOTE: whenever we execute system transactions, reth gives a warning: "State root task returned incorrect state root"
-        // Current hypothesis is: because we require direct access to the db to execute system txs,
-        // reth cannot do parallel state root computations (which presumably are faster than non-parallel).
-        // This does not change the end-result of the block but is something we may want to look into.
-        #[expect(clippy::too_many_lines, reason = "easier to read")]
-        fn execute_transaction_with_result_closure(
-            &mut self,
-            tx: impl ExecutableTx<Self>,
-            on_result_f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
-        ) -> Result<u64, BlockExecutionError> {
-            let tx_envelope = tx.tx();
-            let tx_envelope_input_buf = tx_envelope.input();
-            let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
-
-            if let Ok(system_tx) = rlp_decoded_system_tx {
-                // Validate system tx metadata
-                let block_number = self.inner.evm().block().number;
-                let block_hash = self
-                    .inner
-                    .evm_mut()
-                    .db_mut()
-                    .block_hash(block_number.saturating_sub(1))
-                    .map_err(|_err| {
-                        BlockExecutionError::Internal(
-                            reth_evm::block::InternalBlockExecutionError::msg(
-                                "could not retrieve block by this hash",
-                            ),
-                        )
-                    })?;
-                let span = error_span!(
-                    "system_tx_processing",
-                    "parent_block_hash" = block_hash.to_string(),
-                    "block_number" = block_number,
-                    "allowed_parent_block_hash" = system_tx.parent_blockhash.to_string(),
-                    "allowed_block_height" = system_tx.valid_for_block_height
-                );
-                let guard = span.enter();
-
-                // ensure that parent block hashes match.
-                // This check ensures that a system tx does not get executed for an off-case fork of the desired chain.
-                if system_tx.parent_blockhash != block_hash {
-                    tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
-                    return Err(BlockExecutionError::Validation(
-                        BlockValidationError::InvalidTx {
-                            hash: *tx_envelope.hash(),
-                            error: Box::new(InvalidTransaction::PriorityFeeGreaterThanMaxFee),
-                        },
-                    ));
-                }
-
-                // ensure that block heights match.
-                // This ensures that the system tx does not leak into future blocks.
-                if system_tx.valid_for_block_height != block_number {
-                    tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
-                    return Err(BlockExecutionError::Validation(
-                        BlockValidationError::InvalidTx {
-                            hash: *tx_envelope.hash(),
-                            error: Box::new(InvalidTransaction::PriorityFeeGreaterThanMaxFee),
-                        },
-                    ));
-                }
-                drop(guard);
-
-                // Handle the signer nonce increment
-                let mut new_state =
-                    self.adjust_signer_nonce(&tx, |nonce| nonce.saturating_add(1))?;
-
-                // Process different system transaction types
-                let topic = system_tx.inner.topic();
-                let target;
-                let new_account_state = match system_tx.inner {
-                    system_tx::TransactionPacket::ReleaseStake(balance_increment)
-                    | system_tx::TransactionPacket::BlockReward(balance_increment) => {
-                        let log = Self::create_system_log(
-                            balance_increment.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_increment.amount, 256),
-                                DynSolValue::Address(balance_increment.target),
-                            ],
-                        );
-                        target = balance_increment.target;
-                        let res = self.handle_balance_increment(log, &balance_increment);
-                        Ok(res)
-                    }
-                    system_tx::TransactionPacket::Stake(balance_decrement)
-                    | system_tx::TransactionPacket::StorageFees(balance_decrement) => {
-                        let log = Self::create_system_log(
-                            balance_decrement.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_decrement.amount, 256),
-                                DynSolValue::Address(balance_decrement.target),
-                            ],
-                        );
-                        target = balance_decrement.target;
-                        self.handle_balance_decrement(log, tx_envelope.hash(), &balance_decrement)?
-                    }
-                    system_tx::TransactionPacket::ResetSystemTxNonce(reset_system_tx_nonce) => {
-                        // in this arm we update the nonce of the signer and do an early return.
-                        let state = self.adjust_signer_nonce(&tx, |nonce| {
-                            nonce.saturating_sub(reset_system_tx_nonce.decrement_nonce_by)
-                        })?;
-                        let execution_result = ExecutionResult::Success {
-                            reason: revm::context::result::SuccessReason::Return,
-                            gas_used: 0,
-                            gas_refunded: 0,
-                            logs: vec![],
-                            output: Output::Call([].into()),
-                        };
-                        on_result_f(&execution_result);
-                        self.system_tx_receipts
-                            .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
-                                tx: tx_envelope,
-                                evm: self.inner.evm(),
-                                result: execution_result,
-                                state: &state,
-                                cumulative_gas_used: 0,
-                            }));
-
-                        return Ok(0);
-                    }
-                };
-
-                // at this point, the system tx has been processed, and it was valid *enough*
-                // that we should generate a receipt for it even in a failure state
-                let execution_result = match new_account_state {
-                    Ok((plain_account, execution_result)) => {
-                        let storage = plain_account
-                            .storage
-                            .iter()
-                            .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
-                            .collect();
-                        new_state.insert(
-                            target,
-                            Account {
-                                info: plain_account.info,
-                                storage,
-                                status: revm::state::AccountStatus::Touched,
-                            },
-                        );
-
-                        execution_result
-                    }
-                    Err(execution_result) => execution_result,
-                };
-
-                on_result_f(&execution_result);
-
-                // Build and store the receipt
-                let evm = self.inner.evm_mut();
-                self.system_tx_receipts
-                    .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
-                        tx: tx_envelope,
-                        evm,
-                        result: execution_result,
-                        state: &new_state,
-                        cumulative_gas_used: 0,
-                    }));
-
-                // Commit the changes to the database
-                let db = evm.db_mut();
-                db.commit(new_state);
-                Ok(0)
-            } else {
-                // Handle regular transactions using the inner executor
-                self.inner
-                    .execute_transaction_with_result_closure(tx, on_result_f)
-            }
-        }
-
-        fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
-            let (evm, mut block_res) = self.inner.finish()?;
-            // Combine system receipts with regular transaction receipts
-            let total_receipts = [self.system_tx_receipts, block_res.receipts].concat();
-            block_res.receipts = total_receipts;
-
-            Ok((evm, block_res))
-        }
-
-        fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
-            self.inner.set_state_hook(hook);
-        }
-
-        fn evm_mut(&mut self) -> &mut Self::Evm {
-            self.inner.evm_mut()
-        }
-
-        fn evm(&self) -> &Self::Evm {
-            self.inner.evm()
-        }
-    }
-
-    impl<'db, DB, E> IrysBlockExecutor<'_, E>
-    where
-        DB: Database + 'db,
-        E: Evm<
-            DB = &'db mut State<DB>,
-            Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
-        >,
-    {
-        /// Creates a system transaction log with the specified event name and parameters
-        fn create_system_log(
-            target: Address,
-            topics: Vec<FixedBytes<32>>,
-            params: Vec<DynSolValue>,
-        ) -> Log {
-            let encoded_data = DynSolValue::Tuple(params).abi_encode();
-            Log {
-                address: target,
-                data: LogData::new(topics, encoded_data.into())
-                    .expect("System log creation should not fail"),
-            }
-        }
-
-        /// Increments the signer's nonce for system transactions
-        fn adjust_signer_nonce<T: ExecutableTx<Self>>(
-            &mut self,
-            tx: &T,
-            action: impl Fn(u64) -> u64,
-        ) -> Result<alloy_primitives::map::foldhash::HashMap<Address, Account>, BlockExecutionError>
-        {
-            let evm = self.inner.evm_mut();
-            let db = evm.db_mut();
-            let signer = tx.signer();
-            let state = db.load_cache_account(*signer).map_err(|_err| {
-                BlockExecutionError::Internal(reth_evm::block::InternalBlockExecutionError::msg(
-                    "Could not load signer account",
-                ))
-            })?;
-
-            let Some(plain_account) = state.account.as_ref() else {
-                tracing::warn!("signer account does not exist");
-                return Err(BlockExecutionError::Validation(
-                    BlockValidationError::InvalidTx {
-                        hash: *tx.tx().hash(),
-                        error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
-                    },
-                ));
-            };
-
-            let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
-            let storage = plain_account
-                .storage
-                .iter()
-                .map(|(key, value)| (*key, EvmStorageSlot::new(*value)))
-                .collect();
-
-            let mut new_account_info = plain_account.info.clone();
-            new_account_info.set_nonce(action(tx.tx().nonce()));
-
-            new_state.insert(
-                *signer,
-                Account {
-                    info: new_account_info,
-                    storage,
-                    status: revm::state::AccountStatus::Touched,
-                },
-            );
-
-            db.commit(new_state.clone());
-            Ok(new_state)
-        }
-
-        /// Handles system transaction that increases account balance
-        fn handle_balance_increment(
-            &mut self,
-            log: Log,
-            balance_increment: &system_tx::BalanceIncrement,
-        ) -> (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>) {
-            let evm = self.inner.evm_mut();
-
-            let db = evm.db_mut();
-            let state = db
-                .load_cache_account(balance_increment.target)
-                .expect("Failed to load account for balance increment");
-
-            // Get the existing account or create a new one if it doesn't exist
-            let account_info = if let Some(plain_account) = state.account.as_ref() {
-                let mut plain_account = plain_account.clone();
-                // Add the incremented amount to the balance
-                plain_account.info.balance = plain_account
-                    .info
-                    .balance
-                    .saturating_add(balance_increment.amount);
-                plain_account
-            } else {
-                // Create a new account with the incremented balance
-                let mut account = PlainAccount::new_empty_with_storage(PlainStorage::default());
-                account.info.balance = balance_increment.amount;
-                account
-            };
-
-            let execution_result = ExecutionResult::Success {
-                reason: revm::context::result::SuccessReason::Return,
-                gas_used: 0,
-                gas_refunded: 0,
-                logs: vec![log],
-                output: Output::Call(Bytes::new()),
-            };
-
-            (account_info, execution_result)
-        }
-
-        /// Handles system transaction that decreases account balance
-        #[expect(clippy::type_complexity, reason = "original trait definition")]
-        fn handle_balance_decrement(
-            &mut self,
-            log: Log,
-            tx_hash: &FixedBytes<32>,
-            balance_decrement: &system_tx::BalanceDecrement,
-        ) -> Result<
-            Result<
-                (PlainAccount, ExecutionResult<<E as Evm>::HaltReason>),
-                ExecutionResult<<E as Evm>::HaltReason>,
-            >,
-            BlockExecutionError,
-        > {
-            let evm = self.inner.evm_mut();
-
-            let db = evm.db_mut();
-            let state = db
-                .load_cache_account(balance_decrement.target)
-                .map_err(|_err| {
-                    BlockExecutionError::Internal(
-                        reth_evm::block::InternalBlockExecutionError::msg(
-                            "Could not load account for balance decrement",
-                        ),
-                    )
-                })?;
-
-            // Get the existing account or create a new one if it doesn't exist
-            // handle a case when an account has never existed (0 balance, no data stored on it)
-            // We don't even create a receipt in this case (eth does the same with native txs)
-            let Some(plain_account) = state.account.as_ref() else {
-                tracing::warn!("account does not exist");
-                return Err(BlockExecutionError::Validation(
-                    BlockValidationError::InvalidTx {
-                        hash: *tx_hash,
-                        error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
-                    },
-                ));
-            };
-            let mut new_account_info = plain_account.clone();
-            if new_account_info.info.balance < balance_decrement.amount {
-                tracing::warn!(?plain_account.info.balance, ?balance_decrement.amount);
-                return Ok(Err(ExecutionResult::Revert {
-                    gas_used: 0,
-                    output: Bytes::new(),
-                }));
-            }
-            // Apply the decrement amount to the balance
-            new_account_info.info.balance = new_account_info
-                .info
-                .balance
-                .saturating_sub(balance_decrement.amount);
-
-            let execution_result = ExecutionResult::Success {
-                reason: revm::context::result::SuccessReason::Return,
-                gas_used: 0,
-                gas_refunded: 0,
-                logs: vec![log],
-                output: Output::Call(Bytes::new()),
-            };
-
-            Ok(Ok((new_account_info, execution_result)))
-        }
-    }
-
-    /// Irys block assembler: assembles blocks, ensuring system tx ordering and inclusion rules.
-    #[derive(Debug, Clone)]
-    pub struct IrysBlockAssembler<ChainSpec = reth_chainspec::ChainSpec> {
-        inner: EthBlockAssembler<ChainSpec>,
-    }
-
-    impl<ChainSpec> IrysBlockAssembler<ChainSpec> {
-        /// Creates a new [`IrysBlockAssembler`].
-        pub fn new(chain_spec: Arc<ChainSpec>) -> Self {
-            Self {
-                inner: EthBlockAssembler::new(chain_spec),
-            }
-        }
-    }
-
-    impl<F, ChainSpec> BlockAssembler<F> for IrysBlockAssembler<ChainSpec>
-    where
-        F: for<'a> BlockExecutorFactory<
-            ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
-            Transaction = TransactionSigned,
-            Receipt = Receipt,
-        >,
-        ChainSpec: EthChainSpec + EthereumHardforks,
-    {
-        type Block = Block<TransactionSigned>;
-
-        fn assemble_block(
-            &self,
-            input: BlockAssemblerInput<'_, '_, F>,
-        ) -> Result<Block<TransactionSigned>, BlockExecutionError> {
-            self.inner.assemble_block(input)
-        }
-    }
-
-    /// Irys block executor factory: produces block executors.
-    #[derive(Debug, Clone, Default)]
-    pub struct IrysBlockExecutorFactory {
-        inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, IrysEvmFactory>,
-    }
-
-    impl IrysBlockExecutorFactory {
-        /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
-        /// [`ReceiptBuilder`].
-        pub const fn new(
-            receipt_builder: RethReceiptBuilder,
-            spec: Arc<ChainSpec>,
-            evm_factory: IrysEvmFactory,
-        ) -> Self {
-            Self {
-                inner: EthBlockExecutorFactory::new(receipt_builder, spec, evm_factory),
-            }
-        }
-
-        /// Exposes the receipt builder.
-        #[must_use]
-        pub const fn receipt_builder(&self) -> &RethReceiptBuilder {
-            self.inner.receipt_builder()
-        }
-
-        /// Exposes the chain specification.
-        #[must_use]
-        pub const fn spec(&self) -> &Arc<ChainSpec> {
-            self.inner.spec()
-        }
-
-        /// Exposes the EVM factory.
-        #[must_use]
-        pub const fn evm_factory(&self) -> &IrysEvmFactory {
-            self.inner.evm_factory()
-        }
-    }
-
-    impl BlockExecutorFactory for IrysBlockExecutorFactory
-    where
-        Self: 'static,
-    {
-        type EvmFactory = IrysEvmFactory;
-        type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
-        type Transaction = TransactionSigned;
-        type Receipt = Receipt;
-
-        #[must_use]
-        fn evm_factory(&self) -> &Self::EvmFactory {
-            self.inner.evm_factory()
-        }
-
-        fn create_executor<'a, DB, I>(
-            &'a self,
-            evm: <IrysEvmFactory as EvmFactory>::Evm<&'a mut State<DB>, I>,
-            ctx: Self::ExecutionCtx<'a>,
-        ) -> impl BlockExecutorFor<'a, Self, DB, I>
-        where
-            DB: Database + 'a,
-            I: Inspector<<EthEvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,
-        {
-            let receipt_builder = self.inner.receipt_builder();
-            IrysBlockExecutor {
-                inner: EthBlockExecutor::new(evm, ctx, self.inner.spec(), receipt_builder),
-                receipt_builder,
-                system_tx_receipts: vec![],
-            }
-        }
-    }
-
-    /// Irys EVM config: wraps EVM config, block executor factory, and assembler.
-    #[derive(Debug, Clone)]
-    pub struct IrysEvmConfig {
-        pub inner: EthEvmConfig<EthEvmFactory>,
-        pub executor_factory: IrysBlockExecutorFactory,
-        pub assembler: IrysBlockAssembler,
-    }
-
-    impl ConfigureEvm for IrysEvmConfig {
-        type Primitives = EthPrimitives;
-        type Error = Infallible;
-        type NextBlockEnvCtx = NextBlockEnvAttributes;
-        type BlockExecutorFactory = IrysBlockExecutorFactory;
-        type BlockAssembler = IrysBlockAssembler<ChainSpec>;
-
-        fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
-            &self.executor_factory
-        }
-
-        fn block_assembler(&self) -> &Self::BlockAssembler {
-            &self.assembler
-        }
-
-        fn evm_env(&self, header: &Header) -> EvmEnv {
-            self.inner.evm_env(header)
-        }
-
-        fn next_evm_env(
-            &self,
-            parent: &Header,
-            attributes: &NextBlockEnvAttributes,
-        ) -> Result<EvmEnv, Self::Error> {
-            self.inner.next_evm_env(parent, attributes)
-        }
-
-        fn context_for_block<'a>(
-            &self,
-            block: &'a SealedBlock<alloy_consensus::Block<TransactionSigned>>,
-        ) -> EthBlockExecutionCtx<'a> {
-            self.inner.context_for_block(block)
-        }
-
-        fn context_for_next_block(
-            &self,
-            parent: &SealedHeader,
-            attributes: Self::NextBlockEnvCtx,
-        ) -> EthBlockExecutionCtx<'_> {
-            self.inner.context_for_next_block(parent, attributes)
-        }
-    }
-
-    /// Factory producing [`EthEvm`].
-    #[derive(Debug, Default, Clone, Copy)]
-    #[non_exhaustive]
-    pub struct IrysEvmFactory;
-
-    impl EvmFactory for IrysEvmFactory {
-        type Evm<DB: Database, I: Inspector<EthEvmContext<DB>>> = EthEvm<DB, I, Self::Precompiles>;
-        type Context<DB: Database> = revm::Context<BlockEnv, TxEnv, CfgEnv, DB>;
-        type Tx = TxEnv;
-        type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
-        type HaltReason = HaltReason;
-        type Spec = SpecId;
-        type Precompiles = PrecompilesMap;
-
-        fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
-            let spec_id = input.cfg_env.spec;
-            EthEvm::new(
-                revm::Context::mainnet()
-                    .with_block(input.block_env)
-                    .with_cfg(input.cfg_env)
-                    .with_db(db)
-                    .build_mainnet_with_inspector(NoOpInspector {})
-                    .with_precompiles(PrecompilesMap::from_static(Precompiles::new(
-                        PrecompileSpecId::from_spec_id(spec_id),
-                    ))),
-                false,
-            )
-        }
-
-        fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
-            &self,
-            db: DB,
-            input: EvmEnv,
-            inspector: I,
-        ) -> Self::Evm<DB, I> {
-            let spec_id = input.cfg_env.spec;
-            EthEvm::new(
-                revm::Context::mainnet()
-                    .with_block(input.block_env)
-                    .with_cfg(input.cfg_env)
-                    .with_db(db)
-                    .build_mainnet_with_inspector(inspector)
-                    .with_precompiles(PrecompilesMap::from_static(Precompiles::new(
-                        PrecompileSpecId::from_spec_id(spec_id),
-                    ))),
-                true,
-            )
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::system_tx::{
-        BalanceDecrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID, RELEASE_STAKE_ID,
+        BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID,
+        RELEASE_STAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
-        advance_blocks, block_reward, custom_chain, eth_payload_attributes,
-        eth_payload_attributes_with_parent, get_balance, nonce_reset, release_stake,
-        setup_irys_reth, sign_tx, stake, storage_fees,
+        advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance,
+        release_stake, sign_tx, stake, storage_fees,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
     use alloy_eips::Encodable2718;
     use alloy_network::{EthereumWallet, TxSigner};
-    use alloy_primitives::{Address, B256};
+    use alloy_primitives::{Address, Uint, B256};
     use alloy_primitives::{FixedBytes, Signature};
     use alloy_rpc_types_engine::ForkchoiceState;
     use alloy_signer_local::PrivateKeySigner;
@@ -1217,7 +424,7 @@ mod tests {
         rpc::server_types::eth::EthApiError,
     };
     use reth_e2e_test_utils::wallet::Wallet;
-    use reth_transaction_pool::TransactionPool;
+    use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1227,14 +434,14 @@ mod tests {
     /// - Setup: Use `setup_irys_reth` to launch node, `block_reward` to compose system tx, `sign_tx` to sign.
     /// - Action: Inject system tx with invalid origin.
     /// - Assertion: Tx is rejected with pool error.
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn external_users_cannot_submit_system_txs() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
-        let (node, ctx) = ctx.get_single_node()?;
+        let ((node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
         let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
-        let mut system_tx_raw = compose_system_tx(0, 1, &system_tx);
+        let mut system_tx_raw = compose_system_tx(1, &system_tx);
         let signed_tx = ctx
             .target_account
             .sign_transaction(&mut system_tx_raw)
@@ -1253,22 +460,24 @@ mod tests {
     ///
     /// Setup:
     /// - Create two nodes with the same block producer.
-    /// - Submit a normal tx and a system tx to the nodes.
+    /// - Submit a normal tx to node a, and a system tx to node b.
     ///
     /// Action:
-    /// - Advance the block on the first node.
-    /// - Update forkchoice on the second node.
+    /// - Advance the block on node a.
+    /// - Update forkchoice on node b to point to the new block that was created on node a.
     ///
     /// Assertion:
-    /// - The system tx from second node is dropped from both pools and not included in the block.
+    /// - The system tx from node b is not included in the block.
+    /// - The normal tx from node a is included in the block.
     #[test_log::test(tokio::test)]
-    async fn stale_system_txs_get_dropped() -> eyre::Result<()> {
+    async fn stale_system_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut first_node, mut second_node), ctx) = ctx.get_two_nodes()?;
+        let (((mut node_a, system_tx_store_a), (mut node_b, system_tx_store_b)), ctx) =
+            ctx.get_two_nodes()?;
 
-        // Submit normal transaction to first node
+        // Submit normal transaction to node a
         let normal_tx_hash = create_and_submit_normal_tx(
-            &mut first_node,
+            &mut node_a,
             0,
             U256::from(1000),
             1_000_000_000u128,
@@ -1276,35 +485,25 @@ mod tests {
             &ctx.normal_signer,
         )
         .await?;
+        let payload_node_a = advance_block(&mut node_a, &system_tx_store_a, vec![]).await?;
 
-        // Submit system transaction to second node
+        // Submit system transaction to node b
         let system_tx = create_system_tx(
             BLOCK_REWARD_ID,
             ctx.block_producer_b.address(),
             1,
             ctx.genesis_blockhash,
         );
-        let system_tx_hash =
-            create_and_submit_system_tx(&mut second_node, system_tx, 0, &ctx.block_producer_b)
-                .await?;
+        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_b).await?;
+        let system_tx_hash = *system_tx.hash();
+        let _payload_node_b =
+            advance_block(&mut node_b, &system_tx_store_b, vec![system_tx]).await?;
 
-        let payload = first_node.advance_block().await?;
-        first_node
-            .assert_new_block(
-                normal_tx_hash,
-                payload.block().hash(),
-                payload.block().number,
-            )
-            .await?;
+        // Update forkchoice on node b
+        node_b.sync_to(payload_node_a.block().hash()).await?;
 
-        // Update forkchoice on second node
-        second_node
-            .update_forkchoice(payload.block().hash(), payload.block().hash())
-            .await?;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Assert system tx is dropped from both pools
-        let pool_txs: Vec<_> = second_node
+        // Assert system tx never touched the pool
+        let pool_txs: Vec<_> = node_b
             .inner
             .pool
             .all_transactions()
@@ -1313,10 +512,11 @@ mod tests {
             .collect();
         assert!(
             !pool_txs.contains(&system_tx_hash),
-            "System tx should have been dropped from second node pool"
+            "System tx should never enter the second node pool"
         );
 
-        let pool_txs: Vec<_> = first_node
+        // Assert system tx never touched the pool
+        let pool_txs: Vec<_> = node_a
             .inner
             .pool
             .all_transactions()
@@ -1325,91 +525,74 @@ mod tests {
             .collect();
         assert!(
             !pool_txs.contains(&system_tx_hash),
-            "System tx should have been dropped from first node pool"
+            "System tx should never enter the first node pool"
         );
 
+        // Assert system tx never touched the block
         assert_txs_not_in_block(
-            &payload,
+            &payload_node_a,
             &[system_tx_hash],
             "System tx should not be in block",
+        );
+        // Assert normal tx is in the block
+        assert_txs_in_block(
+            &payload_node_a,
+            &[normal_tx_hash],
+            "Normal tx should be in block",
         );
         Ok(())
     }
 
     #[test_log::test(tokio::test)]
-    async fn block_gets_broadcasted_between_peers() -> eyre::Result<()> {
-        let wallets = Wallet::new(2).wallet_gen();
-        let trget_account = EthereumWallet::from(wallets[0].clone());
-        let target_account = trget_account.default_signer();
-        let block_producer = EthereumWallet::from(wallets[1].clone());
-        let block_producer = block_producer.default_signer();
+    async fn block_with_system_txs_gets_broadcasted_between_peers() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let (((mut node_a, system_tx_store_a), (mut node_b, _system_tx_store_b)), ctx) =
+            ctx.get_two_nodes()?;
 
-        let (mut nodes, _tasks, ..) = setup_irys_reth(
-            &[block_producer.address(), target_account.address()],
-            custom_chain(),
-            false,
-            eth_payload_attributes,
-        )
-        .await?;
-        let mut second_node = nodes.pop().unwrap();
-        let mut first_node = nodes.pop().unwrap();
-        let genesis_blockhash = first_node
-            .inner
-            .provider
-            .consistent_provider()
-            .unwrap()
-            .block_hash(0)
-            .unwrap()
-            .unwrap();
+        let initial_balance = get_balance(&node_a.inner, ctx.block_producer_a.address());
 
-        let initial_balance = get_balance(&first_node.inner, block_producer.address());
-
-        let system_tx = SystemTransaction {
-            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
-                amount: U256::from(7000000000000000000u64),
-                target: block_producer.address(),
-            }),
-            valid_for_block_height: 1,
-            parent_blockhash: genesis_blockhash,
-        };
-        let system_tx_raw = compose_system_tx(0, 1, &system_tx);
-        let system_pooled_tx = sign_tx(system_tx_raw, &block_producer).await;
-        let system_tx_hash = first_node
-            .inner
-            .pool
-            .add_transaction(
-                reth_transaction_pool::TransactionOrigin::Private,
-                system_pooled_tx,
-            )
-            .await?;
+        let amount = U256::from(7000000000000000000u64);
+        let system_tx = compose_system_tx(
+            1,
+            &SystemTransaction::new_v1(
+                1,
+                ctx.genesis_blockhash,
+                TransactionPacket::BlockReward(BalanceIncrement {
+                    amount,
+                    target: ctx.block_producer_a.address(),
+                }),
+            ),
+        );
+        let system_tx = sign_tx(system_tx, &ctx.block_producer_a).await;
+        let system_tx_hash = *system_tx.hash();
 
         // make the node advance
-        let payload = first_node.advance_block().await?;
+        let payload = advance_block(&mut node_a, &system_tx_store_a, vec![system_tx]).await?;
 
         let block_hash = payload.block().hash();
         let block_number = payload.block().number;
+        assert_eq!(block_number, 1);
 
         // assert the block has been committed to the blockchain
-        first_node
+        node_a
             .assert_new_block(system_tx_hash, block_hash, block_number)
             .await?;
 
         // only send forkchoice update to second node
-        second_node
-            .update_forkchoice(block_hash, block_hash)
-            .await?;
+        node_b.update_forkchoice(block_hash, block_hash).await?;
 
         // expect second node advanced via p2p gossip
-        second_node
-            .assert_new_block(system_tx_hash, block_hash, 1)
+        node_b
+            .assert_new_block(system_tx_hash, block_hash, block_number)
             .await?;
 
-        let final_balance = get_balance(&first_node.inner, block_producer.address());
-        let final_balance_second = get_balance(&second_node.inner, block_producer.address());
-        assert_eq!(final_balance, final_balance_second);
-        assert_eq!(
-            final_balance,
-            initial_balance + U256::from(7000000000000000000u64)
+        assert_balance_change(
+            &node_b,
+            ctx.block_producer_a.address(),
+            initial_balance,
+            amount,
+            true,
+            "Producer balance should increase",
         );
 
         Ok(())
@@ -1427,26 +610,22 @@ mod tests {
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         let initial_balance = get_balance(&node.inner, target_signer.address());
         let initial_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
 
         let tx_count = 5;
         let system_tx = system_tx(target_signer.address(), 1, ctx.genesis_blockhash);
-        let tx_hashes = create_and_submit_multiple_system_txs(
-            &mut node,
-            system_tx.clone(),
-            tx_count,
-            0,
-            &ctx.block_producer_a,
-        )
-        .await?;
+        let system_tx_topic = system_tx.topic().into();
+        let system_tx = sign_system_tx(system_tx, &target_signer).await?;
+        let system_txs = vec![system_tx.clone(); tx_count];
 
-        let _block_payload = mine_block_and_validate(&mut node, &tx_hashes, &[]).await?;
+        let _block_payload =
+            mine_block_and_validate(&mut node, &system_tx_store, system_txs, &[]).await?;
 
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
-        asserst_topic_present_in_logs(block_execution, system_tx.inner.topic().into(), tx_count);
+        assert_topic_present_in_logs(block_execution, system_tx_topic, tx_count as u64);
 
         assert_balance_change(
             &node,
@@ -1467,8 +646,8 @@ mod tests {
         assert_nonce(
             &node,
             ctx.block_producer_a.address(),
-            tx_count,
-            "Producer nonce should match tx count",
+            0,
+            "Producer nonce should not change",
         );
 
         Ok(())
@@ -1484,27 +663,19 @@ mod tests {
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         let initial_balance = get_balance(&node.inner, target_signer.address());
         let initial_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
 
         let tx_count = 2;
         let system_tx = system_tx(target_signer.address(), 1, ctx.genesis_blockhash);
-        let tx_hashes = create_and_submit_multiple_system_txs(
-            &mut node,
-            system_tx.clone(),
-            tx_count,
-            0,
-            &ctx.block_producer_a,
-        )
-        .await?;
-
-        // Use new_payload and submit_payload for decrementing transactions
-        let block_payload = node.new_payload().await?;
-        let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
-        node.update_forkchoice(block_payload_hash, block_payload_hash)
-            .await?;
+        let system_tx_topic = system_tx.topic().into();
+        let system_tx = sign_system_tx(system_tx, &target_signer).await?;
+        let system_txs = vec![system_tx.clone(); tx_count];
+        let tx_hashes = system_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
+        let block_payload =
+            mine_block_and_validate(&mut node, &system_tx_store, system_txs, &[]).await?;
 
         // Assertions
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
@@ -1513,7 +684,7 @@ mod tests {
         assert_txs_in_block(&block_payload, &tx_hashes, "System transactions");
 
         // Assert all txs have a corresponding log
-        asserst_topic_present_in_logs(block_execution, system_tx.inner.topic().into(), tx_count);
+        assert_topic_present_in_logs(block_execution, system_tx_topic, tx_count as u64);
 
         // Assert balance for target is decremented
         assert_balance_change(
@@ -1538,8 +709,8 @@ mod tests {
         assert_nonce(
             &node,
             ctx.block_producer_a.address(),
-            tx_count,
-            "Producer nonce should match tx count",
+            0,
+            "Producer nonce should not change",
         );
 
         Ok(())
@@ -1549,7 +720,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_system_tx_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         // Create normal transactions with high gas price
         let normal_tx_hashes = create_and_submit_multiple_normal_txs(
@@ -1569,16 +740,13 @@ mod tests {
             1,
             ctx.genesis_blockhash,
         );
-        let system_tx_hashes = create_and_submit_multiple_system_txs(
-            &mut node,
-            system_tx,
-            2,
-            0,
-            &ctx.block_producer_a,
-        )
-        .await?;
+        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
+        let system_txs = vec![system_tx.clone(); 2];
+        let system_tx_hashes = system_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
 
-        let block_payload = node.advance_block().await?;
+        let block_payload =
+            mine_block_and_validate(&mut node, &system_tx_store, system_txs, &normal_tx_hashes)
+                .await?;
 
         assert_txs_in_block(&block_payload, &system_tx_hashes, "System transactions");
         assert_txs_in_block(&block_payload, &normal_tx_hashes, "Normal transactions");
@@ -1591,7 +759,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         // Create a random address that has never existed on chain
         let nonexistent_address = Address::random();
@@ -1605,22 +773,22 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create and submit a system transaction trying to decrement balance of non-existent account
-        let system_tx = SystemTransaction {
-            inner: TransactionPacket::Stake(BalanceDecrement {
+        let system_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::Stake(BalanceDecrement {
                 amount: U256::ONE,
                 target: nonexistent_address,
             }),
-            valid_for_block_height: 1,
-            parent_blockhash: ctx.genesis_blockhash,
-        };
-        let system_tx_hash =
-            create_and_submit_system_tx(&mut node, system_tx, 0, &ctx.block_producer_a).await?;
+        );
+        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
+        let system_tx_hashes = vec![*system_tx.hash()];
 
         // Submit a normal transaction to ensure block is produced
         let normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
-            U256::ZERO,
+            U256::from(1000),
             1_000_000_000u128,
             Address::random(),
             &ctx.normal_signer,
@@ -1628,12 +796,12 @@ mod tests {
         .await?;
 
         // Produce a new block
-        let block_payload = node.advance_block().await?;
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![system_tx]).await?;
 
-        // Verify the system transaction is NOT included
+        // // Verify the system transaction is NOT included
         assert_txs_not_in_block(
             &block_payload,
-            &[system_tx_hash],
+            &system_tx_hashes,
             "System transaction for non-existent account should not be included in block",
         );
 
@@ -1651,7 +819,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         let funded_balance = get_balance(&node.inner, ctx.normal_signer.address());
 
@@ -1662,24 +830,24 @@ mod tests {
 
         // Create a system tx that tries to decrement more than the balance
         let decrement_amount = funded_balance + U256::ONE;
-        let system_tx = SystemTransaction {
-            inner: TransactionPacket::Stake(BalanceDecrement {
+        let system_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::Stake(BalanceDecrement {
                 amount: decrement_amount,
                 target: ctx.normal_signer.address(),
             }),
-            valid_for_block_height: 1,
-            parent_blockhash: ctx.genesis_blockhash,
-        };
-        let system_tx_hash =
-            create_and_submit_system_tx(&mut node, system_tx, 0, &ctx.block_producer_a).await?;
+        );
+        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
+        let system_tx_hashes = vec![*system_tx.hash()];
 
         // Produce a new block
-        let block_payload = node.advance_block().await?;
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![system_tx]).await?;
 
         // Verify the system transaction IS included
         assert_txs_in_block(
             &block_payload,
-            &[system_tx_hash],
+            &system_tx_hashes,
             "System transaction should be included in block",
         );
 
@@ -1707,6 +875,7 @@ mod tests {
     fn signer_random() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
         Arc::new(PrivateKeySigner::random())
     }
+
     /// Mines 5 blocks, each with a system (block reward) and a normal tx.
     /// Asserts both txs are present in every block.
     /// Verifies sequential block production and tx inclusion.
@@ -1714,9 +883,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn mine_5_blocks_with_system_and_normal_tx() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
-        // Get genesis block hash for parent_blockhash
         let mut parent_blockhash = ctx.genesis_blockhash;
         let recipient = ctx.target_account.address();
 
@@ -1727,13 +895,7 @@ mod tests {
                 block_number,
                 parent_blockhash,
             );
-            let system_tx_hash = create_and_submit_system_tx(
-                &mut node,
-                system_tx,
-                block_number - 1,
-                &ctx.block_producer_a,
-            )
-            .await?;
+            let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
 
             // Normal tx
             let normal_tx_hash = create_and_submit_normal_tx(
@@ -1747,20 +909,14 @@ mod tests {
             .await?;
 
             // Mine block
-            let block_payload = node.advance_block().await?;
-            parent_blockhash = block_payload.block().hash();
-
-            // Assert both txs are present
-            assert_txs_in_block(
-                &block_payload,
-                &[system_tx_hash],
-                &format!("System tx not found in block {}", block_number),
-            );
-            assert_txs_in_block(
-                &block_payload,
+            let block_payload = mine_block_and_validate(
+                &mut node,
+                &system_tx_store,
+                vec![system_tx],
                 &[normal_tx_hash],
-                &format!("Normal tx not found in block {}", block_number),
-            );
+            )
+            .await?;
+            parent_blockhash = block_payload.block().hash();
         }
 
         // Assert that the current block is the latest block
@@ -1784,18 +940,15 @@ mod tests {
     async fn system_tx_with_invalid_parent_blockhash_is_rejected_by_custom_executor(
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
-        // Get genesis block hash for parent_blockhash
-        let recipient = ctx.target_account.address();
-
-        // Use a random blockhash instead of the real parent
+        // Create invalid parent blockhash (random, not actual parent block)
         let invalid_parent_blockhash = FixedBytes::random();
 
         // Create a system tx with the invalid parent blockhash
         let system_tx = block_reward(ctx.block_producer_a.address(), 1, invalid_parent_blockhash);
-        let system_tx_hash =
-            create_and_submit_system_tx(&mut node, system_tx, 0, &ctx.block_producer_a).await?;
+        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
+        let system_tx_hashes = vec![*system_tx.hash()];
 
         // Create and submit a normal user tx
         let normal_tx_hash = create_and_submit_normal_tx(
@@ -1803,18 +956,18 @@ mod tests {
             0,
             U256::from(1234u64),
             2_000_000_000u128, // 2 Gwei
-            recipient,
+            ctx.normal_signer.address(),
             &ctx.normal_signer,
         )
         .await?;
 
         // Mine a block
-        let block_payload = node.advance_block().await?;
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![system_tx]).await?;
 
         // Assert that the system tx is NOT present in the block
         assert_txs_not_in_block(
             &block_payload,
-            &[system_tx_hash],
+            &system_tx_hashes,
             "System tx with invalid parent blockhash should not be included in the block",
         );
 
@@ -1836,9 +989,9 @@ mod tests {
     async fn system_tx_with_invalid_block_number_is_rejected_by_custom_executor() -> eyre::Result<()>
     {
         let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
-        // Use an invalid block number (should be 1, use 2)
+        // Use invalid block number (should be 1 for first block, but using 2)
         let invalid_block_number = 2u64;
 
         // Create a system tx with the valid parent blockhash but invalid block number
@@ -1847,8 +1000,8 @@ mod tests {
             invalid_block_number,
             ctx.genesis_blockhash,
         );
-        let system_tx_hash =
-            create_and_submit_system_tx(&mut node, system_tx, 0, &ctx.block_producer_a).await?;
+        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
+        let system_tx_hashes = vec![*system_tx.hash()];
 
         // Create and submit a normal user tx
         let normal_tx_hash = create_and_submit_normal_tx(
@@ -1862,12 +1015,12 @@ mod tests {
         .await?;
 
         // Mine a block
-        let block_payload = node.advance_block().await?;
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![system_tx]).await?;
 
         // Assert that the system tx is NOT present in the block
         assert_txs_not_in_block(
             &block_payload,
-            &[system_tx_hash],
+            &system_tx_hashes,
             "System tx with invalid block number should not be included in the block",
         );
 
@@ -1882,58 +1035,26 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn system_tx_with_invalid_signer_is_rejected_by_pool_validator() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
-
-        // Create a system tx with a valid block number and parent blockhash, but sign with a random (invalid) signer
-        let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
-        let invalid_signer = signer_random();
-        let res = create_and_submit_system_tx(&mut node, system_tx, 0, &invalid_signer).await;
-        assert!(
-            res.is_err(),
-            "System tx with invalid signer should be rejected by the pool validator"
-        );
-
-        Ok(())
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn system_tx_with_invalid_origin_is_rejected_by_pool_validator() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let (node, ctx) = ctx.get_single_node()?;
-
-        // Create a system tx with a valid block number and parent blockhash, signed by the correct signer
-        let system_tx = block_reward(ctx.block_producer_a.address(), 1, ctx.genesis_blockhash);
-        let system_tx_raw = compose_system_tx(0, 1, &system_tx);
-        let system_pooled_tx = sign_tx(system_tx_raw, &ctx.block_producer_a).await;
-        // Submit with TransactionOrigin::Local (should be rejected, only Private is allowed)
-        let res = node
-            .inner
-            .pool
-            .add_transaction(
-                reth_transaction_pool::TransactionOrigin::Local,
-                system_pooled_tx,
-            )
-            .await;
-        assert!(
-            res.is_err(),
-            "System tx with invalid origin should be rejected by the pool validator"
-        );
-
-        Ok(())
-    }
-
-    #[test_log::test(tokio::test)]
     async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
         // Setup nodes and context
         let ctx = TestContext::new().await?;
-        let ((mut node_a, mut node_b), ctx) = ctx.get_two_nodes()?;
+        let (((mut node_a, system_tx_store_node_a), (mut node_b, system_tx_store_node_b)), ctx) =
+            ctx.get_two_nodes()?;
         let reward_address = Address::random();
 
         // Node A: advance 3 blocks, 2 system txs per block
-        let _block_hashes_a =
-            advance_blocks(&mut node_a, reward_address, 1, 3, 2, &ctx.block_producer_a).await?;
+        let system_tx = block_reward(reward_address, 1, ctx.genesis_blockhash);
+        let system_txs = vec![vec![system_tx; 2]; 3];
+
+        let _block_hashes_a = advance_blocks(
+            &mut node_a,
+            &system_tx_store_node_a,
+            system_txs,
+            &ctx.block_producer_a,
+            ctx.genesis_blockhash,
+            1,
+        )
+        .await?;
         let consistent_provider_a = node_a.inner.provider.consistent_provider().unwrap();
         let account_a_on_fork = consistent_provider_a
             .basic_account(&ctx.block_producer_a.address())
@@ -1942,12 +1063,21 @@ mod tests {
         let node_a_reward_balance = get_balance(&node_a.inner, reward_address);
 
         // Node B: advance 4 blocks, 1 system tx per block
-        let _block_hashes_b =
-            advance_blocks(&mut node_b, reward_address, 1, 4, 1, &ctx.block_producer_b).await?;
+        let system_tx = block_reward(reward_address, 1, ctx.genesis_blockhash);
+        let system_txs = vec![vec![system_tx; 1]; 4];
+        let _block_hashes_b = advance_blocks(
+            &mut node_b,
+            &system_tx_store_node_b,
+            system_txs,
+            &ctx.block_producer_b,
+            ctx.genesis_blockhash,
+            1,
+        )
+        .await?;
 
         // Record Node B's state after 4 blocks
         let consistent_provider_b = node_b.inner.provider.consistent_provider().unwrap();
-        let account_b = consistent_provider_b
+        let block_producer_node_b_account_b = consistent_provider_b
             .basic_account(&ctx.block_producer_b.address())
             .unwrap()
             .unwrap();
@@ -1956,7 +1086,7 @@ mod tests {
             .block_hash(best_block_b)
             .unwrap()
             .unwrap();
-        let node_b_reward_balance = get_balance(&node_b.inner, reward_address);
+        let reward_balance_node_b = get_balance(&node_b.inner, reward_address);
 
         // Node A switches forkchoice to Node B's latest block
         node_a.sync_to(block_hash_b).await?;
@@ -1969,7 +1099,7 @@ mod tests {
             .unwrap();
         let best_block_a = consistent_provider_a.best_block_number().unwrap();
         let block_hash_a = consistent_provider_a.block_hash(4).unwrap().unwrap();
-        let node_a_reward_balance_post_switch = get_balance(&node_a.inner, reward_address);
+        let reward_balance_post_switch_node_a = get_balance(&node_a.inner, reward_address);
         assert_ne!(
             ctx.block_producer_a.address(),
             ctx.block_producer_b.address()
@@ -1980,25 +1110,23 @@ mod tests {
             block_hash_a, block_hash_b,
             "block hashes after sync must be equal"
         );
+        assert_eq!(reward_balance_post_switch_node_a, reward_balance_node_b);
+        assert_eq!(reward_balance_post_switch_node_a, Uint::from(4));
         assert_ne!(
-            node_a_reward_balance, node_b_reward_balance,
+            node_a_reward_balance, reward_balance_node_b,
             "initial rewards differ on forks produced by each chain"
         );
         assert_eq!(
-            node_a_reward_balance_post_switch, node_b_reward_balance,
-            "post FCU, node a has the same state as node b"
-        );
-        assert_ne!(
             account_a_on_fork.nonce, account_a.nonce,
-            "balances for account a pre fork and post fork should be different!"
+            "nonce should be the same for each block producer account"
         );
         assert_eq!(
-            account_b.nonce, 4,
-            "Nonces should be different for each block producer account"
+            block_producer_node_b_account_b.nonce, 0,
+            "nonce should be 0 for each block producer account"
         );
         assert_eq!(
             account_a.nonce, 0,
-            "Nonce should match after forkchoice switch"
+            "nonce should be 0 for each block producer account"
         );
         assert_eq!(
             best_block_a, best_block_b,
@@ -2032,7 +1160,7 @@ mod tests {
         };
 
         let ctx = TestContext::new_with_payload_attributes(payload_attributes).await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         // Initial setup and baseline measurements
         let mut parent_blockhash = ctx.genesis_blockhash;
@@ -2048,16 +1176,12 @@ mod tests {
                 block_number,
                 parent_blockhash,
             );
-            create_and_submit_system_tx(&mut node, block_reward_tx, 0, &ctx.block_producer_a)
-                .await?;
-
-            // Create nonce reset transaction
-            let nonce_reset_tx = nonce_reset(1, block_number, parent_blockhash);
-            create_and_submit_system_tx(&mut node, nonce_reset_tx, 1, &ctx.block_producer_a)
-                .await?;
+            let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
 
             // Mine the block
-            let payload = node.advance_block().await?;
+            let payload =
+                mine_block_and_validate(&mut node, &system_tx_store, vec![block_reward_tx], &[])
+                    .await?;
             parent_blockhash = payload.block().hash();
             block_hashes.push(parent_blockhash);
 
@@ -2112,18 +1236,15 @@ mod tests {
         // Phase 4: Build new fork block on rolled-back state
         tracing::info!("Phase 4: Building new fork block on rolled-back state");
         let fork_block_number = 2; // Building block 2 on top of block 1
+                                   // Update parent tracker for payload attributes
+        *parent_tracker.lock().unwrap() = rollback_target;
         let fork_reward_tx = block_reward(
             ctx.block_producer_a.address(),
             fork_block_number,
             rollback_target,
         );
-        create_and_submit_system_tx(&mut node, fork_reward_tx, 0, &ctx.block_producer_a).await?;
-
-        // Update parent tracker for payload attributes
-        *parent_tracker.lock().unwrap() = rollback_target;
-
-        // Build and submit the fork block
-        let fork_payload = node.build_and_submit_payload().await?;
+        let fork_reward_tx = sign_system_tx(fork_reward_tx, &ctx.block_producer_a).await?;
+        let fork_payload = prepare_block(&mut node, &system_tx_store, vec![fork_reward_tx]).await?;
         let fork_block_hash = fork_payload.block().hash();
 
         tracing::info!(
@@ -2189,11 +1310,270 @@ mod tests {
         assert_nonce(
             &node,
             ctx.block_producer_a.address(),
-            1,
-            "Nonce should be 1 after fork block transaction",
+            0,
+            "Nonce always be 0",
         );
 
         tracing::info!("Rollback test completed successfully");
+        Ok(())
+    }
+
+    /// Tests that system transactions never enter the transaction pool when rolling back state to a past block.
+    ///
+    /// Test scenario:
+    /// 1. Setup a node and create system transactions
+    /// 2. Mine blocks with system transactions to establish state
+    /// 3. Rollback the state to a past block
+    /// 4. Verify that system transactions are never in the transaction pool past
+    #[test_log::test(tokio::test)]
+    async fn system_txs_never_in_pool_during_rollback() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Phase 1: Build initial blocks with system transactions
+        let mut parent_blockhash = ctx.genesis_blockhash;
+        let _initial_balance = get_balance(&node.inner, ctx.block_producer_a.address());
+        let mut block_hashes = vec![parent_blockhash];
+        let mut system_txs = vec![];
+
+        // Build 3 blocks with system transactions
+        for block_number in 1..=3 {
+            let block_reward_tx = block_reward(
+                ctx.block_producer_a.address(),
+                block_number,
+                parent_blockhash,
+            );
+            let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+            system_txs.push(block_reward_tx.clone());
+
+            let normal_tx = create_and_submit_normal_tx(
+                &mut node,
+                block_number - 1,
+                U256::from(1234u64),
+                2_000_000_000u128, // 2 Gwei
+                ctx.target_account.address(),
+                &ctx.normal_signer,
+            )
+            .await?;
+
+            let payload = mine_block_and_validate(
+                &mut node,
+                &system_tx_store,
+                vec![block_reward_tx],
+                &[normal_tx],
+            )
+            .await?;
+            parent_blockhash = payload.block().hash();
+            block_hashes.push(parent_blockhash);
+        }
+
+        // Verify we're at block 3
+        let best_block = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .best_block_number()
+            .unwrap();
+        assert_eq!(best_block, 3, "Should be at block 3");
+
+        // Phase 3: Rollback to block 1
+        let rollback_target = block_hashes[1]; // Block 1
+        tracing::info!("Rolling back to block 1: {}", rollback_target);
+
+        node.inner
+            .add_ons_handle
+            .beacon_engine_handle
+            .fork_choice_updated(
+                ForkchoiceState {
+                    head_block_hash: rollback_target,
+                    safe_block_hash: rollback_target,
+                    finalized_block_hash: rollback_target,
+                },
+                None,
+                EngineApiMessageVersion::default(),
+            )
+            .await?;
+
+        // Allow time for rollback to process
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Phase 4: Verify system transactions never entered the pool during rollback
+        // The key invariant is that system txs should NEVER be in the transaction pool regardless of rollback state
+        let pool_txs: Vec<_> = node
+            .inner
+            .pool
+            .all_transactions()
+            .all()
+            .map(|tx| *tx.hash())
+            .collect();
+
+        for tx in system_txs {
+            assert!(
+                !pool_txs.contains(tx.hash()),
+                "System tx should never be in the transaction pool during rollback"
+            );
+            assert!(
+                pool_txs.is_empty(),
+                "Transaction pool should be empty during rollback, but contains: {:?}",
+                pool_txs
+            );
+        }
+
+        // Phase 5: Try to submit the future system transactions directly to the pool
+        // They should be rejected and never enter the pool
+        let future_system_tx_1 = block_reward(
+            ctx.block_producer_a.address(),
+            2, // block 2
+            rollback_target,
+        );
+        let mut tx_1_raw = compose_system_tx(1, &future_system_tx_1);
+        let signed_tx_1 = ctx
+            .block_producer_a
+            .sign_transaction(&mut tx_1_raw)
+            .await
+            .unwrap();
+        let tx_1_envelope =
+            EthereumTxEnvelope::<TxEip4844>::Legacy(tx_1_raw.into_signed(signed_tx_1))
+                .encoded_2718()
+                .into();
+
+        // These should fail since system txs are not allowed in the pool
+        let tx_1_result = node.rpc.inject_tx(tx_1_envelope).await;
+
+        assert!(
+            tx_1_result.is_err(),
+            "System transaction should be rejected when submitted to pool"
+        );
+
+        // Phase 6: Final check - pool should still be empty
+        let final_pool_txs: Vec<_> = node
+            .inner
+            .pool
+            .all_transactions()
+            .all()
+            .map(|tx| *tx.hash())
+            .collect();
+
+        assert!(
+            final_pool_txs.is_empty(),
+            "Transaction pool should remain empty after attempted system tx submission, but contains: {:?}",
+            final_pool_txs
+        );
+
+        Ok(())
+    }
+
+    /// Tests that system transactions are executed in the exact order they were submitted.
+    /// This is verified by checking the transaction hashes in the receipts match the submission order.
+    ///
+    /// Test scenario:
+    /// 1. Create 5 different types of system transactions in a specific order
+    /// 2. Submit them to the system transaction store
+    /// 3. Mine a block containing these transactions
+    /// 4. Verify the receipts contain the transactions in the same order as submitted
+    #[test_log::test(tokio::test)]
+    async fn test_system_tx_execution_order_via_receipts() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Create different addresses for different transaction types
+        let address_a = ctx.block_producer_a.address();
+        let address_b = ctx.target_account.address();
+        let address_c = ctx.normal_signer.address();
+
+        // Create 5 different system transactions in a specific order
+        let mut system_txs = Vec::new();
+        let mut expected_tx_hashes = Vec::new();
+
+        // 1. Block reward
+        let block_reward_tx = block_reward(address_a, 1, ctx.genesis_blockhash);
+        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*block_reward_tx.hash());
+        system_txs.push(block_reward_tx);
+
+        // 2. Release stake
+        let release_stake_tx = release_stake(address_b, 1, ctx.genesis_blockhash);
+        let release_stake_tx = sign_system_tx(release_stake_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*release_stake_tx.hash());
+        system_txs.push(release_stake_tx);
+
+        // 3. Storage fees
+        let storage_fees_tx = storage_fees(address_c, 1, ctx.genesis_blockhash);
+        let storage_fees_tx = sign_system_tx(storage_fees_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*storage_fees_tx.hash());
+        system_txs.push(storage_fees_tx);
+
+        // 4. Another block reward
+        let block_reward_2_tx = block_reward(address_b, 1, ctx.genesis_blockhash);
+        let block_reward_2_tx = sign_system_tx(block_reward_2_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*block_reward_2_tx.hash());
+        system_txs.push(block_reward_2_tx);
+
+        // 5. Stake transaction
+        let stake_tx = stake(address_a, 1, ctx.genesis_blockhash);
+        let stake_tx = sign_system_tx(stake_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*stake_tx.hash());
+        system_txs.push(stake_tx);
+
+        tracing::info!(
+            "Created {} system transactions in order: {:?}",
+            system_txs.len(),
+            expected_tx_hashes
+        );
+
+        // Mine a block with these system transactions
+        let block_payload = mine_block(&mut node, &system_tx_store, system_txs).await?;
+
+        // Get execution results to verify receipt ordering
+        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+        let receipts = &block_execution.receipts;
+
+        // Verify we have receipts for block 1
+        assert!(
+            receipts.len() > 1,
+            "Should have receipts for at least block 1"
+        );
+        let block_1_receipts = &receipts[1];
+
+        tracing::info!("Block 1 has {} receipts", block_1_receipts.len());
+        assert_eq!(
+            block_1_receipts.len(),
+            expected_tx_hashes.len(),
+            "Should have exactly {} receipts for the {} system transactions",
+            expected_tx_hashes.len(),
+            expected_tx_hashes.len()
+        );
+
+        // Get the transaction hashes from the block in order
+        let block_tx_hashes: Vec<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+
+        tracing::info!("Block transaction order: {:?}", block_tx_hashes);
+
+        // Verify the transactions appear in the block in the same order as submitted
+        for (i, expected_hash) in expected_tx_hashes.iter().enumerate() {
+            assert_eq!(
+                block_tx_hashes[i], *expected_hash,
+                "Transaction at position {} should match submitted order. Expected: {:?}, Got: {:?}",
+                i, expected_hash, block_tx_hashes[i]
+            );
+        }
+
+        // Verify all receipts are successful (system transactions should succeed)
+        for (i, receipt) in block_1_receipts.iter().enumerate() {
+            assert!(
+                receipt.success,
+                "Receipt at position {} should be successful for system transaction {:?}",
+                i, expected_tx_hashes[i]
+            );
+        }
+
         Ok(())
     }
 }
@@ -2202,6 +1582,7 @@ mod tests {
 /// Test Utilities for Irys Reth node
 pub mod test_utils {
     use super::*;
+    use crate::payload::DeterministicSystemTxKey;
     use crate::system_tx::{SystemTransaction, TransactionPacket};
     use alloy_consensus::EthereumTxEnvelope;
     use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
@@ -2223,14 +1604,14 @@ pub mod test_utils {
     };
     use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
     use reth_engine_local::LocalPayloadAttributesBuilder;
-    use reth_transaction_pool::TransactionPool;
+    use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::collections::HashSet;
     use std::sync::Arc;
     use tracing::{span, Level};
 
     /// Common setup for tests - creates wallets, nodes, and returns initialized context
     pub struct TestContext {
-        pub nodes: Vec<NodeHelperType<IrysEthereumNode>>,
+        pub nodes: Vec<(NodeHelperType<IrysEthereumNode>, SystemTxStore)>,
         pub block_producer_a: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub block_producer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
@@ -2277,6 +1658,7 @@ pub mod test_utils {
             let genesis_blockhash = nodes
                 .first()
                 .unwrap()
+                .0
                 .inner
                 .provider
                 .consistent_provider()
@@ -2296,20 +1678,22 @@ pub mod test_utils {
             })
         }
 
-        pub fn get_single_node(mut self) -> eyre::Result<(NodeHelperType<IrysEthereumNode>, Self)> {
+        pub fn get_single_node(
+            mut self,
+        ) -> eyre::Result<((NodeHelperType<IrysEthereumNode>, SystemTxStore), Self)> {
             if self.nodes.is_empty() {
                 return Err(eyre::eyre!("No nodes available"));
             }
-            let node = self.nodes.remove(0);
-            Ok((node, self))
+            let (node, system_tx_receiver) = self.nodes.remove(0);
+            Ok(((node, system_tx_receiver), self))
         }
 
         pub fn get_two_nodes(
             mut self,
         ) -> eyre::Result<(
             (
-                NodeHelperType<IrysEthereumNode>,
-                NodeHelperType<IrysEthereumNode>,
+                (NodeHelperType<IrysEthereumNode>, SystemTxStore),
+                (NodeHelperType<IrysEthereumNode>, SystemTxStore),
             ),
             Self,
         )> {
@@ -2323,41 +1707,30 @@ pub mod test_utils {
     }
 
     /// Helper for creating and submitting system transactions
-    pub async fn create_and_submit_system_tx(
-        node: &mut NodeHelperType<IrysEthereumNode>,
+    pub async fn sign_system_tx(
         system_tx: SystemTransaction,
-        nonce: u64,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
-    ) -> eyre::Result<alloy_primitives::FixedBytes<32>> {
-        let system_tx_raw = compose_system_tx(nonce, 1, &system_tx);
+    ) -> eyre::Result<EthPooledTransaction> {
+        let system_tx_raw = compose_system_tx(1, &system_tx);
         let system_pooled_tx = sign_tx(system_tx_raw, signer).await;
-        let tx_hash = node
-            .inner
-            .pool
-            .add_transaction(
-                reth_transaction_pool::TransactionOrigin::Private,
-                system_pooled_tx,
-            )
-            .await?;
-        Ok(tx_hash)
+        Ok(system_pooled_tx)
     }
 
     /// Helper for creating and submitting multiple system transactions
-    pub async fn create_and_submit_multiple_system_txs(
-        node: &mut NodeHelperType<IrysEthereumNode>,
-        system_tx: SystemTransaction,
+    pub async fn create_multiple_system_txs(
+        system_tx_store: &SystemTxStore,
+        system_tx: &SystemTransaction,
         count: u64,
-        start_nonce: u64,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
-    ) -> eyre::Result<Vec<alloy_primitives::FixedBytes<32>>> {
-        let mut tx_hashes = Vec::new();
-        for i in 0..count {
-            let tx_hash =
-                create_and_submit_system_tx(node, system_tx.clone(), start_nonce + i, signer)
-                    .await?;
-            tx_hashes.push(tx_hash);
+        key: DeterministicSystemTxKey,
+    ) -> eyre::Result<Vec<EthPooledTransaction>> {
+        let mut txs = Vec::new();
+        for _ in 0..count {
+            let tx = sign_system_tx(system_tx.clone(), signer).await?;
+            txs.push(tx);
         }
-        Ok(tx_hashes)
+        system_tx_store.set_system_txs(key, txs.clone());
+        Ok(txs)
     }
 
     /// Helper for creating and submitting normal transactions
@@ -2541,20 +1914,36 @@ pub mod test_utils {
     }
 
     /// Helper for block mining and validation
+    pub async fn mine_block(
+        node: &mut NodeHelperType<IrysEthereumNode>,
+        system_tx_store: &SystemTxStore,
+        system_txs: Vec<EthPooledTransaction>,
+    ) -> eyre::Result<EthBuiltPayload> {
+        let block_payload = advance_block(node, system_tx_store, system_txs).await?;
+        Ok(block_payload)
+    }
+
+    /// Helper for block mining and validation
     pub async fn mine_block_and_validate(
         node: &mut NodeHelperType<IrysEthereumNode>,
-        expected_system_txs: &[alloy_primitives::FixedBytes<32>],
+        system_tx_store: &SystemTxStore,
+        system_txs: Vec<EthPooledTransaction>,
         expected_normal_txs: &[alloy_primitives::FixedBytes<32>],
     ) -> eyre::Result<EthBuiltPayload> {
-        let block_payload = node.advance_block().await?;
+        let expected_system_tx_hashes = system_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
+        let block_payload = advance_block(node, system_tx_store, system_txs).await?;
 
-        assert_txs_in_block(&block_payload, expected_system_txs, "System transactions");
+        assert_txs_in_block(
+            &block_payload,
+            &expected_system_tx_hashes,
+            "System transactions",
+        );
         assert_txs_in_block(&block_payload, expected_normal_txs, "Normal transactions");
 
-        if !expected_system_txs.is_empty() && !expected_normal_txs.is_empty() {
+        if !expected_system_tx_hashes.is_empty() && !expected_normal_txs.is_empty() {
             assert_system_txs_before_normal_txs(
                 &block_payload,
-                expected_system_txs,
+                &expected_system_tx_hashes,
                 expected_normal_txs,
             );
         }
@@ -2575,58 +1964,79 @@ pub mod test_utils {
             RELEASE_STAKE_ID => release_stake(address, valid_for_block_height, parent_blockhash),
             STAKE_ID => stake(address, valid_for_block_height, parent_blockhash),
             STORAGE_FEES_ID => storage_fees(address, valid_for_block_height, parent_blockhash),
-            RESET_SYS_SIGNER_NONCE_ID => nonce_reset(100, valid_for_block_height, parent_blockhash),
             _ => panic!("Unknown system transaction type: {}", tx_type),
         }
     }
 
-    /// Mines multiple blocks, each with a configurable number of system txs.
-    /// Returns the hashes of all produced blocks.
-    ///
-    /// # Arguments
-    /// - `node`: The node to mine blocks on.
-    /// - `reward_to`: Address to receive block rewards.
-    /// - `start_block`: Block number to start mining from.
-    /// - `num_blocks`: Number of blocks to mine.
-    /// - `sys_txs_per_block`: Number of system txs per block.
-    /// - `wallets`: Signer for system txs.
+    /// - store system txs in the store
+    /// - prepare a new payload
+    /// - DOES NOT update the forkchoice
+    pub async fn prepare_block(
+        node: &mut NodeHelperType<IrysEthereumNode>,
+        system_tx_store: &SystemTxStore,
+        system_txs: Vec<EthPooledTransaction>,
+    ) -> Result<EthBuiltPayload, eyre::Error> {
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicSystemTxKey::new(attributes.payload_id());
+        system_tx_store.set_system_txs(key, system_txs);
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
+        node.payload.expect_attr_event(attributes.clone()).await?;
+        node.payload
+            .wait_for_built_payload(attributes.payload_id())
+            .await;
+        let payload = node.payload.expect_built_payload().await?;
+        node.submit_payload(payload.clone()).await?;
+        Ok(payload)
+    }
+
+    pub async fn advance_block(
+        node: &mut NodeHelperType<IrysEthereumNode>,
+        system_tx_store: &SystemTxStore,
+        system_txs: Vec<EthPooledTransaction>,
+    ) -> Result<EthBuiltPayload, eyre::Error> {
+        let payload = prepare_block(node, system_tx_store, system_txs).await?;
+        node.update_forkchoice(payload.block().hash(), payload.block().hash())
+            .await?;
+
+        Ok(payload)
+    }
+
     pub async fn advance_blocks(
         node: &mut NodeHelperType<IrysEthereumNode>,
-        reward_to: Address,
-        start_block: u64,
-        num_blocks: u64,
-        sys_txs_per_block: u64,
-        wallets: &Arc<dyn TxSigner<Signature> + Send + Sync>,
-    ) -> Result<Vec<FixedBytes<32>>, eyre::Error> {
-        let mut parent_blockhash = node
-            .inner
-            .provider
-            .consistent_provider()
-            .unwrap()
-            .block_hash(0)
-            .unwrap()
-            .unwrap();
-        let mut block_hashes = vec![parent_blockhash];
-        let mut nonce = 0;
-        for block_number in start_block..(start_block + num_blocks) {
-            for _tx_idx in 0..sys_txs_per_block {
-                let system_tx = block_reward(reward_to, block_number, parent_blockhash);
-                let system_tx_raw = compose_system_tx(nonce, 1, &system_tx);
-                nonce += 1;
-                let system_pooled_tx = sign_tx(system_tx_raw, wallets).await;
-                node.inner
-                    .pool
-                    .add_transaction(
-                        reth_transaction_pool::TransactionOrigin::Private,
-                        system_pooled_tx,
-                    )
-                    .await?;
+        system_tx_store: &SystemTxStore,
+        system_txs: Vec<Vec<SystemTransaction>>,
+        signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
+        mut parent_blockhash: FixedBytes<32>,
+        mut block_number: u64,
+    ) -> Result<Vec<EthBuiltPayload>, eyre::Error> {
+        let mut block_payloads = Vec::new();
+
+        for system_txs_raw in system_txs.into_iter() {
+            let mut system_txs = Vec::new();
+            for system_tx in system_txs_raw {
+                // Create updated system tx with new metadata
+                let updated_system_tx = match system_tx {
+                    SystemTransaction::V1 { packet, .. } => {
+                        SystemTransaction::new_v1(block_number, parent_blockhash, packet)
+                    }
+                };
+
+                let system_tx = sign_system_tx(updated_system_tx, signer).await?;
+                system_txs.push(system_tx);
             }
-            let payload = node.advance_block().await?;
-            parent_blockhash = payload.block().hash();
-            block_hashes.push(parent_blockhash);
+
+            let block_payload = advance_block(node, system_tx_store, system_txs).await?;
+            parent_blockhash = block_payload.block().hash();
+            block_number += 1;
+            block_payloads.push(block_payload);
         }
-        Ok::<_, eyre::Error>(block_hashes)
+
+        Ok(block_payloads)
     }
 
     /// Compose a system tx for releasing stake.
@@ -2635,14 +2045,14 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Compose a system tx for block reward.
@@ -2651,29 +2061,14 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::BlockReward(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
-    }
-
-    /// Compose a system tx for resetting the system tx nonce.
-    pub fn nonce_reset(
-        decrement_nonce_by: u64,
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-    ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::ResetSystemTxNonce(system_tx::ResetSystemTxNonce {
-                decrement_nonce_by,
-            }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Compose a system tx for staking.
@@ -2682,14 +2077,14 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::Stake(system_tx::BalanceDecrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::Stake(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Compose a system tx for storage fees.
@@ -2698,18 +2093,18 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::StorageFees(system_tx::BalanceDecrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::StorageFees(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Assert that a log topic is present in block execution receipts at least `desired_repetitions` times.
-    pub fn asserst_topic_present_in_logs(
+    pub fn assert_topic_present_in_logs(
         block_execution: reth::providers::ExecutionOutcome,
         storage_fees_topic: [u8; 32],
         desired_repetitions: u64,
@@ -2930,7 +2325,11 @@ pub mod test_utils {
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
         attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
-    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
+    ) -> eyre::Result<(
+        Vec<(NodeHelperType<IrysEthereumNode>, SystemTxStore)>,
+        TaskManager,
+        Wallet,
+    )>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
             PayloadAttributesBuilder<
@@ -2949,9 +2348,10 @@ pub mod test_utils {
         };
 
         // Create nodes and peer them
-        let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
+        let mut nodes: Vec<(NodeTestContext<_, _>, SystemTxStore)> =
+            Vec::with_capacity(num_nodes.len());
 
-        for (idx, allowed_system_tx_origin) in num_nodes.iter().enumerate() {
+        for (idx, _producer) in num_nodes.iter().enumerate() {
             let node_config = NodeConfig::new(chain_spec.clone())
                 .with_network(network_config.clone())
                 .with_unused_ports()
@@ -2960,13 +2360,17 @@ pub mod test_utils {
 
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();
+
+            // Create the MPSC channel for system transaction requests
+            let (system_tx_store, _system_tx_receiver) = SystemTxStore::new_with_notifications();
+
             let NodeHandle {
                 node,
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
                 .testing_node(exec.clone())
                 .node(IrysEthereumNode {
-                    allowed_system_tx_origin: *allowed_system_tx_origin,
+                    system_tx_store: system_tx_store.clone(),
                 })
                 .launch()
                 .await?;
@@ -2975,17 +2379,17 @@ pub mod test_utils {
 
             // Connect each node in a chain.
             if let Some(previous_node) = nodes.last_mut() {
-                previous_node.connect(&mut node).await;
+                previous_node.0.connect(&mut node).await;
             }
 
             // Connect last node with the first if there are more than two
             if idx + 1 == num_nodes.len() && num_nodes.len() > 2 {
                 if let Some(first_node) = nodes.first_mut() {
-                    node.connect(first_node).await;
+                    node.connect(&mut first_node.0).await;
                 }
             }
 
-            nodes.push(node);
+            nodes.push((node, system_tx_store));
         }
 
         Ok((
