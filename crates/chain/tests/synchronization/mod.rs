@@ -4,7 +4,6 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_reth_node_bridge::adapter::new_reth_context;
 use irys_types::IrysTransactionHeader;
 use irys_types::{irys::IrysSigner, NodeConfig};
 use reth::rpc::eth::EthApiServer;
@@ -112,9 +111,9 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let latest_block_before_restart = {
-        let context = new_reth_context(node.node_ctx.reth_handle.clone().into()).await?;
-
-        let latest = context
+        let latest = node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()
@@ -134,16 +133,18 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     info!("getting reth node context");
     let (latest_block_right_after_restart, earliest_block) = {
-        let context = new_reth_context(restarted_node.node_ctx.reth_handle.clone().into()).await?;
-
-        let latest = context
+        let latest = restarted_node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await?;
 
-        let earliest = context
+        let earliest = restarted_node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()
@@ -157,9 +158,9 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     mine_block(&restarted_node.node_ctx).await?;
 
     let next_block = {
-        let context = new_reth_context(restarted_node.node_ctx.reth_handle.clone().into()).await?;
-
-        let latest = context
+        let latest = restarted_node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()

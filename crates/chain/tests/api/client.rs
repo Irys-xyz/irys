@@ -139,6 +139,7 @@ async fn check_get_block_endpoint(
 }
 
 #[actix_rt::test]
+#[test_log::test]
 async fn heavy_api_client_all_endpoints_should_work() {
     setup_tracing_and_temp_dir(Some("heavy_api_client_all_endpoints_should_work"), false);
 

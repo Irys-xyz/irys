@@ -11,7 +11,10 @@ use crate::{
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
+use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
+use alloy_network::TxSignerSync;
 use alloy_rpc_types_engine::PayloadAttributes;
+use alloy_signer_local::LocalSigner;
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
@@ -19,10 +22,13 @@ use irys_database::{
     insert_commitment_tx, tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
-use irys_reth_node_bridge::{
-    ext::IrysRethTestContextExt as _, new_reth_context, node::RethNodeProvider,
+use irys_reth::{
+    compose_system_tx,
+    system_tx::{BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket},
 };
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
+use irys_types::IrysTransactionCommon;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Base64, Config, DataLedger, DataTransactionLedger, H256List,
@@ -32,9 +38,11 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::eth::EthApiServer as _};
+use reth::revm::primitives::ruint::Uint;
+use reth::{payload::EthBuiltPayload, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
+use reth_transaction_pool::EthPooledTransaction;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -60,8 +68,6 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
-    /// Reference to the reth node
-    pub reth_provider: RethNodeProvider,
     /// Global config
     pub config: Config,
     /// The block reward curve
@@ -81,6 +87,8 @@ pub struct BlockProducerActor {
     pub blocks_remaining_for_test: Option<u64>,
     /// Tracing span
     pub span: Span,
+    /// Reth node adapter
+    pub reth_node_adapter: IrysRethNodeAdapter,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -149,12 +157,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             block_discovery_addr,
             epoch_service,
             service_senders,
-            reth_provider,
             config,
             vdf_steps_guard,
             block_tree_guard,
             price_oracle,
             reward_curve,
+            reth_node_adapter,
             ..
         } = self.clone();
 
@@ -387,6 +395,33 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             service_senders.ema.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;
 
+            // try to get block by hash
+            let parent = {
+                let mut attempts = 0;
+                loop {
+                    if attempts > 50 {
+                        break None;
+                    }
+
+                    let result = reth_node_adapter
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_hash(prev_block_header.evm_block_hash, false)
+                        .await?;
+
+                    match result {
+                        Some(block) => break Some(block),
+                        None => {
+                            attempts += 1;
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }.expect("Should be able to get the parent EVM block");
+
+            eyre::ensure!(parent.header.hash == prev_block_header.evm_block_hash, "reth parent block hash mismatch");
+
             // Update the last_epoch_hash field, which tracks the most recent epoch boundary
             //
             // The logic works as follows:
@@ -403,12 +438,74 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 last_epoch_hash = prev_block_hash;
             }
 
-
             let reward_amount = reward_curve.reward_between(
                 // adjust ms -> sec
                 prev_block_header.timestamp.saturating_div(1000),
                 current_timestamp.saturating_div(1000)
             )?;
+
+            let block_reward_system_tx = SystemTransaction {
+                valid_for_block_height: block_height,
+                parent_blockhash: prev_block_header.evm_block_hash,
+                inner: TransactionPacket::BlockReward(
+                    BalanceIncrement {
+                        amount: reward_amount.amount.into(),
+                        target: config.node_config.reward_address
+                    }
+                )
+            };
+
+            let storage_txs = {
+                let block_reward_system_tx = block_reward_system_tx.clone();
+                submit_txs.storage_tx.iter().map(move |header| {
+
+                SystemTransaction {
+                    inner: TransactionPacket::StorageFees(
+                        BalanceDecrement {
+                            amount: Uint::from(header.total_fee()),
+                            target: header.signer,
+                        }
+                    ),
+                    ..block_reward_system_tx.clone()
+                }
+            })};
+
+            let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
+            let system_txs = [block_reward_system_tx].into_iter().chain(storage_txs).map(|tx| {
+                let mut tx_raw = compose_system_tx( config.consensus.chain_id, &tx);
+                let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
+                let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
+                    .try_into_recovered()
+                    .expect("system tx must always be signable");
+
+                EthPooledTransaction::new(tx.clone(), 300)
+            }).collect::<Vec<_>>();
+
+            // generate payload attributes
+            let timestamp = now.as_secs();
+            let payload_attrs = PayloadAttributes {
+                timestamp, // tie timestamp together **THIS HAS TO BE SECONDS**
+                prev_randao: parent.header.mix_hash,
+                suggested_fee_recipient: config.node_config.reward_address,
+                withdrawals: None, // these should ALWAYS be none
+                parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+            };
+            let payload = reth_node_adapter
+                .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, system_txs)
+                .await?;
+
+            // trigger forkchoice update via engine api to commit the block to the blockchain
+            reth_node_adapter
+                .update_forkchoice_full(
+                    payload.block().hash(),
+                    // we mark this block as confirmed because we produced it
+                    Some(payload.block().hash()),
+                    // marking a block as finalized is handled by a different service
+                    None,
+                )
+                .await?;
+
+            let evm_block_hash =  payload.block().hash();
 
             // build a new block header
             let mut irys_block = IrysBlockHeader {
@@ -450,7 +547,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         proofs: None,
                     },
                 ],
-                evm_block_hash: B256::ZERO,
+                evm_block_hash,
                 vdf_limiter_info: VDFLimiterInfo {
                     global_step_number: solution.vdf_step,
                     output: solution.seed.into_inner(),
@@ -463,114 +560,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
                 ema_irys_price: ema_irys_price.ema,
             };
-
-            // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-
-            let mut context =  new_reth_context(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
-
-            // let shadows = submit_txs
-            //         .iter()
-            //         // add data transaction shadows
-            //         .map(|header| ShadowTx {
-            //             tx_id: IrysTxId::from_slice(header.id.as_bytes()),
-            //             fee: irys_primitives::U256::from(
-            //                 header.total_fee(),
-            //             ),
-            //             address: header.signer,
-            //             tx: ShadowTxType::Data(DataShadow {
-            //                 fee: irys_primitives::U256::from(
-            //                     header.total_fee(),
-            //                 ),
-            //             }),
-            //         }).chain([
-            //             // add block rewards shadow
-            //             ShadowTx {
-            //                 tx_id: IrysTxId::from_slice(irys_block.block_hash.as_bytes()),
-            //                 fee: alloy_primitives::U256::ZERO,
-            //                 address: irys_block.reward_address,
-            //                 tx: ShadowTxType::BlockReward(BlockRewardShadow {
-            //                     reward: irys_block.reward_amount.into(),
-            //                 })
-            //             },
-            //         ]);
-            // // let shadows = Shadows::new(shadows.collect());
-
-            // create a new reth payload
-
-            // make sure the parent block is canonical on the reth side so we can built upon it
-            RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
-                head_hash: BlockHashType::Evm(prev_block_header.evm_block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            }).await??;
-
-            // try to get block by hash
-            // let parent = context
-            // .rpc
-            // .inner
-            // .eth_api()
-            // .block_by_hash(prev_block_header.evm_block_hash, false)
-            // .await?.expect("Should be able to get the parent EVM block");
-
-            let parent = {
-                let mut attempts = 0;
-                loop {
-                    if attempts > 50 {
-                        error!("Failed to get parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
-                        break None;
-                    }
-
-                    let result = context
-                        .rpc
-                        .inner
-                        .eth_api()
-                        .block_by_hash(prev_block_header.evm_block_hash, false)
-                        .await?;
-
-                    match result {
-                        Some(block) => {
-                            info!("Got parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
-                            break Some(block)
-                        },
-                        None => {
-                            attempts += 1;
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-            }.expect("Should be able to get the parent EVM block");
-
-            assert!(parent.header.hash == prev_block_header.evm_block_hash);
-
-            // generate payload attributes
-            let payload_attrs = PayloadAttributes {
-                timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-                prev_randao: parent.header.mix_hash,
-                suggested_fee_recipient: irys_block.reward_address,
-                withdrawals: None, // these should ALWAYS be none
-                parent_beacon_block_root: Some(B256::ZERO), // maybe one day we pass through the parent irys block hash here?
-            };
-
-
-            let built = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
-
-            // we can examine the execution status of generated shadow txs
-            // let shadow_receipts = exec_payload.shadow_receipts;
-
-            let block_hash = context
-            .submit_payload(
-                built.clone()
-            )
-            .await?;
-
-            // trigger forkchoice update via engine api to commit the block to the blockchain
-            context
-                .update_forkchoice(prev_block_header.evm_block_hash, block_hash)
-                .await?;
-
-            let evm_block_hash =  built.block().hash();
-
-            irys_block.evm_block_hash = evm_block_hash;
 
             // Now that all fields are initialized, Sign the block and initialize its block_hash
             let block_signer = config.irys_signer();
@@ -601,9 +590,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
+            info!("Finished producing block {}, ({})", &block.block_hash.0.to_base58(),&block_height);
 
-            Ok(Some((block.clone(), built)))
+            Ok(Some((block.clone(), payload)))
         }
         .into_actor(self)
         .map(|result, actor, _ctx| {

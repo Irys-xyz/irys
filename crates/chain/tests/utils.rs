@@ -160,10 +160,13 @@ pub async fn random_port() -> eyre::Result<u16> {
 }
 
 // Reasons tx could fail to be added to mempool
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AddTxError {
+    #[error("Failed to create transaction")]
     CreateTx(eyre::Report),
+    #[error("Failed to add transaction to mempool")]
     TxIngress(TxIngressError),
+    #[error("Failed to send transaction to mailbox")]
     Mailbox(RecvError),
 }
 
