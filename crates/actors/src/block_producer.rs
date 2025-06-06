@@ -445,30 +445,31 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 current_timestamp.saturating_div(1000)
             )?;
 
-            let block_reward_system_tx = SystemTransaction {
-                valid_for_block_height: block_height,
-                parent_blockhash: prev_block_header.evm_block_hash,
-                inner: TransactionPacket::BlockReward(
+            let block_reward_system_tx = SystemTransaction::new_v1(
+                block_height,
+                prev_block_header.evm_block_hash,
+                TransactionPacket::BlockReward(
                     BalanceIncrement {
                         amount: reward_amount.amount.into(),
                         target: config.node_config.reward_address
                     }
                 )
-            };
+            );
 
             let storage_txs = {
                 let block_reward_system_tx = block_reward_system_tx.clone();
                 submit_txs.storage_tx.iter().map(move |header| {
 
-                SystemTransaction {
-                    inner: TransactionPacket::StorageFees(
+                SystemTransaction::new_v1(
+                    block_height,
+                    prev_block_header.evm_block_hash,
+                    TransactionPacket::StorageFees(
                         BalanceDecrement {
                             amount: Uint::from(header.total_fee()),
                             target: header.signer,
                         }
-                    ),
-                    ..block_reward_system_tx.clone()
-                }
+                    )
+                )
             })};
 
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
