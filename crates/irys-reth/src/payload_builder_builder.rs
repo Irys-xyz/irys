@@ -1,4 +1,5 @@
 //! Payload component configuration for the Ethereum node.
+//! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/node/src/payload.rs#L19
 
 use reth_chainspec::EthereumHardforks;
 use reth_ethereum_engine_primitives::{

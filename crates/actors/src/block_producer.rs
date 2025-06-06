@@ -424,7 +424,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             }.expect("Should be able to get the parent EVM block");
 
-            assert!(parent.header.hash == prev_block_header.evm_block_hash);
+            eyre::ensure!(parent.header.hash == prev_block_header.evm_block_hash, "reth parent block hash mismatch");
 
             // Update the last_epoch_hash field, which tracks the most recent epoch boundary
             //
@@ -480,7 +480,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
                     .try_into_recovered()
-                    .unwrap();
+                    .expect("system tx must always be signable");
 
                 EthPooledTransaction::new(tx.clone(), 300)
             }).collect::<Vec<_>>();

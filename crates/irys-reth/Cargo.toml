@@ -34,20 +34,15 @@ reth-e2e-test-utils = { workspace = true, optional = true }
 reth-engine-local = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 revm.workspace = true
-reth-tasks.workspace = true
 reth-storage-api.workspace = true
 revm-primitives.workspace = true
-revm-interpreter.workspace = true
 reth-basic-payload-builder.workspace = true
 reth-node-api.workspace = true
 reth-payload-builder.workspace = true
 reth-chain-state.workspace = true
-reth-errors.workspace = true
 reth-payload-builder-primitives.workspace = true
 reth-ethereum-payload-builder.workspace = true
-reth-payload-primitives.workspace = true
 reth-node-builder.workspace = true
-reth-revm.workspace = true
 
 tokio.workspace = true
 eyre.workspace = true
@@ -56,7 +51,7 @@ futures.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
-lru = "0.14"
+lru.workspace = true
 
 [dev-dependencies]
 reth-e2e-test-utils = { workspace = true }

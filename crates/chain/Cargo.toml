@@ -64,9 +64,7 @@ alloy-network.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 reth-tracing.workspace = true
-alloy-consensus.workspace = true
 alloy-contract.workspace = true
-irys-reth = { workspace = true, features = ["test-utils"] }
 
 [dev-dependencies]
 assert_matches = "1.5.0"

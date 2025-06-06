@@ -1,4 +1,5 @@
 //! Payload service component for the node builder.
+//! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/node/builder/src/components/payload.rs#L1
 
 use crate::{BuilderContext, FullNodeTypes};
 use reth::builder::components::{PayloadBuilderBuilder, PayloadServiceBuilder};

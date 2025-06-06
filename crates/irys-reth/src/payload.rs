@@ -1,4 +1,5 @@
 //! A basic Ethereum payload builder implementation.
+//! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/payload/src/lib.rs#L53
 
 use alloy_consensus::Transaction;
 use lru::LruCache;
