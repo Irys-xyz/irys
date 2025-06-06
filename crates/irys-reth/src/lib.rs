@@ -1604,6 +1604,7 @@ pub mod test_utils {
     };
     use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
     use reth_engine_local::LocalPayloadAttributesBuilder;
+    use reth_primitives_traits::SignedTransaction as _;
     use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::collections::HashSet;
     use std::sync::Arc;
