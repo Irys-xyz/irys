@@ -49,8 +49,8 @@ use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 use reth_tracing::tracing;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    TransactionOrigin, TransactionValidator,
+    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
+    TransactionValidator,
 };
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use reth_trie_db::MerklePatriciaTrie;
@@ -424,7 +424,7 @@ mod tests {
         rpc::server_types::eth::EthApiError,
     };
     use reth_e2e_test_utils::wallet::Wallet;
-    use reth_transaction_pool::TransactionPool;
+    use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -554,14 +554,14 @@ mod tests {
         let amount = U256::from(7000000000000000000u64);
         let system_tx = compose_system_tx(
             1,
-            &SystemTransaction {
-                valid_for_block_height: 1,
-                parent_blockhash: ctx.genesis_blockhash,
-                inner: TransactionPacket::BlockReward(BalanceIncrement {
+            &SystemTransaction::new_v1(
+                1,
+                ctx.genesis_blockhash,
+                TransactionPacket::BlockReward(BalanceIncrement {
                     amount,
                     target: ctx.block_producer_a.address(),
                 }),
-            },
+            ),
         );
         let system_tx = sign_tx(system_tx, &ctx.block_producer_a).await;
         let system_tx_hash = *system_tx.hash();
@@ -617,7 +617,7 @@ mod tests {
 
         let tx_count = 5;
         let system_tx = system_tx(target_signer.address(), 1, ctx.genesis_blockhash);
-        let system_tx_topic = system_tx.inner.topic().into();
+        let system_tx_topic = system_tx.topic().into();
         let system_tx = sign_system_tx(system_tx, &target_signer).await?;
         let system_txs = vec![system_tx.clone(); tx_count];
 
@@ -670,7 +670,7 @@ mod tests {
 
         let tx_count = 2;
         let system_tx = system_tx(target_signer.address(), 1, ctx.genesis_blockhash);
-        let system_tx_topic = system_tx.inner.topic().into();
+        let system_tx_topic = system_tx.topic().into();
         let system_tx = sign_system_tx(system_tx, &target_signer).await?;
         let system_txs = vec![system_tx.clone(); tx_count];
         let tx_hashes = system_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
@@ -773,14 +773,14 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create and submit a system transaction trying to decrement balance of non-existent account
-        let system_tx = SystemTransaction {
-            inner: TransactionPacket::Stake(BalanceDecrement {
+        let system_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::Stake(BalanceDecrement {
                 amount: U256::ONE,
                 target: nonexistent_address,
             }),
-            valid_for_block_height: 1,
-            parent_blockhash: ctx.genesis_blockhash,
-        };
+        );
         let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
         let system_tx_hashes = vec![*system_tx.hash()];
 
@@ -830,14 +830,14 @@ mod tests {
 
         // Create a system tx that tries to decrement more than the balance
         let decrement_amount = funded_balance + U256::ONE;
-        let system_tx = SystemTransaction {
-            inner: TransactionPacket::Stake(BalanceDecrement {
+        let system_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::Stake(BalanceDecrement {
                 amount: decrement_amount,
                 target: ctx.normal_signer.address(),
             }),
-            valid_for_block_height: 1,
-            parent_blockhash: ctx.genesis_blockhash,
-        };
+        );
         let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
         let system_tx_hashes = vec![*system_tx.hash()];
 
@@ -1604,7 +1604,7 @@ pub mod test_utils {
     };
     use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
     use reth_engine_local::LocalPayloadAttributesBuilder;
-    use reth_transaction_pool::TransactionPool;
+    use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::collections::HashSet;
     use std::sync::Arc;
     use tracing::{span, Level};
@@ -2018,12 +2018,15 @@ pub mod test_utils {
 
         for system_txs_raw in system_txs.into_iter() {
             let mut system_txs = Vec::new();
-            for mut system_tx in system_txs_raw {
-                // set the metadata fields for the system tx
-                system_tx.valid_for_block_height = block_number;
-                system_tx.parent_blockhash = parent_blockhash;
+            for system_tx in system_txs_raw {
+                // Create updated system tx with new metadata
+                let updated_system_tx = match system_tx {
+                    SystemTransaction::V1 { packet, .. } => {
+                        SystemTransaction::new_v1(block_number, parent_blockhash, packet)
+                    }
+                };
 
-                let system_tx = sign_system_tx(system_tx, signer).await?;
+                let system_tx = sign_system_tx(updated_system_tx, signer).await?;
                 system_txs.push(system_tx);
             }
 
@@ -2042,14 +2045,14 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Compose a system tx for block reward.
@@ -2058,14 +2061,14 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::BlockReward(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Compose a system tx for staking.
@@ -2074,14 +2077,14 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::Stake(system_tx::BalanceDecrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::Stake(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Compose a system tx for storage fees.
@@ -2090,14 +2093,14 @@ pub mod test_utils {
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
     ) -> SystemTransaction {
-        SystemTransaction {
-            inner: TransactionPacket::StorageFees(system_tx::BalanceDecrement {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::StorageFees(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
             }),
-            valid_for_block_height,
-            parent_blockhash,
-        }
+        )
     }
 
     /// Assert that a log topic is present in block execution receipts at least `desired_repetitions` times.
