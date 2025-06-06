@@ -182,7 +182,6 @@ where
                     .iter()
                     .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
                     .collect();
-                let is_account_empty = plain_account.info.is_empty();
                 let mut status = AccountStatus::Touched;
                 if plain_account.info.is_empty() {
                     // Existing account that is still empty after increment - don't touch it
@@ -193,17 +192,14 @@ where
                     status |= AccountStatus::Created;
                 };
 
-                // Only insert the account into state if it's not empty or if it existed before
-                if !is_account_empty || account_existed {
-                    new_state.insert(
-                        target,
-                        Account {
-                            info: plain_account.info,
-                            storage,
-                            status,
-                        },
-                    );
-                }
+                new_state.insert(
+                    target,
+                    Account {
+                        info: plain_account.info,
+                        storage,
+                        status,
+                    },
+                );
 
                 execution_result
             }
