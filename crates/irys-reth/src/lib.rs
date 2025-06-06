@@ -74,10 +74,12 @@ pub fn compose_system_tx(chain_id: u64, system_tx: &SystemTransaction) -> TxLega
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
     TxLegacy {
+        // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
         value: U256::ZERO,
         // nonce is always 0 for system txs
         nonce: 0_u64,
+        // large enough to not be rejected by the payload builder
         gas_price: DEFAULT_TX_FEE_CAP_WEI,
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
