@@ -49,8 +49,8 @@ use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 use reth_tracing::tracing;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    TransactionOrigin, TransactionValidator,
+    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
+    TransactionValidator,
 };
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use reth_trie_db::MerklePatriciaTrie;
@@ -424,7 +424,7 @@ mod tests {
         rpc::server_types::eth::EthApiError,
     };
     use reth_e2e_test_utils::wallet::Wallet;
-    use reth_transaction_pool::TransactionPool;
+    use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1604,7 +1604,7 @@ pub mod test_utils {
     };
     use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
     use reth_engine_local::LocalPayloadAttributesBuilder;
-    use reth_transaction_pool::TransactionPool;
+    use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::collections::HashSet;
     use std::sync::Arc;
     use tracing::{span, Level};
