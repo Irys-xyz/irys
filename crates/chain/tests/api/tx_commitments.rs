@@ -72,6 +72,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
+    initialize_tracing();
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
     let mut config = NodeConfig::testnet();
