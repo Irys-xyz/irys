@@ -122,6 +122,13 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     Ok(())
 }
 
+// This test aims to (currently) test how the EVM interacts with forks and reorgs in the context of the mempool deciding which txs it should select
+// it does this by:
+// 1.) creating a fork with a transfer that would allow an account (recipient2) to afford a storage transaction (& validating this tx is included by the mempool)
+// 2.) checking that the mempool function called for the block before this fork would prevent their transaction from being selected
+// 3.) re-connecting the peers and ensuring that the correct fork was selected, and the account cannot affort the storage transaction (the funding tx was on the shorter fork)
+// This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
+
 #[actix_web::test]
 async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
