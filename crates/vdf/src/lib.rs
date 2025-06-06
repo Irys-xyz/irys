@@ -145,27 +145,6 @@ pub async fn last_step_checkpoints_is_valid(
     };
     let mut checkpoint_hashes = vdf_info.last_step_checkpoints.clone();
 
-    // println!("---");
-    // for (i, step) in vdf_info.steps.iter().enumerate() {
-    //     println!("step{}: {}", i, Base64::from(step.to_vec()));
-    // }
-    // println!("seed: {}", Base64::from(seed.to_vec()));
-    // println!(
-    //     "prev_output: {}",
-    //     Base64::from(vdf_info.prev_output.to_vec())
-    // );
-
-    // println!(
-    //     "cp{}: {}",
-    //     0,
-    //     Base64::from(vdf_info.last_step_checkpoints[0].to_vec())
-    // );
-    // println!(
-    //     "cp{}: {}",
-    //     24,
-    //     Base64::from(vdf_info.last_step_checkpoints[24].to_vec())
-    // );
-
     let global_step_number: usize = vdf_info
         .global_step_number
         .try_into()
@@ -229,9 +208,6 @@ pub async fn last_step_checkpoints_is_valid(
     })
     .await?;
 
-    // println!("test{}: {}", 0, Base64::from(test[0].to_vec()));
-    // println!("test{}: {}", 24, Base64::from(test[24].to_vec()));
-
     let is_valid = test == vdf_info.last_step_checkpoints;
 
     if !is_valid {
@@ -270,6 +246,10 @@ pub trait MiningBroadcaster {
 mod tests {
     use base58::{FromBase58, ToBase58};
     use irys_types::ConsensusConfig;
+    use tracing::debug;
+    use tracing_subscriber::fmt::SubscriberBuilder;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{fmt, EnvFilter};
 
     use super::*;
 
@@ -355,188 +335,40 @@ mod tests {
         let testnet_config = ConsensusConfig::testnet();
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
-            output: H256(
-                hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
+            output: to_hash("E5acT3ETbH5C2KHrqPogt6JcVbjjYQbjQFShiHqGGgug"),
             global_step_number: 44400,
-            seed: H256(
-                hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
-            next_seed: H256(
-                hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
-            prev_output: H256(
-                hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
+            seed: to_hash("11111111111111111111111111111111"),
+            next_seed: to_hash("11111111111111111111111111111111"),
+            prev_output: to_hash("EchaEZLcR6Vw2rHz2CafaHxe75tj31A2WHmTVsTTS9Sp"),
             last_step_checkpoints: H256List(vec![
-                H256(
-                    hex::decode("01cbc7f0c9a0a9bc02f8de61c806c227865977f1288085a5ec8ee63f117f1441")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("c9ae2ca12ebe463d076e58b36d79ed826e4cf1518bfa4497f9dd600efb149ef7")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("a667ba60fcc78ff881be5a4362ee8ed620d40cd8e1f243a9d3784d49440ad568")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("02bcafa19e4c87deafe4a774a627439199de1a6cdfcfe3fcb4f28c3904cab2db")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("6e69f859b49d3dd83c3d8bf63b1343b6705e21baff18ea903274e5cf86df0942")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("b9bb2804a759e32dc78d6e66bb9083524426bb21d401bba1d10be8720df1c2aa")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("24047f41de57234304e8f9c417e860fa52efc6902f576b9f3ee5aab0500076d3")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("14b032ad411fbb559be2601d6dbf58f0be199a8f1fbd727939691c6f628d66de")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("f4e34ef580c5e603bcb89edd010d78a562999f556d7c5c042c2900a6a7a00dc7")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("7a695bef7b4a042852515e4df71a9267131a3f68ee180ef003ba2a8769026d4e")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("1d6a6344c7ef1b8a2b1f05755d576b44142d7390d6b8a874f5d52a15988027d1")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("aa26de9d3a67fd78d38f98974dfaf7a095c8884363fe861750420e5bd564ceb0")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("ce785db61216b15f4f81b4f2d61c04c340e8576aecc7db85a0e1e0f3092bbf71")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("dd56b778c580cc446aae146209d48a76873ef55882b036e73f5ced4e0e630516")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("03013a92e391d608d468e15bbea0517b0d1619b00d76a41ad9c8bcc93e90964a")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("6e445f49a57953dfd586609dab877177cf02c21fbf93854dc69771a886e4a05b")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("5cb45592f6fd08fdd29ad661a3202c5c8b6bab2694bfbd610435ad48db811eba")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("96ecd10174dadd788f82850ae8b1d45bd17289133e2eb77e625eca1c8e5c0031")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("046a20ecbbd60459c80d6c69ae1649e9cffc6faa037cd6c4a904365142812aae")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("6f943113534cadafcc07cbf5d43703e88029f91af140c2cc595bcf17df9703fd")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("72984524bd2c3e57f2f2e4d35ccf7d03febb23be91ec53d634cc28469d784fec")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("32d91ef55df8b24dff40dd6131b7d962638f47d0ce37a73143734d5b39d71fd0")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("e8ead73c39047f7a4b37f005fd5a83ee89493c35a17bf3fbf2176df4904d8acc")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("88d48a1daf73a989503136fd9ed5633853e8554271ec69a94be52a45c8c13ad1")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
+                to_hash("AbGjYT2pTQLmjNp9UnBvGidgczr53Pfv7AvNxW1iCFJi"),
+                to_hash("2BAnqK4FN57xTMGDnt2PVNFrN59WP6HZvP5F9rq9VBiZ"),
+                to_hash("H3sa7VKLsV7zFk6i2WYgf2zyAFDWGFgqD8FvesL3TE8D"),
+                to_hash("BETn26rhVxX29vW1w773SctQnzWEGUHfth6QyfxB8Een"),
+                to_hash("DeeYLjVPnScS5vVJUTrjGJbmm6CRp4z4ZckEy5t4RHhS"),
+                to_hash("7b2DcEHX9sX2iQPPoJH3KAgYrceTuHoe4u7BivrA5YX2"),
+                to_hash("6eLA4BBEGfS4F3kpmWkmj2iXj7WBoetByyHbNMeu1ihM"),
+                to_hash("DzPbaQ5rQfgsT4HKPAvK87T7JqDni1KDXZfrHbNpf2QD"),
+                to_hash("9VM4txeWEtEeD5Y3cVagVySSRHVyJ8RSVv68ojgpPNge"),
+                to_hash("4U6w56JrakUV3gSdY5FHE33WpxAtGCP4m6utGYeKSpTv"),
+                to_hash("EmxkxKjhv7eHRofc5vcZ6UouUDQPmrBYb7bt7G4n8d7T"),
+                to_hash("FnHxPS8cun2fY2WE13txBJDhvggdLGPRtdmUCpPELA1G"),
+                to_hash("97BHjSMf69vX5NadDAxLoR7smaDpNFd9QzAwaizFw1Qp"),
+                to_hash("54HSZkJuG1QEPXP4xqKgYSDYntocpAcHTQM8kCiQT4t6"),
+                to_hash("HRtTJScmYdKRTWcyMQnmDQ3RFcJMHo4FndVGmZokb8wB"),
+                to_hash("AiX8pZErGzdZPCQNWqCkucuPiZy3Y6jfJd9hZJZNadVn"),
+                to_hash("CwT6kNSBTcZivunDJyfPKXxYhonV6LGgAboyx92jA1an"),
+                to_hash("EsSXCJ13vJQXaNRzXUMWRu5HtFv9aZ4YWKmCGqqTmkT7"),
+                to_hash("5Epgv3cn2yprjQHyYdBzRiadJuYc5nRYqafowCB43gBj"),
+                to_hash("BCo54qTaBtZYNd8YJgCuFsv1rPPHtKmFEYBnsXJNBQbR"),
+                to_hash("Afociuwn5ojvimD5KPJLVCPvxF3hJnVwZohYgXrUDZBf"),
+                to_hash("5Z26M1BAWjVP2MVjHSuoXydXcPmiKrmbFUiBsqJaPHCg"),
+                to_hash("XkuRhYUwaoramqEhpiDqYkhQNPQFQjZk9yQfmfeQoJ9"),
+                to_hash("5rgebnYJLTTyVt9Bm1a7F7KkATwgYEZHCTw2cQ9xb7ow"),
+                to_hash("E5acT3ETbH5C2KHrqPogt6JcVbjjYQbjQFShiHqGGgug"),
             ]),
-            steps: H256List(vec![H256(
-                hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+            steps: H256List(vec![to_hash(
+                "E5acT3ETbH5C2KHrqPogt6JcVbjjYQbjQFShiHqGGgug",
             )]),
             vdf_difficulty: None,
             next_vdf_difficulty: None,
@@ -576,192 +408,46 @@ mod tests {
 
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
-            output: H256(
-                hex::decode("4a6976fc0b102ea04a6e2073c0db72ec763dd6cd53346b7b36592dc415cda46f")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
+            output: to_hash("3Qsb2Usx5679XnfZBr6VQNcMnJG1yMtvhHNYsKgefEL1"),
             global_step_number: 44401,
-            seed: H256(
-                hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
-            next_seed: H256(
-                hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
-            prev_output: H256(
-                hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
+            seed: to_hash("11111111111111111111111111111111"),
+            next_seed: to_hash("11111111111111111111111111111111"),
+            prev_output: to_hash("E5acT3ETbH5C2KHrqPogt6JcVbjjYQbjQFShiHqGGgug"),
             last_step_checkpoints: H256List(vec![
-                H256(
-                    hex::decode("5dfcd481cc2fc3ed4198d2c0001ce9ef053495f5f8db2aaf2cbf591f507efe76")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("62cf2b21e9dacce5bcadbc4846466542e2aaf8a4f054634f2fbbe97d7559e377")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("cb8775eb12ac605e9b6141397f1f07681e5c8e29608d3aff13b9348c23803311")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("3eee39dbf370d5a7c3454350034ba9fd8d5dff4a6564634d728e69d56c1601b7")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("35f10861be8cdb13eb8a690e53a9885f6dc36ff5dd8c87fb5b87584962ff435f")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("a8e6cba62e1092006db8d68c7adb68a929d00e191f1924b17b9beb026cdba244")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("12636a5e00003b54b51cd5d44d44e4667a20cc2565da98c4f93e636a90da243c")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("22a778ddeaccac5d84789a3aa58ecbab1fbb2a572b755608ededb5085b990eea")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("518dbdfaaa5b1864ddd90ad3f0d4bc2a86e1d62e4b595f4d5a4b8f88d5e773a2")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("9195a55e29a902acce59308d6fdbb348a25fb6d8f69a4a2f4523aa08e211fb5f")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("c65d8943868696aa03be0b5eaa85e0b6626d0ffccda40aa141d07054bebd62e6")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("dbc9989d645291aa7d14bd3bb4725c4c3029a986dcdd9d97b8d63241cdc35626")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("e33edab2786b7675a6a2cbbd9fd5a5cd9b2fb7aafce7f0ac90e42be6ac5863e6")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("62f9dff22d67198950f457afda82347f00f23f8e6bdc62d2a1fd4cd0f2d23312")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("c2b95488c1c225bce89b1cc29dda710d64bc5f16c4f32cce01eb9a3e67139a06")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("f2158c0f31f7301e0c3f09e233a42ff50c33f1f136b503b13adcd914acca438c")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("fa4841e900ed9e778a86161914a412a39031565d647af1f97563d4f3c9c6fa62")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("3417b742c8558d78180bc51b7ddf138e9378ec8286cbd99029bb135c7fdd7304")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("cec3c7b680bfae2d5356b48288f55649ebae3e1bff242ccd774e55b998b1b670")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("07c95adccfc38082f79ee0b110c53f4a9a7c3048397844a8bc7bdb72167376c5")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("cf1a222eb815146a4d1377c7fecbbb52a0d9cd66eea60b00bef94cf28d3f77a3")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("bb85423727c38952d695fbe40687d327053582b9cc180c0108b08c40be5c16dc")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("742ad9949bb21534f01e96d80a6c1d495f82fec13cd6b7ff9924bf5da4439b68")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("8179cd7681b9ca617a3c65510b280c7f4c123f30bb0d6f5e9de9768cabcc42a2")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("4a6976fc0b102ea04a6e2073c0db72ec763dd6cd53346b7b36592dc415cda46f")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
+                to_hash("HKXZ8gTfzbjKX1Yj4BiPYr2szt4tXiJ8XYMyLKMkzgYK"),
+                to_hash("Hqx8kaHFmN8to736An11HrX612zwVFgBatCr5jym6URT"),
+                to_hash("HFa2nA8igin9FNbYo2Y9zvjF7VEj7tsGcPcaK9zykfk3"),
+                to_hash("2vxhZHfSytevAjFjPDsPc4KFBhxRpBxcPZB2RC8RYErz"),
+                to_hash("hoySANowfuK5MBZA9uVBkp53tVWcSGnguvrTqsUevmo"),
+                to_hash("4uHW4CMNvVfMbYPu4fmzUmBmJcjUrkYv88AUhzgY6Lrr"),
+                to_hash("UbCkSxgPhkTzuR7JpuPv5iVT4S8to76WQU99ncKzSvS"),
+                to_hash("9u5q95KhD8t3PULQmGox87idU3skP1VwjvL8MM6D2efQ"),
+                to_hash("C2PqBj1jSktvCVk4HPj3C1axY1zgXzpbEbY1Ed1QRsuq"),
+                to_hash("2SJJA3GhVmtyo2LJei1QHLiDrDPFdYVEz1FEcBHqhGKy"),
+                to_hash("EgvP8KFPEu7oxqSF13xnhiAqQHZKqeVCTgCAMKLphh3A"),
+                to_hash("4VVjwiNebvpKbXjfdSVFWSAf5T6SJbXBc7VhNvBQ8QcB"),
+                to_hash("5m5DQ8eZ92C765aY6HWz1s8ijgGiBKNZwNGrfzRNf1XT"),
+                to_hash("6U2Z7WxEbTsqyhrsKNcb2n1airWc4HCQxyKJV5oDK1xj"),
+                to_hash("CA2xn9QAWPgLwkCFBPUkhM67GMZTcTy8DVvZuhfYrXVv"),
+                to_hash("7b5U3EMh6ju6MT2DhWjxLfyJZopyYQceB9hzPsxH3cft"),
+                to_hash("Ai21SQ9W4QwmKU4zamogrnsX3nUUQjTrMGnH5G22T5Qg"),
+                to_hash("3QvcxYH1BHfxLiPs8NrNmj99jgZcufdVKRkn2BQNzT3F"),
+                to_hash("F3Usefji2NMkauufHgL67pqdcEmAjVbtNwHRz4rJD9Mf"),
+                to_hash("GgCyhokL4jnmr4XUJadNmvzkiATkYkBnDvqGbJvMNX45"),
+                to_hash("7hWVtio9um364gPoHZZqVNqdRM7kivryCygUPbwSwS2N"),
+                to_hash("F3fhBBUJPWqrmybCuzCgYiW5BZd7Xy22NxcCmb4pTsPc"),
+                to_hash("D7xxh4WbC6PGzZEtc7LA4amcEDwsX4kbrYGb43vkQsqP"),
+                to_hash("4rxCqPkfJhqjhNK6jCU2MtrauPACJ4yP7G8GEfXsuJCz"),
+                to_hash("3Qsb2Usx5679XnfZBr6VQNcMnJG1yMtvhHNYsKgefEL1"),
             ]),
-            steps: H256List(vec![H256(
-                hex::decode("4a6976fc0b102ea04a6e2073c0db72ec763dd6cd53346b7b36592dc415cda46f")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+            steps: H256List(vec![to_hash(
+                "3Qsb2Usx5679XnfZBr6VQNcMnJG1yMtvhHNYsKgefEL1",
             )]),
             vdf_difficulty: None,
             next_vdf_difficulty: None,
         };
+
+        debug!("{:?}", vdf_info);
 
         let config = testnet_config.vdf;
 
