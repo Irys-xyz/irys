@@ -1,7 +1,7 @@
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::node::{RethNodeAdapter, RethNodeAddOns};
@@ -92,7 +92,38 @@ impl IrysRethNodeAdapter {
         Ok(())
     }
 
-    pub async fn advance_block_irys(
+    /// this should be used for testing only, as it doesn't use the payload builder
+    /// and instead uses the attributes generator directly.
+    /// Also, it doesn't use the system txs.
+    /// Also, it doesn't set a proper parent beacon block root.
+    pub async fn advance_block_testing(
+        &mut self,
+    ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
+    {
+        let current_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let attributes = (self.reth_node.payload.attributes_generator)(current_timestamp.as_secs());
+        let attributes = PayloadAttributes {
+            timestamp: attributes.timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: None,
+            parent_beacon_block_root: Some(B256::ZERO),
+        };
+        let payload = self
+            .build_submit_payload_irys(B256::ZERO, attributes, vec![])
+            .await?;
+
+        // trigger forkchoice update via engine api to commit the block to the blockchain
+        self.update_forkchoice_full(
+            payload.block().hash(),
+            Some(payload.block().hash()),
+            Some(payload.block().hash()),
+        )
+        .await?;
+
+        Ok(payload)
+    }
+    pub async fn advance_block_custom(
         &self,
         parent_block_hash: B256,
         payload_attrs: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,

@@ -30,7 +30,7 @@ use std::{
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, span, Level};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
@@ -73,9 +73,7 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
 
     let (block_hash, block_number) = {
         // make the node advance
-        let payload = genctx
-            .advance_block_irys(B256::ZERO, PayloadAttributes::default(), vec![])
-            .await?;
+        let payload = genctx.advance_block_testing().await?;
 
         (payload.block().hash(), payload.block().number)
     };
@@ -148,33 +146,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
     let (block_hash, block_number) = {
-        let p1_latest = genctx
-            .rpc
-            .inner
-            .eth_api()
-            .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
-            .await
-            .unwrap()
-            .unwrap();
-
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-
-        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
-            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-            prev_randao: B256::ZERO,
-            suggested_fee_recipient: Address::ZERO,
-            withdrawals: None,
-            parent_beacon_block_root: Some(B256::ZERO), // this is required now (Cancun fork activation)
-        };
-
-        let built = genctx
-            .new_payload_irys(p1_latest.header.hash, payload_attrs, vec![])
-            .await?;
-
-        let block_hash = genctx.submit_payload(built.clone()).await?;
-
-        // trigger forkchoice update via engine api to commit the block to the blockchain
-        genctx.update_forkchoice(block_hash, block_hash).await?;
+        let built = genctx.advance_block_testing().await?;
 
         (built.block().hash(), built.block().number)
     };
