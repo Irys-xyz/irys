@@ -237,10 +237,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
-    let _recipient_init_balance = reth_context
-        .rpc
-        .get_balance(recipient.address(), None)
-        .await?;
+    let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
 
     let evm_tx_req = TransactionRequest {
         to: Some(TxKind::Call(recipient.address())),
@@ -307,17 +304,11 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
 
     // Verify recipient received the transfer
-    let recipient_balance = reth_context
-        .rpc
-        .get_balance(recipient.address(), None)
-        .await?;
+    let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
     assert_eq!(recipient_balance, U256::from(1)); // The transferred amount
 
     // Verify account1 balance decreased by storage fees and gas costs
-    let account1_balance = reth_context
-        .rpc
-        .get_balance(account1.address(), None)
-        .await?;
+    let account1_balance = reth_context.rpc.get_balance(account1.address(), None)?;
     // Balance should be: initial (1000) - storage fees - gas costs - transfer amount (1)
     let expected_balance = account_1_balance
         - U256::from(irys_tx.header.total_fee())

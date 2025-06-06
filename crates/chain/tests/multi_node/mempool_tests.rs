@@ -7,8 +7,8 @@ use assert_matches::assert_matches;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_chain::IrysNodeCtx;
 use irys_reth_node_bridge::{
-    adapter::RethContext, ext::IrysRethRpcTestContextExt as _, new_reth_context,
-    reth_e2e_test_utils::transaction::TransactionTestContext,
+    ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
+    IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
@@ -184,8 +184,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     genesis.start_public_api().await;
 
     // Setup Reth context for EVM transactions
-    let genesis_reth_context =
-        new_reth_context(genesis.node_ctx.reth_handle.clone().into()).await?;
+    let genesis_reth_context = genesis.node_ctx.reth_node_adapter.clone();
 
     // Initialize peer configs with their keypair/signer
     let peer1_config = genesis.testnet_peer_with_signer(&peer1_signer);
@@ -203,8 +202,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     peer2.start_public_api().await;
 
     // Setup Reth contexts for peers
-    let peer1_reth_context = new_reth_context(peer1.node_ctx.reth_handle.clone().into()).await?;
-    let peer2_reth_context = new_reth_context(peer2.node_ctx.reth_handle.clone().into()).await?;
+    let peer1_reth_context = peer1.node_ctx.reth_node_adapter.clone();
+    let peer2_reth_context = peer2.node_ctx.reth_node_adapter.clone();
 
     // ensure recipients have 0 balance
     let recipient1_init_balance = genesis_reth_context
@@ -325,7 +324,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(recipient2_balance, expected_recipient2_balance);
 
     // disconnect peers
-    let disconnect_all = async |ctx: &RethContext| -> eyre::Result<Vec<PeerInfo>> {
+    let disconnect_all = async |ctx: &IrysRethNodeAdapter| -> eyre::Result<Vec<PeerInfo>> {
         let all_peers1 = ctx.inner.network.get_all_peers().await?;
         for peer in all_peers1.iter() {
             ctx.inner.network.disconnect_peer(peer.remote_id);
@@ -348,7 +347,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let peer1_peers = disconnect_all(&peer1_reth_context).await?;
     let peer2_peers = disconnect_all(&peer2_reth_context).await?;
 
-    let wait_for_evm_tx = async |ctx: &RethContext, hash: &B256| -> eyre::Result<()> {
+    let wait_for_evm_tx = async |ctx: &IrysRethNodeAdapter, hash: &B256| -> eyre::Result<()> {
         // wait until the tx shows up
         let rpc = ctx.rpc_client().unwrap();
         loop {
@@ -422,7 +421,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // reconnect the peers
 
-    let reconnect_all = async |ctx: &RethContext, peers: &Vec<PeerInfo>| {
+    let reconnect_all = async |ctx: &IrysRethNodeAdapter, peers: &Vec<PeerInfo>| {
         for peer in peers {
             ctx.inner
                 .network

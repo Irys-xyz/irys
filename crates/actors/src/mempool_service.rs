@@ -13,10 +13,7 @@ use irys_database::{
     {insert_tx_header, tx_header_by_txid, SystemLedger},
 };
 use irys_primitives::CommitmentType;
-use irys_reth_node_bridge::{
-    adapter::RethContext, ext::IrysRethRpcTestContextExt as _, new_reth_context,
-    node::RethNodeProvider,
-};
+use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt, IrysRethNodeAdapter};
 use irys_storage::StorageModulesReadGuard;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
@@ -187,7 +184,7 @@ pub enum MempoolServiceMessage {
     ),
 }
 
-#[derive(derive_more::Debug)]
+#[derive(Debug)]
 struct Inner {
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
@@ -196,8 +193,7 @@ struct Inner {
     /// instead of the actor executor runtime, while also providing some `QoL`
     exec: TaskExecutor,
     irys_db: DatabaseProvider,
-    #[debug(skip)]
-    reth_ctx: Arc<RethContext>,
+    reth_node_adapter: IrysRethNodeAdapter,
     mempool_state: AtomicMempoolState,
     /// Reference to all the services we can send messages to
     service_senders: ServiceSenders,
@@ -224,7 +220,7 @@ impl MempoolService {
     pub async fn spawn_service(
         exec: &TaskExecutor,
         irys_db: DatabaseProvider,
-        reth: RethNodeProvider, // TODO: If we keep having to clone the RethNode struct for other services, set up a shared read-only instance of the RethNodeContext via the RethNodeService (or in chain.rs)
+        reth_node_adapter: IrysRethNodeAdapter,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
         commitment_state_guard: &CommitmentStateReadGuard,
@@ -241,7 +237,6 @@ impl MempoolService {
         let commitment_state_guard = commitment_state_guard.clone();
         let storage_modules_guard = storage_modules_guard.clone();
         let service_senders = service_senders.clone();
-        let reth_ctx = Arc::new(new_reth_context(reth.into()).await?);
         let reorg_rx = service_senders.subscribe_reorgs();
 
         Ok(exec.clone().spawn_critical_with_graceful_shutdown_signal(
@@ -258,7 +253,7 @@ impl MempoolService {
                         exec,
                         irys_db,
                         mempool_state: Arc::new(RwLock::new(mempool_state)),
-                        reth_ctx,
+                        reth_node_adapter,
                         service_senders,
                         storage_modules_guard,
                     },
@@ -1080,7 +1075,7 @@ impl Inner {
 
             // get balance state for the block we're building off of
             let balance: U256 = self
-                .reth_ctx
+                .reth_node_adapter
                 .rpc
                 .get_balance_irys(signer, parent_evm_block_id);
 
@@ -1242,7 +1237,8 @@ impl Inner {
 
         // Check account balance
 
-        if self.reth_ctx.rpc.get_balance_irys(tx.signer, None) < U256::from(tx.total_fee()) {
+        if self.reth_node_adapter.rpc.get_balance_irys(tx.signer, None) < U256::from(tx.total_fee())
+        {
             error!(
                 "{:?}: unfunded balance from irys_database::get_account_balance({:?})",
                 TxIngressError::Unfunded,

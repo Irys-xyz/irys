@@ -1,5 +1,6 @@
 use alloy_eips::BlockId;
 use alloy_primitives::U256;
+use base58::ToBase58 as _;
 use irys_types::Address;
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::rpc::RpcTestContext;
