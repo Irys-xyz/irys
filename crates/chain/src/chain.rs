@@ -963,7 +963,7 @@ impl IrysNode {
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
         let p2p_service_handle = p2p_service.run(
-            mempool_facade,
+            mempool_facade.clone(),
             block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
             task_exec,
@@ -984,6 +984,7 @@ impl IrysNode {
             Arc::clone(&reward_curve),
             &irys_db,
             &service_senders,
+            &mempool_facade,
             &epoch_service_actor,
             &block_tree_guard,
             &vdf_state_readonly,
@@ -1285,6 +1286,7 @@ impl IrysNode {
         reward_curve: Arc<HalvingCurve>,
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
+        mempool_facade: &MempoolServiceFacadeImpl,
         epoch_service_actor: &actix::Addr<EpochServiceActor>,
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
@@ -1303,6 +1305,7 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
+            mempool: mempool_facade.clone(),
             blocks_remaining_for_test: None,
             span: Span::current(),
             reth_node_adapter,

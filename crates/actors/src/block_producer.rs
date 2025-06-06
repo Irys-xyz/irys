@@ -4,7 +4,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool_service::MempoolServiceMessage,
+    mempool_service::{MempoolFacade, MempoolServiceFacadeImpl, MempoolServiceMessage},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     CommitmentCacheMessage,
@@ -68,6 +68,8 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
+    /// Mempool facade to interact with mempool service
+    pub mempool: MempoolServiceFacadeImpl,
     /// Global config
     pub config: Config,
     /// The block reward curve
@@ -157,6 +159,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             block_discovery_addr,
             epoch_service,
             service_senders,
+            mempool,
             config,
             vdf_steps_guard,
             block_tree_guard,
