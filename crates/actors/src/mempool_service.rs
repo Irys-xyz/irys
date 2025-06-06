@@ -719,30 +719,15 @@ impl Inner {
                 }
             }
 
-            // FIXME
-            // HACK HACK: in order for block discovery to validate incoming blocks
-            // it needs to read commitment tx from the database. Ideally it should
-            // be reading them from the mempool_service in memory cache, but we are
-            // putting off that work until the actix mempool_service is rewritten as a
-            // tokio service.
-            match self.irys_db.update_eyre(|db_tx| {
-                irys_database::insert_commitment_tx(db_tx, &commitment_tx)?;
-                Ok(())
-            }) {
-                Ok(()) => {
-                    info!(
-                        "Successfully stored commitment_tx in db {:?}",
-                        commitment_tx.id.0.to_base58()
-                    );
-                }
-                Err(db_error) => {
-                    error!(
-                        "Failed to store commitment_tx in db {:?}: {:?}",
-                        commitment_tx.id.0.to_base58(),
-                        db_error
-                    );
-                }
-            }
+            // Having passed the above checks, we now consider this a valid tx. Add it in the mempool state
+            let mut mempool_state_write_guard = mempool_state.write().await;
+            mempool_state_write_guard
+                .valid_commitment_tx
+                .insert(commitment_tx.signer, vec![commitment_tx.clone()]);
+            mempool_state_write_guard
+                .recent_valid_tx
+                .insert(commitment_tx.id);
+            drop(mempool_state_write_guard);
 
             // Gossip transaction
             self.service_senders
