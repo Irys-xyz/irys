@@ -267,9 +267,6 @@ mod tests {
     use base58::{FromBase58, ToBase58};
     use irys_types::ConsensusConfig;
     use tracing::debug;
-    use tracing_subscriber::fmt::SubscriberBuilder;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::{fmt, EnvFilter};
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block() {
