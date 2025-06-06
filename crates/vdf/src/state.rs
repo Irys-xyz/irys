@@ -18,7 +18,7 @@ use tokio::{
     sync::mpsc::Sender,
     time::{sleep, Duration},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -141,22 +141,33 @@ impl VdfStateReadonly {
         self.0.read().unwrap()
     }
 
-    /// Try to read steps interval pooling a max. of 10 times waiting for interval to be available
-    /// TODO @ernius: remove this method usage after VDF validation is done async, vdf steps validation reads VDF steps blocking last steps pushes so the need of this pooling.
-    pub async fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
-        const MAX_RETRIES: i32 = 10;
-        for attempt in 0..MAX_RETRIES {
-            match self.read().get_steps(i) {
-                        Ok(c) => return Ok(c),
-                        Err(e) =>
-                            tracing::warn!("Requested vdf steps range {:?} still unavailable, attempt: {}, reason: {:?}, waiting ...", &i, attempt, e),
-                    };
-            // should be similar to a yield
-            sleep(Duration::from_millis(200)).await;
+    /// Get steps in the given global steps numbers Interval
+    pub fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
+        self.read().get_steps(i)
+    }
+
+    /// Get a specific step by step number
+    pub fn get_step(&self, step_number: u64) -> eyre::Result<H256> {
+        self.get_steps(ii(step_number, step_number))?
+            .0
+            .first()
+            .cloned()
+            .ok_or(eyre!("Step not found"))
+    }
+
+    /// Wait for a specific step to be available for n seconds. This doesn't have the timeout.
+    /// Instead, we should check that the `desired_step_number` is a reasonable number of steps
+    /// to wait for. This should be ensured before calling this function
+    pub async fn wait_for_step(&self, desired_step_number: u64) {
+        debug!("Waiting for step {}", desired_step_number);
+        let retries_per_second = 20;
+        loop {
+            if self.read().global_step >= desired_step_number {
+                debug!("Step {} is available", desired_step_number);
+                return;
+            }
+            sleep(Duration::from_millis(1000 / retries_per_second)).await;
         }
-        Err(eyre::eyre!(
-            "Max. retries reached while waiting to get VDF steps!"
-        ))
     }
 }
 

@@ -968,9 +968,7 @@ impl IrysNode {
             task_exec,
             peer_list_service.clone(),
             irys_db.clone(),
-            service_senders.vdf_fast_forward.clone(),
             gossip_listener,
-            vdf_state_readonly.clone(),
         )?;
 
         // set up the price oracle
