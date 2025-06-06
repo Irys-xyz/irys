@@ -3,7 +3,6 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{
     evm::IrysEvmConfig, payload::SystemTxStore, IrysEthereumNode, IrysSystemTxValidator,
-    SystemTxPriorityOrdering,
 };
 use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
@@ -18,7 +17,8 @@ use reth::{
     rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
     transaction_pool::{
-        blobstore::DiskFileBlobStore, EthPooledTransaction, TransactionValidationTaskExecutor,
+        blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
+        TransactionValidationTaskExecutor,
     },
 };
 use reth_chainspec::ChainSpec;
@@ -58,7 +58,7 @@ pub type RethNodeAdapter = NodeAdapter<
                     EthPooledTransaction,
                 >,
             >,
-            SystemTxPriorityOrdering<EthPooledTransaction>,
+            CoinbaseTipOrdering<EthPooledTransaction>,
             DiskFileBlobStore,
         >,
         IrysEvmConfig,

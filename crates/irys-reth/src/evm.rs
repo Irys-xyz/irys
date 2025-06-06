@@ -189,14 +189,9 @@ where
                         .iter()
                         .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
                         .collect();
-                    // Determine the correct account status based on whether account exists and its final state
-                    let is_account_empty = plain_account.info.balance.is_zero()
-                        && plain_account.info.nonce == 0
-                        && plain_account.info.code_hash == alloy_primitives::keccak256([]);
-
+                    let is_account_empty = plain_account.info.is_empty();
                     let mut status = AccountStatus::Touched;
-
-                    if is_account_empty {
+                    if plain_account.info.is_empty() {
                         // Existing account that is still empty after increment - don't touch it
                         // This handles the case where increment amount is 0 or results in 0 balance
                         status |= AccountStatus::SelfDestructed;
@@ -314,7 +309,7 @@ where
                 .balance
                 .saturating_add(balance_increment.amount);
 
-            tracing::debug!(
+            tracing::trace!(
                 target_address = %balance_increment.target,
                 original_balance = %original_balance,
                 increment_amount = %balance_increment.amount,

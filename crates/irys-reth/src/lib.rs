@@ -34,6 +34,7 @@ use reth::{
         providers::ProviderFactoryBuilder, CanonStateSubscriptions as _, EthStorage,
         StateProviderFactory,
     },
+    rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
@@ -44,6 +45,7 @@ use reth_node_ethereum::{
     node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
 };
+use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 use reth_tracing::tracing;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
@@ -68,13 +70,15 @@ pub mod system_tx;
 
 #[must_use]
 pub fn compose_system_tx(chain_id: u64, system_tx: &SystemTransaction) -> TxLegacy {
+    // allocate 512 bytes for the system tx rlp, misc optimisation
     let mut system_tx_rlp = Vec::with_capacity(512);
     system_tx.encode(&mut system_tx_rlp);
     TxLegacy {
-        gas_limit: 99000,
+        gas_limit: MINIMUM_GAS_LIMIT,
         value: U256::ZERO,
+        // nonce is always 0 for system txs
         nonce: 0_u64,
-        gas_price: 875000000_u128,
+        gas_price: DEFAULT_TX_FEE_CAP_WEI,
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
         input: system_tx_rlp.into(),
@@ -1404,7 +1408,7 @@ mod tests {
 
         for tx in system_txs {
             assert!(
-                !pool_txs.contains(&*tx.hash()),
+                !pool_txs.contains(tx.hash()),
                 "System tx should never be in the transaction pool during rollback"
             );
             assert!(
