@@ -6,9 +6,9 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_database::{database, db::IrysDatabaseExt as _};
+use irys_database::{database, db::IrysDatabaseExt as _, tables::IngressProofs};
 use irys_types::{
-    u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
+    ingress::IngressProof, u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
     IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
@@ -209,6 +209,16 @@ pub async fn get_tx_is_promoted(
     let tx_id: H256 = path.into_inner();
     info!("Get tx_is_promoted by tx_id: {}", tx_id);
     let tx_header = get_storage_transaction(&state, tx_id)?;
-
-    Ok(web::Json(tx_header.ingress_proofs.is_some()))
+    Ok(web::Json(false))
+    // FIXME, this doesn't compile currently, but is how we should retrieve the proofs
+    /*
+    let proofs = state
+        .db
+        .begin_ro_txn()
+        .unwrap()
+        .get::<IngressProofs>(tx_header.data_root)
+        .unwrap();
+    //read its ingressproof(s)
+    Ok(web::Json(proofs.is_some()))
+    */
 }
