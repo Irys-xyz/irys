@@ -303,7 +303,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     // genesis.mine_block().await?;
     let (_block, reth_exec_env) = mine_block(&genesis.node_ctx).await?.unwrap();
 
-    assert_eq!(reth_exec_env.block().transaction_count(), 1);
+    assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 
     peer1.wait_until_height(3, seconds_to_wait).await?;
     peer2.wait_until_height(3, seconds_to_wait).await?;
