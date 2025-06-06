@@ -1150,11 +1150,15 @@ impl IrysNode {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
         // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
-        let is_test = config
+        let is_test_based_on_base_dir = config
             .node_config
             .base_directory
             .parent()
             .is_some_and(|p| p.ends_with(".tmp"));
+        let is_test_based_on_cfg_flag = cfg!(test);
+        if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
+            error!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing")
+        }
         let span = Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
@@ -1163,8 +1167,10 @@ impl IrysNode {
             move || {
                 let _span = span.enter();
 
-                if !is_test {
-                    // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
+                // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
+                if is_test_based_on_base_dir || is_test_based_on_cfg_flag {
+                    info!("Disabling VDF core pinning")
+                } else {
                     let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
 
                     for core in core_ids {
