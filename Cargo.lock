@@ -5121,7 +5121,6 @@ dependencies = [
  "reth-payload-builder",
  "reth-provider",
  "reth-rpc-eth-api",
- "reth-tasks",
  "tokio",
  "tracing",
 ]
