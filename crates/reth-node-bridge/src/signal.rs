@@ -6,34 +6,33 @@ use tracing::trace;
 /// Runs the given future to completion or until a critical task panicked.
 ///
 /// Returns the error if a task panicked, or the given future returned an error.
-pub async fn run_to_completion_or_panic<F, E>(tasks: &mut TaskManager, fut: F) -> Result<(), E>
+pub async fn run_to_completion_or_panic<F>(tasks: &mut TaskManager, fut: F) -> eyre::Result<()>
 where
-    F: Future<Output = Result<(), E>>,
-    E: Send + Sync + From<reth_tasks::PanickedTaskError> + 'static,
+    F: Future<Output = eyre::Result<()>>,
 {
-    {
-        let fut = pin!(fut);
-        tokio::select! {
-            err = tasks => {
-                return Err(err.into())
-            },
-            res = fut => res?,
+    let fut = pin!(fut);
+    tokio::select! {
+        err = tasks => {
+            err?;
+            eyre::bail!("task panicked");
+        },
+        res = fut => {
+            res?;
+            eyre::bail!("future returned an error");
         }
     }
-    Ok(())
 }
 
 /// Runs the future to completion or until:
 /// - `ctrl-c` is received.
 /// - `SIGTERM` is received (unix only).
 /// - A message is received on the given channel.
-pub async fn run_until_ctrl_c_or_channel_message<F, E>(
+pub async fn run_until_ctrl_c_or_channel_message<F>(
     fut: F,
     mut channel: tokio::sync::mpsc::Receiver<()>,
-) -> Result<(), E>
+) -> eyre::Result<()>
 where
-    F: Future<Output = Result<(), E>>,
-    E: Send + Sync + 'static + From<std::io::Error>,
+    F: Future<Output = eyre::Result<()>>,
 {
     let ctrl_c = tokio::signal::ctrl_c();
 
@@ -78,9 +77,7 @@ where
                 trace!(target: "reth::cli", "Received channel message");
                 return Ok(())
             },
-            res = fut =>  return Ok(res?),
+            res = fut =>  return res,
         }
     }
-
-    // Ok(())
 }

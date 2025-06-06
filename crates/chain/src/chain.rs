@@ -729,23 +729,24 @@ impl IrysNode {
                 let exec = task_manager.executor();
                 let _span = span.enter();
                 let run_reth_until_ctrl_c_or_signal = async || {
+                    let start_reth_node = start_reth_node(
+                        exec,
+                        reth_chainspec,
+                        config,
+                        reth_handle_sender,
+                        irys_provider.clone(),
+                        latest_block_height,
+                        system_tx_store,
+                    );
+                    let fut = run_until_ctrl_c_or_channel_message(
+                        start_reth_node.instrument(span2),
+                        reth_shutdown_receiver,
+                    );
                     _ = run_to_completion_or_panic(
                         &mut task_manager,
                         // todo we can simplify things if we use `irys_reth_node_bridge::run_node` directly
                         //      Then we can drop the channel
-                        run_until_ctrl_c_or_channel_message(
-                            start_reth_node(
-                                exec,
-                                reth_chainspec,
-                                config,
-                                reth_handle_sender,
-                                irys_provider.clone(),
-                                latest_block_height,
-                                system_tx_store,
-                            )
-                            .instrument(span2),
-                            reth_shutdown_receiver,
-                        ),
+                        fut,
                     )
                     .await
                     .inspect_err(|e| error!("Reth thread error: {}", &e));
