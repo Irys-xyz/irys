@@ -81,6 +81,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let partitions_guard = self.partition_assignments_guard.clone();
         let miner_address = block.miner_address;
         let block_hash = block.block_hash;
+        let block_height = block.height;
         let vdf_info = block.vdf_limiter_info.clone();
         let vdf_to_fast_forward = vdf_info.clone();
         let poa = block.poa.clone();
@@ -106,7 +107,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
                 let stored_previous_step = vdf_state.get_step(prev_output_step_number).expect("to get the step, since we've just waited for it");
 
                 if stored_previous_step != vdf_to_fast_forward.prev_output {
-                    error!("Previous output from the block is not equal to the saved step with the same index. Expected {}, got {}", stored_previous_step, vdf_to_fast_forward.prev_output);
+                    error!("Previous output from the block {}/{} is not equal to the saved step with the same index. Expected {}, got {}", block_hash, block_height, stored_previous_step, vdf_to_fast_forward.prev_output);
                     block_tree_sender
                         .send(BlockTreeServiceMessage::BlockValidationFinished {
                             block_hash,
@@ -123,7 +124,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
 
                         // Recall range check
                         if let Err(report) = recall_recall_range_is_valid(&block, &config.consensus, &vdf_state).await {
-                            error!("Recall range check failed: {}", report);
+                            error!("Recall range check for block {}/{} failed: {}", block_hash, block_height, report);
                             block_tree_sender
                                 .send(BlockTreeServiceMessage::BlockValidationFinished {
                                     block_hash,
