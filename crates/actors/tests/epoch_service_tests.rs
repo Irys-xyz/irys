@@ -16,7 +16,6 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     epoch_service::{EpochServiceActor, NewEpochMessage},
-    vdf_service::{VdfState, VdfStepsReadGuard},
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -34,6 +33,7 @@ use irys_types::{
     partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
 };
 use irys_types::{Config, U256};
+use irys_vdf::state::{VdfState, VdfStateReadonly};
 
 #[actix::test]
 async fn genesis_test() {
@@ -385,7 +385,7 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStepsReadGuard::new(Arc::new(RwLock::new(VdfState {
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
         capacity: 10,
         global_step: 0,
         seeds: VecDeque::new(),

@@ -138,6 +138,7 @@ async fn check_get_block_endpoint(
 }
 
 #[actix_rt::test]
+#[test_log::test]
 async fn heavy_api_client_all_endpoints_should_work() {
     let config = NodeConfig::testnet();
     let ctx = IrysNodeTest::new_genesis(config).start().await;

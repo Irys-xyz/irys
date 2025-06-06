@@ -116,7 +116,7 @@ jsonrpsee-core = "0.24"
 jsonrpsee-http-client = "0.24"
 jsonrpsee-types = "0.24"
 futures-util = "0.3"
-lru = "0.14.0"
+lru = "0.14"
 paste = "1.0.15"
 async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
@@ -144,6 +144,8 @@ alloy-contract = { version = "1.0.9", default-features = false }
 alloy-core = { version = "1.0.9", default-features = false }
 alloy-eips = { version = "1.0.9", default-features = false }
 alloy-genesis = { version = "1.0.9", default-features = false }
+revm-primitives = "19"
+revm-interpreter = "19"
 alloy-network = { version = "1.0.9", default-features = false }
 alloy-provider = { version = "1.0.9", default-features = false }
 alloy-rpc-types = { version = "1.0.9", features = [
@@ -183,7 +185,14 @@ reth-tracing = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7b
 reth-transaction-pool = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 reth-trie-db = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-
+reth-storage-api = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth-basic-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth-payload-builder-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth-payload-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth-revm = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 # just used (for local testing)
 
 
@@ -350,7 +359,7 @@ panic = "unwind"
 [workspace.lints]
 # to enable in the future
 # rust.missing_debug_implementations = "warn"
-# rust.missing_docs = "warn" 
+# rust.missing_docs = "warn"
 # rust.rust_2018_idioms = { level = "deny", priority = -1 }
 
 
@@ -366,7 +375,7 @@ rust.unused_imports = "warn"
 complexity = { priority = -2, level = "deny" }
 perf = { priority = -3, level = "deny" }
 correctness = { priority = -4, level = "deny" }
-restriction = { priority = -5, level = "allow" } # cherry pick 
+restriction = { priority = -5, level = "allow" } # cherry pick
 style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
 pedantic = { priority = -8, level = "allow" }    # cherry pick

@@ -44,8 +44,6 @@ pub enum TransactionPacket {
     Stake(BalanceDecrement),
     /// Collect storage fees from an account (balance decrement). Must match storage usage.
     StorageFees(BalanceDecrement),
-    /// Reset the system tx nonce for the block producer. Must always be the last system tx in a block.
-    ResetSystemTxNonce(ResetSystemTxNonce),
 }
 
 /// Topics for system transaction logs
@@ -63,8 +61,6 @@ pub mod system_tx_topics {
     pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
     pub static STORAGE_FEES: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SYSTEM_TX_STORAGE_FEES").0);
-    pub static RESET_SYSTEM_TX_NONCE: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("RESET_SYSTEM_TX_NONCE").0);
 }
 
 impl TransactionPacket {
@@ -77,7 +73,6 @@ impl TransactionPacket {
             Self::BlockReward(_) => (*BLOCK_REWARD).into(),
             Self::Stake(_) => (*STAKE).into(),
             Self::StorageFees(_) => (*STORAGE_FEES).into(),
-            Self::ResetSystemTxNonce(_) => (*RESET_SYSTEM_TX_NONCE).into(),
         }
     }
 
@@ -105,13 +100,6 @@ impl TransactionPacket {
                 .try_into()
                 .unwrap_or_default()
             }
-            Self::ResetSystemTxNonce(inner) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Uint(U256::from(inner.decrement_nonce_by), 256)
-                    .abi_encode_packed()
-                    .try_into()
-                    .unwrap_or_default()
-            }
         }
     }
 }
@@ -121,7 +109,6 @@ pub const RELEASE_STAKE_ID: u8 = 0x00;
 pub const BLOCK_REWARD_ID: u8 = 0x01;
 pub const STAKE_ID: u8 = 0x02;
 pub const STORAGE_FEES_ID: u8 = 0x03;
-pub const RESET_SYS_SIGNER_NONCE_ID: u8 = 0x04;
 
 #[expect(
     clippy::arithmetic_side_effects,
@@ -132,7 +119,6 @@ impl Encodable for TransactionPacket {
         1 + match self {
             Self::ReleaseStake(bi) | Self::BlockReward(bi) => bi.length(),
             Self::Stake(bd) | Self::StorageFees(bd) => bd.length(),
-            Self::ResetSystemTxNonce(inner) => inner.length(),
         }
     }
 
@@ -152,10 +138,6 @@ impl Encodable for TransactionPacket {
             }
             Self::StorageFees(inner) => {
                 out.put_u8(STORAGE_FEES_ID);
-                inner.encode(out);
-            }
-            Self::ResetSystemTxNonce(inner) => {
-                out.put_u8(RESET_SYS_SIGNER_NONCE_ID);
                 inner.encode(out);
             }
         }
@@ -190,10 +172,6 @@ impl Decodable for TransactionPacket {
             STORAGE_FEES_ID => {
                 let inner = BalanceDecrement::decode(buf)?;
                 Ok(Self::StorageFees(inner))
-            }
-            RESET_SYS_SIGNER_NONCE_ID => {
-                let inner = ResetSystemTxNonce::decode(buf)?;
-                Ok(Self::ResetSystemTxNonce(inner))
             }
             _ => Err(alloy_rlp::Error::Custom(
                 "Unknown system transaction discriminant",
@@ -254,24 +232,4 @@ pub struct BalanceIncrement {
     pub amount: U256,
     /// Target account address.
     pub target: Address,
-}
-
-/// Nonce reset: decrements the system tx nonce for the block producer. Must be the last system tx in a block.
-#[derive(
-    serde::Deserialize,
-    serde::Serialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-    RlpEncodable,
-    RlpDecodable,
-    arbitrary::Arbitrary,
-)]
-pub struct ResetSystemTxNonce {
-    /// Amount to decrement the nonce by.
-    pub decrement_nonce_by: u64,
 }

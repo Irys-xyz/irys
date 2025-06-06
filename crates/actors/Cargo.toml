@@ -35,11 +35,13 @@ rust_decimal.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 irys-reward-curve.workspace = true
 async-trait.workspace = true
-rayon.workspace = true
-sha2.workspace = true
 reth.workspace = true
+irys-reth.workspace = true
 alloy-rpc-types-engine.workspace = true
-# serde.workspace = true
+alloy-signer-local.workspace = true
+alloy-network.workspace = true
+alloy-consensus.workspace = true
+reth-transaction-pool.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

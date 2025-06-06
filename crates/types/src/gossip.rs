@@ -24,7 +24,7 @@ impl GossipData {
                 format!("commitment transaction {}", commitment_tx.id.0.to_base58())
             }
             GossipData::Block(block) => {
-                format!("block {}", block.block_hash.0.to_base58())
+                format!("block {} height: {}", block.block_hash, block.height)
             }
         }
     }
