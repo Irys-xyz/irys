@@ -418,7 +418,6 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
         for attempt in 1..seconds {
-            //fix 20
             // Do we have any unconfirmed tx?
             let Some(tx) = unconfirmed_txs.first() else {
                 // if not return we are done
