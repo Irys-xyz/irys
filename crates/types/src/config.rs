@@ -346,6 +346,12 @@ pub struct VdfConfig {
     pub sha_1s_difficulty: u64,
 }
 
+impl VdfConfig {
+    pub fn num_iterations_per_checkpoint(&self) -> u64 {
+        self.sha_1s_difficulty / self.num_checkpoints_in_vdf_step as u64
+    }
+}
+
 /// # Epoch Configuration
 ///
 /// Controls the timing and parameters for network epochs.

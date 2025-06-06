@@ -30,7 +30,7 @@ pub fn run_vdf_for_genesis_block(
             &mut salt,
             &mut hash,
             config.num_checkpoints_in_vdf_step,
-            config.sha_1s_difficulty,
+            config.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -136,7 +136,7 @@ pub fn run_vdf(
             &mut salt,
             &mut hash,
             config.num_checkpoints_in_vdf_step,
-            config.sha_1s_difficulty,
+            config.num_iterations_per_checkpoint(),
             &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
         );
 
@@ -256,7 +256,7 @@ mod tests {
             &mut salt,
             &mut hash,
             config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.sha_1s_difficulty,
+            config.consensus.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
         let elapsed = now.elapsed();
@@ -267,7 +267,7 @@ mod tests {
             original_salt,
             original_hash,
             config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.sha_1s_difficulty as usize,
+            config.consensus.vdf.num_iterations_per_checkpoint() as usize,
         );
         let elapsed = now.elapsed();
         debug!("vdf original code verification: {:.2?}", elapsed);
@@ -351,7 +351,7 @@ mod tests {
             &mut salt,
             &mut seed,
             config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.sha_1s_difficulty,
+            config.consensus.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 

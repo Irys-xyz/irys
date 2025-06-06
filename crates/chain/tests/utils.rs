@@ -93,7 +93,7 @@ pub async fn capacity_chunk_solution(
         &mut salt,
         &mut seed,
         config.consensus.vdf.num_checkpoints_in_vdf_step,
-        config.consensus.vdf.sha_1s_difficulty,
+        config.consensus.vdf.num_iterations_per_checkpoint(),
         &mut checkpoints,
     );
 

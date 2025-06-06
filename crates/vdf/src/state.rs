@@ -335,7 +335,7 @@ pub fn vdf_steps_are_valid(
                     &mut salt,
                     &mut seed,
                     config.num_checkpoints_in_vdf_step,
-                    config.sha_1s_difficulty,
+                    config.num_iterations_per_checkpoint(),
                     &mut checkpoints,
                 );
                 (

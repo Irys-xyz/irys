@@ -18,7 +18,7 @@ pub fn vdf_sha(
     salt: &mut U256,
     seed: &mut H256,
     num_checkpoints: usize,
-    num_iterations: u64,
+    num_iterations_per_checkpoint: u64,
     checkpoints: &mut [H256],
 ) {
     let mut local_salt: [u8; 32] = [0; 32];
@@ -26,7 +26,7 @@ pub fn vdf_sha(
     for checkpoint_idx in 0..num_checkpoints {
         salt.to_little_endian(&mut local_salt);
 
-        for _ in 0..num_iterations {
+        for _ in 0..num_iterations_per_checkpoint {
             hasher.update(local_salt);
             hasher.update(seed.as_bytes());
             *seed = H256(hasher.finalize_reset().into());
@@ -45,7 +45,7 @@ pub fn vdf_sha_verification(
     salt: U256,
     seed: H256,
     num_checkpoints: usize,
-    num_iterations: usize,
+    num_iterations_per_checkpoint: usize,
 ) -> Vec<H256> {
     let mut local_salt: U256 = salt;
     let mut local_seed: H256 = seed;
@@ -70,7 +70,7 @@ pub fn vdf_sha_verification(
 
         // subsequent hash iterations (if needed)
         // -----------------------------------------------------------------
-        for _ in 1..num_iterations {
+        for _ in 1..num_iterations_per_checkpoint {
             let mut hasher = sha::Sha256::new();
             hasher.update(salt_bytes.as_bytes());
             hasher.update(hash_bytes.as_bytes());
@@ -206,7 +206,7 @@ pub async fn last_step_checkpoints_is_valid(
             .build()
             .unwrap();
 
-        let num_iterations = config.sha_1s_difficulty;
+        let num_iterations = config.num_iterations_per_checkpoint();
         let test: Vec<H256> = pool.install(|| {
             (0..config.num_checkpoints_in_vdf_step)
                 .into_par_iter()
