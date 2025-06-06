@@ -116,7 +116,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(
         block_reward_balance,
         // started with 0 balance
-        U256::from(0) + U256::try_from(irys_block.reward_amount).unwrap()
+        U256::from(0) + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes())
     );
 
     // ensure that block heights in reth and irys are the same
@@ -231,7 +231,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         account1.address(),
         GenesisAccount {
             // 1ETH
-            balance: account_1_balance.clone(),
+            balance: account_1_balance,
             ..Default::default()
         },
     )]);
@@ -423,7 +423,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     }
 
     // Mine a block - should only contain block reward transaction
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
     let context = node.node_ctx.reth_node_adapter.clone();
 
     // Verify block transactions - should only contain block reward system transaction
@@ -504,7 +504,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     }
 
     // Mine a block - should only contain block reward transaction
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
     let context = node.node_ctx.reth_node_adapter.clone();
 
     // Verify block transactions - should only contain block reward system transaction
@@ -586,7 +586,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     assert_eq!(tx.header.total_fee(), 2, "Total fee should be 2");
 
     // Mine a block - should contain block reward and storage fee transactions
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
         .inner

@@ -521,7 +521,7 @@ impl IrysNode {
         let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel(1);
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
-        let (system_tx_store, system_tx_notification_stream) =
+        let (system_tx_store, _system_tx_notification_stream) =
             SystemTxStore::new_with_notifications();
 
         let irys_provider = irys_storage::reth_provider::create_provider();

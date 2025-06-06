@@ -1,29 +1,23 @@
 use std::{
-    ops::{Deref, DerefMut},
+    ops::Deref,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::node::{RethNodeAdapter, RethNodeAddOns};
-use alloy_eips::{BlockId, BlockNumberOrTag};
-use alloy_primitives::{BlockNumber, B256, U256};
+use alloy_eips::BlockNumberOrTag;
+use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes};
 use irys_reth::{
-    payload::{DeterministicSystemTxKey, SystemTxRequest, SystemTxStore},
+    payload::{DeterministicSystemTxKey, SystemTxStore},
     IrysEthereumNode,
 };
 use irys_types::Address;
 use reth::transaction_pool::EthPooledTransaction;
-use reth_chainspec::EthereumHardforks;
-use reth_e2e_test_utils::{
-    node::NodeTestContext, payload::PayloadTestContext, rpc::RpcTestContext,
-};
-use reth_node_api::{
-    BlockTy, EngineApiMessageVersion, FullNodeComponents, NodeTypes, PayloadKind, PayloadTypes,
-};
-use reth_payload_builder::{EthPayloadBuilderAttributes, PayloadId};
-use reth_provider::{BlockReader, BlockReaderIdExt as _};
-use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, TraceExt};
+use reth_e2e_test_utils::node::NodeTestContext;
+use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadTypes};
+use reth_payload_builder::EthPayloadBuilderAttributes;
+use reth_provider::BlockReaderIdExt as _;
 
 use crate::node::{eth_payload_attributes, RethNode};
 

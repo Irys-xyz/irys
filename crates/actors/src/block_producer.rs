@@ -25,8 +25,6 @@ use irys_database::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_system_tx;
-use irys_reth::payload::DeterministicSystemTxKey;
-use irys_reth::payload::SystemTxStore;
 use irys_reth::system_tx::BalanceDecrement;
 use irys_reth::system_tx::BalanceIncrement;
 use irys_reth::system_tx::SystemTransaction;
@@ -43,9 +41,7 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::payload::EthPayloadBuilderAttributes;
 use reth::revm::primitives::ruint::Uint;
-use reth::transaction_pool::TransactionPool;
 use reth::{payload::EthBuiltPayload, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;

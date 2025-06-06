@@ -123,16 +123,16 @@ impl SystemTxStore {
                 .send(request)
                 .expect("Notification channel closed");
             // Wait for response with specified timeout
-            if let Ok(result) = tokio::time::timeout(timeout, response_rx).await {
-                if let Ok((system_txs, timestamp)) = result {
-                    // add to cache
-                    self.inner
-                        .lock()
-                        .unwrap()
-                        .put(key, (system_txs.clone(), timestamp));
+            if let Ok(Ok((system_txs, timestamp))) =
+                tokio::time::timeout(timeout, response_rx).await
+            {
+                // add to cache
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .put(key, (system_txs.clone(), timestamp));
 
-                    return (system_txs, timestamp);
-                }
+                return (system_txs, timestamp);
             }
         }
 

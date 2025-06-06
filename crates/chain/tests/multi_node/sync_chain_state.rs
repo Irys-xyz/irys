@@ -1,5 +1,5 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
-use alloy_core::primitives::{ruint::aliases::U256, B256};
+use alloy_core::primitives::ruint::aliases::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
@@ -11,22 +11,14 @@ use irys_chain::{
 };
 use irys_database::block_header_by_hash;
 use irys_primitives::IrysTxId;
-use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
+    irys::IrysSigner, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
     NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
-use reth::{
-    payload::EthPayloadBuilderAttributes,
-    rpc::{eth::EthApiServer as _, types::engine::PayloadAttributes},
-};
+use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database;
-use std::{
-    collections::HashMap,
-    net::TcpListener,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, net::TcpListener};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, span, Level};
 
