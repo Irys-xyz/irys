@@ -1,36 +1,30 @@
 use crate::utils::*;
-use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use assert_matches::assert_matches;
-use base58::ToBase58 as _;
-use eyre::eyre;
-use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_chain::{peer_utilities::RethNode, IrysNodeCtx};
-use irys_primitives::IrysTxId;
+use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_chain::IrysNodeCtx;
 use irys_reth_node_bridge::{
     adapter::RethContext, ext::IrysRethRpcTestContextExt as _, new_reth_context,
     reth_e2e_test_utils::transaction::TransactionTestContext,
 };
-use irys_testing_utils::{initialize_tracing, tokio_sleep};
+use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, IrysTransaction, LedgerChunkOffset,
-    NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, DataLedger, LedgerChunkOffset, NodeConfig, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::{
-    network::{DisconnectReason, PeerInfo, Peers},
+    network::{PeerInfo, Peers},
     primitives::{Receipt, Transaction},
     rpc::{
         api::EthApiClient,
         types::{Block, Header, TransactionRequest},
     },
 };
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 use tokio::{sync::oneshot, time::sleep};
-use tracing::debug;
 
 #[actix::test]
 async fn heavy_pending_chunks_test() -> eyre::Result<()> {
@@ -439,7 +433,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let chunks = [[40; 32], [50; 32], [60; 32]];
     let data: Vec<u8> = chunks.concat();
 
-    let peer2_tx = peer2
+    let _peer2_tx = peer2
         .post_storage_tx_without_gossip(H256::zero(), data, &recipient2)
         .await;
 
