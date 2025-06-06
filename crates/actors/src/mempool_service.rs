@@ -51,10 +51,14 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: H256,
     ) -> Result<IrysTransactionHeader, TxReadError>;
-    async fn handle_get_commitment_transaction(
+    async fn handle_get_commitment_transactions_by_signer(
         &self,
         address: Address,
     ) -> Result<Vec<CommitmentTransaction>, TxReadError>;
+    async fn handle_get_commitment_transaction_by_id(
+        &self,
+        id: H256,
+    ) -> Result<CommitmentTransaction, TxReadError>;
     async fn handle_commitment_transaction(
         &self,
         tx_header: CommitmentTransaction,
@@ -95,12 +99,34 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         }
     }
 
-    async fn handle_get_commitment_transaction(
+    async fn handle_get_commitment_transactions_by_signer(
         &self,
         address: Address,
     ) -> Result<Vec<CommitmentTransaction>, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs(address.clone(), oneshot_tx);
+        if let Err(err) = self.service.send(tx_ingress_msg) {
+            tracing::error!("error sending message to mempool: {:?}", err);
+        }
+
+        if let Ok(response) = oneshot_rx.await {
+            match response {
+                Some(response) => Ok(response),
+                None => Err(TxReadError::CommitmentNotInMempool),
+            }
+        } else {
+            Err(TxReadError::Other(
+                "Error reading GetCommitmentTxs response ".to_owned(),
+            ))
+        }
+    }
+
+    async fn handle_get_commitment_transaction_by_id(
+        &self,
+        id: H256,
+    ) -> Result<CommitmentTransaction, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxById(id.clone(), oneshot_tx);
         if let Err(err) = self.service.send(tx_ingress_msg) {
             tracing::error!("error sending message to mempool: {:?}", err);
         }
@@ -199,9 +225,15 @@ pub enum MempoolServiceMessage {
         H256,
         tokio::sync::oneshot::Sender<Option<IrysTransactionHeader>>,
     ),
+    /// get Vec<CommitmentTransaction> by signer
     GetCommitmentTxs(
         Address,
         tokio::sync::oneshot::Sender<Option<Vec<CommitmentTransaction>>>,
+    ),
+    /// get CommitmentTransaction by H256 id
+    GetCommitmentTxById(
+        H256,
+        tokio::sync::oneshot::Sender<Option<CommitmentTransaction>>,
     ),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     ChunkIngressMessage(
@@ -605,6 +637,28 @@ impl Inner {
         }
         drop(mempool_state_guard);
         None
+    }
+
+    //TODO this is using a flatmap because at the time of writing,
+    //     there is no H256 indexed commitment transactions in the mempool.
+    //     There is however a map indexed by signer.
+    async fn handle_get_commitment_transaction_by_id_message(
+        &self,
+        tx_id: H256,
+    ) -> Option<CommitmentTransaction> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+
+        // if tx exists in mempool valid_commitment_tx (temporary storage
+        match mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flatten()
+            .find(|tx| tx.id == tx_id)
+        {
+            Some(v) => Some(v.clone()),
+            _ => None,
+        }
     }
 
     async fn handle_get_commitment_transactions_message(
@@ -1494,7 +1548,14 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-
+                MempoolServiceMessage::GetCommitmentTxById(id, response) => {
+                    let response_message = self
+                        .handle_get_commitment_transaction_by_id_message(id)
+                        .await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
                 MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
                     let _unused_response_message =
                         self.handle_block_confirmed_message(block, all_txs).await;

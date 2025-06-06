@@ -13,8 +13,7 @@ use async_trait::async_trait;
 use eyre::eyre;
 use futures::future;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
-    SystemLedger,
+    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid, SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
@@ -140,42 +139,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let mempool = self.mempool.clone();
 
         //====================================
-        // Commitment ledger TX Validation
-        //------------------------------------
-        // Extract the Commitment ledger from the epoch block
-        let commitment_ledger = new_block_header
-            .system_ledgers
-            .iter()
-            .find(|b| b.ledger_id == SystemLedger::Commitment);
-
-        // Validate commitments (if there are some)
-        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-        let mut commitment_txids: H256List = H256List::new();
-        if let Some(commitment_ledger) = commitment_ledger {
-            debug!("{:#?}", commitment_ledger);
-            let read_tx = self.db.tx().expect("to create a database read tx");
-
-            // Collect commitments with proper error handling
-            match commitment_ledger
-                .tx_ids
-                .iter()
-                .map(|txid| {
-                    commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(collected) => {
-                    commitments = collected;
-                    commitment_txids = commitment_ledger.tx_ids.clone();
-                }
-
-                Err(e) => error!("Failed to collect commitment transactions: {:?}", e),
-            }
-        }
-
-        //====================================
         // Block header pre-validation
         //------------------------------------
         let block_index_guard2 = self.block_index_guard.clone();
@@ -204,6 +167,36 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
+
+            //====================================
+            // Commitment ledger TX Validation
+            //------------------------------------
+            // Extract the Commitment ledger from the epoch block
+            let commitment_ledger = new_block_header
+                .system_ledgers
+                .iter()
+                .find(|b| b.ledger_id == SystemLedger::Commitment);
+            // Validate commitments (if there are some)
+            let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+            let mut commitment_txids: H256List = H256List::new();
+            if let Some(commitment_ledger) = commitment_ledger {
+                debug!("{:#?}", commitment_ledger);
+                // Collect commitments with proper error handling
+                for txid in commitment_ledger.tx_ids.iter() {
+                    match mempool
+                        .handle_get_commitment_transaction_by_id(txid.clone())
+                        .await
+                    {
+                        Ok(v) => commitments.push(v),
+                        _ => Err(eyre::eyre!("No commitment tx found for txid {:?}", txid))?,
+                    }
+                }
+
+                // either we find all the expected CommitmentTransaction in the mempool or we include none in this block
+                if commitment_ledger.tx_ids.len() == commitments.len() {
+                    commitment_txids = commitment_ledger.tx_ids.clone();
+                }
+            }
 
             // Collect submit ledger transactions from the mempool
             let submit_txs = future::try_join_all(

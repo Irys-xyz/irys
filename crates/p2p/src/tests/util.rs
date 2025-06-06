@@ -99,11 +99,18 @@ impl MempoolFacade for MempoolStub {
         Ok(IrysTransactionHeader::default())
     }
 
-    async fn handle_get_commitment_transaction(
+    async fn handle_get_commitment_transactions_by_signer(
         &self,
         _address: Address,
     ) -> std::result::Result<Vec<CommitmentTransaction>, TxReadError> {
         Ok(vec![CommitmentTransaction::default()])
+    }
+
+    async fn handle_get_commitment_transaction_by_id(
+        &self,
+        _tx_id: H256,
+    ) -> std::result::Result<CommitmentTransaction, TxReadError> {
+        Ok(CommitmentTransaction::default())
     }
 
     async fn handle_chunk(
