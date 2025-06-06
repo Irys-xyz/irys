@@ -78,16 +78,27 @@ where
         self.inner.apply_pre_execution_changes()
     }
 
-    // NOTE: whenever we execute system transactions, reth gives a warning: "State root task returned incorrect state root"
-    // Current hypothesis is: because we require direct access to the db to execute system txs,
-    // reth cannot do parallel state root computations (which presumably are faster than non-parallel).
-    // This does not change the end-result of the block but is something we may want to look into.
-    #[expect(clippy::too_many_lines, reason = "easier to read")]
     fn execute_transaction_with_result_closure(
         &mut self,
         tx: impl ExecutableTx<Self>,
         on_result_f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
     ) -> Result<u64, BlockExecutionError> {
+        self.inner
+            .execute_transaction_with_result_closure(tx, on_result_f)
+    }
+
+    // NOTE: whenever we execute system transactions, reth gives a warning: "State root task returned incorrect state root"
+    // Current hypothesis is: because we require direct access to the db to execute system txs,
+    // reth cannot do parallel state root computations (which presumably are faster than non-parallel).
+    // This does not change the end-result of the block but is something we may want to look into.
+    #[expect(clippy::too_many_lines, reason = "easier to read")]
+    fn execute_transaction_with_commit_condition(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        on_result_f: impl FnOnce(
+            &ExecutionResult<<Self::Evm as Evm>::HaltReason>,
+        ) -> reth_evm::block::CommitChanges,
+    ) -> Result<Option<u64>, BlockExecutionError> {
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
         let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
@@ -217,7 +228,9 @@ where
                 Err(execution_result) => execution_result,
             };
 
-            on_result_f(&execution_result);
+            if !on_result_f(&execution_result).should_commit() {
+                return Ok(None);
+            }
 
             // Build and store the receipt
             let evm = self.inner.evm_mut();
@@ -233,11 +246,11 @@ where
             // Commit the changes to the database
             let db = evm.db_mut();
             db.commit(new_state);
-            Ok(0)
+            Ok(Some(0))
         } else {
             // Handle regular transactions using the inner executor
             self.inner
-                .execute_transaction_with_result_closure(tx, on_result_f)
+                .execute_transaction_with_commit_condition(tx, on_result_f)
         }
     }
 
