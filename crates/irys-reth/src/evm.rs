@@ -122,14 +122,14 @@ where
                 "system_tx_processing",
                 "parent_block_hash" = block_hash.to_string(),
                 "block_number" = block_number,
-                "allowed_parent_block_hash" = system_tx.parent_blockhash.to_string(),
-                "allowed_block_height" = system_tx.valid_for_block_height
+                "allowed_parent_block_hash" = system_tx.parent_blockhash().to_string(),
+                "allowed_block_height" = system_tx.valid_for_block_height()
             );
             let guard = span.enter();
 
             // ensure that parent block hashes match.
             // This check ensures that a system tx does not get executed for an off-case fork of the desired chain.
-            if system_tx.parent_blockhash != block_hash {
+            if system_tx.parent_blockhash() != block_hash {
                 tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
                 return Err(BlockExecutionError::Validation(
                     BlockValidationError::InvalidTx {
@@ -141,7 +141,7 @@ where
 
             // ensure that block heights match.
             // This ensures that the system tx does not leak into future blocks.
-            if system_tx.valid_for_block_height != block_number {
+            if system_tx.valid_for_block_height() != block_number {
                 tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
                 return Err(BlockExecutionError::Validation(
                     BlockValidationError::InvalidTx {
@@ -153,41 +153,46 @@ where
             drop(guard);
 
             // Process different system transaction types
-            let topic = system_tx.inner.topic();
+            let topic = system_tx.topic();
             let target;
-            let new_account_state = match system_tx.inner {
-                system_tx::TransactionPacket::ReleaseStake(balance_increment)
-                | system_tx::TransactionPacket::BlockReward(balance_increment) => {
-                    let log = Self::create_system_log(
-                        balance_increment.target,
-                        vec![topic],
-                        vec![
-                            DynSolValue::Uint(balance_increment.amount, 256),
-                            DynSolValue::Address(balance_increment.target),
-                        ],
-                    );
-                    target = balance_increment.target;
-                    let (plain_account, execution_result, account_existed) =
-                        self.handle_balance_increment(log, &balance_increment);
-                    Ok((plain_account, execution_result, account_existed))
-                }
-                system_tx::TransactionPacket::Stake(balance_decrement)
-                | system_tx::TransactionPacket::StorageFees(balance_decrement) => {
-                    let log = Self::create_system_log(
-                        balance_decrement.target,
-                        vec![topic],
-                        vec![
-                            DynSolValue::Uint(balance_decrement.amount, 256),
-                            DynSolValue::Address(balance_decrement.target),
-                        ],
-                    );
-                    target = balance_decrement.target;
-                    let res =
-                        self.handle_balance_decrement(log, tx_envelope.hash(), &balance_decrement)?;
-                    res.map(|(plain_account, execution_result)| {
-                        (plain_account, execution_result, true)
-                    })
-                }
+            let new_account_state = match &system_tx {
+                system_tx::SystemTransaction::V1 { packet, .. } => match packet {
+                    system_tx::TransactionPacket::ReleaseStake(balance_increment)
+                    | system_tx::TransactionPacket::BlockReward(balance_increment) => {
+                        let log = Self::create_system_log(
+                            balance_increment.target,
+                            vec![topic],
+                            vec![
+                                DynSolValue::Uint(balance_increment.amount, 256),
+                                DynSolValue::Address(balance_increment.target),
+                            ],
+                        );
+                        target = balance_increment.target;
+                        let (plain_account, execution_result, account_existed) =
+                            self.handle_balance_increment(log, balance_increment);
+                        Ok((plain_account, execution_result, account_existed))
+                    }
+                    system_tx::TransactionPacket::Stake(balance_decrement)
+                    | system_tx::TransactionPacket::StorageFees(balance_decrement) => {
+                        let log = Self::create_system_log(
+                            balance_decrement.target,
+                            vec![topic],
+                            vec![
+                                DynSolValue::Uint(balance_decrement.amount, 256),
+                                DynSolValue::Address(balance_decrement.target),
+                            ],
+                        );
+                        target = balance_decrement.target;
+                        let res = self.handle_balance_decrement(
+                            log,
+                            tx_envelope.hash(),
+                            balance_decrement,
+                        )?;
+                        res.map(|(plain_account, execution_result)| {
+                            (plain_account, execution_result, true)
+                        })
+                    }
+                },
             };
 
             let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
