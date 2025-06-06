@@ -470,7 +470,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(());
             };
 
-            // setup read lock for for database
+            // create db read transaction
             let ro_tx = self
                 .node_ctx
                 .db
