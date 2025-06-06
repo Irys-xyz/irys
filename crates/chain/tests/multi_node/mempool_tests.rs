@@ -336,8 +336,10 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         }
 
         let all_peers2 = ctx.inner.network.get_all_peers().await?;
-        dbg!(&all_peers2);
-        assert!(all_peers2.is_empty(), "JESSEDEBUG ASYMMETRIC DISCONNECT",);
+        assert!(
+            all_peers2.is_empty(),
+            "the peer should be completely disconnected",
+        );
 
         Ok(all_peers1)
     };
@@ -355,8 +357,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
             )
             .await?
             {
-                Some(tx) => {
-                    dbg!(tx);
+                Some(_tx) => {
                     return Ok(());
                 }
                 None => sleep(Duration::from_millis(200)).await,
@@ -445,20 +446,6 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .await;
 
     // call get best txs from the mempool
-    let (tx, rx) = oneshot::channel();
-    // latest
-    peer2
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
-    let best_current = rx.await?;
-
-    assert_eq!(
-        best_current.storage_tx.len(),
-        1,
-        "There should be a storage tx"
-    );
 
     let (tx, rx) = oneshot::channel();
 
@@ -472,11 +459,26 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         ))?;
 
     let best_previous = rx.await?;
-
+    // previous block does not have the fund tx, the tx should not be present
     assert_eq!(
         best_previous.storage_tx.len(),
         0,
         "there should not be a storage tx (lack of funding due to changed parent EVM block)"
+    );
+
+    let (tx, rx) = oneshot::channel();
+    // latest
+    peer2
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
+    let best_current = rx.await?;
+    // latest block has the fund tx, so it should be present
+    assert_eq!(
+        best_current.storage_tx.len(),
+        1,
+        "There should be a storage tx"
     );
 
     // mine another block on peer1, so it's the longest chain (with gossip)
