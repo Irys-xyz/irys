@@ -28,6 +28,7 @@ pub const CURRENT_SYSTEM_TX_VERSION: u8 = SYSTEM_TX_VERSION_V1;
 
 /// A versioned system transaction, valid for a single block, encoding a protocol-level action.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
+#[non_exhaustive]
 pub enum SystemTransaction {
     /// Version 1 system transaction format
     ///
