@@ -108,7 +108,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         if let Ok(response) = oneshot_rx.await {
             match response {
                 Some(response) => Ok(response),
-                None => Err(TxReadError::NotInMempool),
+                None => Err(TxReadError::CommitmentNotInMempool),
             }
         } else {
             Err(TxReadError::Other(
@@ -434,6 +434,8 @@ pub enum TxReadError {
     DatabaseError,
     /// The service is uninitialized
     ServiceUninitialized,
+    /// The commitment transaction is not found in the mempool
+    CommitmentNotInMempool,
     /// The transaction is not found in the mempool
     NotInMempool,
     /// Catch-all variant for other errors.
