@@ -347,6 +347,8 @@ pub struct VdfConfig {
 }
 
 impl VdfConfig {
+    /// Returns the number of iterations per checkpoint,
+    /// computed as the floor of (step difficulty ÷ number of checkpoints in a step).
     pub fn num_iterations_per_checkpoint(&self) -> u64 {
         self.sha_1s_difficulty / self.num_checkpoints_in_vdf_step as u64
     }
