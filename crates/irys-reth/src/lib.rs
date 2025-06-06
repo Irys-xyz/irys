@@ -13,7 +13,6 @@
 //! - Balance decrements correspond to storage transaction fees
 //! - Every block ends with a nonce reset system tx
 
-use core::marker::PhantomData;
 use std::{sync::Arc, time::SystemTime};
 
 use alloy_consensus::TxLegacy;
@@ -46,12 +45,12 @@ use reth_node_ethereum::{
     EthEngineTypes, EthEvmConfig,
 };
 use reth_tracing::tracing;
-use reth_transaction_pool::TransactionValidationOutcome;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
     EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering, TransactionOrigin, TransactionValidator,
+    TransactionOrigin, TransactionValidator,
 };
+use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use reth_trie_db::MerklePatriciaTrie;
 use system_tx::SystemTransaction;
 use tracing::info;
@@ -196,8 +195,7 @@ pub struct IrysPoolBuilder;
 /// Original code from:
 /// <https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322>
 ///
-/// Notable changes from the original: we evict system txs on every block and frokchoice. They would be deemed stale.
-/// A system tx can only live for a single block.
+/// Notable changes from the original: we reject all system txs, as they are not allowed to land in a the pool.
 impl<Node> PoolBuilder<Node> for IrysPoolBuilder
 where
     Node: FullNodeTypes<Types = IrysEthereumNode>,
@@ -206,7 +204,7 @@ where
         TransactionValidationTaskExecutor<
             IrysSystemTxValidator<Node::Provider, EthPooledTransaction>,
         >,
-        SystemTxPriorityOrdering<EthPooledTransaction>,
+        CoinbaseTipOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
     >;
 
@@ -254,7 +252,7 @@ where
             to_validation_task: validator.to_validation_task,
         };
 
-        let ordering = SystemTxPriorityOrdering::default();
+        let ordering = CoinbaseTipOrdering::default();
         let transaction_pool =
             reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
@@ -362,50 +360,6 @@ where
         B: reth_primitives_traits::Block,
     {
         self.eth_tx_validator.on_new_head_block(new_tip_block);
-    }
-}
-
-/// System txs go to the top
-/// The transactions are ordered by their coinbase tip.
-/// The higher the coinbase tip is, the higher the priority of the transaction.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct SystemTxPriorityOrdering<T>(PhantomData<T>);
-
-impl<T> TransactionOrdering for SystemTxPriorityOrdering<T>
-where
-    T: PoolTransaction + 'static,
-{
-    type PriorityValue = U256;
-    type Transaction = T;
-
-    /// Source: <https://github.com/ethereum/go-ethereum/blob/7f756dc1185d7f1eeeacb1d12341606b7135f9ea/core/txpool/legacypool/list.go#L469-L482>.
-    fn priority(
-        &self,
-        transaction: &Self::Transaction,
-        base_fee: u64,
-    ) -> Priority<Self::PriorityValue> {
-        let tx_envelope_input_buf = transaction.input();
-        let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
-        if rlp_decoded_system_tx.is_ok() {
-            return Priority::Value(U256::MAX);
-        }
-        transaction
-            .effective_tip_per_gas(base_fee)
-            .map(U256::from)
-            .into()
-    }
-}
-
-impl<T> Default for SystemTxPriorityOrdering<T> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<T> Clone for SystemTxPriorityOrdering<T> {
-    fn clone(&self) -> Self {
-        Self::default()
     }
 }
 
@@ -1355,6 +1309,152 @@ mod tests {
         );
 
         tracing::info!("Rollback test completed successfully");
+        Ok(())
+    }
+
+    /// Tests that system transactions never enter the transaction pool when rolling back state to a past block.
+    ///
+    /// Test scenario:
+    /// 1. Setup a node and create system transactions
+    /// 2. Mine blocks with system transactions to establish state
+    /// 3. Rollback the state to a past block
+    /// 4. Verify that system transactions are never in the transaction pool past
+    #[test_log::test(tokio::test)]
+    async fn system_txs_never_in_pool_during_rollback() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Phase 1: Build initial blocks with system transactions
+        let mut parent_blockhash = ctx.genesis_blockhash;
+        let _initial_balance = get_balance(&node.inner, ctx.block_producer_a.address());
+        let mut block_hashes = vec![parent_blockhash];
+        let mut system_txs = vec![];
+
+        // Build 3 blocks with system transactions
+        for block_number in 1..=3 {
+            let block_reward_tx = block_reward(
+                ctx.block_producer_a.address(),
+                block_number,
+                parent_blockhash,
+            );
+            let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+            system_txs.push(block_reward_tx.clone());
+
+            let normal_tx = create_and_submit_normal_tx(
+                &mut node,
+                block_number - 1,
+                U256::from(1234u64),
+                2_000_000_000u128, // 2 Gwei
+                ctx.target_account.address(),
+                &ctx.normal_signer,
+            )
+            .await?;
+
+            let payload = mine_block_and_validate(
+                &mut node,
+                &system_tx_store,
+                vec![block_reward_tx],
+                &[normal_tx],
+            )
+            .await?;
+            parent_blockhash = payload.block().hash();
+            block_hashes.push(parent_blockhash);
+        }
+
+        // Verify we're at block 3
+        let best_block = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .best_block_number()
+            .unwrap();
+        assert_eq!(best_block, 3, "Should be at block 3");
+
+        // Phase 3: Rollback to block 1
+        let rollback_target = block_hashes[1]; // Block 1
+        tracing::info!("Rolling back to block 1: {}", rollback_target);
+
+        node.inner
+            .add_ons_handle
+            .beacon_engine_handle
+            .fork_choice_updated(
+                ForkchoiceState {
+                    head_block_hash: rollback_target,
+                    safe_block_hash: rollback_target,
+                    finalized_block_hash: rollback_target,
+                },
+                None,
+                EngineApiMessageVersion::default(),
+            )
+            .await?;
+
+        // Allow time for rollback to process
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Phase 4: Verify system transactions never entered the pool during rollback
+        // The key invariant is that system txs should NEVER be in the transaction pool regardless of rollback state
+        let pool_txs: Vec<_> = node
+            .inner
+            .pool
+            .all_transactions()
+            .all()
+            .map(|tx| *tx.hash())
+            .collect();
+
+        for tx in system_txs {
+            assert!(
+                !pool_txs.contains(&*tx.hash()),
+                "System tx should never be in the transaction pool during rollback"
+            );
+            assert!(
+                pool_txs.is_empty(),
+                "Transaction pool should be empty during rollback, but contains: {:?}",
+                pool_txs
+            );
+        }
+
+        // Phase 5: Try to submit the future system transactions directly to the pool
+        // They should be rejected and never enter the pool
+        let future_system_tx_1 = block_reward(
+            ctx.block_producer_a.address(),
+            2, // block 2
+            rollback_target,
+        );
+        let mut tx_1_raw = compose_system_tx(1, &future_system_tx_1);
+        let signed_tx_1 = ctx
+            .block_producer_a
+            .sign_transaction(&mut tx_1_raw)
+            .await
+            .unwrap();
+        let tx_1_envelope =
+            EthereumTxEnvelope::<TxEip4844>::Legacy(tx_1_raw.into_signed(signed_tx_1))
+                .encoded_2718()
+                .into();
+
+        // These should fail since system txs are not allowed in the pool
+        let tx_1_result = node.rpc.inject_tx(tx_1_envelope).await;
+
+        assert!(
+            tx_1_result.is_err(),
+            "System transaction should be rejected when submitted to pool"
+        );
+
+        // Phase 6: Final check - pool should still be empty
+        let final_pool_txs: Vec<_> = node
+            .inner
+            .pool
+            .all_transactions()
+            .all()
+            .map(|tx| *tx.hash())
+            .collect();
+
+        assert!(
+            final_pool_txs.is_empty(),
+            "Transaction pool should remain empty after attempted system tx submission, but contains: {:?}",
+            final_pool_txs
+        );
+
         Ok(())
     }
 
