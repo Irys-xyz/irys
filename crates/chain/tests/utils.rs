@@ -7,6 +7,7 @@ use actix_web::{
     dev::{Service, ServiceResponse},
     Error,
 };
+use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58;
 use futures::future::select;
@@ -486,10 +487,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn get_best_mempool_tx(
-        &self,
-        parent_evm_block_hash: Option<EvmBlockHash>,
-    ) -> MempoolTxs {
+    // Get the best txs from the mempool, based off the account state at the optional parent EVM block
+    // if None is provided, it will use the latest state.
+    pub async fn get_best_mempool_tx(&self, parent_evm_block_hash: Option<BlockId>) -> MempoolTxs {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.node_ctx
             .service_senders

@@ -18,7 +18,6 @@ use irys_reth_node_bridge::{
     node::RethNodeProvider,
 };
 use irys_storage::StorageModulesReadGuard;
-use irys_types::EvmBlockHash;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
     validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot, GossipData,
@@ -173,12 +172,9 @@ pub enum MempoolServiceMessage {
         tokio::sync::oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
-    /// Filtering based on funding status etc based on the provided EVM block hash
+    /// Filtering based on funding status etc based on the provided EVM block ID
     /// If `None` is provided, the latest canonical block is used
-    GetBestMempoolTxs(
-        Option<EvmBlockHash>,
-        tokio::sync::oneshot::Sender<MempoolTxs>,
-    ),
+    GetBestMempoolTxs(Option<BlockId>, tokio::sync::oneshot::Sender<MempoolTxs>),
     /// Confirm if tx exists in database
     TxExistenceQuery(
         H256,
@@ -1057,7 +1053,7 @@ impl Inner {
 
     async fn handle_get_best_mempool_txs(
         &self,
-        parent_evm_block_hash: Option<EvmBlockHash>,
+        parent_evm_block_id: Option<BlockId>,
     ) -> MempoolTxs {
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address = HashMap::new();
@@ -1083,10 +1079,10 @@ impl Inner {
             // Calculate total required balance including previously selected transactions
 
             // get balance state for the block we're building off of
-            let balance: U256 = self.reth_ctx.rpc.get_balance_irys(
-                signer,
-                parent_evm_block_hash.map(|bh| BlockId::Hash(bh.into())),
-            );
+            let balance: U256 = self
+                .reth_ctx
+                .rpc
+                .get_balance_irys(signer, parent_evm_block_id);
 
             let has_funds = balance >= U256::from(current_spent + fee);
 
@@ -1389,10 +1385,8 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::GetBestMempoolTxs(parent_evm_block_hash, response) => {
-                    let response_value = self
-                        .handle_get_best_mempool_txs(parent_evm_block_hash)
-                        .await;
+                MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
+                    let response_value = self.handle_get_best_mempool_txs(block_id).await;
                     // Return selected transactions grouped by type
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
