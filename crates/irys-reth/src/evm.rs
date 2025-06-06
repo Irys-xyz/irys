@@ -1,14 +1,16 @@
+// Standard library imports
 use core::convert::Infallible;
 
+// External crate imports - Alloy
 use alloy_consensus::{Block, Header, Transaction as _};
 use alloy_dyn_abi::DynSolValue;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::receipt_builder::ReceiptBuilder as _;
-
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-
 use alloy_primitives::{Bytes, FixedBytes, Log, LogData};
+
+// External crate imports - Reth
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::result::ExecutionResult;
@@ -16,17 +18,19 @@ use reth::revm::context::TxEnv;
 use reth::revm::primitives::hardfork::SpecId;
 use reth::revm::{Inspector, State};
 use reth_ethereum_primitives::Receipt;
-use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, BlockValidationError};
+use reth_evm::block::{
+    BlockExecutorFactory, BlockExecutorFor, BlockValidationError, CommitChanges,
+};
 use reth_evm::eth::receipt_builder::ReceiptBuilderCtx;
-
 use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
 use reth_evm::precompiles::PrecompilesMap;
 use reth_evm::{ConfigureEvm, EthEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes};
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
+
+// External crate imports - Revm
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
 use revm::context::{BlockEnv, CfgEnv};
-
 use revm::database::states::plain_account::PlainStorage;
 use revm::database::PlainAccount;
 use revm::inspector::NoOpInspector;
@@ -34,11 +38,45 @@ use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus, EvmStorageSlot};
 use revm::Database as _;
 use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
+
+// External crate imports - Other
 use tracing::error_span;
 
 use super::*;
 
-/// Irys block executor: handles execution of both regular and system transactions, enforcing protocol rules.
+/// Constants for system transaction processing
+mod constants {
+    /// Gas used for system transactions (always 0)
+    pub(super) const SYSTEM_TX_GAS_USED: u64 = 0;
+
+    /// Gas refunded for system transactions (always 0)
+    pub(super) const SYSTEM_TX_GAS_REFUNDED: u64 = 0;
+
+    /// Cumulative gas used for system transaction receipts
+    pub(super) const SYSTEM_TX_CUMULATIVE_GAS: u64 = 0;
+}
+
+/// Result type for system transaction processing
+type SystemTransactionResult<HaltReason> =
+    Result<(PlainAccount, ExecutionResult<HaltReason>, bool), ExecutionResult<HaltReason>>;
+
+/// Helper for creating block validation errors
+fn create_invalid_tx_error(
+    hash: FixedBytes<32>,
+    reason: InvalidTransaction,
+) -> BlockExecutionError {
+    BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+        hash,
+        error: Box::new(reason),
+    })
+}
+
+/// Helper for creating internal errors
+fn create_internal_error(msg: &str) -> BlockExecutionError {
+    BlockExecutionError::Internal(reth_evm::block::InternalBlockExecutionError::msg(msg))
+}
+
+/// Irys block executor that handles execution of both regular and system transactions.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
     receipt_builder: &'a RethReceiptBuilder,
@@ -78,172 +116,115 @@ where
         self.inner.apply_pre_execution_changes()
     }
 
-    // NOTE: whenever we execute system transactions, reth gives a warning: "State root task returned incorrect state root"
-    // Current hypothesis is: because we require direct access to the db to execute system txs,
-    // reth cannot do parallel state root computations (which presumably are faster than non-parallel).
-    // This does not change the end-result of the block but is something we may want to look into.
-    #[expect(clippy::too_many_lines, reason = "easier to read")]
     fn execute_transaction_with_result_closure(
         &mut self,
         tx: impl ExecutableTx<Self>,
-        on_result_f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
+        f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
     ) -> Result<u64, BlockExecutionError> {
+        self.execute_transaction_with_commit_condition(tx, |res| {
+            f(res);
+            CommitChanges::Yes
+        })
+        .map(Option::unwrap_or_default)
+    }
+
+    /// Executes a transaction with custom commit logic for system transactions.
+    ///
+    /// This method handles both regular Ethereum transactions and Irys system transactions.
+    /// System transactions are special protocol-level operations that modify account balances
+    /// according to consensus rules (staking, rewards, fees, etc.).
+    ///
+    /// # System Transaction Processing
+    /// System transactions undergo additional validation:
+    /// 1. Parent block hash must match current chain state
+    /// 2. Block height must match current block number
+    /// 3. Balance operations must respect account constraints
+    ///
+    /// # Note
+    /// When executing system transactions, reth may give a warning: "State root task returned incorrect state root"
+    /// This is because we require direct access to the db to execute system txs, preventing parallel state root
+    /// computations. This does not affect the correctness of the block.
+    fn execute_transaction_with_commit_condition(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        on_result_f: impl FnOnce(
+            &ExecutionResult<<Self::Evm as Evm>::HaltReason>,
+        ) -> reth_evm::block::CommitChanges,
+    ) -> Result<Option<u64>, BlockExecutionError> {
+        tracing::error!(tx_hash = %tx.tx().hash(), "executing transaction");
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
         let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
 
-        if let Ok(system_tx) = rlp_decoded_system_tx {
-            // Validate system tx metadata
-            let block_number = self.inner.evm().block().number;
-            let block_hash = self
+        let Ok(system_tx) = rlp_decoded_system_tx else {
+            // if the tx is not a system tx, execute it as a regular transaction
+            return self
                 .inner
-                .evm_mut()
-                .db_mut()
-                .block_hash(block_number.saturating_sub(1))
-                .map_err(|_err| {
-                    BlockExecutionError::Internal(
-                        reth_evm::block::InternalBlockExecutionError::msg(
-                            "could not retrieve block by this hash",
-                        ),
-                    )
-                })?;
-            let span = error_span!(
-                "system_tx_processing",
-                "parent_block_hash" = block_hash.to_string(),
-                "block_number" = block_number,
-                "allowed_parent_block_hash" = system_tx.parent_blockhash().to_string(),
-                "allowed_block_height" = system_tx.valid_for_block_height()
-            );
-            let guard = span.enter();
+                .execute_transaction_with_commit_condition(tx, on_result_f);
+        };
 
-            // ensure that parent block hashes match.
-            // This check ensures that a system tx does not get executed for an off-case fork of the desired chain.
-            if system_tx.parent_blockhash() != block_hash {
-                tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
-                return Err(BlockExecutionError::Validation(
-                    BlockValidationError::InvalidTx {
-                        hash: *tx_envelope.hash(),
-                        error: Box::new(InvalidTransaction::PriorityFeeGreaterThanMaxFee),
+        tracing::error!(tx_hash = %tx.tx().hash(), "executing system tx");
+
+        // Validate system tx metadata
+        self.validate_system_transaction_metadata(&system_tx, tx_envelope.hash())?;
+
+        // Process the system transaction
+        let (new_account_state, target) =
+            self.process_system_transaction(&system_tx, tx_envelope.hash())?;
+
+        let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+        // at this point, the system tx has been processed, and it was valid *enough*
+        // that we should generate a receipt for it even in a failure state
+        let execution_result = match new_account_state {
+            Ok((plain_account, execution_result, account_existed)) => {
+                let storage = plain_account
+                    .storage
+                    .iter()
+                    .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
+                    .collect();
+                let mut status = AccountStatus::Touched;
+                if plain_account.info.is_empty() {
+                    // Existing account that is still empty after increment - don't touch it
+                    // This handles the case where increment amount is 0 or results in 0 balance
+                    status |= AccountStatus::SelfDestructed;
+                } else if !account_existed {
+                    // New account being created with non-zero balance - mark as created and touched
+                    status |= AccountStatus::Created;
+                };
+
+                new_state.insert(
+                    target,
+                    Account {
+                        info: plain_account.info,
+                        storage,
+                        status,
                     },
-                ));
+                );
+
+                execution_result
             }
+            Err(execution_result) => execution_result,
+        };
 
-            // ensure that block heights match.
-            // This ensures that the system tx does not leak into future blocks.
-            if system_tx.valid_for_block_height() != block_number {
-                tracing::error!("A system tx leaked into a block that was not approved by the system tx producer");
-                return Err(BlockExecutionError::Validation(
-                    BlockValidationError::InvalidTx {
-                        hash: *tx_envelope.hash(),
-                        error: Box::new(InvalidTransaction::PriorityFeeGreaterThanMaxFee),
-                    },
-                ));
-            }
-            drop(guard);
-
-            // Process different system transaction types
-            let topic = system_tx.topic();
-            let target;
-            let new_account_state = match &system_tx {
-                system_tx::SystemTransaction::V1 { packet, .. } => match packet {
-                    system_tx::TransactionPacket::ReleaseStake(balance_increment)
-                    | system_tx::TransactionPacket::BlockReward(balance_increment) => {
-                        let log = Self::create_system_log(
-                            balance_increment.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_increment.amount, 256),
-                                DynSolValue::Address(balance_increment.target),
-                            ],
-                        );
-                        target = balance_increment.target;
-                        let (plain_account, execution_result, account_existed) =
-                            self.handle_balance_increment(log, balance_increment);
-                        Ok((plain_account, execution_result, account_existed))
-                    }
-                    system_tx::TransactionPacket::Stake(balance_decrement)
-                    | system_tx::TransactionPacket::StorageFees(balance_decrement) => {
-                        let log = Self::create_system_log(
-                            balance_decrement.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_decrement.amount, 256),
-                                DynSolValue::Address(balance_decrement.target),
-                            ],
-                        );
-                        target = balance_decrement.target;
-                        let res = self.handle_balance_decrement(
-                            log,
-                            tx_envelope.hash(),
-                            balance_decrement,
-                        )?;
-                        res.map(|(plain_account, execution_result)| {
-                            (plain_account, execution_result, true)
-                        })
-                    }
-                },
-            };
-
-            let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
-            // at this point, the system tx has been processed, and it was valid *enough*
-            // that we should generate a receipt for it even in a failure state
-            let execution_result = match new_account_state {
-                Ok((plain_account, execution_result, account_existed)) => {
-                    let storage = plain_account
-                        .storage
-                        .iter()
-                        .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
-                        .collect();
-                    let is_account_empty = plain_account.info.is_empty();
-                    let mut status = AccountStatus::Touched;
-                    if plain_account.info.is_empty() {
-                        // Existing account that is still empty after increment - don't touch it
-                        // This handles the case where increment amount is 0 or results in 0 balance
-                        status |= AccountStatus::SelfDestructed;
-                    } else if !account_existed {
-                        // New account being created with non-zero balance - mark as created and touched
-                        status |= AccountStatus::Created;
-                    };
-
-                    // Only insert the account into state if it's not empty or if it existed before
-                    if !is_account_empty || account_existed {
-                        new_state.insert(
-                            target,
-                            Account {
-                                info: plain_account.info,
-                                storage,
-                                status,
-                            },
-                        );
-                    }
-
-                    execution_result
-                }
-                Err(execution_result) => execution_result,
-            };
-
-            on_result_f(&execution_result);
-
-            // Build and store the receipt
-            let evm = self.inner.evm_mut();
-            self.system_tx_receipts
-                .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
-                    tx: tx_envelope,
-                    evm,
-                    result: execution_result,
-                    state: &new_state,
-                    cumulative_gas_used: 0,
-                }));
-
-            // Commit the changes to the database
-            let db = evm.db_mut();
-            db.commit(new_state);
-            Ok(0)
-        } else {
-            // Handle regular transactions using the inner executor
-            self.inner
-                .execute_transaction_with_result_closure(tx, on_result_f)
+        if !on_result_f(&execution_result).should_commit() {
+            return Ok(None);
         }
+
+        // Build and store the receipt
+        let evm = self.inner.evm_mut();
+        self.system_tx_receipts
+            .push(self.receipt_builder.build_receipt(ReceiptBuilderCtx {
+                tx: tx_envelope,
+                evm,
+                result: execution_result,
+                state: &new_state,
+                cumulative_gas_used: constants::SYSTEM_TX_CUMULATIVE_GAS,
+            }));
+
+        // Commit the changes to the database
+        let db = evm.db_mut();
+        db.commit(new_state);
+        Ok(Some(0))
     }
 
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
@@ -276,6 +257,120 @@ where
         Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
     >,
 {
+    /// Validates system transaction metadata (block height and parent hash)
+    fn validate_system_transaction_metadata(
+        &mut self,
+        system_tx: &SystemTransaction,
+        tx_hash: &FixedBytes<32>,
+    ) -> Result<(), BlockExecutionError> {
+        let block_number = self.inner.evm().block().number;
+        let block_hash = self
+            .inner
+            .evm_mut()
+            .db_mut()
+            .block_hash(block_number.saturating_sub(1))
+            .map_err(|_err| create_internal_error("could not retrieve block by this hash"))?;
+
+        let span = error_span!(
+            "system_tx_processing",
+            "parent_block_hash" = block_hash.to_string(),
+            "block_number" = block_number,
+            "allowed_parent_block_hash" = system_tx.parent_blockhash().to_string(),
+            "allowed_block_height" = system_tx.valid_for_block_height()
+        );
+        let _guard = span.enter();
+
+        // ensure that parent block hashes match.
+        // This check ensures that a system tx does not get executed for an off-case fork of the desired chain.
+        if system_tx.parent_blockhash() != block_hash {
+            tracing::error!(
+                "A system tx leaked into a block that was not approved by the system tx producer"
+            );
+            return Err(create_invalid_tx_error(
+                *tx_hash,
+                InvalidTransaction::PriorityFeeGreaterThanMaxFee,
+            ));
+        }
+
+        // ensure that block heights match.
+        // This ensures that the system tx does not leak into future blocks.
+        if system_tx.valid_for_block_height() != block_number {
+            tracing::error!(
+                "A system tx leaked into a block that was not approved by the system tx producer"
+            );
+            return Err(create_invalid_tx_error(
+                *tx_hash,
+                InvalidTransaction::PriorityFeeGreaterThanMaxFee,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Processes a system transaction and returns the new account state and target address
+    fn process_system_transaction(
+        &mut self,
+        system_tx: &SystemTransaction,
+        tx_envelope_hash: &FixedBytes<32>,
+    ) -> Result<(SystemTransactionResult<<E as Evm>::HaltReason>, Address), BlockExecutionError>
+    {
+        let topic = system_tx.topic();
+
+        match system_tx {
+            system_tx::SystemTransaction::V1 { packet, .. } => match packet {
+                system_tx::TransactionPacket::ReleaseStake(balance_increment)
+                | system_tx::TransactionPacket::BlockReward(balance_increment) => {
+                    let log = Self::create_system_log(
+                        balance_increment.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(balance_increment.amount, 256),
+                            DynSolValue::Address(balance_increment.target),
+                        ],
+                    );
+                    let target = balance_increment.target;
+                    let (plain_account, execution_result, account_existed) =
+                        self.handle_balance_increment(log, balance_increment);
+                    Ok((
+                        Ok((plain_account, execution_result, account_existed)),
+                        target,
+                    ))
+                }
+                system_tx::TransactionPacket::Stake(balance_decrement)
+                | system_tx::TransactionPacket::StorageFees(balance_decrement) => {
+                    let log = Self::create_system_log(
+                        balance_decrement.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(balance_decrement.amount, 256),
+                            DynSolValue::Address(balance_decrement.target),
+                        ],
+                    );
+                    let target = balance_decrement.target;
+                    let res =
+                        self.handle_balance_decrement(log, tx_envelope_hash, balance_decrement)?;
+                    Ok((
+                        res.map(|(plain_account, execution_result)| {
+                            (plain_account, execution_result, true)
+                        }),
+                        target,
+                    ))
+                }
+            },
+        }
+    }
+
+    /// Creates a successful execution result for system transactions
+    fn create_success_result(log: Log) -> ExecutionResult<<E as Evm>::HaltReason> {
+        ExecutionResult::Success {
+            reason: revm::context::result::SuccessReason::Return,
+            gas_used: constants::SYSTEM_TX_GAS_USED,
+            gas_refunded: constants::SYSTEM_TX_GAS_REFUNDED,
+            logs: vec![log],
+            output: Output::Call(Bytes::new()),
+        }
+    }
+
     /// Creates a system transaction log with the specified event name and parameters
     fn create_system_log(
         target: Address,
@@ -338,13 +433,7 @@ where
             account
         };
 
-        let execution_result = ExecutionResult::Success {
-            reason: revm::context::result::SuccessReason::Return,
-            gas_used: 0,
-            gas_refunded: 0,
-            logs: vec![log],
-            output: Output::Call(Bytes::new()),
-        };
+        let execution_result = Self::create_success_result(log);
 
         (account_info, execution_result, account_existed)
     }
@@ -369,9 +458,7 @@ where
         let state = db
             .load_cache_account(balance_decrement.target)
             .map_err(|_err| {
-                BlockExecutionError::Internal(reth_evm::block::InternalBlockExecutionError::msg(
-                    "Could not load account for balance decrement",
-                ))
+                create_internal_error("Could not load account for balance decrement")
             })?;
 
         // Get the existing account or create a new one if it doesn't exist
@@ -379,18 +466,16 @@ where
         // We don't even create a receipt in this case (eth does the same with native txs)
         let Some(plain_account) = state.account.as_ref() else {
             tracing::warn!("account does not exist");
-            return Err(BlockExecutionError::Validation(
-                BlockValidationError::InvalidTx {
-                    hash: *tx_hash,
-                    error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
-                },
+            return Err(create_invalid_tx_error(
+                *tx_hash,
+                InvalidTransaction::OverflowPaymentInTransaction,
             ));
         };
         let mut new_account_info = plain_account.clone();
         if new_account_info.info.balance < balance_decrement.amount {
             tracing::warn!(?plain_account.info.balance, ?balance_decrement.amount);
             return Ok(Err(ExecutionResult::Revert {
-                gas_used: 0,
+                gas_used: constants::SYSTEM_TX_GAS_USED,
                 output: Bytes::new(),
             }));
         }
@@ -400,19 +485,16 @@ where
             .balance
             .saturating_sub(balance_decrement.amount);
 
-        let execution_result = ExecutionResult::Success {
-            reason: revm::context::result::SuccessReason::Return,
-            gas_used: 0,
-            gas_refunded: 0,
-            logs: vec![log],
-            output: Output::Call(Bytes::new()),
-        };
+        let execution_result = Self::create_success_result(log);
 
         Ok(Ok((new_account_info, execution_result)))
     }
 }
 
-/// Irys block assembler: assembles blocks, ensuring system tx ordering and inclusion rules.
+/// Irys block assembler that ensures proper ordering and inclusion of system transactions.
+///
+/// This assembler wraps the standard Ethereum block assembler ensures that system transactions are properly ordered
+/// and included according to protocol rules.
 #[derive(Debug, Clone)]
 pub struct IrysBlockAssembler<ChainSpec = reth_chainspec::ChainSpec> {
     inner: EthBlockAssembler<ChainSpec>,
@@ -446,7 +528,11 @@ where
     }
 }
 
-/// Irys block executor factory: produces block executors.
+/// Factory for creating Irys block executors with system transaction support.
+///
+/// This factory produces [`IrysBlockExecutor`] instances that can handle both
+/// regular Ethereum transactions and Irys-specific system transactions. It wraps
+/// the standard Ethereum block executor factory with Irys-specific configuration.
 #[derive(Debug, Clone, Default)]
 pub struct IrysBlockExecutorFactory {
     inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, IrysEvmFactory>,
@@ -516,7 +602,7 @@ where
     }
 }
 
-/// Irys EVM config: wraps EVM config, block executor factory, and assembler.
+/// Irys EVM configuration that integrates system transaction support.
 #[derive(Debug, Clone)]
 pub struct IrysEvmConfig {
     pub inner: EthEvmConfig<EthEvmFactory>,
@@ -567,7 +653,6 @@ impl ConfigureEvm for IrysEvmConfig {
     }
 }
 
-/// Factory producing [`EthEvm`].
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
 pub struct IrysEvmFactory;

@@ -11,7 +11,9 @@ use crate::{
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
-use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
+use alloy_consensus::{
+    transaction::SignerRecoverable, EthereumTxEnvelope, SignableTransaction, TxEip4844,
+};
 use alloy_network::TxSignerSync;
 use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_signer_local::LocalSigner;
