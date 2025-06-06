@@ -364,24 +364,24 @@ mod tests {
                 to_hash("2BAnqK4FN57xTMGDnt2PVNFrN59WP6HZvP5F9rq9VBiZ"),
                 to_hash("H3sa7VKLsV7zFk6i2WYgf2zyAFDWGFgqD8FvesL3TE8D"),
                 to_hash("BETn26rhVxX29vW1w773SctQnzWEGUHfth6QyfxB8Een"),
-                to_hash("DeeYLjVPnScS5vVJUTrjGJbmm6CRp4z4ZckEy5t4RHhS"),
+                to_hash("DeeYLjVPnScS5vVJUTrjGJbmm6CRp4z4ZckEy5t4RHhS"), // typos:ignore
                 to_hash("7b2DcEHX9sX2iQPPoJH3KAgYrceTuHoe4u7BivrA5YX2"),
                 to_hash("6eLA4BBEGfS4F3kpmWkmj2iXj7WBoetByyHbNMeu1ihM"),
                 to_hash("DzPbaQ5rQfgsT4HKPAvK87T7JqDni1KDXZfrHbNpf2QD"),
                 to_hash("9VM4txeWEtEeD5Y3cVagVySSRHVyJ8RSVv68ojgpPNge"),
                 to_hash("4U6w56JrakUV3gSdY5FHE33WpxAtGCP4m6utGYeKSpTv"),
-                to_hash("EmxkxKjhv7eHRofc5vcZ6UouUDQPmrBYb7bt7G4n8d7T"),
+                to_hash("EmxkxKjhv7eHRofc5vcZ6UouUDQPmrBYb7bt7G4n8d7T"), // typos:ignore
                 to_hash("FnHxPS8cun2fY2WE13txBJDhvggdLGPRtdmUCpPELA1G"),
                 to_hash("97BHjSMf69vX5NadDAxLoR7smaDpNFd9QzAwaizFw1Qp"),
                 to_hash("54HSZkJuG1QEPXP4xqKgYSDYntocpAcHTQM8kCiQT4t6"),
-                to_hash("HRtTJScmYdKRTWcyMQnmDQ3RFcJMHo4FndVGmZokb8wB"),
+                to_hash("HRtTJScmYdKRTWcyMQnmDQ3RFcJMHo4FndVGmZokb8wB"), // typos:ignore
                 to_hash("AiX8pZErGzdZPCQNWqCkucuPiZy3Y6jfJd9hZJZNadVn"),
                 to_hash("CwT6kNSBTcZivunDJyfPKXxYhonV6LGgAboyx92jA1an"),
                 to_hash("EsSXCJ13vJQXaNRzXUMWRu5HtFv9aZ4YWKmCGqqTmkT7"),
                 to_hash("5Epgv3cn2yprjQHyYdBzRiadJuYc5nRYqafowCB43gBj"),
-                to_hash("BCo54qTaBtZYNd8YJgCuFsv1rPPHtKmFEYBnsXJNBQbR"),
+                to_hash("BCo54qTaBtZYNd8YJgCuFsv1rPPHtKmFEYBnsXJNBQbR"), // typos:ignore
                 to_hash("Afociuwn5ojvimD5KPJLVCPvxF3hJnVwZohYgXrUDZBf"),
-                to_hash("5Z26M1BAWjVP2MVjHSuoXydXcPmiKrmbFUiBsqJaPHCg"),
+                to_hash("5Z26M1BAWjVP2MVjHSuoXydXcPmiKrmbFUiBsqJaPHCg"), // typos:ignore
                 to_hash("XkuRhYUwaoramqEhpiDqYkhQNPQFQjZk9yQfmfeQoJ9"),
                 to_hash("5rgebnYJLTTyVt9Bm1a7F7KkATwgYEZHCTw2cQ9xb7ow"),
                 to_hash("E5acT3ETbH5C2KHrqPogt6JcVbjjYQbjQFShiHqGGgug"),
@@ -477,11 +477,6 @@ mod tests {
     // one special case that do not apply reset seed
     #[tokio::test]
     async fn test_checkpoints_for_single_step_one() {
-        let _ = SubscriberBuilder::default()
-            .with_env_filter(EnvFilter::from_default_env())
-            .with_span_events(fmt::format::FmtSpan::NONE)
-            .finish()
-            .try_init();
         let mut testnet_config = ConsensusConfig::testnet();
         testnet_config.vdf.sha_1s_difficulty = 100_000;
 
@@ -511,7 +506,7 @@ mod tests {
                 to_hash("BM3aS9t2wgRco1mt6uvzS5TWvAGUz5cUczp1rAUN2BK1"),
                 to_hash("BUwMxGYGfYpEnW6QjXyVzeAr4MvsCMFhjsBFCpLhnh2L"),
                 to_hash("GzjJMGybbGGewCwKzYYaZyMGXMA4pLgrssf1fLeT2RME"),
-                to_hash("BokQ4zJbhtKbQmUtQqFNLGgDRZ8X2anf7FQvP5xr4wn9"),
+                to_hash("BokQ4zJbhtKbQmUtQqFNLGgDRZ8X2anf7FQvP5xr4wn9"), // typos:ignore
                 to_hash("HGABETU5MMqPGiyaDMtymSPNzXYuvuTMMGtxDYW7QqpG"),
                 to_hash("BL3byeTWd9A8fTMVrHDTNMxbCfgiTDFfo3p3hKJ1PUcE"),
                 to_hash("FBDWtGFJMHfed1ypZytZAaZ5duZ669PxE9K2aa2i2fvT"),
@@ -520,12 +515,12 @@ mod tests {
                 to_hash("8ZVY1RPaFZm1EXZv9ft939B1969hmUj8My2ecNU4kpVj"),
                 to_hash("J4aUqMRPrKPW3VsmQ3ZfFuUN8ekF8BxbPLdRagKS8pK1"),
                 to_hash("CwdhRQ6U7yK7cjcnCSbpJ5aXf67Ei9rkckfnTigHDW4D"),
-                to_hash("FbXnYikZXPS3V1g7Z4sv4GYPTUZ7PrdDNEXj54WqoTqs"),
+                to_hash("FbXnYikZXPS3V1g7Z4sv4GYPTUZ7PrdDNEXj54WqoTqs"), // typos:ignore
                 to_hash("5cUT6WESQtcrX36U3sAWMFejkk5UDX4AfEre4hpDYx6G"),
                 to_hash("EA6zAro7R83xbV1fvjGFdsPepVjsBTcUY3ZTBYjXYsyw"),
                 to_hash("BQWpwmsg718ZUTc5QZViUKDxsCMCCW2kzL4Yb6PCrFrS"),
                 to_hash("8bD8azToVs69fNX1NHs1Zi4iTbfCnRmNLvQ2keg3fxPo"),
-                to_hash("4r6WfULFkheaTKcyCtTrBALJ9XqoFCN8tYnmBiNb5oq8"),
+                to_hash("4r6WfULFkheaTKcyCtTrBALJ9XqoFCN8tYnmBiNb5oq8"), // typos:ignore
                 to_hash("41khgaNnxB9K71WS8b9RNendD3e3BrY9sXG56RAwNrbN"),
                 to_hash("8EkaYS2FTQxrLQmkwXKApLqTJVkHGVNErSDNjy9cwmFQ"),
                 to_hash("FtyNJMZJpAhwXbvTsPntMGCneG8TpgtiQvnhhTQqmEyy"),
