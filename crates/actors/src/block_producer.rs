@@ -299,16 +299,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             } else {
                 // In regular blocks: process and persist new commitment transactions
-                // from the mempool and create a ledger entry referencing them
+                // to the mempool and create a ledger entry referencing them
                 let tx = db.tx_mut().unwrap();
                 let mut txids = H256List::new();
 
                 for tx_item in submit_txs.commitment_tx.iter() {
-                    // Only include successfully inserted transactions
-                    if insert_commitment_tx(&tx, tx_item).is_ok() {
-                        debug!("New commitment persisted: {}", tx_item.id.0.to_base58());
+                    // insert commitment transaction in to the mempool
+                    if mempool.handle_commitment_transaction(tx_item.clone()).await.is_ok() {
+                        debug!("New commitment added to mempool: {}", tx_item.id.0.to_base58());
                         txids.push(tx_item.id);
-                    }
+                    };
                 }
                 tx.inner.commit().unwrap();
 
