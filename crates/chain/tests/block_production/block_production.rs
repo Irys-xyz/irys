@@ -280,7 +280,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(matches!(
-        block_reward_systx.inner,
+        block_reward_systx.as_v1().unwrap(),
         TransactionPacket::BlockReward(_)
     ));
 
@@ -289,7 +289,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         SystemTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(matches!(
-        storage_tx_systx.inner,
+        storage_tx_systx.as_v1().unwrap(),
         TransactionPacket::StorageFees(_)
     ));
 
@@ -445,7 +445,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
         SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(
-        matches!(system_tx.inner, TransactionPacket::BlockReward(_)),
+        matches!(system_tx.as_v1().unwrap(), TransactionPacket::BlockReward(_)),
         "Single transaction should be a block reward"
     );
 
@@ -526,7 +526,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
         SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(
-        matches!(system_tx.inner, TransactionPacket::BlockReward(_)),
+        matches!(system_tx.as_v1().unwrap(), TransactionPacket::BlockReward(_)),
         "Single transaction should be a block reward"
     );
 
