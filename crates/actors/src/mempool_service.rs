@@ -51,6 +51,10 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: H256,
     ) -> Result<IrysTransactionHeader, TxReadError>;
+    async fn handle_get_commitment_transaction(
+        &self,
+        address: Address,
+    ) -> Result<Vec<CommitmentTransaction>, TxReadError>;
     async fn handle_commitment_transaction(
         &self,
         tx_header: CommitmentTransaction,
@@ -87,6 +91,28 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         } else {
             Err(TxReadError::Other(
                 "Error reading GetTransaction response ".to_owned(),
+            ))
+        }
+    }
+
+    async fn handle_get_commitment_transaction(
+        &self,
+        address: Address,
+    ) -> Result<Vec<CommitmentTransaction>, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs(address.clone(), oneshot_tx);
+        if let Err(err) = self.service.send(tx_ingress_msg) {
+            tracing::error!("error sending message to mempool: {:?}", err);
+        }
+
+        if let Ok(response) = oneshot_rx.await {
+            match response {
+                Some(response) => Ok(response),
+                None => Err(TxReadError::NotInMempool),
+            }
+        } else {
+            Err(TxReadError::Other(
+                "Error reading GetCommitmentTxs response ".to_owned(),
             ))
         }
     }
@@ -172,6 +198,10 @@ pub enum MempoolServiceMessage {
     GetTransaction(
         H256,
         tokio::sync::oneshot::Sender<Option<IrysTransactionHeader>>,
+    ),
+    GetCommitmentTxs(
+        Address,
+        tokio::sync::oneshot::Sender<Option<Vec<CommitmentTransaction>>>,
     ),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     ChunkIngressMessage(
@@ -570,6 +600,20 @@ impl Inner {
                 tx
             );
             return Some(tx_header.clone());
+        }
+        drop(mempool_state_guard);
+        None
+    }
+
+    async fn handle_get_commitment_transactions_message(
+        &self,
+        address: Address,
+    ) -> Option<Vec<CommitmentTransaction>> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+        // if tx exists in mempool valid_tx (temporary storage)
+        if let Some(tx_headers) = mempool_state_guard.valid_commitment_tx.get(&address) {
+            return Some(tx_headers.clone());
         }
         drop(mempool_state_guard);
         None
@@ -1455,6 +1499,15 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+                MempoolServiceMessage::GetCommitmentTxs(address, response) => {
+                    let response_message = self
+                        .handle_get_commitment_transactions_message(address)
+                        .await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+
                 MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
                     let _unused_response_message =
                         self.handle_block_confirmed_message(block, all_txs).await;
