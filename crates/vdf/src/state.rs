@@ -2,7 +2,6 @@ use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatch
 use eyre::eyre;
 use irys_database::{block_header_by_hash, BlockIndex};
 use irys_efficient_sampling::num_recall_ranges_in_partition;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
     U256,
@@ -34,22 +33,37 @@ pub struct VdfState {
 }
 
 impl VdfState {
-    pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
-        (self.global_step, self.seeds.back().cloned())
+    pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
+        (
+            self.global_step,
+            self.seeds
+                .back()
+                .cloned()
+                .expect("To have at least the genesis step to be inserted"),
+        )
     }
 
-    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
-    pub fn increment_step(&mut self, seed: Seed) {
+    pub fn store_step(&mut self, seed: Seed, global_step: u64) -> u64 {
+        if self.global_step >= global_step {
+            return self.global_step;
+        }
         if self.seeds.len() >= self.capacity {
             self.seeds.pop_front();
         }
-        self.global_step += 1;
-        self.seeds.push_back(seed);
-        tracing::info!(
-            "Received seed: {:?} global step: {}",
-            self.seeds.back().unwrap(),
-            self.global_step
-        );
+        if self.global_step + 1 == global_step {
+            self.seeds.push_back(seed);
+            self.global_step += 1;
+        } else {
+            panic!("VDF steps can't have gaps and have to be inserted in sequence");
+        }
+        global_step
+    }
+
+    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
+    pub fn increment_step(&mut self, seed: Seed) -> u64 {
+        let new_step = self.global_step + 1;
+        self.store_step(seed, new_step);
+        new_step
     }
 
     /// Get steps in the given global steps numbers Interval
@@ -155,50 +169,48 @@ pub fn create_state(
 ) -> VdfState {
     let capacity = calc_capacity(config);
 
-    if let Some(block_hash) = block_index
+    let block_hash = block_index
         .read()
         .expect("To unlock block index")
         .get_latest_item()
         .map(|item| item.block_hash)
-    {
-        let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
-        let tx = db.tx().unwrap();
-        let mut block = block_header_by_hash(&tx, &block_hash, false)
+        .expect("To have at least genesis block");
+
+    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
+    let tx = db.tx().unwrap();
+    let mut block = block_header_by_hash(&tx, &block_hash, false)
+        .unwrap()
+        .unwrap();
+    let global_step_number = block.vdf_limiter_info.global_step_number;
+    let mut steps_remaining = capacity;
+
+    while steps_remaining > 0 && block.height > 0 {
+        // get all the steps out of the block
+        for step in block.vdf_limiter_info.steps.0.iter().rev() {
+            seeds.push_front(Seed(*step));
+            steps_remaining -= 1;
+            if steps_remaining == 0 {
+                break;
+            }
+        }
+        // get the previous block
+        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
             .unwrap()
             .unwrap();
-        let global_step_number = block.vdf_limiter_info.global_step_number;
-        let mut steps_remaining = capacity;
+    }
 
-        while steps_remaining > 0 && block.height > 0 {
-            // get all the steps out of the block
-            for step in block.vdf_limiter_info.steps.0.iter().rev() {
-                seeds.push_front(Seed(*step));
-                steps_remaining -= 1;
-                if steps_remaining == 0 {
-                    break;
-                }
-            }
-            // get the previous block
-            block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-                .unwrap()
-                .unwrap();
-        }
-        info!(
-            "Initializing vdf service from block's info in step number {}",
-            global_step_number
-        );
-        return VdfState {
-            global_step: global_step_number,
-            seeds,
-            capacity,
-            mining_state_sender: Some(vdf_mining_state_sender),
-        };
-    };
+    if block.height == 0 {
+        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+    }
 
-    info!("No block index found, initializing VdfState from zero");
+    info!(
+        "Initializing vdf service from block's info in step number {}",
+        global_step_number
+    );
+
     VdfState {
-        global_step: 0,
-        seeds: VecDeque::with_capacity(capacity),
+        global_step: global_step_number,
+        seeds,
         capacity,
         mining_state_sender: Some(vdf_mining_state_sender),
     }
@@ -364,22 +376,12 @@ pub mod test_helpers {
     pub async fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
 
-        let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-            BlockIndex::new(&config.node_config).await.unwrap(),
-        ));
-
-        let irys_db_env =
-            open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir());
-        let irys_db = DatabaseProvider(Arc::new(irys_db_env.expect("expected valid irys_db_env")));
-
-        // spawn VDF service
-        // this is so we can send it new VDF steps as part of this test
-
-        Arc::new(RwLock::new(create_state(
-            block_index.clone(),
-            irys_db,
-            vdf_mining_state_sender,
-            config,
-        )))
+        let state = VdfState {
+            global_step: 0,
+            capacity: calc_capacity(config),
+            seeds: VecDeque::default(),
+            mining_state_sender: Some(vdf_mining_state_sender),
+        };
+        Arc::new(RwLock::new(state))
     }
 }

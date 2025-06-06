@@ -132,7 +132,7 @@ async fn should_process_block() {
     );
     let peer_addr = peer_list_service.start();
 
-    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
+    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::unbounded_channel();
     let vdf_state = mocked_vdf_service(&config).await;
     let vdf_state_readonly = VdfStateReadonly::new(vdf_state.clone());
     let sync_state = SyncState::new(false);
@@ -304,7 +304,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .await
         .expect("can't send message to peer list");
 
-    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
+    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::unbounded_channel();
     let vdf_state = mocked_vdf_service(&config).await;
     let vdf_state_readonly = VdfStateReadonly::new(vdf_state.clone());
     let sync_state = SyncState::new(false);
