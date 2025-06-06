@@ -138,6 +138,25 @@ pub async fn last_step_checkpoints_is_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
 ) -> eyre::Result<()> {
+    let last_step = vdf_info
+        .steps
+        .0
+        .last()
+        .ok_or(eyre::eyre!("No steps are found in the block"))?;
+    let last_step_last_checkpoint = vdf_info
+        .last_step_checkpoints
+        .0
+        .last()
+        .ok_or(eyre::eyre!("No last checkpoints are found in the block"))?;
+    if *last_step != vdf_info.output {
+        return Err(eyre::eyre!("The last step does not match the output"));
+    }
+    if last_step != last_step_last_checkpoint {
+        return Err(eyre::eyre!(
+            "The last step does not match the last checkpoint"
+        ));
+    }
+
     let mut seed = if vdf_info.steps.len() >= 2 {
         vdf_info.steps[vdf_info.steps.len() - 2]
     } else {
@@ -244,6 +263,7 @@ pub trait MiningBroadcaster {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use base58::{FromBase58, ToBase58};
     use irys_types::ConsensusConfig;
     use tracing::debug;
@@ -251,49 +271,45 @@ mod tests {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    use super::*;
-
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block() {
         // step: 44398 output: 0x893d
         let testnet_config = ConsensusConfig::testnet();
         let vdf_info = VDFLimiterInfo {
-            output: to_hash("AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW"),
+            output: to_hash("Vk8iBZReeugJi3iJNNKX6ty9soW1t3N9dxoFPMTDdye"),
             global_step_number: 44398,
             seed: to_hash("11111111111111111111111111111111"),
             next_seed: to_hash("11111111111111111111111111111111"),
             prev_output: to_hash("8oYs33LUVjtsB6rz6BRXBsVS48WbZJovgbyviKziV6ar"),
             // spellchecker:off
             last_step_checkpoints: H256List(vec![
-                to_hash("5YGk1yQMi5TwLf2iHAaLWnS8iDSdzQEhm3fambxy5Syy"),
-                to_hash("FM8XvtafL5pEsMkwJZDEZpppQpbCWQHxSSijffSjHVaX"),
-                to_hash("6YcQjupYZRGN5fDmngnXLmtWbZUDU2Ur6kgH1N8pW4hX"),
-                to_hash("B85pKLNbsj2YysNk9gs3bHDJN6YuHWCAdjhV9x7WteJr"),
-                to_hash("9xH77QvzHDvmptkefM39NSU7dVNHHjUMw4Wyz31GXSbY"),
-                to_hash("mmkTrT6cDFsx8XzCCs8t7CHmAGbbepV2NA2fYH89ywp"),
-                to_hash("Df4f7UDTykXDLbPYPxiWX9HBndHnUEFhVB9hBmBGt4wb"),
-                to_hash("B7Rf1wEC8QLDfR3vD4fdVdvaHhbBz1Nd1r9KPpUbwrJp"),
-                to_hash("4BxEQ8GUBEWn5NQfSXuWiPPyW6gensivj2JQognZ8tKw"),
-                to_hash("G1N6N8nXLF4SCVkspJ5cbK7isxcHJqhoQMin99p7hvov"),
-                to_hash("F1JPya8vsK3JeCJNDTZhESqhr6BjUSVzvdiMzmaDbjHE"),
-                to_hash("5bJKjJMyNKBP42E8FuEYMPJeFXBFHvVN9d6nuTMNk1Gy"),
-                to_hash("4iHkRQrhRabYZtRuJhZkMTY9QX2cpM2RDN5s5d15oXtR"),
-                to_hash("3mmV4etPnrpCJZ1pXj2LbYaCX6L2ymbkZLnMMhQdAUUM"),
-                to_hash("3aqYUYxzQr2bgPPk4s81AdGS6ekEsZNsK4yYwy2Sc86m"),
-                to_hash("Fxz3fgD6e3VS2Ka5fWQ3rFqzNdSPxctX84MwrR8D9pw4"),
-                to_hash("3VALw7Y6pxCbGTuCBWFonWKnBakSYb3vCoVKHZWGD9gM"),
-                to_hash("8vE2CgMn4Est5rFjVTfBqe1fwUVZryKPAfxzx24iccxh"),
-                to_hash("HGRDCe81gGqF1FidJf6Mwt6GiYFyDyUkeLQUQxy72GeF"),
-                to_hash("3XYHLLZynkE4gL8cL1e4qmn6pg2vUCEbDL1ySVExZXnw"),
-                to_hash("93HH3c29jVch3n3jxSTAgveq4MPNJAsmKdBGL7u75twh"),
-                to_hash("3n4YuWzgTNpDy3PVQ2w8NwwhaY8ZQkx68UrSQeNG7Nad"),
-                to_hash("DnALYWSXJpJkzg4ucVqC71o6dLMz48uaLrM5EnbVJN5U"),
-                to_hash("B1fEtkY9wJ45SRAJhy7GfsML2Sbbjh5m56tzDWSw9EUA"),
-                to_hash("AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW"),
+                to_hash("FX3wyTVoueFp5vMWtfmTMdoa2KHAmdTizSXvGqPJziV2"),
+                to_hash("58KM3ADijBZhVsw5362XxQxUXT7TWEM97Gbkkrgzubs8"),
+                to_hash("FYrSjPuALaT2YjpNpBpK1nBXAeeoM3Wfr2m8boPM7Vq9"),
+                to_hash("2ZF35vRmwGtYNW8XLZXAhvASU9mEsN1BH6QMsr9aByKC"),
+                to_hash("7GY4RcZseBadHvdpvjz2FpKA2LqYUSYtqhVFwiMzZ6no"),
+                to_hash("8NsG4i7HK5PM3yGrpHJgEUMFBW18C6iV325payMGvbDm"),
+                to_hash("8CFw78gk22URpSEvvi2RTYnRffwJpCAcSk7Cy7VcjxXr"),
+                to_hash("Bf16WhYkF4F6HFcm4xsFS6UJYNdhKxVdF3iRAwArcrov"),
+                to_hash("3jmN2bcVHLt2ah6UTFLsFQZfZRUqeuYn25w29GUnAUg4"),
+                to_hash("Hv4rDECtEn9yCpyLAaPSUmw9pNd1gYePXWhYPR5y1Siz"),
+                to_hash("2KpsVM1h3sUnuPBbWXXJk4iqnZChd9N1xPZQvMvFGb7W"),
+                to_hash("a125oyEn49QFJZCCDyrc8ZMBGV8Rho5ydBNMJ6egSpw"),
+                to_hash("7yqU8MeRwzdW7bAeXk4Ji2iUJEeu4bXoiLZi9tnRUpfB"),
+                to_hash("AP8TVNarCHBix62jD7ubKC3zsiZa258Lp6bsEp7c8zzh"),
+                to_hash("9rZGu4UwpGxo4i5E3TpHheaQBR9acURsJpNp2bjzTBX7"),
+                to_hash("27rDPGMCHCWTu9RvmWSnB9bRQ2k9H8LSixXyiWQD6oh2"),
+                to_hash("FyFdr6oF5LVu8o7QxnTK2xFZMagJKKUGEaFbBXnhn6Q1"),
+                to_hash("51GyYjqHZ6Kz7NNSwEByJo4Fs3HbLt1x8MLS7n3TJ52P"),
+                to_hash("H54wCCVdX34q6SHyfCQWerD77Zy1QhwgWHMUtMDEDcJx"),
+                to_hash("DKab4Hzn3QAbb1UoJydgendjHXBYQyL8kMpdmfZmPutS"),
+                to_hash("89S4ktrFRea7r7A1bjUCtta55eFdhtVLoKvvNh7tjZK4"),
+                to_hash("3x2pKSDPnp9AyyKtZYfBcbnS2CA3xJBg5NMtM3EgEzRj"),
+                to_hash("7ty5bgPV5bFFBvKsAR9gxivJdg2Wu2HRZUGtq77qrSuo"),
+                to_hash("2pEWae5bZ6P7nMg3HCrUYUAKWhfRXGFwnpYCEFTUyen2"),
+                to_hash("Vk8iBZReeugJi3iJNNKX6ty9soW1t3N9dxoFPMTDdye"),
             ]),
-            steps: H256List(vec![to_hash(
-                "AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW",
-            )]),
+            steps: H256List(vec![to_hash("Vk8iBZReeugJi3iJNNKX6ty9soW1t3N9dxoFPMTDdye")]),
             // spellchecker:on
             vdf_difficulty: None,
             next_vdf_difficulty: None,
@@ -303,6 +319,9 @@ mod tests {
         config.sha_1s_difficulty = 100_000;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        if x.is_err() {
+            debug!("{:?}", x);
+        }
         assert!(x.is_ok());
 
         if x.is_ok() {
@@ -458,16 +477,16 @@ mod tests {
     // one special case that do not apply reset seed
     #[tokio::test]
     async fn test_checkpoints_for_single_step_one() {
+        let _ = SubscriberBuilder::default()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_span_events(fmt::format::FmtSpan::NONE)
+            .finish()
+            .try_init();
         let mut testnet_config = ConsensusConfig::testnet();
         testnet_config.vdf.sha_1s_difficulty = 100_000;
 
         let vdf_info = VDFLimiterInfo {
-            output: H256(
-                hex::decode("68230a9b96fbd924982a3d29485ad2c67285d76f2c8fc0a4770d50ed5fd41efd")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
+            output: to_hash("9RhHQbUYdcui4CpE2HGXQAvnT3ynP14RLvF6cYCLkXuG"),
             global_step_number: 1,
             seed: H256(
                 hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
@@ -488,162 +507,34 @@ mod tests {
                     .unwrap(),
             ),
             last_step_checkpoints: H256List(vec![
-                H256(
-                    hex::decode("4db3d32b00a0905fed3829682bdd4ff03331056b3f6d5dc48ea5de80bec801ef")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("71ea0860b21198de9d2067ddb3171497ee06644c6c9ba6bcbe488bab276cfe54")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("b63abbb2ad58bcdbf8993d729eafc7cb98e1d9cd0bfe5fa58d1bcbf458960e3f")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("071d7e6137b497246f5bee5de2e117539039e9d1fc9e9a1b194e9a5511d580e6")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("bceeaf844df41a28ebfc7f9bf8dbac8954ace0901f66b6306755cd197e969162")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("b94c02ccaee286f01de98f22cdd754f6734d54f3b4869d86a140c0ba89ad5971")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("b6eac3c9641c2a742f348f7d0f2832be6dd1fd7dd35219ce3e26b1662ee71e10")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("51235b5c4ed65922cd05ad1b80829fe1841a8e2f67da2fb05573e662b9fe3963")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("90b3cf12c8d5a98d7a5032152452dde0e53978ef1aeabf9cf48410043d447470")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("53bc409264f5b4bc5d5ee7e513fa1f810b5097cea40799b23df387a329576ee2")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("f37b93f15643305b7c72d78be902f20236084989f7edce21bb39088656ed7127")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("13226e7fc7760c9f714907abda020f33cdb4b68e7514cacc607ece0854f6f9f2")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("a6093aacba1b19399152de271534c1d2f9e401d721baab93bc7b833ccaff74c5")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("aadc28a73c21da8f3a77e1eb390c57fbffed0979d27159bc18245ba2e57cec25")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("73fb959cc8fac89404721afc06e5971d23b4eca1f02d91d63e50a76539e08e0d")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("084c46940a567fc49ce9cdb0e3215220fb44f7053901a4db5f67ed8e21346a4d")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("3cbe5e09b6af0505b353b822a3e16ff7eb4fcd4abcf14c5f8524be4e71850d64")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("5b732beb962759353275535fc210ae2d81375a244f163c8e3b7b15de04b9664d")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("e7014083deac31f9f76d349cab861218d97dc3fa42d8c7ea95ec684cbc6c8227")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("69b75327dfd640f1d1ea7f27ad625a892a16ae2e6bbcf697e60d20e299fbf606")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("5d318b2fa14e19f78942100f15dddb92c93012302119bedcd8008ddec7faedbb")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("8cd38005367b8d9a96ccd08e37ea71b49adbfafd8b4fbc17826e680030ff36d8")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("fafad43cd0df6b0613c9ef89990ee3945bd69d73bfff7bf871863b8a38cc042c")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("41e7516f83863a1d82e73bcf2a60ffca0bc83371a8ce38960c6f337aadf861bb")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
-                H256(
-                    hex::decode("68230a9b96fbd924982a3d29485ad2c67285d76f2c8fc0a4770d50ed5fd41efd")
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                ),
+                to_hash("E6hG1Twshtuw3vrWybNyNGd1RDcGuDayF8j6SFNoEPek"),
+                to_hash("BM3aS9t2wgRco1mt6uvzS5TWvAGUz5cUczp1rAUN2BK1"),
+                to_hash("BUwMxGYGfYpEnW6QjXyVzeAr4MvsCMFhjsBFCpLhnh2L"),
+                to_hash("GzjJMGybbGGewCwKzYYaZyMGXMA4pLgrssf1fLeT2RME"),
+                to_hash("BokQ4zJbhtKbQmUtQqFNLGgDRZ8X2anf7FQvP5xr4wn9"),
+                to_hash("HGABETU5MMqPGiyaDMtymSPNzXYuvuTMMGtxDYW7QqpG"),
+                to_hash("BL3byeTWd9A8fTMVrHDTNMxbCfgiTDFfo3p3hKJ1PUcE"),
+                to_hash("FBDWtGFJMHfed1ypZytZAaZ5duZ669PxE9K2aa2i2fvT"),
+                to_hash("7zChTjDdr3RfViEKoSHy7bfBnzrU8bjmU1qxufMtKt9U"),
+                to_hash("DCazGAztoKAdzsQodwQSK9SyeKFE35irPHcMhKfwtxbY"),
+                to_hash("8ZVY1RPaFZm1EXZv9ft939B1969hmUj8My2ecNU4kpVj"),
+                to_hash("J4aUqMRPrKPW3VsmQ3ZfFuUN8ekF8BxbPLdRagKS8pK1"),
+                to_hash("CwdhRQ6U7yK7cjcnCSbpJ5aXf67Ei9rkckfnTigHDW4D"),
+                to_hash("FbXnYikZXPS3V1g7Z4sv4GYPTUZ7PrdDNEXj54WqoTqs"),
+                to_hash("5cUT6WESQtcrX36U3sAWMFejkk5UDX4AfEre4hpDYx6G"),
+                to_hash("EA6zAro7R83xbV1fvjGFdsPepVjsBTcUY3ZTBYjXYsyw"),
+                to_hash("BQWpwmsg718ZUTc5QZViUKDxsCMCCW2kzL4Yb6PCrFrS"),
+                to_hash("8bD8azToVs69fNX1NHs1Zi4iTbfCnRmNLvQ2keg3fxPo"),
+                to_hash("4r6WfULFkheaTKcyCtTrBALJ9XqoFCN8tYnmBiNb5oq8"),
+                to_hash("41khgaNnxB9K71WS8b9RNendD3e3BrY9sXG56RAwNrbN"),
+                to_hash("8EkaYS2FTQxrLQmkwXKApLqTJVkHGVNErSDNjy9cwmFQ"),
+                to_hash("FtyNJMZJpAhwXbvTsPntMGCneG8TpgtiQvnhhTQqmEyy"),
+                to_hash("D1boDbg56PZX2PyQiuRJPXwnLBqVmzafo823mUtYHAQY"),
+                to_hash("62Pdx9FsHNFLafhqPiokhcdWZbXGb4T57ZswdHVmtL1z"),
+                to_hash("9RhHQbUYdcui4CpE2HGXQAvnT3ynP14RLvF6cYCLkXuG"),
             ]),
-            steps: H256List(vec![H256(
-                hex::decode("68230a9b96fbd924982a3d29485ad2c67285d76f2c8fc0a4770d50ed5fd41efd")
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+            steps: H256List(vec![to_hash(
+                "9RhHQbUYdcui4CpE2HGXQAvnT3ynP14RLvF6cYCLkXuG",
             )]),
             vdf_difficulty: None,
             next_vdf_difficulty: None,
