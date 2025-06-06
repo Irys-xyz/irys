@@ -673,6 +673,7 @@ impl Inner {
                 }
             }
 
+            // FIXME
             // HACK HACK: in order for block discovery to validate incoming blocks
             // it needs to read commitment tx from the database. Ideally it should
             // be reading them from the mempool_service in memory cache, but we are
