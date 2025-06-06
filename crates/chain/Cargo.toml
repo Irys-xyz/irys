@@ -64,7 +64,6 @@ alloy-network.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 reth-tracing.workspace = true
-alloy-consensus.workspace = true
 alloy-contract.workspace = true
 
 [dev-dependencies]
@@ -76,6 +75,8 @@ rstest.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 semver.workspace = true
+thiserror.workspace = true
+
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]
