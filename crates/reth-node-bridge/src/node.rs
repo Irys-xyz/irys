@@ -2,7 +2,7 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{
-    evm::IrysEvmConfig, IrysEthereumNode, IrysSystemTxValidator, SystemTxPriorityOrdering,
+    evm::IrysEvmConfig, payload::SystemTxStore, IrysEthereumNode, IrysSystemTxValidator,
 };
 use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
@@ -17,7 +17,8 @@ use reth::{
     rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
     transaction_pool::{
-        blobstore::DiskFileBlobStore, EthPooledTransaction, TransactionValidationTaskExecutor,
+        blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
+        TransactionValidationTaskExecutor,
     },
 };
 use reth_chainspec::ChainSpec;
@@ -32,7 +33,7 @@ use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
 use tracing::error;
 
-use crate::{new_reth_context, unwind::unwind_to};
+use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
@@ -57,7 +58,7 @@ pub type RethNodeAdapter = NodeAdapter<
                     EthPooledTransaction,
                 >,
             >,
-            SystemTxPriorityOrdering<EthPooledTransaction>,
+            CoinbaseTipOrdering<EthPooledTransaction>,
             DiskFileBlobStore,
         >,
         IrysEvmConfig,
@@ -110,7 +111,8 @@ pub async fn run_node(
     _provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
-) -> eyre::Result<RethNodeHandle> {
+    system_tx_store: SystemTxStore,
+) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
     reth_config.network.discovery.disable_discovery = true;
@@ -147,13 +149,12 @@ pub async fn run_node(
 
     let handle = builder
         .node(IrysEthereumNode {
-            allowed_system_tx_origin: node_config.miner_address(),
+            system_tx_store: system_tx_store.clone(),
         })
         .launch_with_debug_capabilities()
         .await?;
 
-    let context = new_reth_context(handle.node.clone()).await?;
-
+    let context = IrysRethNodeAdapter::new(handle.node.clone(), system_tx_store).await?;
     // check that the latest height lines up with the expected latest height from irys
 
     let latest = context
@@ -174,5 +175,5 @@ pub async fn run_node(
         return Err(eyre::eyre!("Unwound blocks"));
     };
 
-    Ok(handle)
+    Ok((handle, context))
 }

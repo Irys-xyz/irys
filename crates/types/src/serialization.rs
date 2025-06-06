@@ -1,7 +1,7 @@
 #![allow(clippy::manual_div_ceil, clippy::assign_op_pattern)]
 
 use crate::{Arbitrary, IrysSignature};
-use alloy_primitives::{bytes, Address};
+use alloy_primitives::{bytes, Address, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
@@ -267,6 +267,12 @@ impl Encode for H256 {
 impl Decode for H256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         Ok(Self::from_slice(value))
+    }
+}
+
+impl From<H256> for FixedBytes<32> {
+    fn from(val: H256) -> Self {
+        FixedBytes(val.0)
     }
 }
 

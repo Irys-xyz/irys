@@ -116,7 +116,7 @@ jsonrpsee-core = "0.24"
 jsonrpsee-http-client = "0.24"
 jsonrpsee-types = "0.24"
 futures-util = "0.3"
-lru = "0.14.0"
+lru = "0.14"
 paste = "1.0.15"
 async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
@@ -154,6 +154,8 @@ alloy-sol-macro = { version = "1.1.0", default-features = false }
 alloy-sol-types = { version = "1.1.0", default-features = false }
 
 revm = { version = "23.1.0", default-features = false }
+revm-primitives = "19"
+revm-interpreter = "19"
 
 
 reth = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
@@ -183,7 +185,14 @@ reth-tracing = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da62
 reth-transaction-pool = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
 reth-trie-db = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
 reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
-
+reth-storage-api = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-basic-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-payload-builder-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-payload-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-revm = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
+reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "919c8b9908da626c531f584a086ed6a755e071ae" }
 # just used (for local testing)
 
 
@@ -350,7 +359,7 @@ panic = "unwind"
 [workspace.lints]
 # to enable in the future
 # rust.missing_debug_implementations = "warn"
-# rust.missing_docs = "warn" 
+# rust.missing_docs = "warn"
 # rust.rust_2018_idioms = { level = "deny", priority = -1 }
 
 
@@ -366,7 +375,7 @@ rust.unused_imports = "warn"
 complexity = { priority = -2, level = "deny" }
 perf = { priority = -3, level = "deny" }
 correctness = { priority = -4, level = "deny" }
-restriction = { priority = -5, level = "allow" } # cherry pick 
+restriction = { priority = -5, level = "allow" } # cherry pick
 style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
 pedantic = { priority = -8, level = "allow" }    # cherry pick
