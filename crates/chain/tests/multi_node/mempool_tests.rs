@@ -119,6 +119,10 @@ async fn mempool_persistance_test() -> eyre::Result<()> {
         .await;
     let _ = genesis_node.start_public_api().await;
 
+    // test storage data
+    let chunks = [[10; 32], [20; 32], [30; 32]];
+    let data: Vec<u8> = chunks.concat();
+
     // Create stake and pledge commitments for the signer
     let stake_tx = new_stake_tx(&H256::zero(), &signer);
     let pledge_tx = new_pledge_tx(&H256::zero(), &signer);
@@ -126,6 +130,11 @@ async fn mempool_persistance_test() -> eyre::Result<()> {
     // Post the pledge before the stake
     genesis_node.post_commitment_tx(&pledge_tx).await;
     genesis_node.post_commitment_tx(&stake_tx).await;
+
+    // post storage tx
+    genesis_node
+        .post_storage_tx_without_gossip(H256::zero(), data, &signer)
+        .await;
 
     //stop  node, graceful shurtdown should cause mempool to persist to database
     let genesis_node = genesis_node.stop().await;
