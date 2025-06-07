@@ -20,6 +20,8 @@ use std::ops::{Index, IndexMut};
 
 pub type BlockHash = H256;
 
+pub type EvmBlockHash = B256;
+
 /// Stores the `vdf_limiter_info` in the [`IrysBlockHeader`]
 #[derive(
     Clone,

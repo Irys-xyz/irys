@@ -8,11 +8,14 @@ use crate::{
 };
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_api_server::routes::index::NodeInfo;
+use irys_testing_utils::initialize_tracing;
 use irys_types::BlockIndexItem;
 use tracing::info;
 
 #[actix::test]
 async fn heavy_external_api() -> eyre::Result<()> {
+    initialize_tracing();
+
     let ctx = IrysNodeTest::default_async().await.start().await;
 
     let address = format!(

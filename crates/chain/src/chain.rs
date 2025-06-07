@@ -796,7 +796,7 @@ impl IrysNode {
         ServiceHandleWithShutdownSignal,
     )> {
         // initialize the databases
-        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
+        let (reth_node, _) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), system_tx_store.clone()).await?;
@@ -904,15 +904,16 @@ impl IrysNode {
         // Spawn mempool service
         let _mempool_handle = MempoolService::spawn_service(
             task_exec,
-            &irys_db,
-            reth_db,
-            &storage_modules_guard,
+            irys_db.clone(),
+            reth_node_adapter.clone(),
+            storage_modules_guard.clone(),
             &block_tree_guard,
             &commitment_state_guard,
             receivers.mempool,
             &config,
             &service_senders,
-        );
+        )
+        .await;
         let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
 
         // spawn the chunk migration service

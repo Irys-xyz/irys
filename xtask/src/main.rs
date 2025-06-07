@@ -45,14 +45,14 @@ enum Commands {
     Typos,
     UnusedDeps,
     EmissionSimulation,
+    LocalChecks {
+        #[clap(short, long, default_value_t = false)]
+        with_tests: bool,
+    },
 }
 
-fn main() -> eyre::Result<()> {
-    color_eyre::install()?;
-    let sh = Shell::new()?;
-    let args = Args::parse();
-
-    match args.command {
+fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
+    match command {
         Commands::Test { args, coverage } => {
             println!("cargo test");
             let _ = cmd!(sh, "cargo install --locked cargo-nextest").run();
@@ -91,7 +91,6 @@ fn main() -> eyre::Result<()> {
                 }
             }
         }
-
         Commands::Check { args } => {
             println!("cargo check");
             cmd!(sh, "cargo check {args...}").run()?;
@@ -161,7 +160,38 @@ fn main() -> eyre::Result<()> {
             )
             .run()?;
         }
-    }
-
+        Commands::LocalChecks { with_tests } => {
+            run_command(
+                Commands::Fmt {
+                    check_only: true,
+                    args: vec![],
+                },
+                sh,
+            )?;
+            {
+                // push -D warnings for just this command to mimic CI
+                let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
+                run_command(Commands::Check { args: vec![] }, sh)?;
+            }
+            run_command(Commands::Clippy { args: vec![] }, sh)?;
+            run_command(Commands::UnusedDeps, sh)?;
+            if with_tests {
+                run_command(
+                    Commands::Test {
+                        coverage: false,
+                        args: vec![],
+                    },
+                    sh,
+                )?
+            }
+        }
+    };
     Ok(())
+}
+
+fn main() -> eyre::Result<()> {
+    color_eyre::install()?;
+    let sh = Shell::new()?;
+    let args = Args::parse();
+    run_command(args.command, &sh)
 }

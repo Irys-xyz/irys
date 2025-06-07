@@ -237,10 +237,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
-    let _recipient_init_balance = reth_context
-        .rpc
-        .get_balance(recipient.address(), None)
-        .await?;
+    let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
 
     let evm_tx_req = TransactionRequest {
         to: Some(TxKind::Call(recipient.address())),
@@ -307,17 +304,11 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
 
     // Verify recipient received the transfer
-    let recipient_balance = reth_context
-        .rpc
-        .get_balance(recipient.address(), None)
-        .await?;
+    let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
     assert_eq!(recipient_balance, U256::from(1)); // The transferred amount
 
     // Verify account1 balance decreased by storage fees and gas costs
-    let account1_balance = reth_context
-        .rpc
-        .get_balance(account1.address(), None)
-        .await?;
+    let account1_balance = reth_context.rpc.get_balance(account1.address(), None)?;
     // Balance should be: initial (1000) - storage fees - gas costs - transfer amount (1)
     let expected_balance = account_1_balance
         - U256::from(irys_tx.header.total_fee())
@@ -338,7 +329,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
 
     for _ in 0..3 {
         // mine a single block
@@ -371,7 +362,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
         // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
-        _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+        _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
         sleep(Duration::from_millis(1_500)).await;
     }
 
