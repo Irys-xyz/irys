@@ -382,6 +382,9 @@ opt-level = 3
 [profile.dev.package.openssl]
 opt-level = 3
 
+[profile.fast-dev]
+inherits = "dev"
+opt-level = 3
 
 [workspace.lints]
 # to enable in the future
