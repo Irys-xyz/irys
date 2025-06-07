@@ -11,7 +11,9 @@ use crate::{
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
-use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
+use alloy_consensus::{
+    transaction::SignerRecoverable, EthereumTxEnvelope, SignableTransaction, TxEip4844,
+};
 use alloy_network::TxSignerSync;
 use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_signer_local::LocalSigner;
@@ -386,7 +388,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
+                vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1))
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
             };
             steps.push(solution.seed.0);
@@ -447,35 +449,31 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 current_timestamp.saturating_div(1000)
             )?;
 
-            let block_reward_system_tx = SystemTransaction {
-                valid_for_block_height: block_height,
-                parent_blockhash: prev_block_header.evm_block_hash,
-                inner: TransactionPacket::BlockReward(
+            let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
+            let block_reward_system_tx = SystemTransaction::new_v1(
+                block_height,
+                prev_block_header.evm_block_hash,
+                TransactionPacket::BlockReward(
                     BalanceIncrement {
                         amount: reward_amount.amount.into(),
                         target: config.node_config.reward_address
                     }
                 )
-            };
-
-            let storage_txs = {
-                let block_reward_system_tx = block_reward_system_tx.clone();
-                submit_txs.storage_tx.iter().map(move |header| {
-
-                SystemTransaction {
-                    inner: TransactionPacket::StorageFees(
+            );
+            let storage_txs = submit_txs.storage_tx.iter().map(move |header| {
+                SystemTransaction::new_v1(
+                    block_height,
+                    prev_block_header.evm_block_hash,
+                    TransactionPacket::StorageFees(
                         BalanceDecrement {
                             amount: Uint::from(header.total_fee()),
                             target: header.signer,
                         }
-                    ),
-                    ..block_reward_system_tx.clone()
-                }
-            })};
-
-            let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
+                    )
+                )
+            });
             let system_txs = [block_reward_system_tx].into_iter().chain(storage_txs).map(|tx| {
-                let mut tx_raw = compose_system_tx( config.consensus.chain_id, &tx);
+                let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
                 let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
                     .try_into_recovered()

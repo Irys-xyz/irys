@@ -138,29 +138,38 @@ impl IrysNodeCtx {
         self.config.node_config.http.bind_port
     }
 
-    /// Stop VDF thread mining and send a message to all known partition actors to ignore any received VDF steps
+    /// Stop the VDF thread and send a message to all known partition actors to ignore any received VDF steps
     pub async fn stop_mining(&self) -> eyre::Result<()> {
-        // stop VDF thread mining
-        if let Err(e) = self.service_senders.vdf_mining.send(false).await {
-            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
-        }
+        // stop the VDF thread
+        self.stop_vdf().await?;
         self.set_partition_mining(false).await
     }
-    /// Start VDF thread mining and Send a message to all known partition actors to begin mining when they receive a VDF step
+    /// Start VDF thread and send a message to all known partition actors to begin mining when they receive a VDF step
     pub async fn start_mining(&self) -> eyre::Result<()> {
-        // start VDF thread mining
-        if let Err(e) = self.service_senders.vdf_mining.send(true).await {
-            tracing::error!("Error sending to vdf_mining_state_sender mspc {:?}", e);
-        }
+        // start the VDF thread
+        self.start_vdf().await?;
         self.set_partition_mining(true).await
     }
     // Send a custom control message to all known partition actors to enable/disable partition mining
+    // does NOT modify the state of the  VDF thread!
     pub async fn set_partition_mining(&self, should_mine: bool) -> eyre::Result<()> {
         // Send a custom control message to all known partition actors
         for part in &self.actor_addresses.partitions {
             part.try_send(MiningControl(should_mine))?;
         }
         Ok(())
+    }
+    // starts the VDF thread
+    pub async fn start_vdf(&self) -> eyre::Result<()> {
+        self.vdf_state(true).await
+    }
+    // stops the VDF thread
+    pub async fn stop_vdf(&self) -> eyre::Result<()> {
+        self.vdf_state(false).await
+    }
+    // sets the running state of the VDF thread
+    pub async fn vdf_state(&self, running: bool) -> eyre::Result<()> {
+        Ok(self.service_senders.vdf_mining.send(running).await?)
     }
 }
 
@@ -729,23 +738,24 @@ impl IrysNode {
                 let exec = task_manager.executor();
                 let _span = span.enter();
                 let run_reth_until_ctrl_c_or_signal = async || {
+                    let start_reth_node = start_reth_node(
+                        exec,
+                        reth_chainspec,
+                        config,
+                        reth_handle_sender,
+                        irys_provider.clone(),
+                        latest_block_height,
+                        system_tx_store,
+                    );
+                    let fut = run_until_ctrl_c_or_channel_message(
+                        start_reth_node.instrument(span2),
+                        reth_shutdown_receiver,
+                    );
                     _ = run_to_completion_or_panic(
                         &mut task_manager,
                         // todo we can simplify things if we use `irys_reth_node_bridge::run_node` directly
                         //      Then we can drop the channel
-                        run_until_ctrl_c_or_channel_message(
-                            start_reth_node(
-                                exec,
-                                reth_chainspec,
-                                config,
-                                reth_handle_sender,
-                                irys_provider.clone(),
-                                latest_block_height,
-                                system_tx_store,
-                            )
-                            .instrument(span2),
-                            reth_shutdown_receiver,
-                        ),
+                        fut,
                     )
                     .await
                     .inspect_err(|e| error!("Reth thread error: {}", &e));
@@ -969,9 +979,7 @@ impl IrysNode {
             task_exec,
             peer_list_service.clone(),
             irys_db.clone(),
-            service_senders.vdf_fast_forward.clone(),
             gossip_listener,
-            vdf_state_readonly.clone(),
         )?;
 
         // set up the price oracle

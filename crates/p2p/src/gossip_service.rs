@@ -24,13 +24,11 @@ use core::time::Duration;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
-use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::VdfStep;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -159,9 +157,7 @@ impl P2PService {
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
-        vdf_sender: UnboundedSender<VdfStep>,
         listener: TcpListener,
-        vdf_state: VdfStateReadonly,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -173,9 +169,7 @@ impl P2PService {
             db,
             peer_list.clone(),
             block_discovery.clone(),
-            Some(vdf_sender),
             self.sync_state.clone(),
-            vdf_state,
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =

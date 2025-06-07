@@ -1,7 +1,7 @@
 //! Payload component configuration for the Ethereum node.
 //! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/node/src/payload.rs#L19
 
-use reth_chainspec::EthereumHardforks;
+use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_ethereum_engine_primitives::{
     EthBuiltPayload, EthPayloadAttributes, EthPayloadBuilderAttributes,
 };
@@ -46,11 +46,14 @@ where
         evm_config: Evm,
     ) -> eyre::Result<Self::PayloadBuilder> {
         let conf = ctx.payload_builder_config();
+        let chain = ctx.chain_spec().chain();
+        let gas_limit = conf.gas_limit_for(chain);
+
         Ok(crate::payload::IrysPayloadBuilder::new(
             ctx.provider().clone(),
             pool,
             evm_config,
-            EthereumBuilderConfig::new().with_gas_limit(conf.gas_limit()),
+            EthereumBuilderConfig::new().with_gas_limit(gas_limit),
             self.system_tx_store.clone(),
         ))
     }

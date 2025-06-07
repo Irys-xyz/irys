@@ -16,7 +16,6 @@ reth-db.workspace = true
 reth-chainspec.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
-reth-tasks.workspace = true
 irys-reth = { workspace = true, features = ["test-utils"] }
 reth-node-ethereum.workspace = true
 reth-e2e-test-utils.workspace = true

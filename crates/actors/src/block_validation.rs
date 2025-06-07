@@ -27,7 +27,6 @@ pub async fn prevalidate_block(
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
-    steps_guard: VdfStateReadonly,
     ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(
@@ -85,14 +84,6 @@ pub async fn prevalidate_block(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
         "solution_hash_is_valid",
-    );
-
-    // Recall range check
-    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard).await?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "recall_recall_range_is_valid",
     );
 
     // We only check last_step_checkpoints during pre-validation

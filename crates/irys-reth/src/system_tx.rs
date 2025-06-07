@@ -20,20 +20,28 @@ use alloy_rlp::{RlpDecodable, RlpEncodable};
 use bytes;
 use std::sync::LazyLock;
 
-/// A system transaction, valid for a single block, encoding a protocol-level action.
-#[derive(
-    Debug, Clone, RlpEncodable, RlpDecodable, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary,
-)]
-pub struct SystemTransaction {
-    /// The block height for which this system tx is valid.
-    pub valid_for_block_height: u64,
-    /// The parent block hash to ensure the tx is not replayed on forks.
-    pub parent_blockhash: FixedBytes<32>,
-    /// The actual system transaction packet (see `TransactionPacket`).
-    pub inner: TransactionPacket,
+/// Version constants for SystemTransaction
+pub const SYSTEM_TX_VERSION_V1: u8 = 1;
+
+/// Current version of SystemTransaction
+pub const CURRENT_SYSTEM_TX_VERSION: u8 = SYSTEM_TX_VERSION_V1;
+
+/// A versioned system transaction, valid for a single block, encoding a protocol-level action.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
+#[non_exhaustive]
+pub enum SystemTransaction {
+    /// Version 1 system transaction format
+    ///
+    V1 {
+        /// The block height for which this system tx is valid.
+        valid_for_block_height: u64,
+        /// The parent block hash to ensure the tx is not replayed on forks.
+        parent_blockhash: FixedBytes<32>,
+        /// The actual system transaction packet.
+        packet: TransactionPacket,
+    },
 }
 
-/// Enum of all supported system transaction types in Irys protocol.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 pub enum TransactionPacket {
     /// Release staked funds to an account (balance increment). Used for unstaking or protocol rewards.
@@ -61,6 +69,75 @@ pub mod system_tx_topics {
     pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
     pub static STORAGE_FEES: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SYSTEM_TX_STORAGE_FEES").0);
+}
+
+impl SystemTransaction {
+    /// Create a new V1 system transaction
+    #[must_use]
+    pub fn new_v1(
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+        packet: TransactionPacket,
+    ) -> Self {
+        Self::V1 {
+            valid_for_block_height,
+            parent_blockhash,
+            packet,
+        }
+    }
+
+    /// Get the version of this system transaction
+    #[must_use]
+    pub fn version(&self) -> u8 {
+        match self {
+            Self::V1 { .. } => SYSTEM_TX_VERSION_V1,
+        }
+    }
+
+    /// Get the block height for which this system tx is valid
+    #[must_use]
+    pub fn valid_for_block_height(&self) -> u64 {
+        match self {
+            Self::V1 {
+                valid_for_block_height,
+                ..
+            } => *valid_for_block_height,
+        }
+    }
+
+    /// Get the parent block hash
+    #[must_use]
+    pub fn parent_blockhash(&self) -> FixedBytes<32> {
+        match self {
+            Self::V1 {
+                parent_blockhash, ..
+            } => *parent_blockhash,
+        }
+    }
+
+    /// Get the underlying transaction packet if this is a V1 transaction
+    #[must_use]
+    pub fn as_v1(&self) -> Option<&TransactionPacket> {
+        match self {
+            Self::V1 { packet, .. } => Some(packet),
+        }
+    }
+
+    /// Get the topic for this system transaction.
+    #[must_use]
+    pub fn topic(&self) -> FixedBytes<32> {
+        match self {
+            Self::V1 { packet, .. } => packet.topic(),
+        }
+    }
+
+    /// Get the encoded topic for this system transaction.
+    #[must_use]
+    pub fn encoded_topic(&self) -> [u8; 32] {
+        match self {
+            Self::V1 { packet, .. } => packet.encoded_topic(),
+        }
+    }
 }
 
 impl TransactionPacket {
@@ -114,6 +191,38 @@ pub const STORAGE_FEES_ID: u8 = 0x03;
     clippy::arithmetic_side_effects,
     reason = "length calculation is safe for small values"
 )]
+impl Encodable for SystemTransaction {
+    fn length(&self) -> usize {
+        1 + // version byte
+        match self {
+            Self::V1 { valid_for_block_height, parent_blockhash, packet } => {
+                valid_for_block_height.length() +
+                parent_blockhash.length() +
+                packet.length()
+            }
+        }
+    }
+
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        match self {
+            Self::V1 {
+                valid_for_block_height,
+                parent_blockhash,
+                packet,
+            } => {
+                out.put_u8(SYSTEM_TX_VERSION_V1);
+                valid_for_block_height.encode(out);
+                parent_blockhash.encode(out);
+                packet.encode(out);
+            }
+        }
+    }
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "length calculation is safe for small values"
+)]
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
@@ -140,6 +249,36 @@ impl Encodable for TransactionPacket {
                 out.put_u8(STORAGE_FEES_ID);
                 inner.encode(out);
             }
+        }
+    }
+}
+
+#[expect(
+    clippy::indexing_slicing,
+    reason = "buffer bounds are checked before indexing"
+)]
+impl Decodable for SystemTransaction {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+        let version = buf[0];
+        *buf = &buf[1..]; // advance past the version byte
+
+        match version {
+            SYSTEM_TX_VERSION_V1 => {
+                let valid_for_block_height = u64::decode(buf)?;
+                let parent_blockhash = FixedBytes::<32>::decode(buf)?;
+                let packet = TransactionPacket::decode(buf)?;
+                Ok(Self::V1 {
+                    valid_for_block_height,
+                    parent_blockhash,
+                    packet,
+                })
+            }
+            _ => Err(alloy_rlp::Error::Custom(
+                "Unknown system transaction version",
+            )),
         }
     }
 }
@@ -184,9 +323,19 @@ impl Decodable for TransactionPacket {
     clippy::unimplemented,
     reason = "intentional panic to prevent silent bugs"
 )]
+impl Default for SystemTransaction {
+    fn default() -> Self {
+        unimplemented!("relying on the default impl for `SystemTransaction` is a critical bug")
+    }
+}
+
+#[expect(
+    clippy::unimplemented,
+    reason = "intentional panic to prevent silent bugs"
+)]
 impl Default for TransactionPacket {
     fn default() -> Self {
-        unimplemented!("relying on the default impl for `SYSTEM_TX` is a critical bug")
+        unimplemented!("relying on the default impl for `TransactionPacket` is a critical bug")
     }
 }
 
