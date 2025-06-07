@@ -10,7 +10,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
-    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError},
+    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
 };
 use irys_api_client::ApiClient;
 use irys_primitives::Address;
@@ -87,6 +87,27 @@ impl MempoolFacade for MempoolStub {
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
+    }
+
+    async fn handle_get_transaction(
+        &self,
+        _tx_header: H256,
+    ) -> std::result::Result<IrysTransactionHeader, TxReadError> {
+        Ok(IrysTransactionHeader::default())
+    }
+
+    async fn handle_get_commitment_transactions_by_signer(
+        &self,
+        _address: Address,
+    ) -> std::result::Result<Vec<CommitmentTransaction>, TxReadError> {
+        Ok(vec![CommitmentTransaction::default()])
+    }
+
+    async fn handle_get_commitment_transaction_by_id(
+        &self,
+        _tx_id: H256,
+    ) -> std::result::Result<CommitmentTransaction, TxReadError> {
+        Ok(CommitmentTransaction::default())
     }
 
     async fn handle_chunk(

@@ -4,7 +4,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool_service::MempoolServiceMessage,
+    mempool_service::{MempoolFacade, MempoolServiceFacadeImpl, MempoolServiceMessage},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     CommitmentCacheMessage,
@@ -70,6 +70,8 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
+    /// Mempool facade to interact with mempool service
+    pub mempool: MempoolServiceFacadeImpl,
     /// Global config
     pub config: Config,
     /// The block reward curve
@@ -159,6 +161,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             block_discovery_addr,
             epoch_service,
             service_senders,
+            mempool,
             config,
             vdf_steps_guard,
             block_tree_guard,
@@ -205,7 +208,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let ingress_proofs = walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e|
                     eyre!("Failed to collect ingress proofs from database: {}", e)
                 )?;
-
 
                 let mut publish_txids: Vec<H256> = Vec::new();
                 // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
@@ -299,16 +301,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             } else {
                 // In regular blocks: process and persist new commitment transactions
-                // from the mempool and create a ledger entry referencing them
+                // to the mempool and create a ledger entry referencing them
                 let tx = db.tx_mut().unwrap();
                 let mut txids = H256List::new();
 
                 for tx_item in submit_txs.commitment_tx.iter() {
-                    // Only include successfully inserted transactions
-                    if insert_commitment_tx(&tx, tx_item).is_ok() {
-                        debug!("New commitment persisted: {}", tx_item.id.0.to_base58());
+                    // insert commitment transaction in to the mempool
+                    if mempool.handle_commitment_transaction(tx_item.clone()).await.is_ok() {
+                        debug!("New commitment added to mempool: {}", tx_item.id.0.to_base58());
                         txids.push(tx_item.id);
-                    }
+                    };
                 }
                 tx.inner.commit().unwrap();
 

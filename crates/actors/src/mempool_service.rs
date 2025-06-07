@@ -6,11 +6,13 @@ use core::fmt::Display;
 use eyre::eyre;
 use futures::future::BoxFuture;
 use irys_database::{
+    all_mempool_tx_headers, clear_mempool_tx_headers,
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _, RethDbWrapper},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
+    insert_mempool_tx_header, insert_tx_header,
     submodule::get_data_size_by_data_root,
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
-    {insert_tx_header, tx_header_by_txid, SystemLedger},
+    tx_header_by_txid, SystemLedger,
 };
 use irys_primitives::CommitmentType;
 use irys_storage::StorageModulesReadGuard;
@@ -45,6 +47,18 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError>;
+    async fn handle_get_transaction(
+        &self,
+        tx_header: H256,
+    ) -> Result<IrysTransactionHeader, TxReadError>;
+    async fn handle_get_commitment_transactions_by_signer(
+        &self,
+        address: Address,
+    ) -> Result<Vec<CommitmentTransaction>, TxReadError>;
+    async fn handle_get_commitment_transaction_by_id(
+        &self,
+        id: H256,
+    ) -> Result<CommitmentTransaction, TxReadError>;
     async fn handle_commitment_transaction(
         &self,
         tx_header: CommitmentTransaction,
@@ -66,6 +80,69 @@ impl From<UnboundedSender<MempoolServiceMessage>> for MempoolServiceFacadeImpl {
 
 #[async_trait::async_trait]
 impl MempoolFacade for MempoolServiceFacadeImpl {
+    // get/read transaction from mempool
+    async fn handle_get_transaction(&self, tx: H256) -> Result<IrysTransactionHeader, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::GetTransaction(tx, oneshot_tx))
+            .map_err(|_| TxReadError::Other("Error sending GetTransaction ".to_owned()))?;
+
+        if let Ok(response) = oneshot_rx.await {
+            match response {
+                Some(response) => Ok(response),
+                None => Err(TxReadError::NotInMempool),
+            }
+        } else {
+            Err(TxReadError::Other(
+                "Error reading GetTransaction response ".to_owned(),
+            ))
+        }
+    }
+
+    async fn handle_get_commitment_transactions_by_signer(
+        &self,
+        address: Address,
+    ) -> Result<Vec<CommitmentTransaction>, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs(address.clone(), oneshot_tx);
+        if let Err(err) = self.service.send(tx_ingress_msg) {
+            tracing::error!("error sending message to mempool: {:?}", err);
+        }
+
+        if let Ok(response) = oneshot_rx.await {
+            match response {
+                Some(response) => Ok(response),
+                None => Err(TxReadError::CommitmentNotInMempool),
+            }
+        } else {
+            Err(TxReadError::Other(
+                "Error reading GetCommitmentTxs response ".to_owned(),
+            ))
+        }
+    }
+
+    async fn handle_get_commitment_transaction_by_id(
+        &self,
+        id: H256,
+    ) -> Result<CommitmentTransaction, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxById(id.clone(), oneshot_tx);
+        if let Err(err) = self.service.send(tx_ingress_msg) {
+            tracing::error!("error sending message to mempool: {:?}", err);
+        }
+
+        if let Ok(response) = oneshot_rx.await {
+            match response {
+                Some(response) => Ok(response),
+                None => Err(TxReadError::CommitmentNotInMempool),
+            }
+        } else {
+            Err(TxReadError::Other(
+                "Error reading GetCommitmentTxs response ".to_owned(),
+            ))
+        }
+    }
+
     async fn handle_data_transaction(
         &self,
         tx_header: IrysTransactionHeader,
@@ -124,7 +201,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
 #[derive(Debug)]
 pub struct MempoolState {
-    /// Temporary mempool stubs - will replace with proper data models - `DMac`
+    /// todo: Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
@@ -148,6 +225,16 @@ pub enum MempoolServiceMessage {
         H256,
         tokio::sync::oneshot::Sender<Option<IrysTransactionHeader>>,
     ),
+    /// get Vec<CommitmentTransaction> by signer
+    GetCommitmentTxs(
+        Address,
+        tokio::sync::oneshot::Sender<Option<Vec<CommitmentTransaction>>>,
+    ),
+    /// get CommitmentTransaction by H256 id
+    GetCommitmentTxById(
+        H256,
+        tokio::sync::oneshot::Sender<Option<CommitmentTransaction>>,
+    ),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     ChunkIngressMessage(
         UnpackedChunk,
@@ -169,7 +256,7 @@ pub enum MempoolServiceMessage {
     /// Return filtered list of candidate txns
     /// Filtering based on funding status etc
     GetBestMempoolTxs(tokio::sync::oneshot::Sender<MempoolTxs>),
-    /// Confirm if tx exists in database
+    /// Confirm if tx exists in mempool or database
     TxExistenceQuery(
         H256,
         tokio::sync::oneshot::Sender<Result<bool, TxIngressError>>,
@@ -266,6 +353,10 @@ impl MempoolService {
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting Mempool service");
 
+        if let Err(err) = self.inner.load_persisted_state().await {
+            error!(?err, "failed to load persisted mempool state");
+        }
+
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
             tokio::select! {
@@ -318,6 +409,21 @@ impl MempoolService {
         // explicitly inform the TaskManager that we're shutting down
         drop(shutdown_guard);
 
+        // Persist pending transactions to a temporary table
+        let pending_txs: Vec<_> = {
+            let guard = self.inner.mempool_state.read().await;
+            guard.valid_tx.values().cloned().collect()
+        };
+        if let Err(err) = self.inner.irys_db.update_eyre(|tx| {
+            clear_mempool_tx_headers(tx)?;
+            for hdr in &pending_txs {
+                insert_mempool_tx_header(tx, hdr)?;
+            }
+            Ok(())
+        }) {
+            error!(?err, "failed to persist mempool state");
+        }
+
         tracing::info!("shutting down Mempool service");
         Ok(())
     }
@@ -343,6 +449,32 @@ pub enum TxIngressError {
 }
 
 impl TxIngressError {
+    /// Returns an other error with the given message.
+    pub fn other(err: impl Into<String>) -> Self {
+        Self::Other(err.into())
+    }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display) -> Self {
+        Self::Other(err.to_string())
+    }
+}
+
+/// Reasons why reading a transaction might fail
+#[derive(Debug, Clone)]
+pub enum TxReadError {
+    /// Some database error occurred when reading
+    DatabaseError,
+    /// The service is uninitialized
+    ServiceUninitialized,
+    /// The commitment transaction is not found in the mempool
+    CommitmentNotInMempool,
+    /// The transaction is not found in the mempool
+    NotInMempool,
+    /// Catch-all variant for other errors.
+    Other(String),
+}
+
+impl TxReadError {
     /// Returns an other error with the given message.
     pub fn other(err: impl Into<String>) -> Self {
         Self::Other(err.into())
@@ -472,20 +604,76 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
-    async fn handle_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
+    /// Load persisted mempool transactions from the database
+    /// and then wipe the database
+    async fn load_persisted_state(&self) -> eyre::Result<()> {
+        let read_tx = self.read_tx().await?;
+        let txs = all_mempool_tx_headers(&read_tx)?;
+
+        for tx in txs {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx.clone(), oneshot_tx);
+            if let Err(err) = self.service_senders.mempool.send(tx_ingress_msg) {
+                tracing::error!("error sending message to mempool: {:?}", err);
+            }
+            let _msg_result = oneshot_rx.await;
+        }
+
+        self.irys_db.update_eyre(|tx| {
+            clear_mempool_tx_headers(tx)?;
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+    async fn handle_get_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
-        // if tx exists
+        // if tx exists in mempool valid_tx (temporary storage)
         if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+            tracing::error!(
+                "handle_get_transaction_message() {:?} FOUND in guard.valid_tx",
+                tx
+            );
             return Some(tx_header.clone());
         }
         drop(mempool_state_guard);
+        None
+    }
 
-        if let Ok(read_tx) = self.read_tx().await {
-            let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
-            return tx_header.clone();
+    //TODO this is using a flatmap because at the time of writing,
+    //     there is no H256 indexed commitment transactions in the mempool.
+    //     There is however a map indexed by signer.
+    async fn handle_get_commitment_transaction_by_id_message(
+        &self,
+        tx_id: H256,
+    ) -> Option<CommitmentTransaction> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+
+        // if tx exists in mempool valid_commitment_tx (temporary storage
+        match mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flatten()
+            .find(|tx| tx.id == tx_id)
+        {
+            Some(v) => Some(v.clone()),
+            _ => None,
         }
+    }
 
+    async fn handle_get_commitment_transactions_message(
+        &self,
+        address: Address,
+    ) -> Option<Vec<CommitmentTransaction>> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+        // if tx exists in mempool valid_tx (temporary storage)
+        if let Some(tx_headers) = mempool_state_guard.valid_commitment_tx.get(&address) {
+            return Some(tx_headers.clone());
+        }
+        drop(mempool_state_guard);
         None
     }
 
@@ -587,29 +775,15 @@ impl Inner {
                 }
             }
 
-            // HACK HACK: in order for block discovery to validate incoming blocks
-            // it needs to read commitment tx from the database. Ideally it should
-            // be reading them from the mempool_service in memory cache, but we are
-            // putting off that work until the actix mempool_service is rewritten as a
-            // tokio service.
-            match self.irys_db.update_eyre(|db_tx| {
-                irys_database::insert_commitment_tx(db_tx, &commitment_tx)?;
-                Ok(())
-            }) {
-                Ok(()) => {
-                    info!(
-                        "Successfully stored commitment_tx in db {:?}",
-                        commitment_tx.id.0.to_base58()
-                    );
-                }
-                Err(db_error) => {
-                    error!(
-                        "Failed to store commitment_tx in db {:?}: {:?}",
-                        commitment_tx.id.0.to_base58(),
-                        db_error
-                    );
-                }
-            }
+            // Having passed the above checks, we now consider this a valid tx. Add it in the mempool state
+            let mut mempool_state_write_guard = mempool_state.write().await;
+            mempool_state_write_guard
+                .valid_commitment_tx
+                .insert(commitment_tx.signer, vec![commitment_tx.clone()]);
+            mempool_state_write_guard
+                .recent_valid_tx
+                .insert(commitment_tx.id);
+            drop(mempool_state_write_guard);
 
             // Gossip transaction
             self.service_senders
@@ -655,6 +829,28 @@ impl Inner {
         block: Arc<IrysBlockHeader>,
         all_txs: Arc<Vec<IrysTransactionHeader>>,
     ) -> Result<(), TxIngressError> {
+        // Persist all txs to the database before modifying mempool state
+        {
+            let mut_tx = self
+                .irys_db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            for tx_header in all_txs.iter() {
+                if let Err(err) = insert_tx_header(&mut_tx, tx_header) {
+                    error!(
+                        "Could not insert transaction header - txid: {} err: {}",
+                        tx_header.id, err
+                    );
+                }
+            }
+
+            mut_tx.commit().expect("expect to commit to database");
+        }
+        // remove txs from mempool
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
         for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
@@ -699,17 +895,11 @@ impl Inner {
                 .iter()
                 .enumerate()
             {
-                // Retrieve the promoted transactions header
-                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => {
-                        error!("No transaction header found for txid: {}", txid);
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("Error fetching transaction header for txid {}: {}", txid, e);
-                        continue;
-                    }
+                // Retrieve the promoted transactions header from mempool or database
+                // else continue loop to skip this transaction
+                let mut tx_header = match self.handle_get_transaction_message(*txid).await {
+                    None => continue,
+                    Some(tx_hdr) => tx_hdr,
                 };
 
                 // TODO: In a single node world there is only one ingress proof
@@ -1175,11 +1365,9 @@ impl Inner {
         // Validate anchor
         let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
             Err(e) => {
-                error!(
-                    "Validation failed: {:?} - mapped to: {:?}",
-                    e,
-                    TxIngressError::DatabaseError
-                );
+                error!("Validation failed: {:?}", e,);
+                //todo: should this not return the error?
+                //return Err(e);
                 return Ok(());
             }
             Ok(v) => v,
@@ -1190,13 +1378,10 @@ impl Inner {
             .await
             .map_err(|_| TxIngressError::DatabaseError)?;
 
-        let mempool_state_read_guard = mempool_state.read().await;
         let read_reth_tx = &self
             .reth_db
             .tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
-
-        drop(mempool_state_read_guard);
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
@@ -1247,20 +1432,16 @@ impl Inner {
         // check the result and error handle
         let _ = self.validate_signature(&tx).await;
 
+        // Having passed the above checks, we now consider this a valid tx. Add it in the mempool state
         let mut mempool_state_write_guard = mempool_state.write().await;
         mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
         mempool_state_write_guard.recent_valid_tx.insert(tx.id);
         drop(mempool_state_write_guard);
 
         // Cache the data_root in the database
+        // Persisting transaction headers happens on shutdown
         match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, &tx)?;
-            // TODO: tx headers should not immediately be added to the database
-            // this is a work around until the mempool can persist its state
-            // during shutdown. Currently this has the potential to create
-            // orphaned tx headers in the database with expired anchors and
-            // not linked to any blocks.
-            irys_database::insert_tx_header(db_tx, &tx)?;
             Ok(())
         }) {
             Ok(()) => {
@@ -1317,6 +1498,7 @@ impl Inner {
         Ok(())
     }
 
+    /// check the mempool, and then the database for tx
     async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
@@ -1330,6 +1512,7 @@ impl Inner {
             // Still has it, just invalid
             Ok(true)
         } else {
+            //todo: should this just return false? i.e. only check mempool and not database?
             drop(mempool_state_guard);
             let read_tx = self.read_tx().await;
 
@@ -1354,7 +1537,23 @@ impl Inner {
         Box::pin(async move {
             match msg {
                 MempoolServiceMessage::GetTransaction(tx, response) => {
-                    let response_message = self.handle_transaction_message(tx).await;
+                    let response_message = self.handle_get_transaction_message(tx).await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetCommitmentTxs(address, response) => {
+                    let response_message = self
+                        .handle_get_commitment_transactions_message(address)
+                        .await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetCommitmentTxById(id, response) => {
+                    let response_message = self
+                        .handle_get_commitment_transaction_by_id_message(id)
+                        .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1540,8 +1739,11 @@ impl Inner {
             .anchor_expiry_depth as u64;
 
         let mempool_state_read_guard = mempool_state.read().await;
+        let anchor_found_in_recent_valid_txs =
+            mempool_state_read_guard.recent_valid_tx.contains(anchor);
+        drop(mempool_state_read_guard);
         // Allow transactions to use the txid of a transaction in the mempool
-        if mempool_state_read_guard.recent_valid_tx.contains(anchor) {
+        if anchor_found_in_recent_valid_txs {
             let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
             let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
             // Just provide the most recent block as an anchor
@@ -1553,8 +1755,6 @@ impl Inner {
                 _ => {}
             };
         }
-
-        drop(mempool_state_read_guard); // Release read lock before acquiring write lock
 
         match irys_database::block_header_by_hash(&read_tx, anchor, false) {
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {

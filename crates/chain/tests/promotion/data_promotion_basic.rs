@@ -1,22 +1,17 @@
 use crate::utils::IrysNodeTest;
-use crate::utils::{get_block_parent, get_chunk, post_chunk, verify_published_chunk};
-use actix_web::{
-    middleware::Logger,
-    test::{self, call_service, TestRequest},
-    web::{self, JsonConfig},
-    App,
-};
+use crate::utils::{get_block_parent, post_chunk, verify_published_chunk};
+use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
-use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
-use irys_types::{DataLedger, NodeConfig};
+use irys_types::{
+    irys::IrysSigner, DataLedger, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
+    NodeConfig,
+};
 use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::debug;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
@@ -48,35 +43,7 @@ async fn heavy_data_promotion_test() {
 
     node.node_ctx.start_mining().await.unwrap();
 
-    // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
-    let app_state = ApiState {
-        ema_service: node.node_ctx.service_senders.ema.clone(),
-        reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node
-            .node_ctx
-            .reth_handle
-            .rpc_server_handle()
-            .http_url()
-            .unwrap(),
-        block_index: node.node_ctx.block_index_guard.clone(),
-        block_tree: node.node_ctx.block_tree_guard.clone(),
-        db: node.node_ctx.db.clone(),
-        mempool_service: node.node_ctx.service_senders.mempool.clone(),
-        peer_list: node.node_ctx.peer_list.clone(),
-        chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: config.into(),
-        sync_state: node.node_ctx.sync_state.clone(),
-    };
-
-    // Initialize the app
-    let app = test::init_service(
-        App::new()
-            .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
-            .app_data(web::Data::new(app_state))
-            .wrap(Logger::default())
-            .service(routes()),
-    )
-    .await;
+    let app = node.start_public_api().await;
 
     // Create a bunch of TX chunks
     let data_chunks = [
@@ -119,36 +86,9 @@ async fn heavy_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
-    let delay = Duration::from_secs(1);
-    for attempt in 1..20 {
-        // Do we have any unconfirmed tx?
-        let Some(tx) = unconfirmed_tx.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the tx header from the HTTP endpoint
-        let id: String = tx.id.as_bytes().to_base58();
-        let resp = call_service(
-            &app,
-            TestRequest::get()
-                .uri(&format!("/v1/tx/{}", id))
-                .to_request(),
-        )
-        .await;
-
-        if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(*tx, result);
-            info!("Transaction was retrieved ok after {} attempts", attempt);
-            unconfirmed_tx.remove(0);
-        }
-
-        sleep(delay).await;
-    }
-
+    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
-    assert_eq!(unconfirmed_tx.len(), 0);
+    assert!(result.is_ok());
 
     // ==============================
     // Post Tx chunks out of order
@@ -199,64 +139,19 @@ async fn heavy_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
-    let mut unconfirmed_promotions = vec![
-        txs[2].header.id.as_bytes().to_base58(),
-        txs[0].header.id.as_bytes().to_base58(),
-    ];
-    println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-
-    for attempts in 1..20 {
-        // Do we have any unconfirmed promotions?
-        let Some(txid) = unconfirmed_promotions.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the transactions from the node endpoint
-        println!("Attempting... {}", txid);
-        let req = test::TestRequest::get()
-            .uri(&format!("/v1/tx/{}", &txid))
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-
-        if resp.status() == StatusCode::OK {
-            let tx_header: IrysTransactionHeader = test::read_body_json(resp).await;
-            info!("Transaction was retrieved ok after {} attempts", attempts);
-            if let Some(_proof) = tx_header.ingress_proofs {
-                assert_eq!(tx_header.id.as_bytes().to_base58(), *txid);
-                println!("Confirming... {}", tx_header.id.as_bytes().to_base58());
-                unconfirmed_promotions.remove(0);
-                println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-            }
-        }
-
-        sleep(delay).await;
-    }
-
-    assert_eq!(unconfirmed_promotions.len(), 0);
+    let unconfirmed_promotions = vec![txs[2].header.id, txs[0].header.id];
+    let result = node
+        .wait_for_ingress_proofs(unconfirmed_promotions, 20)
+        .await;
+    assert!(result.is_ok());
 
     // wait for the first set of chunks chunk to appear in the publish ledger
-    for _attempts in 1..20 {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
-        {
-            println!("First set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-    }
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
+    assert!(result.is_ok());
 
     // wait for the second set of chunks to appear in the publish ledger
-    for _attempts in 1..20 {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
-        {
-            println!("Second set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-    }
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
+    assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();

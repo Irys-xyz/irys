@@ -1,20 +1,15 @@
 use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
-use actix_web::{
-    middleware::Logger,
-    test,
-    web::{self, JsonConfig},
-    App,
-};
+use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
-use irys_types::TxChunkOffset;
+use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, UnpackedChunk,
+    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
+    UnpackedChunk,
 };
 use rand::Rng;
 use std::time::Duration;
@@ -23,6 +18,7 @@ use tracing::{debug, info};
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
+    setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_32kb"), false);
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
@@ -32,6 +28,7 @@ async fn heavy_api_end_to_end_test_32b() {
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_256kb() {
+    setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_256kb"), false);
     api_end_to_end_test(256 * 1024).await;
 }
 
@@ -55,34 +52,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     // Is there any reason for spawning another one here?
     node.node_ctx.start_mining().await.unwrap();
 
-    let app_state = ApiState {
-        ema_service: node.node_ctx.service_senders.ema.clone(),
-        reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node
-            .node_ctx
-            .reth_handle
-            .rpc_server_handle()
-            .http_url()
-            .unwrap(),
-        block_index: node.node_ctx.block_index_guard.clone(),
-        block_tree: node.node_ctx.block_tree_guard.clone(),
-        db: node.node_ctx.db.clone(),
-        mempool_service: node.node_ctx.service_senders.mempool.clone(),
-        peer_list: node.node_ctx.peer_list.clone(),
-        chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: config.into(),
-        sync_state: node.node_ctx.sync_state.clone(),
-    };
-
-    // Initialize the app
-    let app = test::init_service(
-        App::new()
-            .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
-            .app_data(web::Data::new(app_state))
-            .wrap(Logger::default())
-            .service(routes()),
-    )
-    .await;
+    let app = node.start_public_api().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),

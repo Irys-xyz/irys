@@ -72,6 +72,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
+    initialize_tracing();
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
     let mut config = NodeConfig::testnet();
@@ -96,18 +97,6 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
         Some(Duration::from_secs(10)),
     )
     .await?;
-
-    let api_state = node.node_ctx.get_api_state();
-    let _db = api_state.db.clone();
-
-    // Start the API server
-    let _app = actix_web::test::init_service(
-        App::new()
-            .wrap(Logger::default())
-            .app_data(actix_web::web::Data::new(api_state))
-            .service(routes()),
-    )
-    .await;
 
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
