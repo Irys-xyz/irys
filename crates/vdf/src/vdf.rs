@@ -77,7 +77,8 @@ pub fn run_vdf(
     let nonce_limiter_reset_frequency = config.reset_frequency as u64;
 
     // maintain a state of whether or not this vdf loop should be mining
-    let mut vdf_mining: bool = true;
+    // don't start the VDF right away
+    let mut vdf_mining: bool = false;
 
     loop {
         if shutdown_listener.try_recv().is_ok() {
@@ -289,7 +290,9 @@ mod tests {
 
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
-        let (_, mining_state_rx) = mpsc::channel::<bool>(1);
+
+        let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
+        mining_state_tx.send(true).await.unwrap();
 
         let vdf_state = mocked_vdf_service(&config).await;
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());

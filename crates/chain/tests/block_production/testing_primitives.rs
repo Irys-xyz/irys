@@ -12,7 +12,7 @@ async fn heavy_test_wait_until_height() {
     info!("height: {}", height);
     let steps = 2;
     let seconds = 60;
-    irys_node.node_ctx.set_partition_mining(true).await.unwrap();
+    irys_node.node_ctx.start_mining().await.unwrap();
     irys_node
         .wait_until_height(height + steps, seconds)
         .await

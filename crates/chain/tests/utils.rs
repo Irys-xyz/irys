@@ -454,7 +454,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
-        self.node_ctx.set_partition_mining(true).await?;
+        // self.node_ctx.set_partition_mining(true).await?;
+        self.node_ctx.start_mining().await?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
@@ -830,12 +831,15 @@ pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
 ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+    node_ctx.start_vdf().await?;
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
         &node_ctx.config,
     )
     .await;
+    node_ctx.stop_vdf().await?;
+
     node_ctx
         .actor_addresses
         .block_producer
@@ -855,12 +859,6 @@ where
     F: Future<Output = T> + Unpin,
 {
     loop {
-        let poa_solution = capacity_chunk_solution(
-            node_ctx.config.node_config.miner_address(),
-            node_ctx.vdf_steps_guard.clone(),
-            &node_ctx.config,
-        )
-        .await;
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
         match race {
             // provided future finished
@@ -870,13 +868,7 @@ where
                 info!("deployment timed out, creating new block..")
             }
         };
-
-        let _ = node_ctx
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()))
-            .await?
-            .unwrap();
+        mine_block(&node_ctx).await?;
     }
 }
 
