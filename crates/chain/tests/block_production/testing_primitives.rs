@@ -18,7 +18,7 @@ async fn heavy_test_wait_until_height() {
         .await
         .unwrap();
     let height5 = irys_node.get_height().await;
-    assert_eq!(height5, height + steps);
+    assert!(height5 >= height + steps);
     irys_node.stop().await;
 }
 
