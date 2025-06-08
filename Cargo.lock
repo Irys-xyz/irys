@@ -4742,6 +4742,7 @@ dependencies = [
  "alloy-signer-local",
  "assert_matches",
  "async-trait",
+ "atomic-write-file",
  "base58",
  "eyre",
  "futures",
@@ -5155,6 +5156,7 @@ dependencies = [
  "serde",
  "serde_json",
  "test-log",
+ "tokio",
  "toml",
  "tracing",
 ]

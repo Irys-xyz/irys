@@ -21,7 +21,7 @@ use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
-    insert_commitment_tx, tables::IngressProofs, tx_header_by_txid, SystemLedger,
+    tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
@@ -336,19 +336,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     tx_ids: txids
                 }
             } else {
-                // In regular blocks: process and persist new commitment transactions
+                // In regular blocks: process new commitment transactions
                 // from the mempool and create a ledger entry referencing them
-                let tx = db.tx_mut().unwrap();
                 let mut txids = H256List::new();
-
-                for tx_item in submit_txs.commitment_tx.iter() {
-                    // Only include successfully inserted transactions
-                    if insert_commitment_tx(&tx, tx_item).is_ok() {
-                        debug!("New commitment persisted: {}", tx_item.id.0.to_base58());
-                        txids.push(tx_item.id);
-                    }
-                }
-                tx.inner.commit().unwrap();
+                submit_txs.commitment_tx.iter().for_each(|ctx| {
+                    txids.push(ctx.id);
+                });
 
                 SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),

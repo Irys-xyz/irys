@@ -227,6 +227,19 @@ impl IrysBlockHeader {
     ) -> u64 {
         previous_ema_recalculation_block_height(self.height, blocks_in_price_adjustment_interval)
     }
+
+    pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
+        let mut commitment_txids = Vec::new();
+        // Because of a circular dependency the types crate can't import the SystemLedger enum
+        // SystemLedger::Commitments = 0, so finding `ledger_id: 0` here, locates the commitment ledger
+        let commitment_ledger = self.system_ledgers.iter().find(|l| l.ledger_id == 0);
+
+        if let Some(commitment_ledger) = commitment_ledger {
+            commitment_txids = commitment_ledger.tx_ids.0.clone();
+        }
+
+        commitment_txids
+    }
 }
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
