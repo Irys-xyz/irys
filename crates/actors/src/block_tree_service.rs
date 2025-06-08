@@ -108,6 +108,11 @@ pub struct ReorgEvent {
     pub timestamp: SystemTime,
 }
 
+#[derive(Debug, Clone)]
+pub struct BlockMigratedEvent {
+    pub block: Arc<IrysBlockHeader>,
+}
+
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     pub fn spawn_service(
@@ -351,15 +356,35 @@ impl BlockTreeServiceInner {
             }
             panic!("Block tree and index out of sync");
         }
-        debug!(?finalized_hash, ?finalized_height, "finalizing irys block");
 
+        match cache.get_block(&finalized_hash) {
+            Some(block) => {
+                let mut block = block.clone();
+                block.poa.chunk = None;
+                let migrated_block = Arc::new(block);
+                // Broadcast BlockMigratedEvent event using the shared sender
+                let block_migrated_event = BlockMigratedEvent {
+                    block: migrated_block.clone(),
+                };
+                if let Err(e) = self
+                    .service_senders
+                    .block_migrated_events
+                    .send(block_migrated_event)
+                {
+                    debug!("No reorg subscribers: {:?}", e);
+                }
+            }
+            None => error!("migrated block {} not found in block_tree", finalized_hash),
+        }
+
+        debug!(?finalized_hash, ?finalized_height, "migrating irys block");
         // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
         if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(cache.tip),
             confirmed_hash: None,
             finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
         }) {
-            panic!("Unable to send finalisation message to reth: {}", &e)
+            panic!("Unable to send finalization message to reth: {}", &e)
         }
 
         if self.send_storage_finalized_message(finalized_hash).is_err() {

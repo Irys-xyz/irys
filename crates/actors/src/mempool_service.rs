@@ -1,10 +1,11 @@
-use crate::block_tree_service::{BlockTreeReadGuard, ReorgEvent};
+use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentCacheStatus, CommitmentStateReadGuard};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
 use futures::future::BoxFuture;
+use irys_database::insert_commitment_tx;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
@@ -206,7 +207,8 @@ struct Inner {
 pub struct MempoolService {
     shutdown: GracefulShutdown,
     msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
-    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
+    block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
     inner: Inner,
 }
 
@@ -239,6 +241,7 @@ impl MempoolService {
         let storage_modules_guard = storage_modules_guard.clone();
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
+        let block_migrated_rx = service_senders.subscribe_block_migrated();
 
         Ok(exec.clone().spawn_critical_with_graceful_shutdown_signal(
             "Mempool Service",
@@ -247,6 +250,7 @@ impl MempoolService {
                     shutdown,
                     msg_rx: rx,
                     reorg_rx,
+                    block_migrated_rx,
                     inner: Inner {
                         block_tree_read_guard,
                         commitment_state_guard,
@@ -290,23 +294,18 @@ impl MempoolService {
 
                 // Handle reorg events
                 reorg_result = self.reorg_rx.recv() => {
-                    match reorg_result {
-                        Ok(reorg_event) => {
-                            self.inner.handle_reorg(reorg_event).await?;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            tracing::debug!("Reorg channel closed");
-                            // Continue running - reorg events are not critical for mempool
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!("Mempool missed {} reorg events", n);
-                            // For mempool, missing reorgs could mean stale state
-                            if n > 5 {
-                                tracing::error!("Mempool significantly lagged, consider clearing pool");
-                            }
-                        }
+                    if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
+                        self.inner.handle_reorg(event).await?;
                     }
                 }
+
+                // Handle block migrated events
+                 migrated_result = self.block_migrated_rx.recv() => {
+                    if let Some(event) = handle_broadcast_recv(migrated_result, "BlockMigrated") {
+                        self.inner.handle_block_migrated(event).await?;
+                    }
+                }
+
 
                 // Handle shutdown signal
                 shutdown = &mut shutdown_future => {
@@ -328,6 +327,26 @@ impl MempoolService {
 
         tracing::info!("shutting down Mempool service");
         Ok(())
+    }
+}
+
+fn handle_broadcast_recv<T>(
+    result: Result<T, broadcast::error::RecvError>,
+    channel_name: &str,
+) -> Option<T> {
+    match result {
+        Ok(event) => Some(event),
+        Err(broadcast::error::RecvError::Closed) => {
+            tracing::debug!("{} channel closed", channel_name);
+            None
+        }
+        Err(broadcast::error::RecvError::Lagged(n)) => {
+            tracing::warn!("{} lagged by {} events", channel_name, n);
+            if n > 5 {
+                tracing::error!("{} significantly lagged", channel_name);
+            }
+            None
+        }
     }
 }
 
@@ -760,6 +779,39 @@ impl Inner {
 
         Ok(())
     }
+
+    /// When a block is migrated from the block_tree to the block_index at the migration depth
+    /// it moves from "the cache" (largely the mempool) to "the index" (long term storage, usually
+    /// in a database or disk)
+    async fn handle_block_migrated(&mut self, event: BlockMigratedEvent) -> eyre::Result<()> {
+        tracing::debug!(
+            "Processing block migrated broadcast: {} height: {}",
+            event.block.block_hash,
+            event.block.height
+        );
+
+        let migrated_block = event.block;
+        let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
+        let commitments = self.handle_get_commitment_txs(commitment_tx_ids).await;
+
+        let tx = self
+            .irys_db
+            .tx_mut()
+            .expect("to get a mutable tx reference from the db");
+
+        for commitment_tx in commitments.values() {
+            // Insert the commitment transaction in to the db, perform migration
+            insert_commitment_tx(&tx, commitment_tx)?;
+            // Remove the commitment tx from the mempool cache, completing the migration
+            self.remove_commitment_tx(&commitment_tx.id).await;
+        }
+        tx.inner.commit()?;
+
+        // TODO: Also migrate publish and submit ledger tx
+
+        Ok(())
+    }
+
     async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -1595,6 +1647,8 @@ impl Inner {
                 }
             }
         }
+
+        drop(mempool_state_guard);
 
         found
     }
