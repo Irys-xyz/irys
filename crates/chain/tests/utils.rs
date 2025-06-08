@@ -94,7 +94,7 @@ pub async fn capacity_chunk_solution(
         &mut salt,
         &mut seed,
         config.consensus.vdf.num_checkpoints_in_vdf_step,
-        config.consensus.vdf.sha_1s_difficulty,
+        config.consensus.vdf.num_iterations_per_checkpoint(),
         &mut checkpoints,
     );
 
@@ -400,28 +400,48 @@ impl IrysNodeTest<IrysNodeCtx> {
             .1
     }
 
-    pub async fn wait_for_reorg(&self, seconds_to_wait: usize) -> eyre::Result<ReorgEvent> {
+    /// Returns a future that resolves when a reorg is detected.
+    ///
+    /// Subscribes to the reorg broadcast channel and waits up to `seconds_to_wait` for the ReorgEvent.
+    /// The future can be created before triggering operations that might cause a reorg.
+    ///
+    /// # Returns
+    /// * `Ok(ReorgEvent)` - Details about the reorg (orphaned blocks, new chain, fork point)
+    /// * `Err` - On timeout or channel closure
+    ///
+    /// # Example
+    /// ```
+    /// let reorg_future = node.wait_for_reorg(30);
+    /// peer.mine_competing_block().await?;
+    /// let reorg = reorg_future.await?;
+    /// ```
+    pub fn wait_for_reorg(
+        &self,
+        seconds_to_wait: usize,
+    ) -> impl Future<Output = eyre::Result<ReorgEvent>> {
         // Subscribe to reorg events
         let mut reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
+        let timeout_duration = Duration::from_secs(seconds_to_wait as u64);
 
-        // Wait for reorg event with timeout
-        match tokio::time::timeout(Duration::from_secs(seconds_to_wait as u64), reorg_rx.recv())
-            .await
-        {
-            Ok(Ok(reorg_event)) => {
-                info!(
-                    "Reorg detected: {} blocks orphaned at height {}, new tip: {}",
+        // Return the future without awaiting it
+        async move {
+            match tokio::time::timeout(timeout_duration, reorg_rx.recv()).await {
+                Ok(Ok(reorg_event)) => {
+                    info!(
+                    "Reorg detected: {} blocks in old fork, {} in new fork, fork at height {}, new tip: {}",
                     reorg_event.old_fork.len(),
+                    reorg_event.new_fork.len(),
                     reorg_event.fork_parent.height,
                     reorg_event.new_tip.0.to_base58()
                 );
-                Ok(reorg_event)
+                    Ok(reorg_event)
+                }
+                Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
+                Err(_) => Err(eyre::eyre!(
+                    "Timeout: No reorg event received within {} seconds",
+                    seconds_to_wait
+                )),
             }
-            Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
-            Err(_) => Err(eyre::eyre!(
-                "Timeout: No reorg event received within {} seconds",
-                seconds_to_wait
-            )),
         }
     }
 
@@ -435,7 +455,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
-        self.node_ctx.set_partition_mining(true).await?;
+        self.node_ctx.start_mining().await?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
@@ -816,12 +836,15 @@ pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
 ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+    node_ctx.start_vdf().await?;
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
         &node_ctx.config,
     )
     .await;
+    node_ctx.stop_vdf().await?;
+
     node_ctx
         .actor_addresses
         .block_producer
@@ -841,12 +864,6 @@ where
     F: Future<Output = T> + Unpin,
 {
     loop {
-        let poa_solution = capacity_chunk_solution(
-            node_ctx.config.node_config.miner_address(),
-            node_ctx.vdf_steps_guard.clone(),
-            &node_ctx.config,
-        )
-        .await;
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
         match race {
             // provided future finished
@@ -856,13 +873,7 @@ where
                 info!("deployment timed out, creating new block..")
             }
         };
-
-        let _ = node_ctx
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()))
-            .await?
-            .unwrap();
+        mine_block(&node_ctx).await?;
     }
 }
 

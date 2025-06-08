@@ -30,7 +30,7 @@ pub fn run_vdf_for_genesis_block(
             &mut salt,
             &mut hash,
             config.num_checkpoints_in_vdf_step,
-            config.sha_1s_difficulty,
+            config.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -77,7 +77,8 @@ pub fn run_vdf(
     let nonce_limiter_reset_frequency = config.reset_frequency as u64;
 
     // maintain a state of whether or not this vdf loop should be mining
-    let mut vdf_mining: bool = true;
+    // don't start the VDF right away
+    let mut vdf_mining: bool = false;
 
     loop {
         if shutdown_listener.try_recv().is_ok() {
@@ -136,7 +137,7 @@ pub fn run_vdf(
             &mut salt,
             &mut hash,
             config.num_checkpoints_in_vdf_step,
-            config.sha_1s_difficulty,
+            config.num_iterations_per_checkpoint(),
             &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
         );
 
@@ -256,7 +257,7 @@ mod tests {
             &mut salt,
             &mut hash,
             config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.sha_1s_difficulty,
+            config.consensus.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
         let elapsed = now.elapsed();
@@ -267,7 +268,7 @@ mod tests {
             original_salt,
             original_hash,
             config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.sha_1s_difficulty as usize,
+            config.consensus.vdf.num_iterations_per_checkpoint() as usize,
         );
         let elapsed = now.elapsed();
         debug!("vdf original code verification: {:.2?}", elapsed);
@@ -289,7 +290,9 @@ mod tests {
 
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
-        let (_, mining_state_rx) = mpsc::channel::<bool>(1);
+
+        let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
+        mining_state_tx.send(true).await.unwrap();
 
         let vdf_state = mocked_vdf_service(&config).await;
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -351,7 +354,7 @@ mod tests {
             &mut salt,
             &mut seed,
             config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.sha_1s_difficulty,
+            config.consensus.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 

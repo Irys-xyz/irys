@@ -346,6 +346,14 @@ pub struct VdfConfig {
     pub sha_1s_difficulty: u64,
 }
 
+impl VdfConfig {
+    /// Returns the number of iterations per checkpoint,
+    /// computed as the floor of (step difficulty ÷ number of checkpoints in a step).
+    pub fn num_iterations_per_checkpoint(&self) -> u64 {
+        self.sha_1s_difficulty / self.num_checkpoints_in_vdf_step as u64
+    }
+}
+
 /// # Epoch Configuration
 ///
 /// Controls the timing and parameters for network epochs.
@@ -524,7 +532,7 @@ impl ConsensusConfig {
                 parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
-                sha_1s_difficulty: 7_000,
+                sha_1s_difficulty: 70_000,
             },
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 10,
@@ -926,7 +934,7 @@ mod tests {
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25
 
-        sha_1s_difficulty = 7000
+        sha_1s_difficulty = 70000
 
         [block_reward_config]
         inflation_cap = 100000000

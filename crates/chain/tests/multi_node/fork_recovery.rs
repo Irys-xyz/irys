@@ -15,7 +15,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
-    let seconds_to_wait = 20;
+    let seconds_to_wait = 10;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -185,6 +185,14 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         genesis_block.block_hash, genesis_block.height
     );
 
+    let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
+
+    let canon_before = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_canonical_chain();
+
     // Determine which peer lost the fork race and extend the other peer's chain
     // to trigger a reorganization. The losing peer's transaction will be evicted
     // and returned to the mempool.
@@ -210,14 +218,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         peer1_node.get_block_by_height(4).await?
     };
 
-    let canon_before = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_canonical_chain();
-
-    // GENESIS occasionally doesn't arrive at block 4 - 10s for gossip is too slow!
-    let reorg_event = genesis_node.wait_for_reorg(seconds_to_wait * 2).await?;
+    let reorg_event = reorg_future.await?;
     let _genesis_block = genesis_node.get_block_by_height(4).await?;
 
     debug!("{:?}", reorg_event);
@@ -226,6 +227,14 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         .block_tree_guard
         .read()
         .get_canonical_chain();
+
+    let old_fork_hashes: Vec<_> = reorg_event.old_fork.iter().map(|b| b.block_hash).collect();
+    let new_fork_hashes: Vec<_> = reorg_event.new_fork.iter().map(|b| b.block_hash).collect();
+
+    println!(
+        "\nReorgEvent:\n fork_parent: {:?}\n old_fork: {:?}\n new_fork:{:?}",
+        reorg_event.fork_parent.block_hash, old_fork_hashes, new_fork_hashes
+    );
 
     println!("\nreorg_tx: {:?}", reorg_tx.header.id);
     println!("canonical_before:");
