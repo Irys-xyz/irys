@@ -159,28 +159,38 @@ async fn mempool_persistance_test() -> eyre::Result<()> {
         .post_storage_tx_without_gossip(H256::zero(), data, &signer)
         .await;
 
-    //stop  node, graceful shurtdown should cause mempool to persist to database
-    let genesis_node = genesis_node.stop().await;
+    // Restart the node
+    tracing::info!("Restarting node");
+    let restarted_node = genesis_node.stop().await.start().await;
 
-    // start node again, startup of mempool should retrieve it's state from database
-    let genesis_node = genesis_node.start().await;
-
-    // Mine a block to confirm the commitments
-    genesis_node.mine_block().await.unwrap();
-    genesis_node.mine_block().await.unwrap();
+    // confirm the mempool tx have appeared back in the mempool after a restart
+    for txid_to_check in vec![stake_tx.id, pledge_tx.id] {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let get_tx_msg = MempoolServiceMessage::GetTransaction(txid_to_check, oneshot_tx);
+        if let Err(err) = restarted_node
+            .node_ctx
+            .service_senders
+            .mempool
+            .send(get_tx_msg)
+        {
+            tracing::error!("error sending message to mempool: {:?}", err);
+        }
+        let tx_from_mempool = oneshot_rx.await.expect("expected result");
+        assert!(tx_from_mempool.is_some());
+    }
 
     // Validate the SystemLedger in the block that it contains the correct commitments
-    let block = genesis_node.get_block_by_height(1).await.unwrap();
+    let block = restarted_node.get_block_by_height(1).await.unwrap();
     assert_eq!(
         block.system_ledgers[0].tx_ids,
         vec![stake_tx.id, pledge_tx.id]
     );
 
-    genesis_node.stop().await;
+    restarted_node.stop().await;
 
     Ok(())
 }
- 
+
 // This test aims to (currently) test how the EVM interacts with forks and reorgs in the context of the mempool deciding which txs it should select
 // it does this by:
 // 1.) creating a fork with a transfer that would allow an account (recipient2) to afford a storage transaction (& validating this tx is included by the mempool)
