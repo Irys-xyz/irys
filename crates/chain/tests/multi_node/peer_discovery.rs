@@ -4,16 +4,10 @@ use std::{
 };
 
 use crate::utils::IrysNodeTest;
-use actix_web::{
-    middleware::Logger,
-    test::{self, call_service, read_body, TestRequest},
-    web::{self, JsonConfig},
-    App,
-};
+use actix_web::test::{call_service, read_body, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
 use irys_types::{
     build_user_agent, irys::IrysSigner, NodeConfig, PeerAddress, PeerResponse, RethPeerInfo,
     VersionRequest,
@@ -49,34 +43,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     node.node_ctx.start_mining().await.unwrap();
 
-    let app_state = ApiState {
-        ema_service: node.node_ctx.service_senders.ema.clone(),
-        reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node
-            .node_ctx
-            .reth_handle
-            .rpc_server_handle()
-            .http_url()
-            .unwrap(),
-        block_index: node.node_ctx.block_index_guard.clone(),
-        block_tree: node.node_ctx.block_tree_guard.clone(),
-        db: node.node_ctx.db.clone(),
-        mempool_service: node.node_ctx.service_senders.mempool.clone(),
-        peer_list: node.node_ctx.peer_list.clone(),
-        chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: config.clone().into(),
-        sync_state: node.node_ctx.sync_state.clone(),
-    };
-
-    // Initialize the app
-    let app = test::init_service(
-        App::new()
-            .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
-            .app_data(web::Data::new(app_state))
-            .wrap(Logger::default())
-            .service(routes()),
-    )
-    .await;
+    let app = node.start_public_api().await;
 
     // Invoke the peer list endpoint
     let req = TestRequest::get().uri("/v1/peer_list").to_request();
