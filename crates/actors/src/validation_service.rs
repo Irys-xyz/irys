@@ -4,6 +4,8 @@
 //! - Validating VDF (Verifiable Delay Function) steps
 //! - Validating recall range
 //! - Validating PoA (Proof of Access)
+//! - Valdiating that the generated system txs in the reth block
+//!   match the expected system txs from the irys block.
 //!
 //! The service supports concurrent validation tasks for improved performance.
 
@@ -16,6 +18,7 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::ensure;
+use futures::future::Either;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
@@ -117,35 +120,34 @@ impl ValidationService {
 
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
-            tokio::select! {
-                // Handle incoming messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => self.inner.handle_message(msg),
-                        None => {
-                            warn!("receiver channel closed");
-                            break None;
-                        }
-                    }
+            // Handle shutdown or message reception
+            let mut msg_rx = pin!(self.msg_rx.recv());
+            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
+                Either::Left((Some(msg), _)) => {
+                    self.inner.handle_message(msg);
                 }
-                // Clean up completed tasks
-                Some(result) = self.inner.validation_tasks.join_next() => {
-                    match result {
-                        Ok(()) => {
-                            debug!("validation task completed successfully");
-                        }
-                        Err(e) if e.is_cancelled() => {
-                            debug!("validation task was cancelled");
-                        }
-                        Err(e) => {
-                            error!(?e, "validation task panicked");
-                        }
-                    }
+                Either::Left((None, _)) => {
+                    warn!("receiver channel closed");
+                    break None;
                 }
-                // Handle shutdown signal
-                shutdown = &mut shutdown_future => {
+                Either::Right((shutdown, _)) => {
                     warn!("shutdown signal received");
                     break Some(shutdown);
+                }
+            }
+
+            // Clean up completed tasks (non-blocking)
+            while let Some(result) = self.inner.validation_tasks.try_join_next() {
+                match result {
+                    Ok(()) => {
+                        debug!("validation task completed successfully");
+                    }
+                    Err(e) if e.is_cancelled() => {
+                        debug!("validation task was cancelled");
+                    }
+                    Err(e) => {
+                        error!(?e, "validation task panicked");
+                    }
                 }
             }
         };

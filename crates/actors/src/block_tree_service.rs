@@ -1568,7 +1568,9 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
 }
 
 /// Returns the canonical chain where the first item in the Vec is the oldest block
-/// Implementation detail: utilises `tokio::task::spawn_blocking`
+/// Uses spawn_blocking to prevent the read operation from blocking the async executor
+/// and locking other async tasks while traversing the block tree.
+/// Notably useful in single-threaded tokio based unittests.
 pub async fn get_canonical_chain(
     tree: BlockTreeReadGuard,
 ) -> eyre::Result<(Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize)> {
@@ -1578,7 +1580,9 @@ pub async fn get_canonical_chain(
 }
 
 /// Returns the block from the block tree at a given block hash
-/// Implementation detail: utilises `tokio::task::spawn_blocking`
+/// Uses spawn_blocking to prevent the read operation from blocking the async executor
+/// and locking other async tasks while accessing the block tree.
+/// Notably useful in single-threaded tokio based unittests.
 pub async fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,
