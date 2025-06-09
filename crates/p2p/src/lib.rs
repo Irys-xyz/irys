@@ -1,4 +1,5 @@
 mod block_pool_service;
+mod block_status_provider;
 mod cache;
 mod gossip_client;
 mod gossip_service;
@@ -18,3 +19,4 @@ pub use peer_list::{PeerListFacade, PeerListFacadeError, PeerListServiceFacade};
 pub use peer_list::{PeerListService, PeerListServiceError};
 pub use sync::{sync_chain, SyncState};
 pub use types::{GossipError, GossipResult};
+pub use block_status_provider::{BlockStatusProvider, BlockStatus};

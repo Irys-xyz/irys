@@ -1,5 +1,5 @@
 use crate::{
-    block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock},
+    block_pool_service::{BlockProcessedOrProcessing, BlockPoolService, GetBlockByHash, ProcessBlock},
     cache::{GossipCache, GossipCacheKey},
     peer_list::PeerListFacade,
     sync::SyncState,
@@ -20,18 +20,20 @@ use irys_types::{
 };
 use std::sync::Arc;
 use tracing::{debug, error, Span};
+use crate::block_status_provider::BlockStatusProvider;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R>
+pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R, BlockProvider>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
     TApiClient: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    BlockProvider: BlockStatusProvider,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: Addr<BlockPoolService<TApiClient, R, TBlockDiscovery>>,
+    pub block_pool: Addr<BlockPoolService<TApiClient, R, TBlockDiscovery, BlockProvider>>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
@@ -41,12 +43,13 @@ where
     pub span: Span,
 }
 
-impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
+impl<M, B, A, R, BP> Clone for GossipServerDataHandler<M, B, A, R, BP>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    BP: BlockStatusProvider,
 {
     fn clone(&self) -> Self {
         Self {
@@ -62,12 +65,13 @@ where
     }
 }
 
-impl<M, B, A, R> GossipServerDataHandler<M, B, A, R>
+impl<M, B, A, R, BP> GossipServerDataHandler<M, B, A, R, BP>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    BP: BlockStatusProvider,
 {
     pub(crate) async fn handle_chunk(
         &self,
@@ -273,7 +277,7 @@ where
 
         let has_block_already_been_processed = self
             .block_pool
-            .send(BlockExists {
+            .send(BlockProcessedOrProcessing {
                 block_hash: block_header.block_hash,
             })
             .await
