@@ -1805,7 +1805,9 @@ impl Inner {
                 .unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
         }
 
-        // TODO: Similar logic for storage_tx
+        for (_txid, storage_tx) in recovered.storage_txs {
+            self.handle_tx_ingress_message(storage_tx).await.unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
+        }
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
