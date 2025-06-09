@@ -624,28 +624,6 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
-    /// Load persisted mempool transactions from the database
-    /// and then wipe the database
-    async fn load_persisted_state(&self) -> eyre::Result<()> {
-        let read_tx = self.read_tx().await?;
-        let txs = all_mempool_tx_headers(&read_tx)?;
-
-        for tx in txs {
-            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx.clone(), oneshot_tx);
-            if let Err(err) = self.service_senders.mempool.send(tx_ingress_msg) {
-                tracing::error!("error sending message to mempool: {:?}", err);
-            }
-            let _msg_result = oneshot_rx.await;
-        }
-
-        self.irys_db.update_eyre(|tx| {
-            clear_mempool_tx_headers(tx)?;
-            Ok(())
-        })?;
-
-        Ok(())
-    }
     async fn handle_get_storage_transaction_message(
         &self,
         tx: H256,
