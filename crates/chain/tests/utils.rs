@@ -415,6 +415,57 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    pub async fn wait_for_ingress_proofs(
+        &self,
+        mut unconfirmed_promotions: Vec<H256>,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        tracing::info!(
+            "waiting up to {} seconds for unconfirmed_promotions: {:?}",
+            seconds,
+            unconfirmed_promotions
+        );
+        for attempts in 1..seconds {
+            // Do we have any unconfirmed promotions?
+            let Some(txid) = unconfirmed_promotions.first() else {
+                // if not return we are done
+                return Ok(());
+            };
+
+            // create db read transaction
+            let ro_tx = self
+                .node_ctx
+                .db
+                .as_ref()
+                .tx()
+                .map_err(|e| {
+                    tracing::error!("Failed to create mdbx transaction: {}", e);
+                })
+                .unwrap();
+
+            // Retrieve the transaction header from database
+            let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap();
+            if let Some(tx_header) = tx_header {
+                //read its ingressproof(s)
+                match ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+                    Some(proof) => {
+                        assert_eq!(proof.data_root, tx_header.data_root);
+                        tracing::info!("Proofs available after {} attempts", attempts);
+                        unconfirmed_promotions.pop();
+                    }
+                    _ => {}
+                };
+            }
+            drop(ro_tx);
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed waiting for ingress proofs. Waited {} seconds",
+            seconds,
+        ))
+    }
+
     pub fn get_height_on_chain(&self) -> u64 {
         self.node_ctx.block_index_guard.read().latest_height()
     }

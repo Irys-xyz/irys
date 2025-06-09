@@ -165,42 +165,11 @@ async fn heavy_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
-    let mut unconfirmed_promotions = vec![
-        txs[2].header.id.as_bytes().to_base58(),
-        txs[0].header.id.as_bytes().to_base58(),
-    ];
-    println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-
-    for attempts in 1..20 {
-        // Do we have any unconfirmed promotions?
-        let Some(txid) = unconfirmed_promotions.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the transactions from the node endpoint
-        println!("Attempting... {}", txid);
-        let req = test::TestRequest::get()
-            .uri(&format!("/v1/tx/{}", &txid))
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-
-        if resp.status() == StatusCode::OK {
-            let tx_header: IrysTransactionHeader = test::read_body_json(resp).await;
-            info!("Transaction was retrieved ok after {} attempts", attempts);
-            if let Some(_proof) = tx_header.ingress_proofs {
-                assert_eq!(tx_header.id.as_bytes().to_base58(), *txid);
-                println!("Confirming... {}", tx_header.id.as_bytes().to_base58());
-                unconfirmed_promotions.remove(0);
-                println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-            }
-        }
-
-        sleep(delay).await;
-    }
-
-    assert_eq!(unconfirmed_promotions.len(), 0);
+    let unconfirmed_promotions = vec![txs[2].header.id, txs[0].header.id];
+    let result = node
+        .wait_for_ingress_proofs(unconfirmed_promotions, 20)
+        .await;
+    assert!(result.is_ok());
 
     // wait for the first set of chunks chunk to appear in the publish ledger
     for _attempts in 1..20 {
