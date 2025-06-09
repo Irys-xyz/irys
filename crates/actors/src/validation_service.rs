@@ -29,7 +29,7 @@ use std::{pin::pin, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::{
     sync::mpsc::UnboundedReceiver,
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
 use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 
@@ -68,8 +68,6 @@ struct ValidationServiceInner {
     reth_node_adapter: IrysRethNodeAdapter,
     /// Database provider for transaction lookups
     db: DatabaseProvider,
-    /// Active validation tasks
-    validation_tasks: JoinSet<()>,
 }
 
 impl ValidationService {
@@ -102,7 +100,6 @@ impl ValidationService {
                         service_senders,
                         reth_node_adapter,
                         db,
-                        validation_tasks: JoinSet::new(),
                     },
                 };
 
@@ -124,7 +121,7 @@ impl ValidationService {
             let mut msg_rx = pin!(self.msg_rx.recv());
             match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
                 Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg);
+                    self.inner.handle_message(msg).await;
                 }
                 Either::Left((None, _)) => {
                     warn!("receiver channel closed");
@@ -135,21 +132,6 @@ impl ValidationService {
                     break Some(shutdown);
                 }
             }
-
-            // Clean up completed tasks (non-blocking)
-            while let Some(result) = self.inner.validation_tasks.try_join_next() {
-                match result {
-                    Ok(()) => {
-                        debug!("validation task completed successfully");
-                    }
-                    Err(e) if e.is_cancelled() => {
-                        debug!("validation task was cancelled");
-                    }
-                    Err(e) => {
-                        error!(?e, "validation task panicked");
-                    }
-                }
-            }
         };
 
         // Process remaining messages before shutdown
@@ -158,15 +140,8 @@ impl ValidationService {
             "processing last in-bound messages before shutdown"
         );
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg);
+            self.inner.handle_message(msg).await;
         }
-
-        // Abort all active validation tasks and wait for them to finish
-        info!(
-            "aborting {} active validation tasks",
-            self.inner.validation_tasks.len()
-        );
-        self.inner.validation_tasks.shutdown().await;
 
         // Explicitly inform the TaskManager that we're shutting down
         drop(shutdown_guard);
@@ -179,64 +154,47 @@ impl ValidationService {
 impl ValidationServiceInner {
     /// Handle incoming messages
     #[instrument(skip_all)]
-    fn handle_message(&mut self, msg: ValidationServiceMessage) {
+    async fn handle_message(&mut self, msg: ValidationServiceMessage) {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
-                self.spawn_validation_task(block);
+                let block_hash = block.block_hash;
+                let block_height = block.height;
+
+                debug!(?block_hash, ?block_height, "validating block");
+
+                let vdf_ff = &self.service_senders.vdf_fast_forward;
+                let validation_result = validate_block(
+                    block,
+                    self.block_index_guard.clone(),
+                    self.partition_assignments_guard.clone(),
+                    self.vdf_state_readonly.clone(),
+                    self.config.clone(),
+                    vdf_ff,
+                    self.reth_node_adapter.clone(),
+                    self.db.clone(),
+                )
+                .await
+                .unwrap_or(ValidationResult::Invalid);
+
+                // Notify the block tree service
+                if let Err(e) =
+                    self.service_senders
+                        .block_tree
+                        .send(BlockTreeServiceMessage::BlockValidationFinished {
+                            block_hash,
+                            validation_result,
+                        })
+                {
+                    error!(?e, "Failed to send validation result to block tree service");
+                }
             }
         }
     }
-
-    /// Spawn a validation task for a block
-    fn spawn_validation_task(&mut self, block: Arc<IrysBlockHeader>) {
-        let block_hash = block.block_hash;
-        let block_height = block.height;
-
-        debug!(?block_hash, ?block_height, "spawning validation task");
-
-        // Clone necessary data for the spawned task
-        let block_index_guard = self.block_index_guard.clone();
-        let partitions_guard = self.partition_assignments_guard.clone();
-        let vdf_state = self.vdf_state_readonly.clone();
-        let config = self.config.clone();
-        let service_senders = self.service_senders.clone();
-        let reth_adapter = self.reth_node_adapter.clone();
-        let db = self.db.clone();
-
-        // Spawn the validation task
-        self.validation_tasks.spawn(async move {
-            let vdf_ff = &service_senders.vdf_fast_forward;
-            let validation_result = validate_block_concurrent(
-                block,
-                block_index_guard,
-                partitions_guard,
-                vdf_state,
-                config,
-                vdf_ff,
-                reth_adapter,
-                db,
-            )
-            .await
-            .unwrap_or(ValidationResult::Invalid);
-
-            // Also notify the block tree service
-            if let Err(e) =
-                service_senders
-                    .block_tree
-                    .send(BlockTreeServiceMessage::BlockValidationFinished {
-                        block_hash,
-                        validation_result,
-                    })
-            {
-                error!(?e, "Failed to send validation result to block tree service");
-            };
-        });
-    }
 }
 
-/// Perform concurrent block validation
+/// Perform block validation
 #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
-async fn validate_block_concurrent(
+async fn validate_block(
     block: Arc<IrysBlockHeader>,
     block_index_guard: BlockIndexReadGuard,
     partitions_guard: PartitionAssignmentsReadGuard,
