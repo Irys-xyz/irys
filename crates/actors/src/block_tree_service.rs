@@ -1568,7 +1568,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
 /// Implementation detail: utilises `tokio::task::spawn_blocking`
 pub async fn get_canonical_chain(
     tree: BlockTreeReadGuard,
-) -> eyre::Result<(Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize)> {
+) -> eyre::Result<(Vec<ChainCacheEntry>, usize)> {
     let canonical_chain =
         tokio::task::spawn_blocking(move || tree.read().get_canonical_chain()).await?;
     Ok(canonical_chain)
