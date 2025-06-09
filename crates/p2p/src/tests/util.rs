@@ -130,7 +130,20 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> std::result::Result<bool, TxIngressError> {
+    async fn is_known_commitment_tx(
+        &self,
+        tx_id: H256,
+    ) -> std::result::Result<bool, TxIngressError> {
+        let exists = self
+            .txs
+            .read()
+            .expect("to read txs")
+            .iter()
+            .any(|message| message.id == tx_id);
+        Ok(exists)
+    }
+
+    async fn is_known_storage_tx(&self, tx_id: H256) -> std::result::Result<bool, TxIngressError> {
         let exists = self
             .txs
             .read()

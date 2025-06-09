@@ -69,7 +69,8 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+    async fn is_known_commitment_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+    async fn is_known_storage_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
 }
 
 #[derive(Clone, Debug)]
@@ -85,11 +86,11 @@ impl From<UnboundedSender<MempoolServiceMessage>> for MempoolServiceFacadeImpl {
 
 #[async_trait::async_trait]
 impl MempoolFacade for MempoolServiceFacadeImpl {
-    // get/read transaction from mempool
+    // get/read storage transaction from mempool
     async fn handle_get_transaction(&self, tx: H256) -> Result<IrysTransactionHeader, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetTransaction(tx, oneshot_tx))
+            .send(MempoolServiceMessage::GetStorageTransaction(tx, oneshot_tx))
             .map_err(|_| TxReadError::Other("Error sending GetTransaction ".to_owned()))?;
 
         if let Ok(response) = oneshot_rx.await {
@@ -195,11 +196,27 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process ChunkIngressMessage")
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+    async fn is_known_commitment_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))
-            .map_err(|_| TxIngressError::Other("Error sending TxExistenceQuery ".to_owned()))?;
+            .send(MempoolServiceMessage::CommitmentTxExistenceQuery(
+                tx_id, oneshot_tx,
+            ))
+            .map_err(|_| {
+                TxIngressError::Other("Error sending CommitmentTxExistenceQuery ".to_owned())
+            })?;
+
+        oneshot_rx.await.expect("to process TxExistenceQuery")
+    }
+    async fn is_known_storage_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::StorageTxExistenceQuery(
+                tx_id, oneshot_tx,
+            ))
+            .map_err(|_| {
+                TxIngressError::Other("Error sending StorageTxExistenceQuery ".to_owned())
+            })?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
     }
@@ -227,7 +244,7 @@ pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
     BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
     /// Get IrysTransactionHeader
-    GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
+    GetStorageTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
     /// get CommitmentTransaction by H256 id
     GetCommitmentTxById(H256, oneshot::Sender<Option<CommitmentTransaction>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -257,8 +274,10 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-    /// Confirm if tx exists in database
-    TxExistenceQuery(H256, oneshot::Sender<Result<bool, TxIngressError>>),
+    /// Confirm CommitmentTransaction tx exists in mempool
+    CommitmentTxExistenceQuery(H256, oneshot::Sender<Result<bool, TxIngressError>>),
+    /// Confirm IrysTransactionHeader exists in mempool
+    StorageTxExistenceQuery(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// validate and process an incoming IrysTransactionHeader
     TxIngressMessage(
         IrysTransactionHeader,
@@ -627,7 +646,10 @@ impl Inner {
 
         Ok(())
     }
-    async fn handle_get_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
+    async fn handle_get_storage_transaction_message(
+        &self,
+        tx: H256,
+    ) -> Option<IrysTransactionHeader> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
         // if tx exists in mempool valid_tx (temporary storage)
@@ -873,9 +895,9 @@ impl Inner {
                 .iter()
                 .enumerate()
             {
-                // Retrieve the promoted transactions header from mempool or database
+                // Retrieve the promoted transactions header from mempool
                 // else continue loop to skip this transaction
-                let mut tx_header = match self.handle_get_transaction_message(*txid).await {
+                let mut tx_header = match self.handle_get_storage_transaction_message(*txid).await {
                     None => continue,
                     Some(tx_hdr) => tx_hdr,
                 };
@@ -1616,8 +1638,8 @@ impl Inner {
     ) -> BoxFuture<'a, eyre::Result<()>> {
         Box::pin(async move {
             match msg {
-                MempoolServiceMessage::GetTransaction(tx, response) => {
-                    let response_message = self.handle_get_transaction_message(tx).await;
+                MempoolServiceMessage::GetStorageTransaction(tx, response) => {
+                    let response_message = self.handle_get_storage_transaction_message(tx).await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1664,7 +1686,13 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::TxExistenceQuery(txid, response) => {
+                MempoolServiceMessage::CommitmentTxExistenceQuery(txid, response) => {
+                    let response_value = self.handle_tx_existence_query(txid).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::StorageTxExistenceQuery(txid, response) => {
                     let response_value = self.handle_tx_existence_query(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);

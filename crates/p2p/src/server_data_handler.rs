@@ -146,7 +146,7 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_tx(tx_id).await? {
+        if self.mempool.is_known_storage_tx(tx_id).await? {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -198,7 +198,7 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_tx(tx_id).await? {
+        if self.mempool.is_known_commitment_tx(tx_id).await? {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -302,7 +302,7 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(tx_id).await? {
+            if !self.is_known_storage_tx(tx_id).await? {
                 missing_tx_ids.push(tx_id);
             }
         }
@@ -312,7 +312,7 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(system_tx_id).await? {
+            if !self.is_known_commitment_tx(system_tx_id).await? {
                 missing_tx_ids.push(system_tx_id);
             }
         }
@@ -373,8 +373,12 @@ where
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        Ok(self.mempool.is_known_tx(tx_id).await?)
+    async fn is_known_storage_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+        Ok(self.mempool.is_known_storage_tx(tx_id).await?)
+    }
+
+    async fn is_known_commitment_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+        Ok(self.mempool.is_known_commitment_tx(tx_id).await?)
     }
 
     pub(crate) async fn handle_get_data(

@@ -133,7 +133,7 @@ pub async fn get_transaction(
     // get from mempool
     // todo: replace with facade fn call
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::GetTransaction(tx_id, oneshot_tx);
+    let tx_ingress_msg = MempoolServiceMessage::GetStorageTransaction(tx_id, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!(
             "API Failed to deliver MempoolServiceMessage::GetTransaction: {:?}",

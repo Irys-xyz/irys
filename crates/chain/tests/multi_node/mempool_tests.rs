@@ -166,7 +166,7 @@ async fn mempool_persistance_test() -> eyre::Result<()> {
     // confirm the mempool tx have appeared back in the mempool after a restart
     for txid_to_check in vec![stake_tx.id, pledge_tx.id] {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let get_tx_msg = MempoolServiceMessage::GetTransaction(txid_to_check, oneshot_tx);
+        let get_tx_msg = MempoolServiceMessage::GetStorageTransaction(txid_to_check, oneshot_tx);
         if let Err(err) = restarted_node
             .node_ctx
             .service_senders
