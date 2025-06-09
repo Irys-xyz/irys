@@ -47,7 +47,7 @@ impl BlockStatusProvider {
         }
     }
 
-    pub fn block_is_in_the_tree(&self, block_hash: &H256) -> bool {
+    pub fn is_block_in_the_tree(&self, block_hash: &H256) -> bool {
         self.block_tree_read_guard
             .read()
             .get_block(block_hash)
@@ -81,11 +81,9 @@ impl BlockStatusProvider {
     }
 
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
-        let block_is_in_the_tree = self.block_is_in_the_tree(block_hash);
+        let block_is_in_the_tree = self.is_block_in_the_tree(block_hash);
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
-
-        println!("{:?}", binding.items);
 
         if let Some(index_item) = index_item {
             if &index_item.block_hash == block_hash {

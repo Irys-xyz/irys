@@ -290,7 +290,9 @@ impl GossipServiceTestFixture {
     pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
-        let config = NodeConfig::testnet().into();
+        let mut node_config = NodeConfig::testnet();
+        node_config.base_directory = temp_dir.path().to_path_buf();
+        let config = Config::new(node_config);
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
