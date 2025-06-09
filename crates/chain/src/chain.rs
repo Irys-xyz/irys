@@ -960,6 +960,8 @@ impl IrysNode {
             vdf_state_readonly.clone(),
             &config,
             &service_senders,
+            reth_node_adapter.clone(),
+            irys_db.clone(),
             receivers.validation_service,
         );
 

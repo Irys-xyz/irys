@@ -6,18 +6,28 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
 };
+use alloy_consensus::Transaction;
+use alloy_eips::HashOrNumber;
 use base58::ToBase58;
-use eyre::ensure;
+use eyre::{ensure, eyre, OptionExt};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt, tx_header_by_txid};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
+use irys_reth::alloy_rlp::Decodable;
+use irys_reth::system_tx::{
+    BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket,
+};
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
-    DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
+    Address, Config, ConsensusConfig, DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
+    IrysTransactionCommon, IrysTransactionHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use openssl::sha;
+use reth::{providers::TransactionsProvider, revm::primitives::ruint::Uint};
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
@@ -459,6 +469,148 @@ pub fn poa_is_valid(
             ));
         }
     }
+    Ok(())
+}
+
+/// Validates that the system transactions in the EVM block match the expected system transactions
+/// generated from the Irys block data.
+pub async fn system_transactions_are_valid(
+    block: &IrysBlockHeader,
+    reth_adapter: &IrysRethNodeAdapter,
+    db: &DatabaseProvider,
+) -> eyre::Result<()> {
+    // 1. Fetch EVM block transactions
+    let block_txs = reth_adapter
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(block.evm_block_hash))?
+        .ok_or_eyre("Block not found in reth")?;
+
+    // 2. Extract system transactions from the beginning of the block
+    let mut system_txs = Vec::new();
+    for tx in block_txs {
+        // Try to decode as system transaction
+        if let Ok(system_tx) = SystemTransaction::decode(&mut tx.input().as_ref()) {
+            let tx_signer = tx.into_signed().recover_signer()?;
+            ensure!(
+                block.miner_address == tx_signer,
+                "System tx signer is not the miner"
+            );
+            system_txs.push(system_tx);
+        } else {
+            // If we can't decode as system tx, we've reached the regular transactions
+            break;
+        }
+    }
+
+    // 3. Generate expected system transactions
+    let expected_txs = generate_expected_system_transactions_from_db(block, db).await?;
+
+    // 4. Validate they match
+    validate_system_transactions_match(&system_txs, &expected_txs)
+}
+
+/// Generates the expected system transactions for a given block
+///
+/// Safety: block rewrards are already validate in block prevadliatino thus we trust them at face-value
+pub fn generate_expected_system_transactions(
+    block_height: u64,
+    reward_address: Address,
+    reward_amount: reth::revm::primitives::U256,
+    parent_evm_block_hash: H256,
+    submit_txs: &[IrysTransactionHeader],
+) -> eyre::Result<Vec<SystemTransaction>> {
+    let mut expected_txs = Vec::new();
+
+    // 1. Block reward transaction (always first)
+    let block_reward_tx = SystemTransaction::new_v1(
+        block_height,
+        parent_evm_block_hash.into(),
+        TransactionPacket::BlockReward(BalanceIncrement {
+            amount: reward_amount.into(),
+            target: reward_address,
+        }),
+    );
+    expected_txs.push(block_reward_tx);
+
+    // For each transaction in the submit ledger, create a storage fee system transaction
+    for submit_tx in submit_txs {
+        let storage_fee_tx = SystemTransaction::new_v1(
+            block_height,
+            parent_evm_block_hash.into(),
+            TransactionPacket::StorageFees(BalanceDecrement {
+                amount: Uint::from(submit_tx.total_fee()),
+                target: submit_tx.signer,
+            }),
+        );
+        expected_txs.push(storage_fee_tx);
+    }
+
+    Ok(expected_txs)
+}
+
+/// Generates expected system transactions by looking up required data from the database
+async fn generate_expected_system_transactions_from_db(
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<SystemTransaction>> {
+    // Look up previous block to get EVM hash
+    let prev_block = db
+        .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
+        .ok_or_eyre("Previous block not found")?;
+
+    // Look up submit transaction headers
+    let submit_ledger = block
+        .data_ledgers
+        .iter()
+        .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
+        .ok_or_eyre("Submit ledger not found")?;
+
+    let submit_txs = Vec::new();
+    for _tx_id in &submit_ledger.tx_ids.0 {
+        // todo: we need to query the db and mempool at the same time because
+        // there's no guarantee where the tx will be located
+        //
+        // if let Some(tx_header) = db.view_eyre(|tx| tx_header_by_txid(tx, tx_id))? {
+        //     submit_txs.push(tx_header);
+        // }
+    }
+
+    generate_expected_system_transactions(
+        block.height,
+        block.reward_address,
+        block.reward_amount.into(),
+        H256(prev_block.evm_block_hash.0),
+        &submit_txs,
+    )
+}
+
+/// Validates that the actual system transactions match the expected ones
+#[tracing::instrument(err)]
+fn validate_system_transactions_match(
+    actual: &[SystemTransaction],
+    expected: &[SystemTransaction],
+) -> eyre::Result<()> {
+    // Check that we have at least the expected number of system transactions
+    ensure!(
+        actual.len() >= expected.len(),
+        "Insufficient system transactions: expected at least {}, got {}",
+        expected.len(),
+        actual.len()
+    );
+
+    // Validate each expected system transaction
+    for (i, (actual_tx, expected_tx)) in actual.iter().zip(expected.iter()).enumerate() {
+        // Check block height using getter method
+        ensure!(
+            actual_tx == expected_tx,
+            "System transaction mismatch at idx {}. expected {:?}, got {:?}",
+            i,
+            expected_tx,
+            actual_tx
+        );
+    }
+
     Ok(())
 }
 

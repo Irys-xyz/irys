@@ -5,7 +5,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    validation_service::{ValidationService, ValidationServiceMessage},
+    validation_service::ValidationServiceMessage,
     BlockFinalizedMessage,
 };
 use actix::prelude::*;

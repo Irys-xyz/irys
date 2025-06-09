@@ -7,7 +7,7 @@
 //!
 //! The service supports concurrent validation tasks for improved performance.
 
-use crate::block_validation::recall_recall_range_is_valid;
+use crate::block_validation::{recall_recall_range_is_valid, system_transactions_are_valid};
 use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeServiceMessage, ValidationResult},
@@ -16,17 +16,14 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::ensure;
-use futures::future::Either;
-use irys_types::{Config, IrysBlockHeader, H256};
+use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
 use tokio::{
-    sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
-        oneshot,
-    },
+    sync::mpsc::UnboundedReceiver,
     task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, error, info, instrument, trace, warn, Instrument};
@@ -62,6 +59,10 @@ struct ValidationServiceInner {
     config: Config,
     /// Service channels
     service_senders: ServiceSenders,
+    /// Reth node adapter for RPC calls
+    reth_node_adapter: IrysRethNodeAdapter,
+    /// Database provider for transaction lookups
+    db: DatabaseProvider,
     /// Active validation tasks
     validation_tasks: JoinSet<()>,
 }
@@ -75,6 +76,8 @@ impl ValidationService {
         vdf_state_readonly: VdfStateReadonly,
         config: &Config,
         service_senders: &ServiceSenders,
+        reth_node_adapter: IrysRethNodeAdapter,
+        db: DatabaseProvider,
         rx: UnboundedReceiver<ValidationServiceMessage>,
     ) -> JoinHandle<()> {
         let config = config.clone();
@@ -92,6 +95,8 @@ impl ValidationService {
                         vdf_state_readonly,
                         config,
                         service_senders,
+                        reth_node_adapter,
+                        db,
                         validation_tasks: JoinSet::new(),
                     },
                 };
@@ -191,6 +196,8 @@ impl ValidationServiceInner {
         let vdf_state = self.vdf_state_readonly.clone();
         let config = self.config.clone();
         let service_senders = self.service_senders.clone();
+        let reth_adapter = self.reth_node_adapter.clone();
+        let db = self.db.clone();
 
         // Spawn the validation task
         self.validation_tasks.spawn(async move {
@@ -201,6 +208,8 @@ impl ValidationServiceInner {
                 vdf_state,
                 config,
                 service_senders.clone(),
+                reth_adapter,
+                db,
             )
             .await
             .unwrap_or(ValidationResult::Invalid);
@@ -229,6 +238,8 @@ async fn validate_block_concurrent(
     vdf_state: VdfStateReadonly,
     config: Config,
     service_senders: ServiceSenders,
+    reth_adapter: IrysRethNodeAdapter,
+    db: DatabaseProvider,
 ) -> eyre::Result<ValidationResult> {
     let vdf_info = block.vdf_limiter_info.clone();
 
@@ -299,11 +310,30 @@ async fn validate_block_concurrent(
         .instrument(tracing::info_span!("poa task validation"))
     };
 
-    // Wait for both tasks to complete
-    let (recall_result, poa_result) = tokio::try_join!(recall_task, poa_task)?;
+    // System transaction validation
+    let system_tx_task = {
+        let block = block.clone();
+        let reth_adapter = reth_adapter.clone();
+        let db = db.clone();
+        tokio::spawn(async move {
+            system_transactions_are_valid(&block, &reth_adapter, &db)
+                .await
+                .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
+                .map(|_| ValidationResult::Valid)
+                // TODO: we just assume all system txs are valid until we fix the validator
+                .unwrap_or(ValidationResult::Valid)
+        })
+        .instrument(tracing::info_span!("system transaction validation"))
+    };
 
-    match (recall_result, poa_result) {
-        (ValidationResult::Valid, ValidationResult::Valid) => Ok(ValidationResult::Valid),
+    // Wait for all three tasks to complete
+    let (recall_result, poa_result, system_tx_result) =
+        tokio::try_join!(recall_task, poa_task, system_tx_task)?;
+
+    match (recall_result, poa_result, system_tx_result) {
+        (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
+            Ok(ValidationResult::Valid)
+        }
         _ => Ok(ValidationResult::Invalid),
     }
 }
