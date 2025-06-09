@@ -159,7 +159,7 @@ impl P2PService {
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
         listener: TcpListener,
-        block_status_provider: impl BlockStatusProvider,
+        block_status_provider: BlockStatusProvider,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,

@@ -22,28 +22,25 @@ use irys_types::{
 };
 use std::net::TcpListener;
 use tracing::{debug, error, info};
-use crate::block_status_provider::BlockStatusProvider;
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B, A, R, BP>
+pub(crate) struct GossipServer<M, B, A, R>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    BP: BlockStatusProvider,
 {
-    data_handler: GossipServerDataHandler<M, B, A, R, BP>,
+    data_handler: GossipServerDataHandler<M, B, A, R>,
     peer_list: PeerListFacade<A, R>,
 }
 
-impl<M, B, A, R, BP> Clone for GossipServer<M, B, A, R, BP>
+impl<M, B, A, R> Clone for GossipServer<M, B, A, R>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    BP: BlockStatusProvider,
 {
     fn clone(&self) -> Self {
         Self {
@@ -53,16 +50,15 @@ where
     }
 }
 
-impl<M, B, A, R, BP> GossipServer<M, B, A, R, BP>
+impl<M, B, A, R> GossipServer<M, B, A, R>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    BP: BlockStatusProvider,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, B, A, R, BP>,
+        gossip_server_data_handler: GossipServerDataHandler<M, B, A, R>,
         peer_list: PeerListFacade<A, R>,
     ) -> Self {
         Self {

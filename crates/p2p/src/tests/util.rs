@@ -1,6 +1,6 @@
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
-use crate::{P2PService, ServiceHandleWithShutdownSignal};
+use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
@@ -265,6 +265,7 @@ pub(crate) struct GossipServiceTestFixture {
     #[allow(dead_code)]
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
+    pub block_status_provider: BlockStatusProvider,
 }
 
 impl Default for GossipServiceTestFixture {
@@ -345,6 +346,7 @@ impl GossipServiceTestFixture {
             api_client_stub: ApiClientStub::new(),
             task_manager,
             task_executor,
+            block_status_provider: BlockStatusProvider::default(),
         }
     }
 
@@ -386,6 +388,7 @@ impl GossipServiceTestFixture {
                 self.peer_list.clone().into(),
                 self.db.clone(),
                 gossip_listener,
+                self.block_status_provider.clone(),
             )
             .expect("failed to run gossip service");
 

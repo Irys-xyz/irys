@@ -37,7 +37,8 @@ use irys_database::{
     SystemLedger,
 };
 use irys_p2p::{
-    P2PService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
+    BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
+    ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::SystemTxStore;
@@ -989,6 +990,7 @@ impl IrysNode {
             peer_list_service.clone(),
             irys_db.clone(),
             gossip_listener,
+            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
         )?;
 
         // set up the price oracle

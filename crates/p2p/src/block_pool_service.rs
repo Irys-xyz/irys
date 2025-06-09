@@ -12,7 +12,7 @@ use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::HashMap;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub enum BlockPoolError {
@@ -29,12 +29,11 @@ impl From<PeerListFacadeError> for BlockPoolError {
 }
 
 #[derive(Debug)]
-pub(crate) struct BlockPoolService<A, R, B, BP>
+pub(crate) struct BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     /// Database provider for accessing transaction headers and related data.
     pub(crate) db: Option<DatabaseProvider>,
@@ -47,15 +46,14 @@ where
 
     sync_state: SyncState,
 
-    block_status_provider: BP,
+    block_status_provider: BlockStatusProvider,
 }
 
-impl<A, R, B, BP> Default for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Default for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     fn default() -> Self {
         Self {
@@ -65,17 +63,16 @@ where
             block_producer: None,
             peer_list: None,
             sync_state: SyncState::default(),
-            block_status_provider: BP::default(),
+            block_status_provider: BlockStatusProvider::default(),
         }
     }
 }
 
-impl<A, R, B, BP> Actor for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Actor for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Context = actix::Context<Self>;
 
@@ -84,37 +81,34 @@ where
     }
 }
 
-impl<A, R, B, BP> Supervised for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Supervised for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
 }
 
-impl<A, R, B, BP> SystemService for BlockPoolService<A, R, B, BP>
+impl<A, R, B> SystemService for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
 }
 
-impl<A, R, B, BP> BlockPoolService<A, R, B, BP>
+impl<A, R, B> BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     pub(crate) fn new_with_client(
         db: DatabaseProvider,
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: B,
         sync_state: SyncState,
-        block_status_provider: BP,
+        block_status_provider: BlockStatusProvider,
     ) -> Self {
         Self {
             db: Some(db),
@@ -130,27 +124,24 @@ where
     fn process_block(
         &mut self,
         block_header: IrysBlockHeader,
-        ctx: &mut <BlockPoolService<A, R, B, BP> as Actor>::Context,
+        ctx: &mut <BlockPoolService<A, R, B> as Actor>::Context,
     ) -> ResponseActFuture<Self, Result<(), BlockPoolError>> {
         let block_status = self
             .block_status_provider
-            .block_status_by_height(block_header.height);
-        let block_with_such_hash_has_already_been_processed = self.block_status_provider.block_has_been_processed(block_header.block_hash);
+            .block_status(block_header.height, &block_header.block_hash);
 
         match block_status {
             BlockStatus::NotProcessed => {}
             BlockStatus::ProcessedButSubjectToReorg => {
-                if block_with_such_hash_has_already_been_processed {
-                    debug!(
-                        "Block pool: Block {} (height {}) is already processed",
-                        block_header.block_hash.0.to_base58(),
-                        block_header.height,
-                    );
-                    return Box::pin(
-                        async move { Err(BlockPoolError::AlreadyProcessed(block_header.block_hash)) }
-                            .into_actor(self),
-                    );
-                }
+                debug!(
+                    "Block pool: Block {} (height {}) is already processed",
+                    block_header.block_hash.0.to_base58(),
+                    block_header.height,
+                );
+                return Box::pin(
+                    async move { Err(BlockPoolError::AlreadyProcessed(block_header.block_hash)) }
+                        .into_actor(self),
+                );
             }
             BlockStatus::Processed => {
                 debug!(
@@ -161,6 +152,17 @@ where
                 return Box::pin(
                     async move { Err(BlockPoolError::AlreadyProcessed(block_header.block_hash)) }
                         .into_actor(self),
+                );
+            }
+            BlockStatus::IndexHashMismatch => {
+                let message = format!(
+                    "Failed to process block {}/{}: index hash mismatch",
+                    block_header.block_hash.0.to_base58(),
+                    block_header.height,
+                );
+                warn!(message);
+                return Box::pin(
+                    async move { Err(BlockPoolError::BlockError(message)) }.into_actor(self),
                 );
             }
         }
@@ -194,7 +196,7 @@ where
                     current_block_hash.0.to_base58()
                 );
 
-                let previous_block_has_been_processed = block_status_provider.block_has_been_processed(prev_block_hash);
+                let previous_block_has_been_processed = block_status_provider.block_has_been_processed_by_the_tree(&prev_block_hash);
 
                 // If the parent block is in the db, process it
                 if previous_block_has_been_processed {
@@ -279,12 +281,11 @@ pub(crate) struct ProcessBlock {
     pub header: IrysBlockHeader,
 }
 
-impl<A, R, B, BP> Handler<ProcessBlock> for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Handler<ProcessBlock> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
@@ -299,12 +300,11 @@ struct TryToFetchParent {
     pub header: IrysBlockHeader,
 }
 
-impl<A, R, B, BP> Handler<TryToFetchParent> for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Handler<TryToFetchParent> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
@@ -355,12 +355,11 @@ struct RemoveBlockFromPool {
     pub block_hash: BlockHash,
 }
 
-impl<A, R, B, BP> Handler<RemoveBlockFromPool> for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Handler<RemoveBlockFromPool> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Result = ();
 
@@ -378,12 +377,11 @@ struct RequestBlockFromTheNetwork {
     pub block_hash: BlockHash,
 }
 
-impl<A, R, B, BP> Handler<RequestBlockFromTheNetwork> for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Handler<RequestBlockFromTheNetwork> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
@@ -433,12 +431,11 @@ pub(crate) struct GetBlockByHash {
     pub block_hash: BlockHash,
 }
 
-impl<A, R, B, BP> Handler<GetBlockByHash> for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Handler<GetBlockByHash> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Result = Result<Option<IrysBlockHeader>, BlockPoolError>;
 
@@ -468,23 +465,28 @@ pub(crate) struct BlockProcessedOrProcessing {
     pub block_hash: BlockHash,
 }
 
-impl<A, R, B, BP> Handler<BlockProcessedOrProcessing> for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Handler<BlockProcessedOrProcessing> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Result = Result<bool, BlockPoolError>;
 
-    fn handle(&mut self, msg: BlockProcessedOrProcessing, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(
+        &mut self,
+        msg: BlockProcessedOrProcessing,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
         let block_hash = msg.block_hash;
 
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
             return Ok(self.orphaned_blocks_by_parent.contains_key(parent_hash));
         }
 
-        Ok(self.block_status_provider.block_has_been_processed(block_hash))
+        Ok(self
+            .block_status_provider
+            .block_has_been_processed_by_the_tree(&block_hash))
     }
 }
 
@@ -494,12 +496,11 @@ struct ProcessOrphanedAncestor {
     pub block_hash: BlockHash,
 }
 
-impl<A, R, B, BP> Handler<ProcessOrphanedAncestor> for BlockPoolService<A, R, B, BP>
+impl<A, R, B> Handler<ProcessOrphanedAncestor> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
-    BP: BlockStatusProvider,
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 

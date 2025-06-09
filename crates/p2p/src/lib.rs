@@ -11,6 +11,7 @@ mod sync;
 mod tests;
 mod types;
 
+pub use block_status_provider::{BlockStatus, BlockStatusProvider};
 pub use gossip_client::GossipClient;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
@@ -19,4 +20,3 @@ pub use peer_list::{PeerListFacade, PeerListFacadeError, PeerListServiceFacade};
 pub use peer_list::{PeerListService, PeerListServiceError};
 pub use sync::{sync_chain, SyncState};
 pub use types::{GossipError, GossipResult};
-pub use block_status_provider::{BlockStatusProvider, BlockStatus};

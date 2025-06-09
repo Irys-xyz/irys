@@ -1,5 +1,7 @@
 use crate::{
-    block_pool_service::{BlockProcessedOrProcessing, BlockPoolService, GetBlockByHash, ProcessBlock},
+    block_pool_service::{
+        BlockPoolService, BlockProcessedOrProcessing, GetBlockByHash, ProcessBlock,
+    },
     cache::{GossipCache, GossipCacheKey},
     peer_list::PeerListFacade,
     sync::SyncState,
@@ -20,20 +22,18 @@ use irys_types::{
 };
 use std::sync::Arc;
 use tracing::{debug, error, Span};
-use crate::block_status_provider::BlockStatusProvider;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R, BlockProvider>
+pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
     TApiClient: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    BlockProvider: BlockStatusProvider,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: Addr<BlockPoolService<TApiClient, R, TBlockDiscovery, BlockProvider>>,
+    pub block_pool: Addr<BlockPoolService<TApiClient, R, TBlockDiscovery>>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
@@ -43,13 +43,12 @@ where
     pub span: Span,
 }
 
-impl<M, B, A, R, BP> Clone for GossipServerDataHandler<M, B, A, R, BP>
+impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    BP: BlockStatusProvider,
 {
     fn clone(&self) -> Self {
         Self {
@@ -65,13 +64,12 @@ where
     }
 }
 
-impl<M, B, A, R, BP> GossipServerDataHandler<M, B, A, R, BP>
+impl<M, B, A, R> GossipServerDataHandler<M, B, A, R>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    BP: BlockStatusProvider,
 {
     pub(crate) async fn handle_chunk(
         &self,

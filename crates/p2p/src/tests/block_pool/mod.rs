@@ -1,7 +1,7 @@
 use crate::block_pool_service::{BlockPoolService, ProcessBlock};
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
-use crate::SyncState;
+use crate::{BlockStatusProvider, SyncState};
 use actix::Actor;
 use async_trait::async_trait;
 use base58::ToBase58;
@@ -130,12 +130,15 @@ async fn should_process_block() {
     );
     let peer_addr = peer_list_service.start();
 
+    let block_status_provider_mock = BlockStatusProvider::default();
+
     let sync_state = SyncState::new(false);
     let service = BlockPoolService::new_with_client(
         db.clone(),
         peer_addr.into(),
         block_discovery_stub.clone(),
         sync_state,
+        block_status_provider_mock,
     );
     let addr = service.start();
 
@@ -299,11 +302,14 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     let sync_state = SyncState::new(false);
 
+    let block_status_provider_mock = BlockStatusProvider::default();
+
     let service = BlockPoolService::new_with_client(
         db.clone(),
         peer_addr.into(),
         block_discovery_stub.clone(),
         sync_state,
+        block_status_provider_mock,
     );
     let addr = service.start();
 
