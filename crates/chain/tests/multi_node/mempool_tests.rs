@@ -291,11 +291,11 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
                -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
             let stake_tx = peer.post_stake_commitment(H256::zero()).await;
             genesis
-                .wait_for_mempool(stake_tx.id, seconds_to_wait)
+                .wait_for_mempool_commitment_txs(vec![stake_tx.id], seconds_to_wait)
                 .await?;
             let pledge_tx = peer.post_pledge_commitment(H256::zero()).await;
             genesis
-                .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+                .wait_for_mempool_commitment_txs(vec![pledge_tx.id], seconds_to_wait)
                 .await?;
             Ok((stake_tx, pledge_tx))
         };

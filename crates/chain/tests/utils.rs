@@ -596,28 +596,32 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
-    pub async fn wait_for_mempool(
+    pub async fn wait_for_mempool_storage_txs(
         &self,
-        tx_id: IrysTransactionId,
+        mut tx_ids: Vec<IrysTransactionId>,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
 
-        for _ in 0..max_retries {
-            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            mempool_service.send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))?;
+        while let Some(tx_id) = tx_ids.pop() {
+            'inner: while retries < max_retries {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                mempool_service.send(MempoolServiceMessage::StorageTxExistenceQuery(
+                    tx_id.clone(),
+                    oneshot_tx,
+                ))?;
 
-            //if transaction exists
-            if oneshot_rx
-                .await
-                .expect("to process ChunkIngressMessage")
-                .expect("boolean response to transaction existence")
-            {
-                break;
+                //if transaction exists
+                if oneshot_rx
+                    .await
+                    .expect("to process ChunkIngressMessage")
+                    .expect("boolean response to transaction existence")
+                {
+                    break 'inner;
+                }
             }
-
             sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
@@ -629,6 +633,52 @@ impl IrysNodeTest<IrysNodeCtx> {
             ))
         } else {
             info!("transaction found in mempool after {} retries", &retries);
+            Ok(())
+        }
+    }
+
+    pub async fn wait_for_mempool_commitment_txs(
+        &self,
+        mut tx_ids: Vec<H256>,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait; // 1 second per retry
+
+        while let Some(tx_id) = tx_ids.pop() {
+            'inner: while retries < max_retries {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                mempool_service.send(MempoolServiceMessage::CommitmentTxExistenceQuery(
+                    tx_id.clone(),
+                    oneshot_tx,
+                ))?;
+
+                //if transaction exists in mempool
+                if oneshot_rx
+                    .await
+                    .expect("to process ChunkIngressMessage")
+                    .expect("boolean response to transaction existence")
+                {
+                    break 'inner;
+                }
+
+                sleep(Duration::from_secs(1)).await;
+                retries += 1;
+            }
+        }
+
+        if retries == max_retries {
+            tracing::error!(
+                "transaction not found in mempool after {} retries",
+                &retries
+            );
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transactions found in mempool after {} retries", &retries);
             Ok(())
         }
     }

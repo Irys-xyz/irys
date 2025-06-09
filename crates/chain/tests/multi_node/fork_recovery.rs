@@ -55,16 +55,16 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
     // Wait for all commitment tx to show up in the genesis_node's mempool
     genesis_node
-        .wait_for_mempool(peer1_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool_commitment_txs(vec![peer1_stake_tx.id], seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer1_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool_commitment_txs(vec![peer1_pledge_tx.id], seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool_commitment_txs(vec![peer2_stake_tx.id], seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool_commitment_txs(vec![peer2_pledge_tx.id], seconds_to_wait)
         .await?;
 
     // Mine a block to get the commitments included
@@ -113,8 +113,12 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
     // Wait for the transaction to gossip
     let txid = shared_tx.header.id;
-    peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
-    peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
+    peer1_node
+        .wait_for_mempool_storage_txs(vec![txid], seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_for_mempool_storage_txs(vec![txid], seconds_to_wait)
+        .await?;
 
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
