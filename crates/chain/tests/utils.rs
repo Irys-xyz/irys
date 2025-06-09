@@ -24,9 +24,11 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
-use irys_database::db::IrysDatabaseExt as _;
-use irys_database::tables::IrysBlockHeaders;
-use irys_database::tx_header_by_txid;
+use irys_database::{
+    db::IrysDatabaseExt as _,
+    tables::{IngressProofs, IrysBlockHeaders},
+    tx_header_by_txid,
+};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_primitives::CommitmentType;
@@ -46,8 +48,7 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
-use reth_db::cursor::*;
-use reth_db::Database;
+use reth_db::{cursor::*, transaction::DbTx, Database};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -384,6 +385,34 @@ impl IrysNodeTest<IrysNodeCtx> {
             );
             Ok(())
         }
+    }
+
+    pub async fn wait_for_chunk(
+        &self,
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = ServiceResponse,
+            Error = actix_web::Error,
+        >,
+        ledger: DataLedger,
+        offset: i32,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        let delay = Duration::from_secs(1);
+        for attempt in 1..seconds {
+            if let Some(_packed_chunk) =
+                get_chunk(&app, ledger, LedgerChunkOffset::from(offset)).await
+            {
+                info!("chunk found {} attempts", attempt);
+                return Ok(());
+            }
+            sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed waiting for chunk to arrive. Waited {} seconds",
+            seconds,
+        ))
     }
 
     pub fn get_height_on_chain(&self) -> u64 {
