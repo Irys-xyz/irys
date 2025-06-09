@@ -7,6 +7,7 @@ use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 pub mod state;
 pub mod vdf;
@@ -259,6 +260,69 @@ pub struct VdfStep {
 
 pub trait MiningBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
+}
+
+pub fn calibrate_vdf() -> u64 {
+    let precision_perc = 0.05;
+    let mut config = irys_types::ConsensusConfig::testnet().vdf;
+    let target_secs = Duration::from_secs(1).as_secs_f64();
+
+    let mut seed: H256 = H256::zero();
+    let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+
+    for attempt in 0..5 {
+        let mut hasher = Sha256::new();
+        let mut salt = U256::from(0);
+
+        let start = std::time::Instant::now();
+        // TODO: CPU turbo behaviour can mess this measurement up, figure out how to mitigate/account (CPU freq measuring??)
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut seed,
+            config.num_checkpoints_in_vdf_step,
+            config.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        let elapsed = start.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+
+        let ratio = target_secs / elapsed_secs;
+
+        println!(
+            "attempt {}: {} iterations took {:.6}s (target: {:.6}s, ratio: {:.4})",
+            attempt + 1,
+            config.sha_1s_difficulty,
+            elapsed_secs,
+            target_secs,
+            ratio
+        );
+
+        // early return if our ratio is <= precision
+        if (ratio - 1.0).abs() <= precision_perc {
+            println!(
+                "calibration complete: {} iterations in {} attempts",
+                attempt + 1,
+                config.sha_1s_difficulty
+            );
+            return config.sha_1s_difficulty;
+        }
+
+        // adjust iterations based on the ratio of target time to actual time
+        config.sha_1s_difficulty = (config.sha_1s_difficulty as f64 * ratio).round() as u64;
+
+        if config.sha_1s_difficulty == 0 {
+            config.sha_1s_difficulty = 1;
+        }
+    }
+
+    println!(
+        "maximum attempts reached - best approximation: {}",
+        config.sha_1s_difficulty
+    );
+
+    config.sha_1s_difficulty
 }
 
 #[cfg(test)]

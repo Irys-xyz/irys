@@ -33,7 +33,8 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
+    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, BlockIndex,
+    SystemLedger,
 };
 use irys_p2p::{
     P2PService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
@@ -342,7 +343,9 @@ impl IrysNode {
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                return self.create_new_genesis_block(genesis_block.clone()).await;
+                return self
+                    .create_new_genesis_block(irys_db, genesis_block.clone())
+                    .await;
             }
             NodeMode::PeerSync => {
                 // Fetch genesis data from trusted peer when joining network
@@ -392,6 +395,7 @@ impl IrysNode {
 
     async fn create_new_genesis_block(
         &self,
+        irys_db: &DatabaseProvider,
         mut genesis_block: IrysBlockHeader,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
         // Generate genesis commitments from configuration
@@ -411,6 +415,11 @@ impl IrysNode {
 
         // Add commitment transactions to genesis block
         add_genesis_commitments(&mut genesis_block, &self.config);
+
+        // Also persist them to the db
+        for commitment_tx in commitments.iter() {
+            let _ = irys_db.update(|tx| insert_commitment_tx(tx, commitment_tx));
+        }
 
         run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
 
@@ -805,7 +814,7 @@ impl IrysNode {
         ServiceHandleWithShutdownSignal,
     )> {
         // initialize the databases
-        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
+        let (reth_node, _) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), system_tx_store.clone()).await?;
@@ -913,15 +922,16 @@ impl IrysNode {
         // Spawn mempool service
         let _mempool_handle = MempoolService::spawn_service(
             task_exec,
-            &irys_db,
-            reth_db,
-            &storage_modules_guard,
+            irys_db.clone(),
+            reth_node_adapter.clone(),
+            storage_modules_guard.clone(),
             &block_tree_guard,
             &commitment_state_guard,
             receivers.mempool,
             &config,
             &service_senders,
-        );
+        )
+        .await;
         let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
 
         // spawn the chunk migration service
@@ -1436,7 +1446,7 @@ impl IrysNode {
         actix::Addr<EpochServiceActor>,
     )> {
         let (genesis_block, commitments, epoch_replay_data) =
-            EpochReplayData::query_replay_data(irys_db, block_index_guard, config)?;
+            EpochReplayData::query_replay_data(irys_db, block_index_guard, config).await?;
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;

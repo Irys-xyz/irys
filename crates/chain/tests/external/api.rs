@@ -92,7 +92,7 @@ async fn external_api() -> eyre::Result<()> {
             .node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(oneshot_tx));
+            .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx));
         if let Err(e) = response {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }

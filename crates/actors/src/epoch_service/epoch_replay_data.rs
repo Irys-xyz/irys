@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use crate::block_index_service::BlockIndexReadGuard;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
+use irys_storage::RecoveredMempoolState;
 use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
 use reth_db::Database;
 
@@ -27,7 +28,7 @@ impl EpochReplayData {
     ///
     /// # Returns
     /// * Tuple containing the genesis block, genesis commitments, and vector of subsequent epoch data
-    pub fn query_replay_data(
+    pub async fn query_replay_data(
         db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
         config: &Config,
@@ -36,6 +37,10 @@ impl EpochReplayData {
         Vec<CommitmentTransaction>,
         Vec<EpochReplayData>,
     )> {
+        // Recover any mempool commitment transactions that were persisted
+        let recovered =
+            RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir()).await;
+
         let block_index = block_index_guard.read();
 
         // Calculate how many epoch blocks should exist in the chain
@@ -100,10 +105,14 @@ impl EpochReplayData {
                 .tx_ids
                 .iter()
                 .map(|txid| {
+                    // First try to get the commitment tx from the DB
                     commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
-                        opt.ok_or_else(|| {
-                            eyre::eyre!("Commitment transaction not found: txid={}", txid)
-                        })
+                        // Then from the mempools recovered commitments
+                        opt.or_else(|| recovered.commitment_txs.get(txid).cloned())
+                            .ok_or_else(|| {
+                                // If we can't find it, there's no continuing
+                                eyre::eyre!("Commitment transaction not found: txid={}", txid)
+                            })
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()

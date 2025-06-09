@@ -13,19 +13,18 @@ use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
-    U256,
 };
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::mdbx::init_db_for;
 use reth_db::table::{Table, TableInfo};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
+use reth_db::TableSet;
 use reth_db::{
     cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
-use reth_db::{PlainAccountState, TableSet};
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
@@ -292,15 +291,6 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
 pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
     let chunk_count: usize = tx.entries::<T>()?;
     Ok((chunk_count as u64, chunk_count as u64 * chunk_size))
-}
-
-/// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
-pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
-    debug!("balance check on address: {:?}", address);
-    Ok(tx
-        .get::<PlainAccountState>(address)?
-        .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
-        .unwrap_or(U256::from(0)))
 }
 
 pub fn insert_peer_list_item<T: DbTxMut>(

@@ -1,5 +1,5 @@
 use crate::{
-    block_tree_service::{BlockTreeServiceMessage, ReorgEvent},
+    block_tree_service::{BlockMigratedEvent, BlockTreeServiceMessage, ReorgEvent},
     cache_service::CacheServiceAction,
     ema_service::EmaServiceMessage,
     mempool_service::MempoolServiceMessage,
@@ -38,6 +38,10 @@ impl ServiceSenders {
     pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
         self.0.subscribe_reorgs()
     }
+
+    pub fn subscribe_block_migrated(&self) -> broadcast::Receiver<BlockMigratedEvent> {
+        self.0.subscribe_block_migrated()
+    }
 }
 
 #[derive(Debug)]
@@ -52,6 +56,7 @@ pub struct ServiceReceivers {
     pub gossip_broadcast: UnboundedReceiver<GossipData>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
+    pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
 }
 
 #[derive(Debug)]
@@ -66,6 +71,7 @@ pub struct ServiceSendersInner {
     pub gossip_broadcast: UnboundedSender<GossipData>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
+    pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
 }
 
 impl ServiceSendersInner {
@@ -88,6 +94,8 @@ impl ServiceSendersInner {
             unbounded_channel::<BlockTreeServiceMessage>();
         // Create broadcast channel for reorg events
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
+        let (block_migrated_sender, block_migrated_receiver) =
+            broadcast::channel::<BlockMigratedEvent>(100);
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -100,6 +108,7 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
             reorg_events: reorg_sender,
+            block_migrated_events: block_migrated_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -112,6 +121,7 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
             reorg_events: reorg_receiver,
+            block_migrated_events: block_migrated_receiver,
         };
         (senders, receivers)
     }
@@ -119,6 +129,10 @@ impl ServiceSendersInner {
     /// Subscribe to reorg events - can be called multiple times
     pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
         self.reorg_events.subscribe()
+    }
+
+    pub fn subscribe_block_migrated(&self) -> broadcast::Receiver<BlockMigratedEvent> {
+        self.block_migrated_events.subscribe()
     }
 }
 

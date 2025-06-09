@@ -3,7 +3,7 @@ use crate::{
     block_tree_service::BlockTreeServiceMessage,
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
-    mempool_service::{MempoolFacade, MempoolServiceFacadeImpl},
+    mempool_service::{MempoolFacade, MempoolServiceFacadeImpl, MempoolServiceMessage},
     services::ServiceSenders,
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
     GetCommitmentStateGuardMessage,
@@ -18,11 +18,12 @@ use irys_database::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
-    IrysBlockHeader, IrysTransactionHeader,
+    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use tracing::{debug, error, info, Instrument, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -75,7 +76,6 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
             .map_err(|mailbox_error: MailboxError| eyre!("MailboxError: {:?}", mailbox_error))?
     }
 }
-
 /// When a block is discovered, either produced locally or received from
 /// a network peer, this message is broadcast.
 #[derive(Message, Debug, Clone)]
@@ -152,6 +152,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let epoch_config = self.config.consensus.epoch.clone();
         let span2 = self.span.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
+        let mempool_sender = self.service_senders.mempool.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -175,6 +176,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 .system_ledgers
                 .iter()
                 .find(|b| b.ledger_id == SystemLedger::Commitment);
+
             // Validate commitments (if there are some)
             let mut commitments: Vec<CommitmentTransaction> = Vec::new();
             let mut commitment_txids: H256List = H256List::new();
@@ -248,6 +250,24 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
                         return Err(eyre::eyre!("Invalid ingress proof signature: {}", e));
                     }
+
+            // Validate commitments (if there are some)
+            let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+            let mut commitment_tx_ids: H256List = H256List::new();
+            if let Some(commitment_ledger) = commitment_ledger {
+                debug!("{:#?}", commitment_ledger);
+                commitment_tx_ids = commitment_ledger.tx_ids.clone();
+                match get_commitment_tx_in_parallel(
+                    commitment_tx_ids.0.clone(),
+                    &mempool_sender,
+                    &db,
+                )
+                .await
+                {
+                    Ok(tx) => {
+                        commitments = tx;
+                    }
+                    Err(e) => error!("Failed to collect commitment transactions: {:?}", e),
                 }
             }
 
@@ -287,7 +307,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             let _ = commitment_cache_sender.send(
                                 CommitmentCacheMessage::RollbackCommitments {
-                                    commitment_txs: commitment_txids,
+                                    commitment_txs: commitment_tx_ids,
                                     response: tx,
                                 },
                             );
@@ -398,5 +418,80 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
         })
+    }
+}
+
+pub async fn get_commitment_tx_in_parallel(
+    commitment_tx_ids: Vec<IrysTransactionId>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let tx_ids_clone = commitment_tx_ids.clone();
+
+    // Set up a function to query the mempool for commitment transactions
+    let mempool_future = {
+        let tx_ids = tx_ids_clone.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
+                commitment_tx_ids: tx_ids,
+                response: tx,
+            })?;
+            let x = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
+            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(x)
+        }
+    };
+
+    // Set up a function to query the database for commitment transactions
+    let db_future = {
+        let tx_ids = commitment_tx_ids.clone();
+        let db_ref = db.clone();
+        async move {
+            let db_tx = db_ref.tx()?;
+            let mut results = HashMap::new();
+            for tx_id in &tx_ids {
+                if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
+                    results.insert(*tx_id, header);
+                }
+            }
+            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
+        }
+    };
+
+    // Query mempool and database in parallel
+    let (mempool_results, db_results) = tokio::join!(mempool_future, db_future);
+
+    let mempool_map = mempool_results?;
+    let db_map = db_results?;
+
+    debug!(
+        "mempool_results:\n {:?}",
+        mempool_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    );
+    debug!(
+        "db_results:\n {:?}",
+        db_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    );
+
+    // Combine results, preferring mempool
+    let mut headers = Vec::with_capacity(commitment_tx_ids.len());
+    let mut missing = Vec::new();
+
+    for tx_id in commitment_tx_ids {
+        if let Some(header) = mempool_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else if let Some(header) = db_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else {
+            missing.push(tx_id);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(headers)
+    } else {
+        Err(eyre::eyre!("Missing transactions: {:?}", missing))
     }
 }

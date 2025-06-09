@@ -21,7 +21,7 @@ use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
-    insert_commitment_tx, tables::IngressProofs, tx_header_by_txid, SystemLedger,
+    tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
@@ -40,8 +40,8 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::revm::primitives::ruint::Uint;
 use reth::{payload::EthBuiltPayload, rpc::eth::EthApiServer as _};
+use reth::{revm::primitives::ruint::Uint, rpc::types::BlockId};
 use reth_db::cursor::*;
 use reth_db::Database;
 use reth_transaction_pool::EthPooledTransaction;
@@ -189,6 +189,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 return Ok(None)
             }
 
+            // make sure the parent block is canonical on the reth side so we can build upon it & query for balances
+            // do this early
+            RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
+                head_hash: BlockHashType::Evm(prev_block_header.evm_block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            }).await??;
+
             // Get all the ingress proofs for data promotion
             let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
             let mut proofs: Vec<TxIngressProof> = Vec::new();
@@ -266,9 +274,39 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let publish_max_chunk_offset =  prev_block_header.data_ledgers[DataLedger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
+             // try to get the parent EVM block
+             // we need to make sure it's present here, as `GetBestMempoolTxs` relies on it
+             let parent = {
+                let mut attempts = 0;
+                loop {
+                    if attempts > 50 {
+                        break None;
+                    }
+                    let result = reth_node_adapter
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_hash(prev_block_header.evm_block_hash, false)
+                        .await?;
+                    match result {
+                        Some(block) => {
+                            info!("Got parent EVM block {} after {} attempts",&prev_block_header.evm_block_hash, &attempts);
+                            break Some(block)
+                        },
+                        None => {
+                            attempts += 1;
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }.expect("Should be able to get the parent EVM block");
+
+            eyre::ensure!(parent.header.hash == prev_block_header.evm_block_hash, "reth parent block hash mismatch");
+
             // Submit Ledger Transactions
             let (tx, rx) = tokio::sync::oneshot::channel();
-            service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(tx)).expect("to send MempoolServiceMessage");
+            // make sure the parent EVM block is present before calling this!
+            service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(Some(BlockId::Hash(prev_block_header.evm_block_hash.into())), tx)).expect("to send MempoolServiceMessage");
             let submit_txs = rx.await.expect("to receive txns");
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);
@@ -300,19 +338,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     tx_ids: txids
                 }
             } else {
-                // In regular blocks: process and persist new commitment transactions
-                // to the mempool and create a ledger entry referencing them
-                let tx = db.tx_mut().unwrap();
+                // In regular blocks: process new commitment transactions
+                // from the mempool and create a ledger entry referencing them
                 let mut txids = H256List::new();
-
-                for tx_item in submit_txs.commitment_tx.iter() {
-                    // insert commitment transaction in to the mempool
-                    if mempool.handle_commitment_transaction(tx_item.clone()).await.is_ok() {
-                        debug!("New commitment added to mempool: {}", tx_item.id.0.to_base58());
-                        txids.push(tx_item.id);
-                    };
-                }
-                tx.inner.commit().unwrap();
+                submit_txs.commitment_tx.iter().for_each(|ctx| {
+                    txids.push(ctx.id);
+                });
 
                 SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
@@ -399,33 +430,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let (tx, rx) = tokio::sync::oneshot::channel();
             service_senders.ema.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;
-
-            // try to get block by hash
-            let parent = {
-                let mut attempts = 0;
-                loop {
-                    if attempts > 50 {
-                        break None;
-                    }
-
-                    let result = reth_node_adapter
-                        .rpc
-                        .inner
-                        .eth_api()
-                        .block_by_hash(prev_block_header.evm_block_hash, false)
-                        .await?;
-
-                    match result {
-                        Some(block) => break Some(block),
-                        None => {
-                            attempts += 1;
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-            }.expect("Should be able to get the parent EVM block");
-
-            eyre::ensure!(parent.header.hash == prev_block_header.evm_block_hash, "reth parent block hash mismatch");
 
             // Update the last_epoch_hash field, which tracks the most recent epoch boundary
             //
