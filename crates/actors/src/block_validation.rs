@@ -550,6 +550,7 @@ pub fn generate_expected_system_transactions(
 }
 
 /// Generates expected system transactions by looking up required data from the database
+#[tracing::instrument(skip_all, err)]
 async fn generate_expected_system_transactions_from_db(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
@@ -586,7 +587,7 @@ async fn generate_expected_system_transactions_from_db(
 }
 
 /// Validates that the actual system transactions match the expected ones
-#[tracing::instrument(err)]
+#[tracing::instrument(skip_all, err)]
 fn validate_system_transactions_match(
     actual: &[SystemTransaction],
     expected: &[SystemTransaction],
