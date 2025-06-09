@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use crate::utils::{get_block_parent, get_chunk, post_chunk, verify_published_chunk};
+use crate::utils::{get_block_parent, post_chunk, verify_published_chunk};
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
@@ -9,8 +9,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::debug;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
@@ -85,36 +84,9 @@ async fn heavy_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
-    let delay = Duration::from_secs(1);
-    for attempt in 1..20 {
-        // Do we have any unconfirmed tx?
-        let Some(tx) = unconfirmed_tx.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the tx header from the HTTP endpoint
-        let id: String = tx.id.as_bytes().to_base58();
-        let resp = call_service(
-            &app,
-            TestRequest::get()
-                .uri(&format!("/v1/tx/{}", id))
-                .to_request(),
-        )
-        .await;
-
-        if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(*tx, result);
-            info!("Transaction was retrieved ok after {} attempts", attempt);
-            unconfirmed_tx.remove(0);
-        }
-
-        sleep(delay).await;
-    }
-
+    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
-    assert_eq!(unconfirmed_tx.len(), 0);
+    assert!(result.is_ok());
 
     // ==============================
     // Post Tx chunks out of order

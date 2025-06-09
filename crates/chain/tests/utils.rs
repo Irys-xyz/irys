@@ -415,6 +415,48 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    pub async fn wait_for_confirmed_txs(
+        &self,
+        mut unconfirmed_txs: Vec<IrysTransactionHeader>,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        let delay = Duration::from_secs(1);
+        for attempt in 1..seconds {
+            // Do we have any unconfirmed tx?
+            let Some(tx) = unconfirmed_txs.first() else {
+                // if not return we are done
+                return Ok(());
+            };
+
+            let ro_tx = self
+                .node_ctx
+                .db
+                .as_ref()
+                .tx()
+                .map_err(|e| {
+                    tracing::error!("Failed to create mdbx transaction: {}", e);
+                })
+                .unwrap();
+
+            // Retrieve the transaction header from database
+            match tx_header_by_txid(&ro_tx, &tx.id) {
+                Ok(Some(header)) => {
+                    assert_eq!(*tx, header);
+                    info!("Transaction was retrieved ok after {} attempts", attempt);
+                    unconfirmed_txs.pop();
+                }
+                _ => {}
+            };
+            drop(ro_tx);
+
+            sleep(delay).await;
+        }
+        Err(eyre::eyre!(
+            "Failed waiting for confirmed txs. Waited {} seconds",
+            seconds,
+        ))
+    }
+
     pub async fn wait_for_ingress_proofs(
         &self,
         mut unconfirmed_promotions: Vec<H256>,
