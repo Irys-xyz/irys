@@ -439,7 +439,6 @@ impl BlockTreeServiceInner {
 
             if add_result.is_ok() {
                 // Schedule block for full validation regardless of origin
-                // HACK
                 self.service_senders
                     .validation_service
                     .send(ValidationServiceMessage::ValidateBlock {

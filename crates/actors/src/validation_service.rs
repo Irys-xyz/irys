@@ -4,7 +4,7 @@
 //! - Validating VDF (Verifiable Delay Function) steps
 //! - Validating recall range
 //! - Validating PoA (Proof of Access)
-//! - Valdiating that the generated system txs in the reth block
+//! - Validating that the generated system txs in the reth block
 //!   match the expected system txs from the irys block.
 //!
 //! The service supports concurrent validation tasks for improved performance.
@@ -21,17 +21,13 @@ use eyre::ensure;
 use futures::future::Either;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
+use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
-use irys_vdf::VdfStep;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::{
-    sync::mpsc::UnboundedReceiver,
-    task::JoinHandle,
-};
-use tracing::{debug, error, info, instrument, trace, warn, Instrument};
+use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 
 /// Messages that the validation service supports
 #[derive(Debug)]
@@ -59,7 +55,7 @@ struct ValidationServiceInner {
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// VDF steps read guard
-    vdf_state_readonly: VdfStateReadonly,
+    vdf_state: VdfStateReadonly,
     /// Reference to global config for node
     config: Config,
     /// Service channels
@@ -68,6 +64,8 @@ struct ValidationServiceInner {
     reth_node_adapter: IrysRethNodeAdapter,
     /// Database provider for transaction lookups
     db: DatabaseProvider,
+    /// Rayon thread pool that executes vdf steps
+    pool: rayon::ThreadPool,
 }
 
 impl ValidationService {
@@ -93,9 +91,13 @@ impl ValidationService {
                     shutdown,
                     msg_rx: rx,
                     inner: ValidationServiceInner {
+                        pool: rayon::ThreadPoolBuilder::new()
+                            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+                            .build()
+                            .expect("to be able to build vdf validatoin pool"),
                         block_index_guard,
                         partition_assignments_guard,
-                        vdf_state_readonly,
+                        vdf_state: vdf_state_readonly,
                         config,
                         service_senders,
                         reth_node_adapter,
@@ -162,141 +164,123 @@ impl ValidationServiceInner {
 
                 debug!(?block_hash, ?block_height, "validating block");
 
-                let vdf_ff = &self.service_senders.vdf_fast_forward;
-                let validation_result = validate_block(
-                    block,
-                    self.block_index_guard.clone(),
-                    self.partition_assignments_guard.clone(),
-                    self.vdf_state_readonly.clone(),
-                    self.config.clone(),
-                    vdf_ff,
-                    self.reth_node_adapter.clone(),
-                    self.db.clone(),
-                )
-                .await
-                .unwrap_or(ValidationResult::Invalid);
+                let validation_result = self
+                    .validate_block(block)
+                    .await
+                    .unwrap_or(ValidationResult::Invalid);
 
                 // Notify the block tree service
-                if let Err(e) =
-                    self.service_senders
-                        .block_tree
-                        .send(BlockTreeServiceMessage::BlockValidationFinished {
-                            block_hash,
-                            validation_result,
-                        })
-                {
+                if let Err(e) = self.service_senders.block_tree.send(
+                    BlockTreeServiceMessage::BlockValidationFinished {
+                        block_hash,
+                        validation_result,
+                    },
+                ) {
                     error!(?e, "Failed to send validation result to block tree service");
                 }
             }
         }
     }
-}
 
-/// Perform block validation
-#[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
-async fn validate_block(
-    block: Arc<IrysBlockHeader>,
-    block_index_guard: BlockIndexReadGuard,
-    partitions_guard: PartitionAssignmentsReadGuard,
-    vdf_state: VdfStateReadonly,
-    config: Config,
-    vdf_ff: &UnboundedSender<VdfStep>,
-    reth_adapter: IrysRethNodeAdapter,
-    db: DatabaseProvider,
-) -> eyre::Result<ValidationResult> {
-    let vdf_info = block.vdf_limiter_info.clone();
+    /// Perform block validation
+    #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
+    async fn validate_block(&self, block: Arc<IrysBlockHeader>) -> eyre::Result<ValidationResult> {
+        let vdf_info = block.vdf_limiter_info.clone();
 
-    // First, wait for the previous VDF step to be available
-    let first_step_number = vdf_info.first_step_number();
-    let prev_output_step_number = first_step_number.saturating_sub(1);
+        // First, wait for the previous VDF step to be available
+        let first_step_number = vdf_info.first_step_number();
+        let prev_output_step_number = first_step_number.saturating_sub(1);
 
-    vdf_state.wait_for_step(prev_output_step_number).await;
-    let stored_previous_step = vdf_state
-        .get_step(prev_output_step_number)
-        .expect("to get the step, since we've just waited for it");
+        self.vdf_state.wait_for_step(prev_output_step_number).await;
+        let stored_previous_step = self
+            .vdf_state
+            .get_step(prev_output_step_number)
+            .expect("to get the step, since we've just waited for it");
 
-    trace!(
-        expected = ?stored_previous_step,
-        got = ?vdf_info.prev_output,
-        "Previous output from the block is not equal to the saved step with the same index"
-    );
-    ensure!(
-        stored_previous_step == vdf_info.prev_output,
-        "Previous output from the block is not equal to the saved step with the same index"
-    );
+        ensure!(
+            stored_previous_step == vdf_info.prev_output,
+            "vdf output is not equal to the saved step with the same index {:?}, got {:?}",
+            stored_previous_step,
+            vdf_info.prev_output,
+        );
 
-    // Spawn VDF validation task
-    let vdf_config = config.consensus.vdf.clone();
-    let vdf_state_for_validation = vdf_state.clone();
-    let vdf_info_clone = vdf_info.clone();
-    tokio::task::spawn_blocking(move || {
-        vdf_steps_are_valid(&vdf_info_clone, &vdf_config, vdf_state_for_validation)
-    })
-    .await??;
+        // Spawn VDF validation task
+        vdf_steps_are_valid(
+            &self.pool,
+            &vdf_info,
+            &self.config.consensus.vdf,
+            &self.vdf_state,
+        )?;
 
-    // Fast forward VDF steps
-    fast_forward_vdf_steps_from_block(&vdf_info, vdf_ff.clone()).await;
-    vdf_state.wait_for_step(vdf_info.global_step_number).await;
+        // Fast forward VDF steps
+        fast_forward_vdf_steps_from_block(&vdf_info, &self.service_senders.vdf_fast_forward).await;
+        self.vdf_state
+            .wait_for_step(vdf_info.global_step_number)
+            .await;
 
-    // Recall range validation
-    let recall_task = {
-        let block = block.clone();
-        let consensus_config = config.consensus.clone();
-        let vdf_state = vdf_state.clone();
-        tokio::spawn(async move {
-            recall_recall_range_is_valid(&block, &consensus_config, &vdf_state)
+        let poa = block.poa.clone();
+        let miner_address = block.miner_address;
+        let block = &block;
+        // Recall range validation
+        let recall_task = async move {
+            recall_recall_range_is_valid(block, &self.config.consensus, &self.vdf_state)
                 .await
                 .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
                 .map(|_| ValidationResult::Valid)
                 .unwrap_or(ValidationResult::Invalid)
-        })
-        .instrument(tracing::info_span!("recall range validation"))
-    };
+        }
+        .instrument(tracing::info_span!("recall range validation"));
 
-    // POA validation
-    let poa_task = {
-        let poa = block.poa.clone();
-        let miner_address = block.miner_address;
-        let consensus_config = config.consensus.clone();
-        tokio::task::spawn_blocking(move || {
-            poa_is_valid(
-                &poa,
-                &block_index_guard,
-                &partitions_guard,
-                &consensus_config,
-                &miner_address,
-            )
-            .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
-            .map(|_| ValidationResult::Valid)
-            .unwrap_or(ValidationResult::Invalid)
-        })
-        .instrument(tracing::info_span!("poa task validation"))
-    };
+        // POA validation
+        let poa_task = {
+            let consensus_config = self.config.consensus.clone();
+            let block_index_guard = self.block_index_guard.clone();
+            let partitions_guard = self.partition_assignments_guard.clone();
+            tokio::task::spawn_blocking(move || {
+                poa_is_valid(
+                    &poa,
+                    &block_index_guard,
+                    &partitions_guard,
+                    &consensus_config,
+                    &miner_address,
+                )
+                .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
+                .map(|_| ValidationResult::Valid)
+            })
+            .instrument(tracing::info_span!("poa task validation"))
+        };
+        let poa_task = async move {
+            let res = poa_task.await;
 
-    // System transaction validation
-    let system_tx_task = {
-        let block = block.clone();
-        let reth_adapter = reth_adapter.clone();
-        let db = db.clone();
-        tokio::spawn(async move {
-            system_transactions_are_valid(&block, &reth_adapter, &db)
+            match res {
+                Ok(res) => res.unwrap_or(ValidationResult::Invalid),
+                Err(err) => {
+                    tracing::error!(?err, "poa task panicked");
+                    ValidationResult::Invalid
+                }
+            }
+        };
+
+        // System transaction validation
+        let system_tx_task = async move {
+            system_transactions_are_valid(block, &self.reth_node_adapter, &self.db)
+                .instrument(tracing::info_span!("system transaction validation"))
                 .await
                 .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
                 .map(|_| ValidationResult::Valid)
                 // TODO: we just assume all system txs are valid until we fix the validator
                 .unwrap_or(ValidationResult::Valid)
-        })
-        .instrument(tracing::info_span!("system transaction validation"))
-    };
+        };
 
-    // Wait for all three tasks to complete
-    let (recall_result, poa_result, system_tx_result) =
-        tokio::try_join!(recall_task, poa_task, system_tx_task)?;
+        // Wait for all three tasks to complete
+        let (recall_result, poa_result, system_tx_result) =
+            tokio::join!(recall_task, poa_task, system_tx_task);
 
-    match (recall_result, poa_result, system_tx_result) {
-        (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
-            Ok(ValidationResult::Valid)
+        match (recall_result, poa_result, system_tx_result) {
+            (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
+                Ok(ValidationResult::Valid)
+            }
+            _ => Ok(ValidationResult::Invalid),
         }
-        _ => Ok(ValidationResult::Invalid),
     }
 }

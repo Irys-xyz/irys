@@ -512,7 +512,7 @@ pub async fn system_transactions_are_valid(
 
 /// Generates the expected system transactions for a given block
 ///
-/// Safety: block rewrards are already validate in block prevadliatino thus we trust them at face-value
+/// Safety: block rewards are already validated in block prevalidation thus we trust them at face-value
 pub fn generate_expected_system_transactions(
     block_height: u64,
     reward_address: Address,
