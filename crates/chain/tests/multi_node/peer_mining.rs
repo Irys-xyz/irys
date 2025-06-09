@@ -39,10 +39,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
 
     // Wait for commitment tx to show up in the genesis_node's mempool
     genesis_node
-        .wait_for_mempool(stake_tx.id, seconds_to_wait)
-        .await?;
-    genesis_node
-        .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool_commitment_txs(vec![stake_tx.id, pledge_tx.id], seconds_to_wait)
         .await?;
 
     // Mine a block to get the commitments included
