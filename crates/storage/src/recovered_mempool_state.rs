@@ -1,11 +1,11 @@
 use std::{collections::HashMap, path::Path};
 
-use irys_types::{CommitmentTransaction, IrysTransaction, H256};
+use irys_types::{CommitmentTransaction, IrysTransactionHeader, H256};
 use tracing::debug;
 
 pub struct RecoveredMempoolState {
     pub commitment_txs: HashMap<H256, CommitmentTransaction>,
-    pub storage_txs: HashMap<H256, IrysTransaction>,
+    pub storage_txs: HashMap<H256, IrysTransactionHeader>,
 }
 
 impl RecoveredMempoolState {
@@ -52,12 +52,12 @@ impl RecoveredMempoolState {
                         continue;
                     };
 
-                    let Ok(tx) = serde_json::from_str::<IrysTransaction>(&json) else {
+                    let Ok(tx) = serde_json::from_str::<IrysTransactionHeader>(&json) else {
                         debug!("Failed to parse {:?}", path);
                         continue;
                     };
 
-                    storage_txs.insert(tx.header.id, tx);
+                    storage_txs.insert(tx.id, tx);
                     let _ = tokio::fs::remove_file(&path).await;
                 }
             }
