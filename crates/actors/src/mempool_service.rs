@@ -108,7 +108,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         &self,
         address: Address,
     ) -> Result<Vec<CommitmentTransaction>, TxReadError> {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        /*let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs(address.clone(), oneshot_tx);
         if let Err(err) = self.service.send(tx_ingress_msg) {
             tracing::error!("error sending message to mempool: {:?}", err);
@@ -123,7 +123,8 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             Err(TxReadError::Other(
                 "Error reading GetCommitmentTxs response ".to_owned(),
             ))
-        }
+        }*/
+        Err(TxReadError::DatabaseError)
     }
 
     async fn handle_get_commitment_transaction_by_id(
