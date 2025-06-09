@@ -161,16 +161,14 @@ async fn heavy_double_root_data_promotion_test() {
 
     // wait for the first set of chunks to appear in the publish ledger
     // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
-    // it should be replaced wit the helper function wait_for_chunk() which will rightly error
-    tokio::time::sleep(Duration::from_secs(20)).await;
-    //let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
+    //        assert commented out to mimic prior (passing test) behaviour
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
     //assert!(result.is_ok());
 
     // wait for the second set of chunks to appear in the publish ledger
     // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
-    // it should be replaced wit the helper function wait_for_chunk() which will rightly error
-    tokio::time::sleep(Duration::from_secs(20)).await;
-    //let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
+    //        assert commented out to mimic prior (passing test) behaviour
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
     //assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
