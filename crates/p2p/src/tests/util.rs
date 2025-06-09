@@ -268,12 +268,6 @@ pub(crate) struct GossipServiceTestFixture {
     pub block_status_provider: BlockStatusProvider,
 }
 
-impl Default for GossipServiceTestFixture {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct MockRethServiceActor {}
 
@@ -293,7 +287,7 @@ impl GossipServiceTestFixture {
     /// # Panics
     /// Can panic
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
         let config = NodeConfig::testnet().into();
@@ -327,11 +321,10 @@ impl GossipServiceTestFixture {
 
         let tokio_runtime = tokio::runtime::Handle::current();
 
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
-
-        let block_status_provider_mock = tokio::runtime::Handle::current()
-            .block_on(BlockStatusProvider::mock(&config.node_config));
 
         Self {
             // temp_dir,
