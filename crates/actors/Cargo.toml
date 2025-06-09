@@ -6,7 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 assert_matches = "1.5.0"
-atomic-write-file = "0.2"
 irys-types.workspace = true
 irys-database.workspace = true
 irys-packing.workspace = true

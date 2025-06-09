@@ -4743,7 +4743,6 @@ dependencies = [
  "alloy-signer-local",
  "assert_matches",
  "async-trait",
- "atomic-write-file",
  "base58",
  "eyre",
  "futures",
