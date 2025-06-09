@@ -123,9 +123,9 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 }
 
 #[actix::test]
+/// stake, mine, pledge, mine, restart node, confirm pledge is present still in mempool, mine, storage tx, restart
 async fn mempool_persistance_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // Configure a test network
@@ -142,29 +142,42 @@ async fn mempool_persistance_test() -> eyre::Result<()> {
         .await;
     let _ = genesis_node.start_public_api().await;
 
+    // Create and post stake commitment for the signer
+    let stake_tx = new_stake_tx(&H256::zero(), &signer);
+    genesis_node.post_commitment_tx(&stake_tx).await;
+    genesis_node.mine_block().await.unwrap();
+
+    let unconfirmed_txs = vec![stake_tx.id];
+    let result = genesis_node
+        .wait_for_mempool_commitment_txs(unconfirmed_txs, 20)
+        .await;
+    assert!(result.is_ok());
+
+    //create and post pledge commitment for the signer
+    let pledge_tx = new_pledge_tx(&H256::zero(), &signer);
+    genesis_node.post_commitment_tx(&pledge_tx).await;
+
     // test storage data
     let chunks = [[10; 32], [20; 32], [30; 32]];
     let data: Vec<u8> = chunks.concat();
 
-    // Create stake and pledge commitments for the signer
-    let stake_tx = new_stake_tx(&H256::zero(), &signer);
-    let pledge_tx = new_pledge_tx(&H256::zero(), &signer);
-
-    // Post the pledge before the stake
-    genesis_node.post_commitment_tx(&pledge_tx).await;
-    genesis_node.post_commitment_tx(&stake_tx).await;
-
     // post storage tx
-    genesis_node
+    let storage_tx = genesis_node
         .post_storage_tx_without_gossip(H256::zero(), data, &signer)
         .await;
+
+    let unconfirmed_txs = vec![storage_tx.header.id];
+    let result = genesis_node
+        .wait_for_mempool_storage_txs(unconfirmed_txs, 20)
+        .await;
+    assert!(result.is_ok());
 
     // Restart the node
     tracing::info!("Restarting node");
     let restarted_node = genesis_node.stop().await.start().await;
 
     // confirm the mempool tx have appeared back in the mempool after a restart
-    for txid_to_check in vec![stake_tx.id, pledge_tx.id] {
+    for txid_to_check in vec![pledge_tx.id] {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let get_tx_msg = MempoolServiceMessage::GetStorageTransaction(txid_to_check, oneshot_tx);
         if let Err(err) = restarted_node
