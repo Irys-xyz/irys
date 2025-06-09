@@ -9,8 +9,8 @@ use crate::{
 use alloy_consensus::Transaction;
 use alloy_eips::HashOrNumber;
 use base58::ToBase58;
-use eyre::{ensure, eyre, OptionExt};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt, tx_header_by_txid};
+use eyre::{ensure, OptionExt};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable;
 use irys_reth::system_tx::{
@@ -527,7 +527,7 @@ pub fn generate_expected_system_transactions(
         block_height,
         parent_evm_block_hash.into(),
         TransactionPacket::BlockReward(BalanceIncrement {
-            amount: reward_amount.into(),
+            amount: reward_amount,
             target: reward_address,
         }),
     );

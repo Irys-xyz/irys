@@ -20,8 +20,10 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
+use irys_vdf::VdfStep;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::{
     sync::mpsc::UnboundedReceiver,
     task::{JoinHandle, JoinSet},
@@ -201,13 +203,14 @@ impl ValidationServiceInner {
 
         // Spawn the validation task
         self.validation_tasks.spawn(async move {
+            let vdf_ff = &service_senders.vdf_fast_forward;
             let validation_result = validate_block_concurrent(
                 block,
                 block_index_guard,
                 partitions_guard,
                 vdf_state,
                 config,
-                service_senders.clone(),
+                vdf_ff,
                 reth_adapter,
                 db,
             )
@@ -237,7 +240,7 @@ async fn validate_block_concurrent(
     partitions_guard: PartitionAssignmentsReadGuard,
     vdf_state: VdfStateReadonly,
     config: Config,
-    service_senders: ServiceSenders,
+    vdf_ff: &UnboundedSender<VdfStep>,
     reth_adapter: IrysRethNodeAdapter,
     db: DatabaseProvider,
 ) -> eyre::Result<ValidationResult> {
@@ -272,7 +275,7 @@ async fn validate_block_concurrent(
     .await??;
 
     // Fast forward VDF steps
-    fast_forward_vdf_steps_from_block(&vdf_info, service_senders.vdf_fast_forward.clone()).await;
+    fast_forward_vdf_steps_from_block(&vdf_info, vdf_ff.clone()).await;
     vdf_state.wait_for_step(vdf_info.global_step_number).await;
 
     // Recall range validation
