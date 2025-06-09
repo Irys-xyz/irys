@@ -5,7 +5,7 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysCommitments,
-    IrysPoAChunks, IrysTxHeaders, MempoolTxHeaders, Metadata, PeerListItems,
+    IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
@@ -108,28 +108,6 @@ pub fn tx_header_by_txid<T: DbTx>(
     Ok(tx
         .get::<IrysTxHeaders>(*txid)?
         .map(IrysTransactionHeader::from))
-}
-
-/// Inserts a [`IrysTransactionHeader`] into [`MempoolTxHeaders`]
-pub fn insert_mempool_tx_header<T: DbTxMut>(
-    tx: &T,
-    tx_header: &IrysTransactionHeader,
-) -> eyre::Result<()> {
-    Ok(tx.put::<MempoolTxHeaders>(tx_header.id, tx_header.clone().into())?)
-}
-
-/// Clears the [`MempoolTxHeaders`] table
-pub fn clear_mempool_tx_headers<T: DbTxMut>(tx: &T) -> Result<(), DatabaseError> {
-    tx.clear::<MempoolTxHeaders>()
-}
-
-/// Returns all [`IrysTransactionHeader`]s currently stored in [`MempoolTxHeaders`]
-pub fn all_mempool_tx_headers<T: DbTx>(tx: &T) -> eyre::Result<Vec<IrysTransactionHeader>> {
-    let entries = walk_all::<MempoolTxHeaders, _>(tx)?;
-    Ok(entries
-        .into_iter()
-        .map(|(_, value)| IrysTransactionHeader::from(value))
-        .collect())
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
