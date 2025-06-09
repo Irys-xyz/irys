@@ -1,15 +1,28 @@
 use irys_actors::block_index_service::BlockIndexReadGuard;
-use irys_actors::block_tree_service::{BlockTreeCache, BlockTreeReadGuard};
-use irys_database::BlockIndex;
-use irys_types::{BlockHash, IrysBlockHeader, H256};
-use std::sync::{Arc, RwLock};
+use irys_actors::block_tree_service::BlockTreeReadGuard;
+use irys_types::{BlockHash, H256};
+#[cfg(test)]
+use {
+    irys_actors::block_tree_service::BlockTreeCache,
+    irys_database::BlockIndex,
+    irys_types::{BlockIndexItem, IrysBlockHeader, NodeConfig},
+    std::sync::{Arc, RwLock},
+    tracing::warn,
+};
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MismatchedBlockHashes {
+    pub hash_in_index: BlockHash,
+    pub hash_in_tree: BlockHash,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlockStatus {
     NotProcessed,
     ProcessedButSubjectToReorg,
     Processed,
-    IndexHashMismatch,
+    IndexHashMismatch(MismatchedBlockHashes),
 }
 
 #[derive(Clone, Debug)]
@@ -20,14 +33,7 @@ pub struct BlockStatusProvider {
 
 impl Default for BlockStatusProvider {
     fn default() -> Self {
-        Self {
-            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
-                BlockTreeCache::new(&IrysBlockHeader::default()),
-            ))),
-            block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
-                BlockIndex::default(),
-            ))),
-        }
+        panic!("If you want to mock BlockStatusProvider, use `BlockStatusProvider::mock` instead.")
     }
 }
 
@@ -62,7 +68,10 @@ impl BlockStatusProvider {
                 if &index_item.block_hash == hash {
                     BlockStatus::Processed
                 } else {
-                    BlockStatus::IndexHashMismatch
+                    BlockStatus::IndexHashMismatch(MismatchedBlockHashes {
+                        hash_in_index: index_item.block_hash,
+                        hash_in_tree: *hash,
+                    })
                 }
             } else {
                 BlockStatus::ProcessedButSubjectToReorg
@@ -77,11 +86,16 @@ impl BlockStatusProvider {
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
 
+        println!("{:?}", binding.items);
+
         if let Some(index_item) = index_item {
             if &index_item.block_hash == block_hash {
                 BlockStatus::Processed
             } else {
-                BlockStatus::IndexHashMismatch
+                BlockStatus::IndexHashMismatch(MismatchedBlockHashes {
+                    hash_in_index: index_item.block_hash,
+                    hash_in_tree: *block_hash,
+                })
             }
         } else if block_is_in_the_tree {
             BlockStatus::ProcessedButSubjectToReorg
@@ -95,7 +109,49 @@ impl BlockStatusProvider {
             BlockStatus::Processed => true,
             BlockStatus::ProcessedButSubjectToReorg => true,
             BlockStatus::NotProcessed => false,
-            BlockStatus::IndexHashMismatch => false,
+            BlockStatus::IndexHashMismatch(_) => false,
         }
+    }
+}
+
+#[cfg(test)]
+impl BlockStatusProvider {
+    pub async fn mock(node_config: &NodeConfig) -> Self {
+        Self {
+            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
+                BlockTreeCache::new(&IrysBlockHeader::new_mock_header()),
+            ))),
+            block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
+                BlockIndex::new(node_config)
+                    .await
+                    .expect("to create a mock block index"),
+            ))),
+        }
+    }
+
+    pub fn add_block_to_index_and_tree(&self, block: IrysBlockHeader) {
+        self.block_tree_read_guard
+            .write()
+            .add_block(&block, Arc::new(Vec::new()))
+            .expect("to add block to the tree");
+        self.block_index_read_guard
+            .write()
+            .push_item(&BlockIndexItem {
+                block_hash: block.block_hash,
+                num_ledgers: 0,
+                ledgers: vec![],
+            })
+            .unwrap();
+        warn!(
+            "Added block {:?} (height {}) to index and tree",
+            block.block_hash, block.height
+        );
+    }
+
+    pub fn add_block_to_the_tree(&self, block: IrysBlockHeader) {
+        self.block_tree_read_guard
+            .write()
+            .add_block(&block, Arc::new(Vec::new()))
+            .expect("to add block to the tree");
     }
 }

@@ -330,6 +330,9 @@ impl GossipServiceTestFixture {
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
 
+        let block_status_provider_mock = tokio::runtime::Handle::current()
+            .block_on(BlockStatusProvider::mock(&config.node_config));
+
         Self {
             // temp_dir,
             gossip_port,
@@ -346,7 +349,7 @@ impl GossipServiceTestFixture {
             api_client_stub: ApiClientStub::new(),
             task_manager,
             task_executor,
-            block_status_provider: BlockStatusProvider::default(),
+            block_status_provider: block_status_provider_mock,
         }
     }
 

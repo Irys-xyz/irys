@@ -80,6 +80,7 @@ impl ApiClient for MockApiClient {
 #[derive(Clone)]
 struct BlockDiscoveryStub {
     received_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    block_status_provider: BlockStatusProvider,
     db: DatabaseProvider,
 }
 
@@ -93,6 +94,8 @@ impl BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
         self.db.update_eyre(|tx| insert_block_header(tx, &block))?;
+        self.block_status_provider
+            .add_block_to_index_and_tree(block.clone());
         self.received_blocks
             .write()
             .expect("to unlock blocks")
@@ -105,6 +108,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 async fn should_process_block() {
     let temp_dir = setup_tracing_and_temp_dir(None, false);
     let mut node_config = NodeConfig::testnet();
+    node_config.base_directory = temp_dir.path().to_path_buf();
     node_config.trusted_peers = vec![];
     let config = Config::new(node_config);
 
@@ -116,9 +120,13 @@ async fn should_process_block() {
     let mock_client = MockApiClient {
         block_response: None,
     };
+
+    let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+
     let block_discovery_stub = BlockDiscoveryStub {
         received_blocks: Arc::new(RwLock::new(vec![])),
         db: db.clone(),
+        block_status_provider: block_status_provider_mock.clone(),
     };
     let reth_service = MockRethServiceActor {};
     let reth_addr = reth_service.start();
@@ -130,22 +138,20 @@ async fn should_process_block() {
     );
     let peer_addr = peer_list_service.start();
 
-    let block_status_provider_mock = BlockStatusProvider::default();
-
     let sync_state = SyncState::new(false);
     let service = BlockPoolService::new_with_client(
         db.clone(),
         peer_addr.into(),
         block_discovery_stub.clone(),
         sync_state,
-        block_status_provider_mock,
+        block_status_provider_mock.clone(),
     );
     let addr = service.start();
 
     let parent_block_header = IrysBlockHeader {
         block_hash: BlockHash::random(),
         height: 1,
-        ..Default::default()
+        ..IrysBlockHeader::new_mock_header()
     };
     let parent_block_hash = parent_block_header.block_hash;
 
@@ -153,11 +159,12 @@ async fn should_process_block() {
         block_hash: BlockHash::random(),
         previous_block_hash: parent_block_hash,
         height: parent_block_header.height + 1,
-        ..Default::default()
+        ..IrysBlockHeader::new_mock_header()
     };
 
     // Inserting parent block header to the db, so the current block should go to the
     //  block producer
+    block_status_provider_mock.add_block_to_index_and_tree(parent_block_header.clone());
     {
         db.update_eyre(|tx| insert_block_header(tx, &parent_block_header))
             .expect("to insert block");
@@ -206,6 +213,7 @@ async fn should_process_block() {
 async fn should_process_block_with_intermediate_block_in_api() {
     let temp_dir = setup_tracing_and_temp_dir(None, false);
     let mut node_config = NodeConfig::testnet();
+    node_config.base_directory = temp_dir.path().to_path_buf();
     node_config.trusted_peers = vec![];
     let config = Config::new(node_config);
 
@@ -231,7 +239,8 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Create block1 (will be in database)
     let block1 = IrysBlockHeader {
         block_hash: BlockHash::random(),
-        ..Default::default()
+        height: 1,
+        ..IrysBlockHeader::new_mock_header()
     };
 
     let block1_hash = block1.block_hash;
@@ -240,14 +249,16 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let block2 = IrysBlockHeader {
         block_hash: BlockHash::random(),
         previous_block_hash: block1.block_hash,
-        ..Default::default()
+        height: block1.height + 1,
+        ..IrysBlockHeader::new_mock_header()
     };
 
     // Create block3 (test block)
     let block3 = IrysBlockHeader {
         block_hash: BlockHash::random(),
         previous_block_hash: block2.block_hash,
-        ..Default::default()
+        height: block2.height + 1,
+        ..IrysBlockHeader::new_mock_header()
     };
 
     debug!("Block 1: {:?}", block1.block_hash);
@@ -269,9 +280,12 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Setup MockApiClient to return block2 when queried
     let mock_client = MockApiClient::default();
 
+    let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+
     let block_discovery_stub = BlockDiscoveryStub {
         received_blocks: Arc::new(RwLock::new(vec![])),
         db: db.clone(),
+        block_status_provider: block_status_provider_mock.clone(),
     };
     let reth_service = MockRethServiceActor {};
     let reth_addr = reth_service.start();
@@ -302,14 +316,12 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     let sync_state = SyncState::new(false);
 
-    let block_status_provider_mock = BlockStatusProvider::default();
-
     let service = BlockPoolService::new_with_client(
         db.clone(),
         peer_addr.into(),
         block_discovery_stub.clone(),
         sync_state,
-        block_status_provider_mock,
+        block_status_provider_mock.clone(),
     );
     let addr = service.start();
 
@@ -322,15 +334,18 @@ async fn should_process_block_with_intermediate_block_in_api() {
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
         tokio::spawn(async move {
             debug!("Send block to block pool");
-            addr.send(ProcessBlock { header: block })
-                .await
-                .expect("to send message")
-                .expect("to process block");
+            addr.send(ProcessBlock {
+                header: block.clone(),
+            })
+            .await
+            .expect("to send message")
+            .expect("to process block");
         });
         true
     });
 
     // Insert block1 into the database
+    block_status_provider_mock.add_block_to_index_and_tree(block1.clone());
     {
         db.update_eyre(|tx| insert_block_header(tx, &block1))
             .expect("to insert block1");

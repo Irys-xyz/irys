@@ -154,11 +154,13 @@ where
                         .into_actor(self),
                 );
             }
-            BlockStatus::IndexHashMismatch => {
+            BlockStatus::IndexHashMismatch(mismatched_hashes) => {
                 let message = format!(
-                    "Failed to process block {}/{}: index hash mismatch",
+                    "Failed to process block {} (height {}): index hash mismatch. Index hash is {:?}, provided hash is {:?}",
                     block_header.block_hash.0.to_base58(),
                     block_header.height,
+                    mismatched_hashes.hash_in_index,
+                    mismatched_hashes.hash_in_tree
                 );
                 warn!(message);
                 return Box::pin(
@@ -168,9 +170,10 @@ where
         }
 
         debug!(
-            "Block pool: Processing block {} (height {}), block status: ",
+            "Block pool: Processing block {} (height {}), block status: {:?}",
             block_header.block_hash.0.to_base58(),
-            block_header.height
+            block_header.height,
+            block_status
         );
         let current_block_height = block_header.height;
         let prev_block_hash = block_header.previous_block_hash;
