@@ -1,7 +1,9 @@
 use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use core::time::Duration;
 use irys_actors::mempool_service::MempoolFacade;
-use irys_types::{DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore};
+use irys_types::{
+    BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
+};
 use tracing::debug;
 
 #[actix_web::test]
@@ -282,7 +284,10 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     fixture2.add_peer(&fixture1).await;
 
     // Create a test block with transactions
-    let mut block = IrysBlockHeader::default();
+    let mut block = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        ..IrysBlockHeader::new_mock_header()
+    };
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;

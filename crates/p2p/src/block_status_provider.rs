@@ -10,7 +10,6 @@ use {
     tracing::warn,
 };
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MismatchedBlockHashes {
     pub hash_in_index: BlockHash,
