@@ -448,7 +448,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 _ => {}
             };
             drop(ro_tx);
-
+            mine_blocks(&self.node_ctx, 1).await.unwrap();
             sleep(delay).await;
         }
         Err(eyre::eyre!(
@@ -499,6 +499,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 };
             }
             drop(ro_tx);
+            mine_block(&self.node_ctx).await.unwrap();
             sleep(Duration::from_secs(1)).await;
         }
 
