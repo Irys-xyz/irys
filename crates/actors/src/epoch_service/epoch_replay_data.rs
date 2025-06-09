@@ -37,6 +37,10 @@ impl EpochReplayData {
         Vec<CommitmentTransaction>,
         Vec<EpochReplayData>,
     )> {
+        // Recover any mempool commitment transactions that were persisted
+        let recovered =
+            RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir()).await;
+
         let block_index = block_index_guard.read();
 
         // Calculate how many epoch blocks should exist in the chain
@@ -44,10 +48,6 @@ impl EpochReplayData {
         let num_blocks = block_index.num_blocks();
         let num_epoch_blocks = (num_blocks / num_blocks_in_epoch).max(1);
         let mut replay_data: VecDeque<EpochReplayData> = VecDeque::new();
-
-        // Recover any mempool commitment transactions that were persisted
-        let recovered =
-            RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir()).await;
 
         // Process each epoch block from genesis to the latest
         for i in 0..num_epoch_blocks {
