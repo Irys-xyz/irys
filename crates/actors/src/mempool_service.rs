@@ -7,13 +7,12 @@ use eyre::eyre;
 use futures::future::BoxFuture;
 use irys_database::insert_commitment_tx;
 use irys_database::{
-    all_mempool_tx_headers, clear_mempool_tx_headers,
-    db::{IrysDatabaseExt as _, IrysDupCursorExt as _, RethDbWrapper},
+    db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
-    insert_mempool_tx_header, insert_tx_header,
+    insert_tx_header,
     submodule::get_data_size_by_data_root,
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
-    tx_header_by_txid, SystemLedger,
+    tx_header_by_txid,
 };
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt, IrysRethNodeAdapter};
