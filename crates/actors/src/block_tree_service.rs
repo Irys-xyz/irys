@@ -5,12 +5,12 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    validation_service::{RequestValidationMessage, ValidationService},
+    validation_service::{ValidationService, ValidationServiceMessage},
     BlockFinalizedMessage,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
-use eyre::ensure;
+use eyre::{ensure, Context};
 use futures::future::Either;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
@@ -440,9 +440,12 @@ impl BlockTreeServiceInner {
             if add_result.is_ok() {
                 // Schedule block for full validation regardless of origin
                 // HACK
-                System::set_current(self.system.clone());
-                let validation_service = ValidationService::from_registry();
-                validation_service.do_send(RequestValidationMessage(block.clone()));
+                self.service_senders
+                    .validation_service
+                    .send(ValidationServiceMessage::ValidateBlock {
+                        block: block.clone(),
+                    })
+                    .context("validation service unreachable!")?;
 
                 // Update block state to reflect scheduled validation
                 if cache
@@ -661,7 +664,7 @@ pub fn prune_chains_at_ancestor(
     (old_divergent, new_divergent)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ValidationResult {
     Valid,
     Invalid,

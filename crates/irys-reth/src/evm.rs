@@ -151,7 +151,7 @@ where
             &ExecutionResult<<Self::Evm as Evm>::HaltReason>,
         ) -> reth_evm::block::CommitChanges,
     ) -> Result<Option<u64>, BlockExecutionError> {
-        tracing::error!(tx_hash = %tx.tx().hash(), "executing transaction");
+        tracing::trace!(tx_hash = %tx.tx().hash(), "executing transaction");
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
         let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
@@ -162,8 +162,6 @@ where
                 .inner
                 .execute_transaction_with_commit_condition(tx, on_result_f);
         };
-
-        tracing::error!(tx_hash = %tx.tx().hash(), "executing system tx");
 
         // Validate system tx metadata
         self.validate_system_transaction_metadata(&system_tx, tx_envelope.hash())?;
