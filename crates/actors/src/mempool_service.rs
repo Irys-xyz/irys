@@ -227,8 +227,6 @@ pub enum MempoolServiceMessage {
     BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
     /// Get IrysTransactionHeader
     GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
-    /// get Vec<CommitmentTransaction> by signer
-    GetCommitmentTxs(Address, oneshot::Sender<Option<Vec<CommitmentTransaction>>>),
     /// get CommitmentTransaction by H256 id
     GetCommitmentTxById(H256, oneshot::Sender<Option<CommitmentTransaction>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -1421,11 +1419,6 @@ impl Inner {
             .await
             .map_err(|_| TxIngressError::DatabaseError)?;
 
-        let read_reth_tx = &self
-            .reth_db
-            .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?;
-
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
             let anchor_expiry_depth = self
@@ -1624,14 +1617,6 @@ impl Inner {
             match msg {
                 MempoolServiceMessage::GetTransaction(tx, response) => {
                     let response_message = self.handle_get_transaction_message(tx).await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetCommitmentTxs(address, response) => {
-                    let response_message = self
-                        .handle_get_commitment_transactions_message(address)
-                        .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };

@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use eyre::eyre;
 use futures::future;
 use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid, SystemLedger,
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
+    SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
@@ -250,6 +251,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
                         return Err(eyre::eyre!("Invalid ingress proof signature: {}", e));
                     }
+                }
+            }
 
             // Validate commitments (if there are some)
             let mut commitments: Vec<CommitmentTransaction> = Vec::new();
