@@ -24,9 +24,11 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
-use irys_database::db::IrysDatabaseExt as _;
-use irys_database::tables::IrysBlockHeaders;
-use irys_database::{tables::IngressProofs, tx_header_by_txid};
+use irys_database::{
+    db::IrysDatabaseExt as _,
+    tables::{IngressProofs, IrysBlockHeaders},
+    tx_header_by_txid,
+};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_primitives::CommitmentType;
@@ -46,9 +48,7 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
-use reth_db::cursor::*;
-use reth_db::transaction::DbTx;
-use reth_db::Database;
+use reth_db::{cursor::*, transaction::DbTx, Database};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -448,7 +448,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 _ => {}
             };
             drop(ro_tx);
-
+            mine_blocks(&self.node_ctx, 1).await.unwrap();
             sleep(delay).await;
         }
         Err(eyre::eyre!(
@@ -499,6 +499,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 };
             }
             drop(ro_tx);
+            mine_block(&self.node_ctx).await.unwrap();
             sleep(Duration::from_secs(1)).await;
         }
 

@@ -41,8 +41,6 @@ async fn heavy_data_promotion_test() {
     .await
     .unwrap();
 
-    node.node_ctx.start_mining().await.unwrap();
-
     let app = node.start_public_api().await;
 
     // Create a bunch of TX chunks
