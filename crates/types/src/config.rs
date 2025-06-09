@@ -742,7 +742,7 @@ impl NodeConfig {
         self.base_directory.join("irys_consensus_data")
     }
 
-    /// get the irys mempool persistance path
+    /// get the irys mempool persistence path
     pub fn mempool_dir(&self) -> PathBuf {
         self.base_directory.join("mempool")
     }
