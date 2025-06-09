@@ -144,26 +144,11 @@ async fn heavy_data_promotion_test() {
     assert!(result.is_ok());
 
     // wait for the first set of chunks chunk to appear in the publish ledger
-    for _attempts in 1..20 {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
-        {
-            println!("First set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-    }
-
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
+    assert!(result.is_ok());
     // wait for the second set of chunks to appear in the publish ledger
-    for _attempts in 1..20 {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
-        {
-            println!("Second set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-    }
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
+    assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
