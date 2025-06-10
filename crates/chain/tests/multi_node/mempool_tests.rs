@@ -123,8 +123,13 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 }
 
 #[actix::test]
-/// stake, mine, pledge, mine, restart node, confirm pledge is present still in mempool, mine, storage tx, restart
-async fn mempool_persistance_test() -> eyre::Result<()> {
+/// Test mempool p[ersists to disk during shutdown
+///
+/// post stake, post pledge, restart node
+/// confirm pledge is present in mempool
+/// post storage tx, restart node
+/// confirm storage tx is present in mempool
+async fn mempool_persistence_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     initialize_tracing();
 
