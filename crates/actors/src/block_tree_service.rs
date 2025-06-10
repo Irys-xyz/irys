@@ -1,5 +1,4 @@
 use crate::{
-    block_discovery::get_storage_tx_in_parallel,
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaServiceMessage,
@@ -27,10 +26,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::{
-    sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
-        oneshot,
-    },
+    sync::{mpsc::UnboundedReceiver, oneshot},
     task::JoinHandle,
 };
 use tracing::{debug, error, info};
@@ -219,8 +215,7 @@ impl BlockTreeServiceInner {
                 block_hash,
                 validation_result,
             } => {
-                self.on_block_validation_finished(block_hash, validation_result)
-                    .await;
+                self.on_block_validation_finished(block_hash, validation_result);
             }
         }
         Ok(())
@@ -245,20 +240,8 @@ impl BlockTreeServiceInner {
 
         // Get all the transactions for the finalized block, error if not found
         // TODO: Eventually abstract this for support of `n` ledgers
-        let submit_txs = get_ledger_tx_headers(
-            &tx,
-            &block_header,
-            DataLedger::Submit,
-            &self.service_senders.mempool,
-            &self.db,
-        );
-        let publish_txs = get_ledger_tx_headers(
-            &tx,
-            &block_header,
-            DataLedger::Publish,
-            &self.service_senders.mempool,
-            &self.db,
-        );
+        let submit_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Submit);
+        let publish_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Publish);
 
         let all_txs = {
             let mut combined = submit_txs.unwrap_or_default();
@@ -327,9 +310,8 @@ impl BlockTreeServiceInner {
     fn try_notify_services_of_block_finalization(
         &self,
         arc_block: &Arc<IrysBlockHeader>,
-        cache_binding: Arc<RwLock<BlockTreeCache>>, //cache: &BlockTreeCache,
+        cache: &BlockTreeCache,
     ) {
-        let cache = cache_binding.read().unwrap();
         let migration_depth = self.consensus_config.chunk_migration_depth as usize;
 
         // Skip if block isn't deep enough for finalization
@@ -508,7 +490,7 @@ impl BlockTreeServiceInner {
     /// 6. Checks if any blocks are deep enough to be finalized to storage
     ///
     /// Invalid blocks are logged but currently remain in the cache.
-    async fn on_block_validation_finished(
+    fn on_block_validation_finished(
         &mut self,
         block_hash: H256,
         validation_result: ValidationResult,
@@ -638,9 +620,9 @@ impl BlockTreeServiceInner {
 
                     self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
-                drop(cache);
+
                 // Handle block finalization (move chunks to disk and add to block_index)
-                self.try_notify_services_of_block_finalization(&arc_block, binding);
+                self.try_notify_services_of_block_finalization(&arc_block, &cache);
             }
         }
     }
@@ -693,20 +675,19 @@ fn get_ledger_tx_headers<T: DbTx>(
     tx: &T,
     block_header: &IrysBlockHeader,
     ledger: DataLedger,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
-    db: &DatabaseProvider,
 ) -> Option<Vec<IrysTransactionHeader>> {
-    let storage_tx_ids = block_header.data_ledgers[ledger]
+    match block_header.data_ledgers[ledger]
         .tx_ids
         .iter()
-        .cloned()
-        .collect::<Vec<H256>>();
-
-    match tokio::runtime::Handle::current().block_on(get_storage_tx_in_parallel(
-        storage_tx_ids,
-        mempool_sender,
-        db,
-    )) {
+        .map(|txid| {
+            tx_header_by_txid(tx, txid)
+                .map_err(|e| eyre::eyre!("Failed to get tx header: {}", e))
+                .and_then(|opt| {
+                    opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
         Ok(txs) => Some(txs),
         Err(e) => {
             error!(
