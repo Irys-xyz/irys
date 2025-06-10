@@ -662,7 +662,7 @@ impl Inner {
             .values()
             .flatten()
             .find(|tx| tx.id == tx_id)
-            .map(|v| v.clone())
+            .cloned()
     }
 
     async fn handle_get_commitment_transactions_message(
