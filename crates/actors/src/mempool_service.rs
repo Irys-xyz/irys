@@ -652,15 +652,12 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         // if tx exists in mempool valid_commitment_tx (temporary storage
-        match mempool_state_guard
+        mempool_state_guard
             .valid_commitment_tx
             .values()
             .flatten()
             .find(|tx| tx.id == tx_id)
-        {
-            Some(v) => Some(v.clone()),
-            _ => None,
-        }
+            .map(|v| v.clone())
     }
 
     async fn handle_get_commitment_transactions_message(
