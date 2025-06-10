@@ -35,6 +35,7 @@ async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
 }
 
 async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
+    // setup node
     let entropy_packing_iterations = 1_000;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
@@ -50,7 +51,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let chain_id = config.consensus_config().chain_id;
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    // Is there any reason for spawning another one here?
+    // mine a block
     node.mine_block().await?;
 
     let app = node.start_public_api().await;
@@ -62,6 +63,9 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     .await
     .unwrap();
 
+    // mine a block
+    node.mine_block().await?;
+
     // Create 2.5 chunks worth of data *  fill the data with random bytes
     let data_size = chunk_size * 2_usize;
     let mut data_bytes = vec![0u8; data_size];
@@ -72,9 +76,6 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         .create_transaction(data_bytes.clone(), None)
         .unwrap();
     let tx = main_signer.sign_transaction(tx).unwrap();
-
-    // mine a block
-    node.mine_block().await?;
 
     // send storage tx via POST request with JSON payload
     let req = test::TestRequest::post()
@@ -93,7 +94,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     info!("Transaction was posted");
 
     // mine a block
-    node.mine_blocks(5).await?;
+    node.mine_blocks(1).await?;
 
     // Loop though each of the transaction chunks
     for (index, chunk_node) in tx.chunks.iter().enumerate() {
