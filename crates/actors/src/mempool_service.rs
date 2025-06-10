@@ -61,10 +61,6 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: H256,
     ) -> Result<IrysTransactionHeader, TxReadError>;
-    async fn handle_get_commitment_transactions_by_signer(
-        &self,
-        address: Address,
-    ) -> Result<Vec<CommitmentTransaction>, TxReadError>;
     async fn handle_get_commitment_transaction_by_id(
         &self,
         id: H256,
@@ -108,29 +104,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 "Error reading GetTransaction response ".to_owned(),
             ))
         }
-    }
-
-    async fn handle_get_commitment_transactions_by_signer(
-        &self,
-        _address: Address,
-    ) -> Result<Vec<CommitmentTransaction>, TxReadError> {
-        /*let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs(address.clone(), oneshot_tx);
-        if let Err(err) = self.service.send(tx_ingress_msg) {
-            tracing::error!("error sending message to mempool: {:?}", err);
-        }
-
-        if let Ok(response) = oneshot_rx.await {
-            match response {
-                Some(response) => Ok(response),
-                None => Err(TxReadError::CommitmentNotInMempool),
-            }
-        } else {
-            Err(TxReadError::Other(
-                "Error reading GetCommitmentTxs response ".to_owned(),
-            ))
-        }*/
-        Err(TxReadError::DatabaseError)
     }
 
     async fn handle_get_commitment_transaction_by_id(
@@ -681,20 +654,6 @@ impl Inner {
             .flatten()
             .find(|tx| tx.id == tx_id)
             .cloned()
-    }
-
-    async fn handle_get_commitment_transactions_message(
-        &self,
-        address: Address,
-    ) -> Option<Vec<CommitmentTransaction>> {
-        let mempool_state = &self.mempool_state.clone();
-        let mempool_state_guard = mempool_state.read().await;
-        // if tx exists in mempool valid_tx (temporary storage)
-        if let Some(tx_headers) = mempool_state_guard.valid_commitment_tx.get(&address) {
-            return Some(tx_headers.clone());
-        }
-        drop(mempool_state_guard);
-        None
     }
 
     async fn handle_commitment_tx_ingress_message(
