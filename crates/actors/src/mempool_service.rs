@@ -1152,7 +1152,7 @@ impl Inner {
             // Remove any confirmed commitment tx
             if let Some(commitment_tx_ids) = commitment_tx_ids {
                 for tx_id in &commitment_tx_ids.0 {
-                    confirmed_commitments.insert(tx_id.clone());
+                    confirmed_commitments.insert(*tx_id);
                 }
             }
         }
