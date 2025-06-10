@@ -1793,7 +1793,8 @@ impl Inner {
 
     async fn restore_mempool_from_disk(&mut self) {
         let recovered =
-            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir()).await;
+            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
+                .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
             self.handle_commitment_tx_ingress_message(commitment_tx)

@@ -9,7 +9,7 @@ pub struct RecoveredMempoolState {
 }
 
 impl RecoveredMempoolState {
-    pub async fn load_from_disk(mempool_dir: &Path) -> Self {
+    pub async fn load_from_disk(mempool_dir: &Path, remove_files: bool) -> Self {
         let commitment_tx_path = mempool_dir.join("commitment_tx");
         let storage_tx_path = mempool_dir.join("storage_tx");
         let mut commitment_txs = HashMap::new();
@@ -34,7 +34,10 @@ impl RecoveredMempoolState {
                     };
 
                     commitment_txs.insert(tx.id, tx);
-                    let _ = tokio::fs::remove_file(&path).await;
+                    tracing::error!("PERSIST loaded commitment entry from file 3");
+                    if remove_files {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
                 }
             }
         }
@@ -58,7 +61,10 @@ impl RecoveredMempoolState {
                     };
 
                     storage_txs.insert(tx.id, tx);
-                    let _ = tokio::fs::remove_file(&path).await;
+                    tracing::error!("PERSIST loaded storage entry from file");
+                    if remove_files {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
                 }
             }
         }
