@@ -240,6 +240,19 @@ impl IrysBlockHeader {
 
         commitment_txids
     }
+
+    pub fn get_storage_ledger_tx_ids(&self) -> Vec<H256> {
+        let mut storage_txids = Vec::new();
+        // Because of a circular dependency the types crate can't import the SystemLedger enum
+        // SystemLedger::Commitments = 0, so finding `ledger_id: 0` here, locates the commitment ledger
+        let storage_ledger = self.data_ledgers.iter().find(|l| l.ledger_id == 1);
+
+        if let Some(storage_ledger) = storage_ledger {
+            storage_txids = storage_ledger.tx_ids.0.clone();
+        }
+
+        storage_txids
+    }
 }
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
