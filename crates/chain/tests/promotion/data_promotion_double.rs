@@ -1,5 +1,5 @@
+use crate::utils::post_chunk;
 use crate::utils::{get_block_parent, mine_block, verify_published_chunk, IrysNodeTest};
-use crate::utils::{mine_blocks, post_chunk};
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
@@ -52,7 +52,7 @@ async fn heavy_double_root_data_promotion_test() {
     .await
     .unwrap();
 
-    let block1 = mine_block(&node.node_ctx).await.unwrap().unwrap();
+    let _block1 = mine_block(&node.node_ctx).await.unwrap().unwrap();
 
     let app = node.start_public_api().await;
 

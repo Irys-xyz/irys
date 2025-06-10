@@ -5,7 +5,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool_service::{MempoolFacade, MempoolServiceFacadeImpl, MempoolServiceMessage},
+    mempool_service::{MempoolFacade, MempoolServiceFacadeImpl},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     CommitmentCacheMessage,
@@ -301,10 +301,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             eyre::ensure!(parent.header.hash == prev_block_header.evm_block_hash, "reth parent block hash mismatch");
 
             // Submit Ledger Transactions
-            let (tx, rx) = tokio::sync::oneshot::channel();
             // make sure the parent EVM block is present before calling this!
-            service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(Some(BlockId::Hash(prev_block_header.evm_block_hash.into())), tx)).expect("to send MempoolServiceMessage");
-            let submit_txs = rx.await.expect("to receive txns");
+            let submit_txs = mempool.get_best_mempool_txs(Some(BlockId::Hash(prev_block_header.evm_block_hash.into()))).await.expect("to receive txns");
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;

@@ -1,6 +1,8 @@
 use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
-use crate::services::ServiceSenders;
-use crate::{CommitmentCacheMessage, CommitmentCacheStatus, CommitmentStateReadGuard};
+use crate::{
+    services::ServiceSenders, CommitmentCacheMessage, CommitmentCacheStatus,
+    CommitmentStateReadGuard,
+};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -51,6 +53,11 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError>;
+    async fn get_best_mempool_txs(
+        &self,
+        block: Option<BlockId>,
+    ) -> Result<MempoolTxs, TxReadError> {
+    }
     async fn handle_get_transaction(
         &self,
         tx_header: H256,
@@ -161,6 +168,18 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxIngressMessage")
+    }
+
+    async fn get_best_mempool_txs(
+        &self,
+        block: Option<BlockId>,
+    ) -> Result<MempoolTxs, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::GetBestMempoolTxs(block, oneshot_tx))
+            .map_err(|_| TxReadError::Other("Error sending GetBestMempoolTxs ".to_owned()))?;
+
+        Ok(oneshot_rx.await.expect("to process GetBestMempoolTxs"))
     }
 
     async fn handle_commitment_transaction(
