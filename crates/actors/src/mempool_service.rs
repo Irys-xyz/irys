@@ -113,7 +113,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
     async fn handle_get_commitment_transactions_by_signer(
         &self,
-        address: Address,
+        _address: Address,
     ) -> Result<Vec<CommitmentTransaction>, TxReadError> {
         /*let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs(address.clone(), oneshot_tx);
