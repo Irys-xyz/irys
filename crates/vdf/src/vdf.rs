@@ -368,8 +368,13 @@ mod tests {
             ..VDFLimiterInfo::default()
         };
 
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+            .build()
+            .expect("to be able to build vdf validation pool");
+
         assert!(
-            vdf_steps_are_valid(&vdf_info, &config.consensus.vdf, vdf_steps_guard).is_ok(),
+            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard).is_ok(),
             "Invalid VDF"
         );
 
