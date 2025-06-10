@@ -1052,19 +1052,14 @@ mod tests {
         }
     }
 
-    /// Creates a fork scenario in the block tree for testing reorgs
-    fn create_fork_scenario(
-        fork_height: u64,
-        old_fork_length: u64,
-        new_fork_length: u64,
-    ) -> (BlockTreeReadGuard, ReorgEvent, Vec<PriceInfo>) {
-        // Build common chain up to fork point
+    /// Creates a clean chain state without any forks for testing
+    fn setup_chain_for_fork_test(max_height: u64) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
         let mut blocks = Vec::new();
         let mut prices = Vec::new();
 
-        // Common chain
+        // Build linear chain without any forks
         let mut last_hash = H256::default();
-        for height in 0..=fork_height {
+        for height in 0..=max_height {
             let mut header = IrysBlockHeader::new_mock_header();
             header.height = height;
             header.oracle_irys_price = rand_price(height);
@@ -1081,34 +1076,58 @@ mod tests {
             blocks.push((header, ChainState::Onchain));
         }
 
-        let fork_parent = blocks.last().unwrap().0.clone();
+        let block_tree_guard = genesis_tree(&mut blocks);
+        (block_tree_guard, prices)
+    }
+
+    /// Adds fork to an existing block tree after EMA service initialization
+    fn create_and_apply_fork(
+        block_tree_guard: &BlockTreeReadGuard,
+        fork_height: u64,
+        old_fork_length: u64,
+        new_fork_length: u64,
+    ) -> ReorgEvent {
+        // Get the fork parent block
+        let fork_parent = {
+            let tree = block_tree_guard.read();
+            let (chain, _) = tree.get_canonical_chain();
+            let fork_parent_hash = chain
+                .iter()
+                .find(|(_, height, _, _)| *height == fork_height)
+                .map(|(hash, _, _, _)| *hash)
+                .expect("Fork height should exist in chain");
+            
+            let block = tree.get_block(&fork_parent_hash).unwrap();
+            Arc::new(block.clone())
+        };
+
         let fork_parent_hash = fork_parent.block_hash;
 
-        // Old fork (current canonical chain)
+        // Build old fork blocks (current canonical chain continuation)
         let mut old_fork_blocks = Vec::new();
-        let mut last_hash = fork_parent_hash;
 
-        for i in 1..=old_fork_length {
-            let mut header = IrysBlockHeader::new_mock_header();
-            header.height = fork_height + i;
-            header.previous_block_hash = last_hash;
-            header.oracle_irys_price = rand_price(header.height);
-            header.ema_irys_price = rand_price(header.height);
-            header.block_hash = H256::random();
-            last_hash = header.block_hash;
-
-            old_fork_blocks.push(Arc::new(header.clone()));
-            blocks.push((header, ChainState::Onchain));
+        {
+            let tree = block_tree_guard.read();
+            let (chain, _) = tree.get_canonical_chain();
+            // Collect existing blocks that form the old fork
+            for i in 1..=old_fork_length {
+                let height = fork_height + i;
+                let block_hash = chain
+                    .iter()
+                    .find(|(_, h, _, _)| *h == height)
+                    .map(|(hash, _, _, _)| *hash);
+                
+                if let Some(hash) = block_hash {
+                    let block = tree.get_block(&hash).unwrap();
+                    old_fork_blocks.push(Arc::new(block.clone()));
+                }
+            }
         }
 
-        // New fork (will become canonical) - add these to the block tree
+        // Create new fork blocks with higher difficulty
         let mut new_fork_blocks = Vec::new();
-        last_hash = fork_parent_hash;
+        let mut last_hash = fork_parent_hash;
 
-        // Create block tree with common chain and old fork
-        let block_tree_guard = genesis_tree(&mut blocks);
-
-        // Now add the new fork blocks to the tree
         {
             let mut tree = block_tree_guard.write();
             for i in 1..=new_fork_length {
@@ -1119,7 +1138,8 @@ mod tests {
                 header.oracle_irys_price = rand_price(header.height + 100);
                 header.ema_irys_price = rand_price(header.height + 100);
                 header.block_hash = H256::random();
-                header.cumulative_diff = (fork_height + i + old_fork_length + 1).into(); // Much higher difficulty to ensure it becomes canonical
+                // Much higher difficulty to ensure it becomes canonical
+                header.cumulative_diff = (fork_height + i + old_fork_length + 1).into();
                 last_hash = header.block_hash;
 
                 // Add to block tree as validated but not yet canonical
@@ -1142,15 +1162,13 @@ mod tests {
         let new_tip = new_fork_blocks.last().unwrap().block_hash;
 
         // Create reorg event
-        let reorg_event = ReorgEvent {
+        ReorgEvent {
             old_fork: Arc::new(old_fork_blocks),
             new_fork: Arc::new(new_fork_blocks),
-            fork_parent: Arc::new(fork_parent),
+            fork_parent,
             new_tip,
             timestamp: SystemTime::now(),
-        };
-
-        (block_tree_guard, reorg_event, prices)
+        }
     }
 
     #[test(tokio::test)]
@@ -1566,8 +1584,9 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_ema_service_reorg_basic() {
-        // Setup: Create a fork at height 10 with old fork of 3 blocks and new fork of 4 blocks
-        let (block_tree_guard, reorg_event, _prices) = create_fork_scenario(10, 3, 4);
+        // Step 1: Create clean chain state without any forks
+        let (block_tree_guard, prices) = setup_chain_for_fork_test(13); // height 10 + 3 blocks for old fork
+        
         let config = Config::new(NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 ema: EmaConfig {
@@ -1578,20 +1597,23 @@ mod tests {
             ..NodeConfig::testnet()
         });
 
-        // Create EMA service with fork scenario
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard, vec![], config);
+        // Step 2: Initialize EMA service with clean block tree (no forks)
+        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
 
-        // Get initial EMA price before reorg
+        // Get initial EMA price before creating fork
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.ema_sender
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
-        let _initial_ema = rx.await.unwrap();
+        let initial_ema = rx.await.unwrap();
 
-        // Trigger reorg
+        // Step 3: Now create fork on the block tree after EMA service is initialized
+        let reorg_event = create_and_apply_fork(&block_tree_guard, 10, 3, 4);
+
+        // Step 4: Trigger reorg
         ctx.trigger_reorg(&service_senders, reorg_event).await;
 
-        // Verify service is still responsive after reorg
+        // Step 5: Verify service is still responsive after reorg
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.ema_sender
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
@@ -1600,12 +1622,15 @@ mod tests {
 
         // The EMA should be valid (non-zero)
         assert!(post_reorg_ema.amount > U256::from(0));
+        // Initial EMA should also have been valid
+        assert!(initial_ema.amount > U256::from(0));
     }
 
     #[test(tokio::test)]
     async fn test_ema_service_reorg_multiple_intervals() {
-        // Setup: Create a fork at height 25 (crossing multiple EMA intervals)
-        let (block_tree_guard, reorg_event, _prices) = create_fork_scenario(25, 5, 6);
+        // Step 1: Create clean chain state without any forks (height 25 + 5 blocks for old fork)
+        let (block_tree_guard, prices) = setup_chain_for_fork_test(30);
+        
         let config = Config::new(NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 ema: EmaConfig {
@@ -1616,13 +1641,24 @@ mod tests {
             ..NodeConfig::testnet()
         });
 
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard, vec![], config);
+        // Step 2: Initialize EMA service with clean block tree (no forks)
+        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
 
-        // Trigger reorg
+        // Verify initial state crosses multiple EMA intervals
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        ctx.ema_sender
+            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
+            .unwrap();
+        let _initial_ema = rx.await.unwrap();
+
+        // Step 3: Create fork at height 25 (crossing multiple EMA intervals)
+        let reorg_event = create_and_apply_fork(&block_tree_guard, 25, 5, 6);
+
+        // Step 4: Trigger reorg
         ctx.trigger_reorg(&service_senders, reorg_event).await;
 
-        // Test that we can get prices for the next block after reorg
-        let new_height = 32; // After the new fork
+        // Step 5: Test that we can get prices for the next block after reorg
+        let new_height = 32; // After the new fork (25 + 6 + 1)
         let oracle_price = rand_price(new_height);
         let result = ctx.get_prices_for_new_block(new_height, oracle_price).await;
 
@@ -1634,8 +1670,9 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_ema_service_reorg_updates_both_caches() {
-        // Setup
-        let (block_tree_guard, reorg_event, _prices) = create_fork_scenario(15, 3, 5);
+        // Step 1: Create clean chain state without any forks (height 15 + 3 blocks for old fork)
+        let (block_tree_guard, prices) = setup_chain_for_fork_test(18);
+        
         let config = Config::new(NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 ema: EmaConfig {
@@ -1646,12 +1683,24 @@ mod tests {
             ..NodeConfig::testnet()
         });
 
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard, vec![], config);
+        // Step 2: Initialize EMA service with clean block tree (no forks)
+        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
 
-        // Trigger reorg
+        // Verify initial caches are working
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        ctx.ema_sender
+            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
+            .unwrap();
+        let initial_confirmed_ema = rx.await.unwrap();
+        assert!(initial_confirmed_ema.amount > U256::from(0));
+
+        // Step 3: Create fork at height 15
+        let reorg_event = create_and_apply_fork(&block_tree_guard, 15, 3, 5);
+
+        // Step 4: Trigger reorg
         ctx.trigger_reorg(&service_senders, reorg_event).await;
 
-        // Test that both confirmed (for pricing) and optimistic (for validation) caches work
+        // Step 5: Test that both confirmed (for pricing) and optimistic (for validation) caches work
 
         // Test confirmed cache via GetCurrentEmaForPricing
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1672,8 +1721,9 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_ema_service_reorg_price_continuity() {
-        // Setup: Test that EMA calculations remain consistent after reorg
-        let (block_tree_guard, reorg_event, _prices) = create_fork_scenario(18, 2, 3);
+        // Step 1: Create clean chain state without any forks (height 18 + 2 blocks for old fork)
+        let (block_tree_guard, prices) = setup_chain_for_fork_test(20);
+        
         let config = Config::new(NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 ema: EmaConfig {
@@ -1684,20 +1734,24 @@ mod tests {
             ..NodeConfig::testnet()
         });
 
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard, vec![], config);
+        // Step 2: Initialize EMA service with clean block tree (no forks)
+        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
 
-        // Get price before reorg
+        // Get price before creating fork
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.ema_sender
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let pre_reorg_ema = rx.await.unwrap();
 
-        // Trigger reorg
+        // Step 3: Create fork at height 18
+        let reorg_event = create_and_apply_fork(&block_tree_guard, 18, 2, 3);
+
+        // Step 4: Trigger reorg
         ctx.trigger_reorg(&service_senders, reorg_event).await;
 
-        // Validate EMA price calculation after reorg
-        let new_height = 22;
+        // Step 5: Validate EMA price calculation after reorg
+        let new_height = 21; // Height of the new chain tip (18 + 3)
         let oracle_price = rand_price(new_height);
         let ema_price = rand_price(new_height);
 
@@ -1718,5 +1772,11 @@ mod tests {
         // Both EMAs should be valid prices
         assert!(pre_reorg_ema.amount > U256::from(0));
         assert!(post_reorg_ema.amount > U256::from(0));
+        
+        // Verify we can get prices for the next block
+        let next_height = 22; // Next block after the new chain tip
+        let next_oracle_price = rand_price(next_height);
+        let next_price_result = ctx.get_prices_for_new_block(next_height, next_oracle_price).await;
+        assert!(next_price_result.is_ok());
     }
 }
