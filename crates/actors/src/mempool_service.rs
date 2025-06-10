@@ -244,6 +244,11 @@ pub enum MempoolServiceMessage {
     BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
     /// Get IrysTransactionHeader
     GetStorageTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
+    /// Get IrysTransactionHeader
+    GetStorageTransactions(
+        Vec<H256>,
+        oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
+    ),
     /// get CommitmentTransaction by H256 id
     GetCommitmentTxById(H256, oneshot::Sender<Option<CommitmentTransaction>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -1617,6 +1622,17 @@ impl Inner {
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
+                }
+                MempoolServiceMessage::GetStorageTransactions(txs, response) => {
+                    let mut found_txs = vec![];
+                    for tx in txs {
+                        let response_message =
+                            self.handle_get_storage_transaction_message(tx).await;
+                        found_txs.push(response_message);
+                    }
+                    if let Err(e) = response.send(found_txs) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    }
                 }
                 MempoolServiceMessage::GetCommitmentTxById(id, response) => {
                     let response_message = self
