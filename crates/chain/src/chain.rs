@@ -906,7 +906,7 @@ impl IrysNode {
 
         // Spawn EMA service
         let _handle =
-            EmaService::spawn_service(task_exec, block_tree_guard.clone(), receivers.ema, &config);
+            EmaService::spawn_service(task_exec, block_tree_guard.clone(), receivers.ema, &config, &service_senders);
 
         // Spawn the CommitmentCache service
         let _commitcache_handle = CommitmentCache::spawn_service(
