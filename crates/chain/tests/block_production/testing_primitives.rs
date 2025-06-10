@@ -38,6 +38,7 @@ async fn heavy_test_mine() {
 
 #[actix::test]
 async fn heavy_test_mine_tx() {
+    // setup
     let mut config = NodeConfig::testnet();
     let account = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
@@ -56,10 +57,14 @@ async fn heavy_test_mine_tx() {
         .create_submit_data_tx(&account, data)
         .await
         .unwrap();
-    irys_node.mine_block().await.unwrap();
+    // mine enough blocks to move block into index from tree
+    irys_node.mine_blocks(2).await.unwrap();
+    // confirm the block were mined
     let next_height = irys_node.get_height().await;
-    assert_eq!(next_height, height + 1_u64);
+    assert_eq!(next_height, height + 2_u64);
+    // confirm the header is presednt in the database
     let tx_header = irys_node.get_tx_header(&tx.header.id).unwrap();
     assert_eq!(tx_header, tx.header);
+    // teardown
     irys_node.stop().await;
 }

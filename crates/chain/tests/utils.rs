@@ -748,6 +748,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         account.sign_transaction(tx).map_err(AddTxError::CreateTx)
     }
 
+    /// read storage tx from mbdx i.e. block index
     pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
         match self
             .node_ctx
