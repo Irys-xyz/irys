@@ -952,7 +952,7 @@ impl IrysNode {
         )));
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
-        // Spawn Valdiation service
+        // Spawn the valdiation service
         let _handle = ValidationService::spawn_service(
             task_exec,
             block_index_guard.clone(),

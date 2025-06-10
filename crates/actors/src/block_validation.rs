@@ -533,7 +533,7 @@ pub fn generate_expected_system_transactions(
     );
     expected_txs.push(block_reward_tx);
 
-    // For each transaction in the submit ledger, create a storage fee system transaction
+    // create a storage fee system txs
     for submit_tx in submit_txs {
         let storage_fee_tx = SystemTransaction::new_v1(
             block_height,
@@ -545,6 +545,8 @@ pub fn generate_expected_system_transactions(
         );
         expected_txs.push(storage_fee_tx);
     }
+
+    // TODO: create staking system txs
 
     Ok(expected_txs)
 }

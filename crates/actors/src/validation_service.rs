@@ -94,7 +94,7 @@ impl ValidationService {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
                             .build()
-                            .expect("to be able to build vdf validatoin pool"),
+                            .expect("to be able to build vdf validation pool"),
                         block_index_guard,
                         partition_assignments_guard,
                         vdf_state: vdf_state_readonly,
