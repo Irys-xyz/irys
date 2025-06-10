@@ -1,6 +1,6 @@
 use crate::{
     block_pool_service::{
-        BlockPoolService, BlockProcessedOrProcessing, GetBlockByHash, ProcessBlock,
+        BlockDataRequest, BlockPoolService, BlockProcessedOrProcessing, ProcessBlock,
     },
     cache::{GossipCache, GossipCacheKey},
     peer_list::PeerListFacade,
@@ -277,6 +277,7 @@ where
             .block_pool
             .send(BlockProcessedOrProcessing {
                 block_hash: block_header.block_hash,
+                block_height: block_header.height,
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
@@ -401,7 +402,7 @@ where
             GossipDataRequest::Block(block_hash) => {
                 let block_result = self
                     .block_pool
-                    .send(GetBlockByHash { block_hash })
+                    .send(BlockDataRequest { block_hash })
                     .await
                     .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?;
 

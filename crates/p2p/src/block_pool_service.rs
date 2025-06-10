@@ -11,8 +11,11 @@ use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use tracing::{debug, error, info, warn};
+
+const BLOCK_POOL_CACHE_SIZE: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub enum BlockPoolError {
@@ -20,6 +23,7 @@ pub enum BlockPoolError {
     OtherInternal(String),
     BlockError(String),
     AlreadyProcessed(BlockHash),
+    PreviousBlockDoesNotMatch(String),
 }
 
 impl From<PeerListFacadeError> for BlockPoolError {
@@ -38,8 +42,8 @@ where
     /// Database provider for accessing transaction headers and related data.
     pub(crate) db: Option<DatabaseProvider>,
 
-    pub(crate) orphaned_blocks_by_parent: HashMap<BlockHash, IrysBlockHeader>,
-    pub(crate) block_hash_to_parent_hash: HashMap<BlockHash, BlockHash>,
+    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, IrysBlockHeader>,
+    pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
@@ -58,8 +62,12 @@ where
     fn default() -> Self {
         Self {
             db: None,
-            orphaned_blocks_by_parent: HashMap::new(),
-            block_hash_to_parent_hash: HashMap::new(),
+            orphaned_blocks_by_parent: LruCache::new(
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+            ),
+            block_hash_to_parent_hash: LruCache::new(
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+            ),
             block_producer: None,
             peer_list: None,
             sync_state: SyncState::default(),
@@ -112,8 +120,12 @@ where
     ) -> Self {
         Self {
             db: Some(db),
-            orphaned_blocks_by_parent: HashMap::new(),
-            block_hash_to_parent_hash: HashMap::new(),
+            orphaned_blocks_by_parent: LruCache::new(
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+            ),
+            block_hash_to_parent_hash: LruCache::new(
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+            ),
             peer_list: Some(peer_list),
             block_producer: Some(block_producer_addr),
             sync_state,
@@ -160,7 +172,7 @@ where
                     block_header.block_hash.0.to_base58(),
                     block_header.height,
                     mismatched_hashes.hash_in_index,
-                    mismatched_hashes.hash_in_tree
+                    mismatched_hashes.provided_hash
                 );
                 warn!(message);
                 return Box::pin(
@@ -184,9 +196,9 @@ where
         // Adding the block to the pool, so if a block depending on that block arrives,
         // this block won't be requested from the network
         self.orphaned_blocks_by_parent
-            .insert(prev_block_hash, block_header.clone());
+            .put(prev_block_hash, block_header.clone());
         self.block_hash_to_parent_hash
-            .insert(current_block_hash, prev_block_hash);
+            .put(current_block_hash, prev_block_hash);
 
         let sync_state = self.sync_state.clone();
         let block_status_provider = self.block_status_provider.clone();
@@ -199,10 +211,27 @@ where
                     current_block_hash.0.to_base58()
                 );
 
-                let previous_block_has_been_processed = block_status_provider.block_has_been_processed_by_the_tree(&prev_block_hash);
+                let previous_block_status = block_status_provider.block_status(block_header.height.saturating_sub(1), &prev_block_hash);
+
+                warn!("Previous block status: {:?}", previous_block_status);
+
+                if let BlockStatus::IndexHashMismatch(mismatched_hashes) = previous_block_status {
+                    let message = format!(
+                        "Failed to process block {} (height {}): parent hash mismatch. Index hash is {:?}, provided hash is {:?}",
+                        block_header.block_hash.0.to_base58(),
+                        block_header.height,
+                        mismatched_hashes.hash_in_index,
+                        mismatched_hashes.provided_hash
+                    );
+                    warn!(message);
+                    self_addr.do_send(RemoveBlockFromPool {
+                        block_hash: block_header.block_hash,
+                    });
+                    return Err(BlockPoolError::PreviousBlockDoesNotMatch(message));
+                }
 
                 // If the parent block is in the db, process it
-                if previous_block_has_been_processed {
+                if previous_block_status.is_processed() {
                     info!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
@@ -317,7 +346,7 @@ where
         let previous_block_hash = block_header.previous_block_hash;
         let parent_is_already_in_the_pool = self
             .block_hash_to_parent_hash
-            .contains_key(&previous_block_hash);
+            .contains(&previous_block_hash);
 
         Box::pin(
             async move {
@@ -367,8 +396,8 @@ where
     type Result = ();
 
     fn handle(&mut self, msg: RemoveBlockFromPool, _ctx: &mut Self::Context) {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.remove(&msg.block_hash) {
-            self.orphaned_blocks_by_parent.remove(&parent_hash);
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.pop(&msg.block_hash) {
+            self.orphaned_blocks_by_parent.pop(&parent_hash);
         }
     }
 }
@@ -430,11 +459,11 @@ where
 /// Get block by its hash
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<Option<IrysBlockHeader>, BlockPoolError>")]
-pub(crate) struct GetBlockByHash {
+pub(crate) struct BlockDataRequest {
     pub block_hash: BlockHash,
 }
 
-impl<A, R, B> Handler<GetBlockByHash> for BlockPoolService<A, R, B>
+impl<A, R, B> Handler<BlockDataRequest> for BlockPoolService<A, R, B>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -442,7 +471,7 @@ where
 {
     type Result = Result<Option<IrysBlockHeader>, BlockPoolError>;
 
-    fn handle(&mut self, msg: GetBlockByHash, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: BlockDataRequest, _ctx: &mut Self::Context) -> Self::Result {
         let block_hash = msg.block_hash;
 
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
@@ -466,6 +495,7 @@ where
 #[rtype(result = "Result<bool, BlockPoolError>")]
 pub(crate) struct BlockProcessedOrProcessing {
     pub block_hash: BlockHash,
+    pub block_height: u64,
 }
 
 impl<A, R, B> Handler<BlockProcessedOrProcessing> for BlockPoolService<A, R, B>
@@ -482,14 +512,16 @@ where
         _ctx: &mut Self::Context,
     ) -> Self::Result {
         let block_hash = msg.block_hash;
+        let block_height = msg.block_height;
 
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
-            return Ok(self.orphaned_blocks_by_parent.contains_key(parent_hash));
+            return Ok(self.orphaned_blocks_by_parent.contains(parent_hash));
         }
 
         Ok(self
             .block_status_provider
-            .block_has_been_processed_by_the_tree(&block_hash))
+            .block_status(block_height, &block_hash)
+            .is_processed())
     }
 }
 

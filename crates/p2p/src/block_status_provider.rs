@@ -7,13 +7,13 @@ use {
     irys_database::BlockIndex,
     irys_types::{BlockIndexItem, IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
-    tracing::warn,
+    tracing::{debug, warn},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MismatchedBlockHashes {
     pub hash_in_index: BlockHash,
-    pub hash_in_tree: BlockHash,
+    pub provided_hash: BlockHash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -22,6 +22,15 @@ pub enum BlockStatus {
     ProcessedButSubjectToReorg,
     Processed,
     IndexHashMismatch(MismatchedBlockHashes),
+}
+
+impl BlockStatus {
+    pub fn is_processed(&self) -> bool {
+        matches!(
+            self,
+            BlockStatus::Processed | BlockStatus::ProcessedButSubjectToReorg
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -54,32 +63,6 @@ impl BlockStatusProvider {
             .is_some()
     }
 
-    /// If the block height is unknown
-    pub fn block_status_from_tree(&self, hash: &BlockHash) -> BlockStatus {
-        let binding = self.block_tree_read_guard.read();
-        let index_item = binding.get_block(hash);
-
-        if let Some(index_item) = index_item {
-            let block_index_binding = self.block_index_read_guard.read();
-            let index_item = block_index_binding.get_item(index_item.height);
-
-            if let Some(index_item) = index_item {
-                if &index_item.block_hash == hash {
-                    BlockStatus::Processed
-                } else {
-                    BlockStatus::IndexHashMismatch(MismatchedBlockHashes {
-                        hash_in_index: index_item.block_hash,
-                        hash_in_tree: *hash,
-                    })
-                }
-            } else {
-                BlockStatus::ProcessedButSubjectToReorg
-            }
-        } else {
-            BlockStatus::NotProcessed
-        }
-    }
-
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
         let block_is_in_the_tree = self.is_block_in_the_tree(block_hash);
         let binding = self.block_index_read_guard.read();
@@ -91,22 +74,13 @@ impl BlockStatusProvider {
             } else {
                 BlockStatus::IndexHashMismatch(MismatchedBlockHashes {
                     hash_in_index: index_item.block_hash,
-                    hash_in_tree: *block_hash,
+                    provided_hash: *block_hash,
                 })
             }
         } else if block_is_in_the_tree {
             BlockStatus::ProcessedButSubjectToReorg
         } else {
             BlockStatus::NotProcessed
-        }
-    }
-
-    pub fn block_has_been_processed_by_the_tree(&self, hash: &BlockHash) -> bool {
-        match self.block_status_from_tree(hash) {
-            BlockStatus::Processed => true,
-            BlockStatus::ProcessedButSubjectToReorg => true,
-            BlockStatus::NotProcessed => false,
-            BlockStatus::IndexHashMismatch(_) => false,
         }
     }
 }
@@ -126,13 +100,134 @@ impl BlockStatusProvider {
         }
     }
 
-    pub fn add_block_to_index_and_tree(&self, block: IrysBlockHeader) {
+    pub fn tree_tip(&self) -> BlockHash {
+        self.block_tree_read_guard.read().tip
+    }
+
+    pub fn get_block_from_tree(&self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
+        self.block_tree_read_guard
+            .read()
+            .get_block(block_hash)
+            .cloned()
+    }
+
+    pub fn oldest_tree_height(&self) -> u64 {
+        let mut lastest_block = self.tree_tip();
+        let mut oldest_height = 0;
+        debug!("The tip is: {:?}", lastest_block);
+
+        while let Some(block) = self.get_block_from_tree(&lastest_block) {
+            oldest_height = block.height;
+            if block.previous_block_hash != BlockHash::zero() {
+                lastest_block = block.previous_block_hash;
+            } else {
+                break;
+            }
+        }
+
+        debug!(
+            "The oldest block height in the tree is: {} ({:?})",
+            oldest_height, lastest_block
+        );
+        oldest_height
+    }
+
+    pub fn produce_mock_chain(
+        num_blocks: u64,
+        starting_block: Option<&IrysBlockHeader>,
+    ) -> Vec<IrysBlockHeader> {
+        let first_block = starting_block
+            .map(|parent| IrysBlockHeader {
+                block_hash: BlockHash::random(),
+                height: parent.height + 1,
+                previous_block_hash: parent.block_hash,
+                ..IrysBlockHeader::new_mock_header()
+            })
+            .unwrap_or_else(|| IrysBlockHeader {
+                block_hash: BlockHash::random(),
+                height: 1,
+                ..IrysBlockHeader::new_mock_header()
+            });
+
+        let mut blocks = vec![first_block];
+
+        for _ in 1..num_blocks {
+            let prev_block = blocks.last().expect("to have at least one block");
+            let block = IrysBlockHeader {
+                block_hash: BlockHash::random(),
+                height: prev_block.height + 1,
+                previous_block_hash: prev_block.block_hash,
+                ..IrysBlockHeader::new_mock_header()
+            };
+            blocks.push(block);
+        }
+
+        blocks
+    }
+
+    pub fn add_block_to_index_and_tree(&self, block: &IrysBlockHeader) {
+        self.add_block_to_index(block);
+        self.add_block_to_the_tree(block);
+        warn!(
+            "Added block {:?} (height {}) to index and tree",
+            block.block_hash, block.height
+        );
+    }
+
+    pub fn add_block_to_the_tree(&self, block: &IrysBlockHeader) {
         self.block_tree_read_guard
             .write()
-            .add_block(&block, Arc::new(Vec::new()))
+            .add_block(block, Arc::new(Vec::new()))
             .expect("to add block to the tree");
-        self.block_index_read_guard
-            .write()
+    }
+
+    pub fn set_tip(&self, block_hash: &BlockHash) {
+        self.block_tree_read_guard.write().tip = *block_hash;
+        warn!("Marked block {:?} as tip", block_hash);
+    }
+
+    pub fn delete_blocks_older_than(&self, height: u64) {
+        let mut lastest_block = self.tree_tip();
+        debug!("The tip is: {:?}", lastest_block);
+        let mut blocks_to_delete = vec![];
+
+        while let Some(block) = self.get_block_from_tree(&lastest_block) {
+            if block.height < height {
+                blocks_to_delete.push(block.block_hash);
+            }
+
+            if block.previous_block_hash != BlockHash::zero() {
+                lastest_block = block.previous_block_hash;
+            } else {
+                debug!("No previous block hash found, breaking the loop.");
+                break;
+            }
+        }
+
+        for block_hash in blocks_to_delete {
+            self.block_tree_read_guard
+                .write()
+                .test_delete(&block_hash)
+                .expect("to delete block from the tree");
+            debug!("Deleted block {:?} from the tree", block_hash);
+        }
+    }
+
+    pub fn add_block_to_index(&self, block: &IrysBlockHeader) {
+        let mut binding = self.block_index_read_guard.write();
+
+        if binding.items.is_empty() {
+            let genesis = IrysBlockHeader::default();
+            binding
+                .push_item(&BlockIndexItem {
+                    block_hash: genesis.block_hash,
+                    num_ledgers: 0,
+                    ledgers: vec![],
+                })
+                .unwrap();
+        }
+
+        binding
             .push_item(&BlockIndexItem {
                 block_hash: block.block_hash,
                 num_ledgers: 0,
@@ -140,15 +235,8 @@ impl BlockStatusProvider {
             })
             .unwrap();
         warn!(
-            "Added block {:?} (height {}) to index and tree",
+            "Added block {:?} (height {}) to index",
             block.block_hash, block.height
         );
-    }
-
-    pub fn add_block_to_the_tree(&self, block: IrysBlockHeader) {
-        self.block_tree_read_guard
-            .write()
-            .add_block(&block, Arc::new(Vec::new()))
-            .expect("to add block to the tree");
     }
 }

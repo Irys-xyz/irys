@@ -1087,6 +1087,11 @@ impl BlockTreeCache {
         Ok(())
     }
 
+    #[cfg(feature = "test-utils")]
+    pub fn test_delete(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
+        self.delete_block(block_hash)
+    }
+
     /// Removes a block and all its descendants recursively
     pub fn remove_block(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
         // Get children before deleting the block
