@@ -10,7 +10,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
-    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
+    mempool_service::{ChunkIngressError, MempoolFacade, MempoolTxs, TxIngressError, TxReadError},
 };
 use irys_api_client::ApiClient;
 use irys_primitives::Address;
@@ -24,6 +24,7 @@ use irys_types::{
     PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
+use reth::rpc::types::BlockId;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -87,6 +88,16 @@ impl MempoolFacade for MempoolStub {
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
+    }
+
+    async fn handle_get_best_mempool_txs(
+        &self,
+        _: Option<BlockId>,
+    ) -> Result<MempoolTxs, TxReadError> {
+        Ok(MempoolTxs {
+            commitment_tx: vec![CommitmentTransaction::default()],
+            storage_tx: vec![IrysTransactionHeader::default()],
+        })
     }
 
     async fn handle_get_transaction(

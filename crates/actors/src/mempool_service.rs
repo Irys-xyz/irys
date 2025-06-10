@@ -53,11 +53,10 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError>;
-    async fn get_best_mempool_txs(
+    async fn handle_get_best_mempool_txs(
         &self,
         block: Option<BlockId>,
-    ) -> Result<MempoolTxs, TxReadError> {
-    }
+    ) -> Result<MempoolTxs, TxReadError>;
     async fn handle_get_transaction(
         &self,
         tx_header: H256,
@@ -170,7 +169,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process TxIngressMessage")
     }
 
-    async fn get_best_mempool_txs(
+    async fn handle_get_best_mempool_txs(
         &self,
         block: Option<BlockId>,
     ) -> Result<MempoolTxs, TxReadError> {

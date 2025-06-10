@@ -23,6 +23,7 @@ actix.workspace = true
 serde = { workspace = true }
 base58.workspace = true
 actix-rt.workspace = true
+reth.workspace = true
 reth-tasks.workspace = true
 
 [dev-dependencies]

@@ -302,7 +302,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Submit Ledger Transactions
             // make sure the parent EVM block is present before calling this!
-            let submit_txs = mempool.get_best_mempool_txs(Some(BlockId::Hash(prev_block_header.evm_block_hash.into()))).await.expect("to receive txns");
+            let submit_txs = mempool.handle_get_best_mempool_txs(Some(BlockId::Hash(prev_block_header.evm_block_hash.into()))).await.expect("to receive txns");
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
