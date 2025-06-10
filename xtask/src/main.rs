@@ -175,6 +175,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             }
             run_command(Commands::Clippy { args: vec![] }, sh)?;
             run_command(Commands::UnusedDeps, sh)?;
+            run_command(Commands::Typos, sh)?;
             if with_tests {
                 run_command(
                     Commands::Test {

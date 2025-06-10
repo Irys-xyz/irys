@@ -5,6 +5,7 @@ use eyre::Context;
 use irys_types::block_production::Seed;
 use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use openssl::sha;
+pub use rayon;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -262,20 +263,25 @@ pub trait MiningBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
 }
 
-pub fn calibrate_vdf() -> u64 {
-    let precision_perc = 0.05;
+/// Runs the VDF, starting with the testnet config's step count, calibrating the iterations between runs to get to ~1s/step - returning the value once `runs` runs are complete
+/// Note: please set `runs` to a decently high value, so calibration can occur on the maximum sustained performance, instead of the short lived peak performance
+/// This function may not accurately provide an iteration count for tests, or when many VDF threads are run at the same time
+/// to calibrate that, run multiple instances of this function at the same time and take the lowest value
+/// (this is particularly notable on Heterogenous CPUs, with some higher and some lower performance cores)
+pub fn calibrate_vdf(runs: u64) -> u64 {
+    // let precision_perc = 0.05;
     let mut config = irys_types::ConsensusConfig::testnet().vdf;
     let target_secs = Duration::from_secs(1).as_secs_f64();
 
     let mut seed: H256 = H256::zero();
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
 
-    for attempt in 0..5 {
+    // we don't early return once we have a precise value - this is to allow the calibration to accurately reflect the sustained performance
+    for attempt in 0..runs {
         let mut hasher = Sha256::new();
         let mut salt = U256::from(0);
 
         let start = std::time::Instant::now();
-        // TODO: CPU turbo behaviour can mess this measurement up, figure out how to mitigate/account (CPU freq measuring??)
         vdf_sha(
             &mut hasher,
             &mut salt,
@@ -299,15 +305,15 @@ pub fn calibrate_vdf() -> u64 {
             ratio
         );
 
-        // early return if our ratio is <= precision
-        if (ratio - 1.0).abs() <= precision_perc {
-            println!(
-                "calibration complete: {} iterations in {} attempts",
-                attempt + 1,
-                config.sha_1s_difficulty
-            );
-            return config.sha_1s_difficulty;
-        }
+        // // early return if our ratio is <= precision
+        // if (ratio - 1.0).abs() <= precision_perc {
+        //     println!(
+        //         "calibration complete: {} iterations in {} attempts",
+        //         attempt + 1,
+        //         config.sha_1s_difficulty
+        //     );
+        //     return config.sha_1s_difficulty;
+        // }
 
         // adjust iterations based on the ratio of target time to actual time
         config.sha_1s_difficulty = (config.sha_1s_difficulty as f64 * ratio).round() as u64;

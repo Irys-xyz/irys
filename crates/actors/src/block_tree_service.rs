@@ -5,12 +5,12 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    validation_service::{RequestValidationMessage, ValidationService},
+    validation_service::ValidationServiceMessage,
     BlockFinalizedMessage,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
-use eyre::ensure;
+use eyre::{ensure, Context};
 use futures::future::Either;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
@@ -439,10 +439,12 @@ impl BlockTreeServiceInner {
 
             if add_result.is_ok() {
                 // Schedule block for full validation regardless of origin
-                // HACK
-                System::set_current(self.system.clone());
-                let validation_service = ValidationService::from_registry();
-                validation_service.do_send(RequestValidationMessage(block.clone()));
+                self.service_senders
+                    .validation_service
+                    .send(ValidationServiceMessage::ValidateBlock {
+                        block: block.clone(),
+                    })
+                    .context("validation service unreachable!")?;
 
                 // Update block state to reflect scheduled validation
                 if cache
@@ -661,7 +663,7 @@ pub fn prune_chains_at_ancestor(
     (old_divergent, new_divergent)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ValidationResult {
     Valid,
     Invalid,
@@ -1570,7 +1572,9 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
 }
 
 /// Returns the canonical chain where the first item in the Vec is the oldest block
-/// Implementation detail: utilises `tokio::task::spawn_blocking`
+/// Uses spawn_blocking to prevent the read operation from blocking the async executor
+/// and locking other async tasks while traversing the block tree.
+/// Notably useful in single-threaded tokio based unittests.
 pub async fn get_canonical_chain(
     tree: BlockTreeReadGuard,
 ) -> eyre::Result<(Vec<ChainCacheEntry>, usize)> {
@@ -1580,7 +1584,9 @@ pub async fn get_canonical_chain(
 }
 
 /// Returns the block from the block tree at a given block hash
-/// Implementation detail: utilises `tokio::task::spawn_blocking`
+/// Uses spawn_blocking to prevent the read operation from blocking the async executor
+/// and locking other async tasks while accessing the block tree.
+/// Notably useful in single-threaded tokio based unittests.
 pub async fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,

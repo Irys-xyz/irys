@@ -1,6 +1,7 @@
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::BlockTreeReadGuard,
+    block_validation::generate_expected_system_transactions,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
@@ -24,13 +25,9 @@ use irys_database::{
     tables::IngressProofs, tx_header_by_txid, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
-use irys_reth::{
-    compose_system_tx,
-    system_tx::{BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket},
-};
+use irys_reth::compose_system_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
-use irys_types::IrysTransactionCommon;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Base64, Config, DataLedger, DataTransactionLedger, H256List,
@@ -40,8 +37,8 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
+use reth::rpc::types::BlockId;
 use reth::{payload::EthBuiltPayload, rpc::eth::EthApiServer as _};
-use reth::{revm::primitives::ruint::Uint, rpc::types::BlockId};
 use reth_db::cursor::*;
 use reth_db::Database;
 use reth_transaction_pool::EthPooledTransaction;
@@ -452,29 +449,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             )?;
 
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
-            let block_reward_system_tx = SystemTransaction::new_v1(
+            // Generate expected system transactions using shared logic
+            let expected_system_txs = generate_expected_system_transactions(
                 block_height,
-                prev_block_header.evm_block_hash,
-                TransactionPacket::BlockReward(
-                    BalanceIncrement {
-                        amount: reward_amount.amount.into(),
-                        target: config.node_config.reward_address
-                    }
-                )
-            );
-            let storage_txs = submit_txs.storage_tx.iter().map(move |header| {
-                SystemTransaction::new_v1(
-                    block_height,
-                    prev_block_header.evm_block_hash,
-                    TransactionPacket::StorageFees(
-                        BalanceDecrement {
-                            amount: Uint::from(header.total_fee()),
-                            target: header.signer,
-                        }
-                    )
-                )
-            });
-            let system_txs = [block_reward_system_tx].into_iter().chain(storage_txs).map(|tx| {
+                config.node_config.reward_address,
+                reward_amount.amount.into(),
+                H256(prev_block_header.evm_block_hash.0),
+                &submit_txs.storage_tx,
+            )?;
+            let system_txs = expected_system_txs.into_iter().map(|tx| {
                 let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
                 let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
