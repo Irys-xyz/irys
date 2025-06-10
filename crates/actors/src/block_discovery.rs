@@ -178,25 +178,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 .iter()
                 .find(|b| b.ledger_id == SystemLedger::Commitment);
 
-            // Validate commitments (if there are some)
-            let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-            let mut commitment_txids: H256List = H256List::new();
-            if let Some(commitment_ledger) = commitment_ledger {
-                debug!("{:#?}", commitment_ledger);
-                // Collect commitments with proper error handling
-                for txid in commitment_ledger.tx_ids.iter() {
-                    match mempool.handle_get_commitment_transaction_by_id(*txid).await {
-                        Ok(v) => commitments.push(v),
-                        _ => Err(eyre::eyre!("No commitment tx found for txid {:?}", txid))?,
-                    }
-                }
-
-                // either we find all the expected CommitmentTransaction in the mempool or we include none in this block
-                if commitment_ledger.tx_ids.len() == commitments.len() {
-                    commitment_txids = commitment_ledger.tx_ids.clone();
-                }
-            }
-
             // Collect submit ledger transactions from the mempool
             let submit_txs = future::try_join_all(
                 submit_txids
@@ -232,7 +213,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     }
                 })
                 .collect();
-
             drop(mut_tx);
 
             if !publish_txs.is_empty() {
