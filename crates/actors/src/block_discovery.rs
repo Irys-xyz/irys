@@ -421,6 +421,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     }
 }
 
+/// Get all commitment transactions from the mempool and database
 pub async fn get_commitment_tx_in_parallel(
     commitment_tx_ids: Vec<IrysTransactionId>,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
