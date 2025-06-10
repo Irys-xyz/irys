@@ -17,22 +17,24 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[actix_web::test]
-async fn heavy_api_end_to_end_test_32b() {
+async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_32kb"), false);
     if PACKING_TYPE == PackingType::CPU {
-        api_end_to_end_test(32).await;
+        api_end_to_end_test(32).await?;
     } else {
         info!("C packing implementation does not support chunk size different from CHUNK_SIZE");
     }
+    Ok(())
 }
 
 #[actix_web::test]
-async fn heavy_api_end_to_end_test_256kb() {
+async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
     setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_256kb"), false);
-    api_end_to_end_test(256 * 1024).await;
+    api_end_to_end_test(256 * 1024).await?;
+    Ok(())
 }
 
-async fn api_end_to_end_test(chunk_size: usize) {
+async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let entropy_packing_iterations = 1_000;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
@@ -49,7 +51,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // Is there any reason for spawning another one here?
-    node.node_ctx.start_mining().await.unwrap();
+    node.mine_block().await?;
 
     let app = node.start_public_api().await;
 
@@ -65,14 +67,16 @@ async fn api_end_to_end_test(chunk_size: usize) {
     let mut data_bytes = vec![0u8; data_size];
     rand::thread_rng().fill(&mut data_bytes[..]);
 
-    // Create a new Irys API instance & a signed transaction
-
+    // Create a new signed transaction
     let tx = main_signer
         .create_transaction(data_bytes.clone(), None)
         .unwrap();
     let tx = main_signer.sign_transaction(tx).unwrap();
 
-    // Make a POST request with JSON payload
+    // mine a block
+    node.mine_block().await?;
+
+    // send storage tx via POST request with JSON payload
     let req = test::TestRequest::post()
         .uri("/v1/tx")
         .set_json(&tx.header)
@@ -87,6 +91,9 @@ async fn api_end_to_end_test(chunk_size: usize) {
     debug!("Response body: {:#?}", body);
     assert_eq!(status, StatusCode::OK);
     info!("Transaction was posted");
+
+    // mine a block
+    node.mine_blocks(5).await?;
 
     // Loop though each of the transaction chunks
     for (index, chunk_node) in tx.chunks.iter().enumerate() {
@@ -106,7 +113,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
             ),
         };
 
-        // Make a POST request with JSON payload
+        // Send chunk via POST request with JSON payload
         let req = test::TestRequest::post()
             .uri("/v1/chunk")
             .set_json(&chunk)
@@ -120,11 +127,16 @@ async fn api_end_to_end_test(chunk_size: usize) {
     }
     let id: String = tx.header.id.as_bytes().to_base58();
     let mut attempts = 1;
-    let max_attempts = 40;
+    let max_attempts = 10;
 
     let delay = Duration::from_secs(1);
 
-    // polls for tx being stored
+    // polls for tx being stored in mempool
+    let unconfirmed_txs = vec![tx.header.id];
+    let result = node.wait_for_mempool_storage_txs(unconfirmed_txs, 20).await;
+    assert!(result.is_ok());
+
+    // polls for tx being available to api
     while attempts < max_attempts {
         let req = test::TestRequest::get()
             .uri(&format!("/v1/tx/{}", &id))
@@ -153,6 +165,8 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     let mut missing_chunks = vec![1, 0];
     let ledger = 1; // Submit ledger
+
+    node.mine_block().await?;
 
     // polls for chunk being available
     while attempts < max_attempts {
@@ -207,4 +221,6 @@ async fn api_end_to_end_test(chunk_size: usize) {
     );
 
     node.node_ctx.stop().await;
+
+    Ok(())
 }
