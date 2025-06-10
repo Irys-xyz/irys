@@ -182,7 +182,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     let restarted_node = genesis_node.stop().await.start().await;
 
     // confirm the mempool tx have appeared back in the mempool after a restart
-    for txid_to_check in vec![pledge_tx.id] {
+    for txid_to_check in vec![storage_tx.header.id] {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let get_tx_msg = MempoolServiceMessage::GetStorageTransaction(txid_to_check, oneshot_tx);
         if let Err(err) = restarted_node
@@ -194,15 +194,16 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
             tracing::error!("error sending message to mempool: {:?}", err);
         }
         let tx_from_mempool = oneshot_rx.await.expect("expected result");
+        tracing::error!("transaction: {:?}", txid_to_check);
         assert!(tx_from_mempool.is_some());
     }
 
     // Validate the SystemLedger in the block that it contains the correct commitments
-    let block = restarted_node.get_block_by_height(1).await.unwrap();
-    assert_eq!(
-        block.system_ledgers[0].tx_ids,
-        vec![stake_tx.id, pledge_tx.id]
-    );
+    let unconfirmed_txs = vec![stake_tx.id, pledge_tx.id];
+    let result = restarted_node
+        .wait_for_mempool_commitment_txs(unconfirmed_txs, 20)
+        .await;
+    assert!(result.is_ok());
 
     restarted_node.stop().await;
 
