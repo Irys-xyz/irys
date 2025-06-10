@@ -185,10 +185,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 debug!("{:#?}", commitment_ledger);
                 // Collect commitments with proper error handling
                 for txid in commitment_ledger.tx_ids.iter() {
-                    match mempool
-                        .handle_get_commitment_transaction_by_id(txid.clone())
-                        .await
-                    {
+                    match mempool.handle_get_commitment_transaction_by_id(*txid).await {
                         Ok(v) => commitments.push(v),
                         _ => Err(eyre::eyre!("No commitment tx found for txid {:?}", txid))?,
                     }

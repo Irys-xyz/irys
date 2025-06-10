@@ -132,7 +132,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         id: H256,
     ) -> Result<CommitmentTransaction, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxById(id.clone(), oneshot_tx);
+        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxById(id, oneshot_tx);
         if let Err(err) = self.service.send(tx_ingress_msg) {
             tracing::error!("error sending message to mempool: {:?}", err);
         }
