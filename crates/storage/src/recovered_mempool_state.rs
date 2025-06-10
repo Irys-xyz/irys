@@ -34,7 +34,6 @@ impl RecoveredMempoolState {
                     };
 
                     commitment_txs.insert(tx.id, tx);
-                    tracing::error!("PERSIST loaded commitment entry from file 3");
                     if remove_files {
                         let _ = tokio::fs::remove_file(&path).await;
                     }
@@ -61,7 +60,6 @@ impl RecoveredMempoolState {
                     };
 
                     storage_txs.insert(tx.id, tx);
-                    tracing::error!("PERSIST loaded storage entry from file");
                     if remove_files {
                         let _ = tokio::fs::remove_file(&path).await;
                     }
