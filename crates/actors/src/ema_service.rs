@@ -844,8 +844,8 @@ mod tests {
     use super::*;
     use crate::block_tree_service::{get_canonical_chain, BlockTreeCache, ChainState, ReorgEvent};
     use irys_types::{
-        storage_pricing::TOKEN_SCALE, ConsensusConfig, ConsensusOptions, EmaConfig, NodeConfig,
-        H256, U256,
+        block_height_to_use_for_price, storage_pricing::TOKEN_SCALE, ConsensusConfig,
+        ConsensusOptions, EmaConfig, NodeConfig, H256,
     };
     use reth::tasks::TaskManager;
     use rstest::rstest;
@@ -873,8 +873,8 @@ mod tests {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
                 // add a random constant to the price to differentiate it from the height
-                header.oracle_irys_price = rand_price(height);
-                header.ema_irys_price = rand_price(height);
+                header.oracle_irys_price = deterministic_price(height);
+                header.ema_irys_price = deterministic_price(height);
                 header
             })
             .collect::<Vec<_>>();
@@ -888,7 +888,7 @@ mod tests {
         (blocks, prices)
     }
 
-    pub(crate) fn rand_price(height: u64) -> IrysTokenPrice {
+    pub(crate) fn deterministic_price(height: u64) -> IrysTokenPrice {
         let amount = TOKEN_SCALE + IrysTokenPrice::token(Decimal::from(height)).unwrap().amount;
 
         IrysTokenPrice::new(amount)
@@ -1062,8 +1062,8 @@ mod tests {
         for height in 0..=max_height {
             let mut header = IrysBlockHeader::new_mock_header();
             header.height = height;
-            header.oracle_irys_price = rand_price(height);
-            header.ema_irys_price = rand_price(height);
+            header.oracle_irys_price = deterministic_price(height);
+            header.ema_irys_price = deterministic_price(height);
             header.block_hash = H256::random();
             header.previous_block_hash = last_hash;
             last_hash = header.block_hash;
@@ -1081,45 +1081,42 @@ mod tests {
     }
 
     /// Adds fork to an existing block tree after EMA service initialization
+    /// Returns (ReorgEvent, Vec<PriceInfo>) where the Vec contains all prices from genesis to the tip of the new fork
     fn create_and_apply_fork(
         block_tree_guard: &BlockTreeReadGuard,
         fork_height: u64,
-        old_fork_length: u64,
-        new_fork_length: u64,
-    ) -> ReorgEvent {
+        common_ancestor_height: u64,
+    ) -> (ReorgEvent, Vec<PriceInfo>) {
         // Get the fork parent block
         let fork_parent = {
             let tree = block_tree_guard.read();
             let (chain, _) = tree.get_canonical_chain();
             let fork_parent_hash = chain
                 .iter()
-                .find(|(_, height, _, _)| *height == fork_height)
+                .find(|(_, height, _, _)| *height == common_ancestor_height)
                 .map(|(hash, _, _, _)| *hash)
                 .expect("Fork height should exist in chain");
-            
+
             let block = tree.get_block(&fork_parent_hash).unwrap();
             Arc::new(block.clone())
         };
 
         let fork_parent_hash = fork_parent.block_hash;
 
-        // Build old fork blocks (current canonical chain continuation)
-        let mut old_fork_blocks = Vec::new();
-
+        // Collect all prices from genesis to fork point first
+        let mut fork_prices = Vec::new();
         {
             let tree = block_tree_guard.read();
             let (chain, _) = tree.get_canonical_chain();
-            // Collect existing blocks that form the old fork
-            for i in 1..=old_fork_length {
-                let height = fork_height + i;
-                let block_hash = chain
-                    .iter()
-                    .find(|(_, h, _, _)| *h == height)
-                    .map(|(hash, _, _, _)| *hash);
-                
-                if let Some(hash) = block_hash {
-                    let block = tree.get_block(&hash).unwrap();
-                    old_fork_blocks.push(Arc::new(block.clone()));
+
+            // Collect prices from genesis (height 0) up to and including the fork point
+            for (hash, height, _, _) in chain.iter() {
+                if *height <= common_ancestor_height {
+                    let block = tree.get_block(hash).unwrap();
+                    fork_prices.push(PriceInfo {
+                        oracle: block.oracle_irys_price,
+                        ema: block.ema_irys_price,
+                    });
                 }
             }
         }
@@ -1130,17 +1127,23 @@ mod tests {
 
         {
             let mut tree = block_tree_guard.write();
-            for i in 1..=new_fork_length {
+            for height in (common_ancestor_height + 1)..=fork_height {
                 let mut header = IrysBlockHeader::new_mock_header();
-                header.height = fork_height + i;
+                header.height = height;
                 header.previous_block_hash = last_hash;
                 // Use different prices to distinguish from old fork
-                header.oracle_irys_price = rand_price(header.height + 100);
-                header.ema_irys_price = rand_price(header.height + 100);
+                header.oracle_irys_price = deterministic_price(header.height + 100);
+                header.ema_irys_price = deterministic_price(header.height + 100);
                 header.block_hash = H256::random();
                 // Much higher difficulty to ensure it becomes canonical
-                header.cumulative_diff = (fork_height + i + old_fork_length + 1).into();
+                header.cumulative_diff = (height + fork_height).into();
                 last_hash = header.block_hash;
+
+                // Collect the price info for this fork block
+                fork_prices.push(PriceInfo {
+                    oracle: header.oracle_irys_price,
+                    ema: header.ema_irys_price,
+                });
 
                 // Add to block tree as validated but not yet canonical
                 tree.add_common(
@@ -1155,20 +1158,32 @@ mod tests {
             }
 
             // Mark the new tip as the canonical chain
-            tree.mark_tip(&new_fork_blocks.last().unwrap().block_hash)
+            let is_new_tip = tree
+                .mark_tip(&new_fork_blocks.last().unwrap().block_hash)
                 .unwrap();
+            assert!(is_new_tip);
         }
 
         let new_tip = new_fork_blocks.last().unwrap().block_hash;
 
+        let data = block_tree_guard.read();
+        assert_eq!(
+            data.get_canonical_chain().0.len(),
+            (fork_height + 1) as usize
+        );
+
         // Create reorg event
-        ReorgEvent {
-            old_fork: Arc::new(old_fork_blocks),
-            new_fork: Arc::new(new_fork_blocks),
+        let reorg_event = ReorgEvent {
+            // ema service does not read this data
+            old_fork: Arc::new(vec![]),
+            // ema service does not read this data
+            new_fork: Arc::new(vec![]),
             fork_parent,
             new_tip,
             timestamp: SystemTime::now(),
-        }
+        };
+
+        (reorg_event, fork_prices)
     }
 
     #[test(tokio::test)]
@@ -1292,7 +1307,7 @@ mod tests {
                     ..NodeConfig::testnet()
                 }),
             );
-            let new_oracle_price = rand_price(max_height);
+            let new_oracle_price = deterministic_price(max_height);
 
             // action
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1409,7 +1424,7 @@ mod tests {
             // action
             let new_block_height = max_height + 1;
             let response = ctx
-                .get_prices_for_new_block(new_block_height, rand_price(max_height))
+                .get_prices_for_new_block(new_block_height, deterministic_price(max_height))
                 .await
                 .unwrap();
             let price_status_original = ctx
@@ -1462,7 +1477,7 @@ mod tests {
             );
 
             // action
-            let oracle_price = rand_price(max_block_height);
+            let oracle_price = deterministic_price(max_block_height);
             let res = ctx
                 .get_prices_for_new_block(height_of_new_block, oracle_price)
                 .await;
@@ -1582,11 +1597,12 @@ mod tests {
         );
     }
 
+    /// Create a simple fork scenario and just check if the service still works after processing the fork event
     #[test(tokio::test)]
     async fn test_ema_service_reorg_basic() {
         // Step 1: Create clean chain state without any forks
         let (block_tree_guard, prices) = setup_chain_for_fork_test(13); // height 10 + 3 blocks for old fork
-        
+
         let config = Config::new(NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 ema: EmaConfig {
@@ -1598,7 +1614,8 @@ mod tests {
         });
 
         // Step 2: Initialize EMA service with clean block tree (no forks)
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
+        let (ctx, service_senders) =
+            TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
 
         // Get initial EMA price before creating fork
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1607,30 +1624,48 @@ mod tests {
             .unwrap();
         let initial_ema = rx.await.unwrap();
 
+        // Initial EMA should be the genesis price (height 0) since we're in the first interval
+        assert_eq!(
+            initial_ema, prices[0].ema,
+            "Initial EMA should match genesis price"
+        );
+
         // Step 3: Now create fork on the block tree after EMA service is initialized
-        let reorg_event = create_and_apply_fork(&block_tree_guard, 10, 3, 4);
+        // Fork from height 10, creating a new chain that ends at height 14
+        let (reorg_event, _fork_prices) = create_and_apply_fork(&block_tree_guard, 14, 10);
 
         // Step 4: Trigger reorg
         ctx.trigger_reorg(&service_senders, reorg_event).await;
 
-        // Step 5: Verify service is still responsive after reorg
+        // Step 5: Verify the EMA price after reorg
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.ema_sender
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let post_reorg_ema = rx.await.unwrap();
 
-        // The EMA should be valid (non-zero)
-        assert!(post_reorg_ema.amount > U256::from(0));
-        // Initial EMA should also have been valid
-        assert!(initial_ema.amount > U256::from(0));
+        // After reorg, the chain height is 14 (fork at 10 + new fork length 4)
+        // Since we're still in the first price interval (< 20), the EMA should still be the genesis price
+        assert_eq!(
+            post_reorg_ema, prices[0].ema,
+            "Post-reorg EMA should still be genesis price"
+        );
+
+        // Verify service is responsive and can calculate prices for the next block
+        let new_height = 15;
+        let oracle_price = deterministic_price(new_height);
+        let result = ctx.get_prices_for_new_block(new_height, oracle_price).await;
+        assert!(
+            result.is_ok(),
+            "Should be able to calculate prices for next block"
+        );
     }
 
     #[test(tokio::test)]
     async fn test_ema_service_reorg_multiple_intervals() {
-        // Step 1: Create clean chain state without any forks (height 25 + 5 blocks for old fork)
+        // Step 1: Create clean chain state without any forks
         let (block_tree_guard, prices) = setup_chain_for_fork_test(30);
-        
+
         let config = Config::new(NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 ema: EmaConfig {
@@ -1642,141 +1677,83 @@ mod tests {
         });
 
         // Step 2: Initialize EMA service with clean block tree (no forks)
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
+        let (ctx, service_senders) =
+            TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
 
         // Verify initial state crosses multiple EMA intervals
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.ema_sender
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
-        let _initial_ema = rx.await.unwrap();
+        let initial_ema = rx.await.unwrap();
 
-        // Step 3: Create fork at height 25 (crossing multiple EMA intervals)
-        let reorg_event = create_and_apply_fork(&block_tree_guard, 25, 5, 6);
+        // At height 30, we're in the 4th interval (30-39)
+        // The pricing block is from 2 intervals ago: block 19 (the last block of interval 10-19)
+        let pricing_height = block_height_to_use_for_price(30, 10);
+        assert_eq!(
+            pricing_height, 19,
+            "At height 30, should use price from block 19"
+        );
+        assert_eq!(
+            initial_ema, prices[19].ema,
+            "Initial EMA should be from height 19 (2 intervals ago)"
+        );
 
-        // Step 4: Trigger reorg
-        ctx.trigger_reorg(&service_senders, reorg_event).await;
-
-        // Step 5: Test that we can get prices for the next block after reorg
-        let new_height = 32; // After the new fork (25 + 6 + 1)
-        let oracle_price = rand_price(new_height);
-        let result = ctx.get_prices_for_new_block(new_height, oracle_price).await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.ema.amount > U256::from(0));
-        assert!(response.range_adjusted_oracle_price.amount > U256::from(0));
-    }
-
-    #[test(tokio::test)]
-    async fn test_ema_service_reorg_updates_both_caches() {
-        // Step 1: Create clean chain state without any forks (height 15 + 3 blocks for old fork)
-        let (block_tree_guard, prices) = setup_chain_for_fork_test(18);
-        
-        let config = Config::new(NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                ema: EmaConfig {
-                    price_adjustment_interval: 10,
-                },
-                ..ConsensusConfig::testnet()
-            }),
-            ..NodeConfig::testnet()
-        });
-
-        // Step 2: Initialize EMA service with clean block tree (no forks)
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
-
-        // Verify initial caches are working
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
-            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
-            .unwrap();
-        let initial_confirmed_ema = rx.await.unwrap();
-        assert!(initial_confirmed_ema.amount > U256::from(0));
-
-        // Step 3: Create fork at height 15
-        let reorg_event = create_and_apply_fork(&block_tree_guard, 15, 3, 5);
+        // Step 3: Create fork with height 30 (crossing multiple EMA intervals)
+        // Fork from height 15, creating a new chain that ends at height 30
+        let (reorg_event, fork_prices) = create_and_apply_fork(&block_tree_guard, 30, 15);
 
         // Step 4: Trigger reorg
         ctx.trigger_reorg(&service_senders, reorg_event).await;
 
-        // Step 5: Test that both confirmed (for pricing) and optimistic (for validation) caches work
-
-        // Test confirmed cache via GetCurrentEmaForPricing
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
-            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
-            .unwrap();
-        let confirmed_ema = rx.await.unwrap();
-        assert!(confirmed_ema.amount > U256::from(0));
-
-        // Test optimistic cache via ValidateOraclePrice
-        let test_height = 20;
-        let test_oracle_price = rand_price(test_height);
-        let status = ctx
-            .validate_oracle_price(test_height, test_oracle_price)
-            .await;
-        assert!(status.is_ok());
-    }
-
-    #[test(tokio::test)]
-    async fn test_ema_service_reorg_price_continuity() {
-        // Step 1: Create clean chain state without any forks (height 18 + 2 blocks for old fork)
-        let (block_tree_guard, prices) = setup_chain_for_fork_test(20);
-        
-        let config = Config::new(NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                ema: EmaConfig {
-                    price_adjustment_interval: 10,
-                },
-                ..ConsensusConfig::testnet()
-            }),
-            ..NodeConfig::testnet()
-        });
-
-        // Step 2: Initialize EMA service with clean block tree (no forks)
-        let (ctx, service_senders) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices, config);
-
-        // Get price before creating fork
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
-            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
-            .unwrap();
-        let pre_reorg_ema = rx.await.unwrap();
-
-        // Step 3: Create fork at height 18
-        let reorg_event = create_and_apply_fork(&block_tree_guard, 18, 2, 3);
-
-        // Step 4: Trigger reorg
-        ctx.trigger_reorg(&service_senders, reorg_event).await;
-
-        // Step 5: Validate EMA price calculation after reorg
-        let new_height = 21; // Height of the new chain tip (18 + 3)
-        let oracle_price = rand_price(new_height);
-        let ema_price = rand_price(new_height);
-
-        let validation_result = ctx
-            .validate_ema_price(new_height, ema_price, oracle_price)
-            .await;
-
-        // Should get a result (either Valid or Invalid, but not an error)
-        assert!(validation_result.is_ok());
-
-        // Verify the service maintains price continuity
+        // Step 5: Verify EMA after reorg
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.ema_sender
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let post_reorg_ema = rx.await.unwrap();
 
-        // Both EMAs should be valid prices
-        assert!(pre_reorg_ema.amount > U256::from(0));
-        assert!(post_reorg_ema.amount > U256::from(0));
-        
-        // Verify we can get prices for the next block
-        let next_height = 22; // Next block after the new chain tip
-        let next_oracle_price = rand_price(next_height);
-        let next_price_result = ctx.get_prices_for_new_block(next_height, next_oracle_price).await;
-        assert!(next_price_result.is_ok());
+        // After reorg, chain height is 30 (new fork ends at 30)
+        // At height 30, we're still in the 4th interval (30-39)
+        // The pricing block is still from 2 intervals ago: block 19
+        assert_eq!(
+            post_reorg_ema, fork_prices[19].ema,
+            "Post-reorg EMA should be from forked block 19"
+        );
+
+        // Test that we can get prices for the next block after reorg
+        let new_height = 31; // Next block after the fork tip at 30
+        let oracle_price = deterministic_price(new_height);
+        let result = ctx.get_prices_for_new_block(new_height, oracle_price).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // Verify the oracle price is properly bounded
+        assert_eq!(
+            response.range_adjusted_oracle_price, oracle_price,
+            "Oracle price should not need adjustment"
+        );
+
+        // Test optimistic cache
+        let test_height = new_height;
+        let test_oracle_price = deterministic_price(test_height);
+        let status = ctx
+            .validate_oracle_price(test_height, test_oracle_price)
+            .await;
+        assert!(status.is_ok());
+
+        // The oracle price validation should pass since it's within range
+        assert_eq!(
+            status.unwrap(),
+            PriceStatus::Valid,
+            "Oracle price should be valid"
+        );
+
+        // Also verify the optimistic cache can calculate EMA for validation
+        let validation_result = ctx
+            .validate_ema_price(test_height, prices[0].ema, test_oracle_price)
+            .await;
+        assert!(validation_result.is_ok(), "EMA validation should not error");
     }
 }
