@@ -372,7 +372,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     let _ = block_tree_sender.send(BlockTreeServiceMessage::BlockPreValidated {
                         block: new_block_header.clone(),
-                        all_txs: Arc::new(all_txs),
                         response: oneshot_tx,
                     });
                     let _ = oneshot_rx
