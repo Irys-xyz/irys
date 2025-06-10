@@ -496,3 +496,80 @@ pub async fn get_commitment_tx_in_parallel(
         Err(eyre::eyre!("Missing transactions: {:?}", missing))
     }
 }
+
+/// Get all storage transactions from the mempool and database
+pub async fn get_storage_tx_in_parallel(
+    storage_tx_ids: Vec<IrysTransactionId>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<IrysTransactionHeader>> {
+    let tx_ids_clone = storage_tx_ids.clone();
+
+    // Set up a function to query the mempool for storage transactions
+    let mempool_future = {
+        let tx_ids = tx_ids_clone.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            mempool_sender.send(MempoolServiceMessage::GetStorageTransactions(tx_ids, tx))?;
+            let x = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .into_iter()
+                .filter(|v| v.is_some())
+                .map(|v| (v.clone().unwrap().id, v.unwrap()))
+                .collect::<HashMap<IrysTransactionId, IrysTransactionHeader>>();
+            Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(x)
+        }
+    };
+
+    // Set up a function to query the database for commitment transactions
+    let db_future = {
+        let tx_ids = storage_tx_ids.clone();
+        let db_ref = db.clone();
+        async move {
+            let db_tx = db_ref.tx()?;
+            let mut results = HashMap::new();
+            for tx_id in &tx_ids {
+                if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
+                    results.insert(*tx_id, header);
+                }
+            }
+            Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(results)
+        }
+    };
+
+    // Query mempool and database in parallel
+    let (mempool_results, db_results) = tokio::join!(mempool_future, db_future);
+
+    let mempool_map = mempool_results?;
+    let db_map = db_results?;
+
+    debug!(
+        "mempool_results:\n {:?}",
+        mempool_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    );
+    debug!(
+        "db_results:\n {:?}",
+        db_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    );
+
+    // Combine results, preferring mempool
+    let mut headers = Vec::with_capacity(storage_tx_ids.len());
+    let mut missing = Vec::new();
+
+    for tx_id in storage_tx_ids {
+        if let Some(header) = mempool_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else if let Some(header) = db_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else {
+            missing.push(tx_id);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(headers)
+    } else {
+        Err(eyre::eyre!("Missing transactions: {:?}", missing))
+    }
+}
