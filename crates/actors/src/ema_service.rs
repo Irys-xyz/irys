@@ -19,6 +19,7 @@ use crate::{
     block_tree_service::{BlockTreeReadGuard, ReorgEvent},
     services::ServiceSenders,
 };
+use futures::{future::Either, FutureExt};
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
@@ -88,6 +89,7 @@ pub struct NewBlockEmaResponse {
 pub struct EmaService {
     shutdown: GracefulShutdown,
     msg_rx: UnboundedReceiver<EmaServiceMessage>,
+    reorg_rx: tokio::sync::broadcast::Receiver<ReorgEvent>,
     inner: Inner,
 }
 
@@ -98,7 +100,6 @@ struct Inner {
     block_tree_read_guard: BlockTreeReadGuard,
     confirmed_price_ctx: PriceCacheContext<Confirmed>,
     optimistic_price_ctx: PriceCacheContext<Optimistic>,
-    reorg_rx: tokio::sync::broadcast::Receiver<ReorgEvent>,
 }
 
 impl EmaService {
@@ -130,8 +131,8 @@ impl EmaService {
             let ema_service = Self {
                 shutdown,
                 msg_rx: rx,
+                reorg_rx,
                 inner: Inner {
-                    reorg_rx,
                     optimistic_price_ctx,
                     confirmed_price_ctx,
                     token_price_safe_range,
@@ -151,32 +152,29 @@ impl EmaService {
 
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
-            tokio::select! {
-                // Handle regular EMA messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            self.inner.handle_message(msg).await?;
-                        }
-                        None => {
-                            tracing::warn!("receiver channel closed");
-                            break None;
-                        }
-                    }
+            let mut msg_rx = pin!(self.msg_rx.recv());
+            let mut reorg_rx = pin!(self.reorg_rx.recv().map(handle_broadcast_recv));
+            let mut reorg_and_shutdown =
+                futures::future::select(&mut shutdown_future, &mut reorg_rx);
+            match futures::future::select(&mut msg_rx, &mut reorg_and_shutdown).await {
+                Either::Left((Some(msg), _)) => {
+                    self.inner.handle_message(msg).await?;
                 }
-
-                // Handle reorg events
-                reorg_result = self.inner.reorg_rx.recv() => {
-                    if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
+                Either::Left((None, _)) => {
+                    tracing::warn!("receiver channel closed");
+                    break None;
+                }
+                Either::Right((shutdown, _)) => match shutdown {
+                    Either::Left((shutdown, _)) => {
+                        tracing::warn!("shutdown signal received");
+                        break Some(shutdown);
+                    }
+                    Either::Right((Ok(Some(event)), _)) => {
                         self.inner.handle_reorg(event).await?;
                     }
-                }
-
-                // Handle shutdown signal
-                shutdown = &mut shutdown_future => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
-                }
+                    Either::Right((Ok(None), _)) => {}
+                    Either::Right((Err(err), _)) => return Err(err),
+                },
             }
         };
 
@@ -413,22 +411,21 @@ impl Inner {
 }
 
 /// Handle broadcast channel receive results
+#[tracing::instrument(skip_all, err)]
 fn handle_broadcast_recv<T>(
     result: Result<T, broadcast::error::RecvError>,
-    channel_name: &str,
-) -> Option<T> {
+) -> eyre::Result<Option<T>> {
     match result {
-        Ok(event) => Some(event),
+        Ok(event) => Ok(Some(event)),
         Err(broadcast::error::RecvError::Closed) => {
-            tracing::debug!("{} channel closed", channel_name);
-            None
+            eyre::bail!("broadcast channel closed")
         }
         Err(broadcast::error::RecvError::Lagged(n)) => {
-            tracing::warn!("{} lagged by {} events", channel_name, n);
+            tracing::warn!(skipped_messages = ?n, "reorg lagged");
             if n > 5 {
-                tracing::error!("{} significantly lagged", channel_name);
+                tracing::error!("reorg channel significantly lagged");
             }
-            None
+            Ok(None)
         }
     }
 }
@@ -853,7 +850,6 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::SystemTime;
     use test_log::test;
-    use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
     pub(crate) fn build_genesis_tree_with_n_blocks(
         max_block_height: u64,
@@ -933,7 +929,7 @@ mod tests {
         config: Config,
         task_manager: TaskManager,
         task_executor: TaskExecutor,
-        ema_sender: UnboundedSender<EmaServiceMessage>,
+        service_senders: ServiceSenders,
         prices: Vec<PriceInfo>,
     }
 
@@ -948,12 +944,11 @@ mod tests {
             let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(max_block_height);
             let task_manager = TaskManager::new(tokio::runtime::Handle::current());
             let task_executor = task_manager.executor();
-            let (tx, rx) = unbounded_channel();
-            let (service_senders, _) = ServiceSenders::new();
+            let (service_senders, recv) = ServiceSenders::new();
             let _handle = EmaService::spawn_service(
                 &task_executor,
                 block_tree_guard.clone(),
-                rx,
+                recv.ema,
                 &config,
                 &service_senders,
             );
@@ -962,7 +957,7 @@ mod tests {
                 config,
                 task_manager,
                 task_executor,
-                ema_sender: tx,
+                service_senders,
                 prices,
             }
         }
@@ -973,7 +968,8 @@ mod tests {
             new_oracle_price: IrysTokenPrice,
         ) -> eyre::Result<NewBlockEmaResponse> {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            self.ema_sender
+            self.service_senders
+                .ema
                 .send(EmaServiceMessage::GetPriceDataForNewBlock {
                     height_of_new_block,
                     response: tx,
@@ -990,7 +986,8 @@ mod tests {
             oracle_price: IrysTokenPrice,
         ) -> eyre::Result<PriceStatus> {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            self.ema_sender
+            self.service_senders
+                .ema
                 .send(EmaServiceMessage::ValidateEmaPrice {
                     response: tx,
                     block_height,
@@ -1007,7 +1004,8 @@ mod tests {
             oracle_price: IrysTokenPrice,
         ) -> eyre::Result<PriceStatus> {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            self.ema_sender
+            self.service_senders
+                .ema
                 .send(EmaServiceMessage::ValidateOraclePrice {
                     response: tx,
                     block_height,
@@ -1021,32 +1019,31 @@ mod tests {
             block_tree_guard: BlockTreeReadGuard,
             prices: Vec<PriceInfo>,
             config: Config,
-        ) -> (Self, ServiceSenders) {
+        ) -> Self {
             let task_manager = TaskManager::new(tokio::runtime::Handle::current());
             let task_executor = task_manager.executor();
-            let (tx, rx) = unbounded_channel();
-            let (service_senders, _) = ServiceSenders::new();
+            let (service_senders, service_rx) = ServiceSenders::new();
             let _handle = EmaService::spawn_service(
                 &task_executor,
                 block_tree_guard.clone(),
-                rx,
+                service_rx.ema,
                 &config,
                 &service_senders,
             );
-            let ctx = Self {
+
+            Self {
                 guard: block_tree_guard,
                 config,
                 task_manager,
+                service_senders,
                 task_executor,
-                ema_sender: tx,
                 prices,
-            };
-            (ctx, service_senders)
+            }
         }
 
-        async fn trigger_reorg(&self, service_senders: &ServiceSenders, event: ReorgEvent) {
+        async fn trigger_reorg(&self, event: ReorgEvent) {
             // Trigger reorg using the provided service senders
-            let _ = service_senders.reorg_events.send(event);
+            let _ = self.service_senders.reorg_events.send(event);
             // Give the service time to process the reorg
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
@@ -1210,18 +1207,24 @@ mod tests {
                 ..NodeConfig::testnet()
             }),
         );
+        dbg!("here");
         let desired_block_price = &ctx.prices[price_block_idx];
 
+        dbg!("here");
         // action
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
+        ctx.service_senders
+            .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
+        dbg!("here");
         let response = rx.await.unwrap();
 
+        dbg!("here");
         // assert
         assert_eq!(response, desired_block_price.ema);
-        assert!(!ctx.ema_sender.is_closed());
+        assert!(!ctx.service_senders.ema.is_closed());
+        drop(ctx);
     }
 
     mod get_ema_for_next_adjustment_period {
@@ -1263,7 +1266,6 @@ mod tests {
 
             // action - get EMA for new block
             let ema_response = ctx
-                .0
                 .get_prices_for_new_block(1, new_oracle_price)
                 .await
                 .unwrap()
@@ -1274,7 +1276,7 @@ mod tests {
             let ema_computed = new_oracle_price
                 .calculate_ema(
                     price_adjustment_interval,
-                    ctx.0.config.consensus.genesis_price,
+                    ctx.config.consensus.genesis_price,
                 )
                 .unwrap();
             assert_eq!(ema_computed, ema_response);
@@ -1311,7 +1313,8 @@ mod tests {
 
             // action
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ctx.ema_sender
+            ctx.service_senders
+                .ema
                 .send(EmaServiceMessage::GetPriceDataForNewBlock {
                     height_of_new_block: max_height + 1,
                     response: tx,
@@ -1517,7 +1520,8 @@ mod tests {
         // Attempt to send a message and ensure it fails
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let send_result = ctx
-            .ema_sender
+            .service_senders
+            .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx });
 
         // assert
@@ -1526,7 +1530,7 @@ mod tests {
             "Service should not accept new messages after shutdown"
         );
         assert!(
-            ctx.ema_sender.is_closed(),
+            ctx.service_senders.ema.is_closed(),
             "Service sender should be closed"
         );
     }
@@ -1579,7 +1583,10 @@ mod tests {
         };
 
         // Send a `NewConfirmedBlock` message
-        let send_result = ctx.ema_sender.send(EmaServiceMessage::BlockConfirmed);
+        let send_result = ctx
+            .service_senders
+            .ema
+            .send(EmaServiceMessage::BlockConfirmed);
         assert!(
             send_result.is_ok(),
             "Service should accept new confirmed block messages"
@@ -1587,7 +1594,8 @@ mod tests {
 
         // Verify that the price cache is updated
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
+        ctx.service_senders
+            .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let response = rx.await.unwrap();
@@ -1614,12 +1622,12 @@ mod tests {
         });
 
         // Step 2: Initialize EMA service with clean block tree (no forks)
-        let (ctx, service_senders) =
-            TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
+        let ctx = TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
 
         // Get initial EMA price before creating fork
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
+        ctx.service_senders
+            .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let initial_ema = rx.await.unwrap();
@@ -1635,11 +1643,12 @@ mod tests {
         let (reorg_event, _fork_prices) = create_and_apply_fork(&block_tree_guard, 14, 10);
 
         // Step 4: Trigger reorg
-        ctx.trigger_reorg(&service_senders, reorg_event).await;
+        ctx.trigger_reorg(reorg_event).await;
 
         // Step 5: Verify the EMA price after reorg
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
+        ctx.service_senders
+            .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let post_reorg_ema = rx.await.unwrap();
@@ -1677,12 +1686,12 @@ mod tests {
         });
 
         // Step 2: Initialize EMA service with clean block tree (no forks)
-        let (ctx, service_senders) =
-            TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
+        let ctx = TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
 
         // Verify initial state crosses multiple EMA intervals
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
+        ctx.service_senders
+            .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let initial_ema = rx.await.unwrap();
@@ -1704,11 +1713,12 @@ mod tests {
         let (reorg_event, fork_prices) = create_and_apply_fork(&block_tree_guard, 30, 15);
 
         // Step 4: Trigger reorg
-        ctx.trigger_reorg(&service_senders, reorg_event).await;
+        ctx.trigger_reorg(reorg_event).await;
 
         // Step 5: Verify EMA after reorg
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_sender
+        ctx.service_senders
+            .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let post_reorg_ema = rx.await.unwrap();
