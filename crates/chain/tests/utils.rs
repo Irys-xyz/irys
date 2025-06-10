@@ -439,13 +439,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .unwrap();
 
             // Retrieve the transaction header from database
-            match tx_header_by_txid(&ro_tx, &tx.id) {
-                Ok(Some(header)) => {
-                    assert_eq!(*tx, header);
-                    info!("Transaction was retrieved ok after {} attempts", attempt);
-                    unconfirmed_txs.pop();
-                }
-                _ => {}
+            if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                assert_eq!(*tx, header);
+                info!("Transaction was retrieved ok after {} attempts", attempt);
+                unconfirmed_txs.pop();
             };
             drop(ro_tx);
             mine_blocks(&self.node_ctx, 1).await.unwrap();
@@ -489,13 +486,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap();
             if let Some(tx_header) = tx_header {
                 //read its ingressproof(s)
-                match ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-                    Some(proof) => {
-                        assert_eq!(proof.data_root, tx_header.data_root);
-                        tracing::info!("Proofs available after {} attempts", attempts);
-                        unconfirmed_promotions.pop();
-                    }
-                    _ => {}
+                if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+                    assert_eq!(proof.data_root, tx_header.data_root);
+                    tracing::info!("Proofs available after {} attempts", attempts);
+                    unconfirmed_promotions.pop();
                 };
             }
             drop(ro_tx);

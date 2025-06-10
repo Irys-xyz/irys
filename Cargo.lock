@@ -4737,6 +4737,7 @@ dependencies = [
  "actix",
  "actix-rt",
  "alloy-consensus",
+ "alloy-eips",
  "alloy-network",
  "alloy-rpc-types-engine",
  "alloy-signer-local",

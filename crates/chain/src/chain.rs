@@ -952,13 +952,17 @@ impl IrysNode {
         )));
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
-        // spawn the validation service
-        let validation_arbiter = Self::init_validation_service(
+        // Spawn the valdiation service
+        let _handle = ValidationService::spawn_service(
+            task_exec,
+            block_index_guard.clone(),
+            partition_assignments_guard.clone(),
+            vdf_state_readonly.clone(),
             &config,
-            &block_index_guard,
-            &partition_assignments_guard,
-            &vdf_state_readonly,
             &service_senders,
+            reth_node_adapter.clone(),
+            irys_db.clone(),
+            receivers.validation_service,
         );
 
         // create the block reward curve
@@ -1109,10 +1113,6 @@ impl IrysNode {
             arbiters_guard.push(ArbiterHandle::new(
                 block_discovery_arbiter,
                 "block_discovery_arbiter".to_string(),
-            ));
-            arbiters_guard.push(ArbiterHandle::new(
-                validation_arbiter,
-                "validation_arbiter".to_string(),
             ));
             arbiters_guard.push(ArbiterHandle::new(
                 peer_list_arbiter,
@@ -1381,29 +1381,6 @@ impl IrysNode {
                 block_discovery_actor
             });
         (block_discovery, block_discovery_arbiter)
-    }
-
-    fn init_validation_service(
-        config: &Config,
-        block_index_guard: &BlockIndexReadGuard,
-        partition_assignments_guard: &irys_actors::epoch_service::PartitionAssignmentsReadGuard,
-        vdf_state_readonly: &VdfStateReadonly,
-        service_senders: &ServiceSenders,
-    ) -> Arbiter {
-        let validation_service = ValidationService::new(
-            block_index_guard.clone(),
-            partition_assignments_guard.clone(),
-            vdf_state_readonly.clone(),
-            config,
-            service_senders,
-        );
-        let validation_arbiter = Arbiter::new();
-        let validation_service =
-            ValidationService::start_in_arbiter(&validation_arbiter.handle(), |_| {
-                validation_service
-            });
-        SystemRegistry::set(validation_service);
-        validation_arbiter
     }
 
     fn init_chunk_migration_service(

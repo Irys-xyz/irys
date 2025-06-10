@@ -3,6 +3,7 @@ use crate::{
     cache_service::CacheServiceAction,
     ema_service::EmaServiceMessage,
     mempool_service::MempoolServiceMessage,
+    validation_service::ValidationServiceMessage,
     CommitmentCacheMessage, StorageModuleServiceMessage,
 };
 use actix::Message;
@@ -55,6 +56,7 @@ pub struct ServiceReceivers {
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipData>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
+    pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
 }
@@ -70,6 +72,7 @@ pub struct ServiceSendersInner {
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipData>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
+    pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
 }
@@ -92,6 +95,8 @@ impl ServiceSendersInner {
             unbounded_channel::<GossipData>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
+        let (validation_sender, validation_receiver) =
+            unbounded_channel::<ValidationServiceMessage>();
         // Create broadcast channel for reorg events
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
         let (block_migrated_sender, block_migrated_receiver) =
@@ -107,6 +112,7 @@ impl ServiceSendersInner {
             storage_modules: sm_sender,
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
+            validation_service: validation_sender,
             reorg_events: reorg_sender,
             block_migrated_events: block_migrated_sender,
         };
@@ -120,6 +126,7 @@ impl ServiceSendersInner {
             storage_modules: sm_receiver,
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
+            validation_service: validation_receiver,
             reorg_events: reorg_receiver,
             block_migrated_events: block_migrated_receiver,
         };

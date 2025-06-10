@@ -250,18 +250,11 @@ fn calc_capacity(config: &Config) -> usize {
 
 /// Validate the steps from the `nonce_info` to see if they are valid.
 /// Verifies each step in parallel across as many cores as are available.
-///
-/// # Arguments
-///
-/// * `vdf_info` - The Vdf limiter info from the block header to validate.
-///
-/// # Returns
-///
-/// - `bool` - `true` if the steps are valid, false otherwise.
 pub fn vdf_steps_are_valid(
+    pool: &rayon::ThreadPool,
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
-    vdf_steps_guard: VdfStateReadonly,
+    vdf_steps_guard: &VdfStateReadonly,
 ) -> eyre::Result<()> {
     info!(
         "Checking seed {:?} reset_seed {:?}",
@@ -304,10 +297,6 @@ pub fn vdf_steps_are_valid(
     // because we only have the first and last checkpoint of each step, but we
     // can calculate each of the steps in parallel
     // Limit threads number to avoid overloading the system using configuration limit
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(config.parallel_verification_thread_limit)
-        .build()
-        .unwrap();
     let test: Vec<(H256, Option<H256List>)> = pool.install(|| {
         (0..steps.len() - 1)
             .into_par_iter()

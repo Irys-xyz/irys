@@ -5,6 +5,7 @@ use eyre::Context;
 use irys_types::block_production::Seed;
 use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use openssl::sha;
+pub use rayon;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
