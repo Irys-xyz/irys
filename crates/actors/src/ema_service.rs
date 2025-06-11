@@ -19,7 +19,7 @@ use crate::{
     block_tree_service::{BlockTreeReadGuard, ReorgEvent},
     services::ServiceSenders,
 };
-use futures::{future::Either, FutureExt};
+use futures::FutureExt;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
@@ -152,29 +152,30 @@ impl EmaService {
 
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            let mut reorg_rx = pin!(self.reorg_rx.recv().map(handle_broadcast_recv));
-            let mut reorg_and_shutdown =
-                futures::future::select(&mut shutdown_future, &mut reorg_rx);
-            match futures::future::select(&mut msg_rx, &mut reorg_and_shutdown).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
-                }
-                Either::Left((None, _)) => {
-                    tracing::warn!("receiver channel closed");
-                    break None;
-                }
-                Either::Right((shutdown, _)) => match shutdown {
-                    Either::Left((shutdown, _)) => {
-                        tracing::warn!("shutdown signal received");
-                        break Some(shutdown);
+            tokio::select! {
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.inner.handle_message(msg).await?;
+                        }
+                        None => {
+                            tracing::warn!("receiver channel closed");
+                            break None;
+                        }
                     }
-                    Either::Right((Ok(Some(event)), _)) => {
-                        self.inner.handle_reorg(event).await?;
+                }
+                result = self.reorg_rx.recv() => {
+                    match handle_broadcast_recv(result)? {
+                        Some(event) => {
+                            self.inner.handle_reorg(event).await?;
+                        }
+                        None => {}
                     }
-                    Either::Right((Ok(None), _)) => {}
-                    Either::Right((Err(err), _)) => return Err(err),
-                },
+                }
+                shutdown = &mut shutdown_future => {
+                    tracing::warn!("shutdown signal received");
+                    break Some(shutdown);
+                }
             }
         };
 
