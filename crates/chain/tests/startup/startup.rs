@@ -1,4 +1,4 @@
-use crate::utils::{mine_block, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use irys_actors::block_tree_service::get_canonical_chain;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::NodeConfig;
@@ -15,8 +15,12 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
     // 2. mine 2 new blocks
     // 3. This rolls over the epoch (meaning the genesis + second block get finalized and written to disk)
     let ctx = node.start().await;
-    let (header_1, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
-    let (_header_2, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.mine_block().await;
+    let header_1 = ctx
+        .get_block_by_height(ctx.get_height().await)
+        .await
+        .unwrap();
+    ctx.mine_block().await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     // restart the node
     let ctx = ctx.stop().await.start().await;
@@ -35,7 +39,8 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
         2,
         "we expect the genesis block + 1 new block (the second block does not get saved)"
     );
-    mine_block(&ctx.node_ctx).await?;
+    ctx.mine_block().await;
+
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
         .unwrap();
@@ -60,8 +65,12 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     // 2. mine 2 new blocks
     // 3. This rolls over the epoch (meaning the genesis + second block get finalized and written to disk)
     let ctx = node.start().await;
-    let (header_1, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
-    let (_header_2, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.mine_block().await;
+    let header_1 = ctx
+        .get_block_by_height(ctx.get_height().await)
+        .await
+        .unwrap();
+    ctx.mine_block().await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     // stop the node
     ctx.stop().await;
@@ -86,7 +95,7 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
         2,
         "we expect the genesis block + 1 new block (the second block does not get saved)"
     );
-    mine_block(&ctx.node_ctx).await?;
+    ctx.mine_block().await;
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
         .unwrap();

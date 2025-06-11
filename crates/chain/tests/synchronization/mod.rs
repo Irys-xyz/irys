@@ -1,4 +1,4 @@
-use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
+use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
@@ -106,7 +106,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     )
     .await?;
 
-    mine_block(&node.node_ctx).await?;
+    node.mine_block().await;
     // Waiting a little for the block
     tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -124,7 +124,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     };
 
     // Add one block on top to confirm previous one
-    mine_block(&node.node_ctx).await?;
+    node.mine_block().await;
     // Waiting a little for the block
     tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -155,7 +155,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     };
 
     info!("mining blocks");
-    mine_block(&restarted_node.node_ctx).await?;
+    restarted_node.mine_block().await;
 
     let next_block = {
         let latest = restarted_node

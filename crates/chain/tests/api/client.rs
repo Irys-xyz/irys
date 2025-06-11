@@ -1,6 +1,6 @@
 //! api client tests
 
-use crate::utils::{mine_block, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
@@ -71,9 +71,9 @@ async fn check_transaction_endpoints(
     ctx: &IrysNodeTest<IrysNodeCtx>,
 ) {
     // advance one block
-    let (_previous_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
+    ctx.mine_block().await;
     // advance one block, finalizing the previous block
-    let (_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
+    ctx.mine_block().await;
 
     let tx = ctx
         .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
@@ -95,7 +95,7 @@ async fn check_transaction_endpoints(
         .expect("valid post transaction response");
 
     // advance one block to add the transaction to the block
-    let (_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
+    ctx.mine_block().await;
 
     let retrieved_tx = api_client
         .get_transaction(api_address, tx_id)
@@ -123,9 +123,13 @@ async fn check_get_block_endpoint(
     ctx: &IrysNodeTest<IrysNodeCtx>,
 ) {
     // advance one block
-    let (previous_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
+    ctx.mine_block().await;
+    let previous_header = ctx
+        .get_block_by_height(ctx.get_height().await)
+        .await
+        .unwrap();
     // advance one block, finalizing the previous block
-    let (_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
+    ctx.mine_block().await;
 
     let previous_block_hash = previous_header.block_hash;
     let block = api_client

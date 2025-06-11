@@ -2,7 +2,6 @@ use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
-use eyre::OptionExt;
 use irys_actors::mempool_service::TxIngressError;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable;
@@ -18,7 +17,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::utils::{mine_block, AddTxError, IrysNodeTest};
+use crate::utils::{AddTxError, IrysNodeTest};
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -142,7 +141,11 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
     for i in 1..10 {
         info!("manually producing block {}", i);
-        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+        node.mine_block().await;
+        let block = node
+            .get_block_by_height(node.get_height().await)
+            .await
+            .unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -190,7 +193,11 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
 
-    let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
+    node.mine_block().await;
+    let block = node
+        .get_block_by_height(node.get_height().await)
+        .await
+        .unwrap();
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
@@ -333,9 +340,11 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     for _ in 0..3 {
         // mine a single block
-        let (block, _reth_exec_env) = mine_block(&node.node_ctx)
-            .await?
-            .ok_or_eyre("block was not mined")?;
+        node.mine_block().await;
+        let block = node
+            .get_block_by_height(node.get_height().await)
+            .await
+            .unwrap();
 
         // obtain the EVM timestamp for this block from Reth
         let reth_block = reth_context

@@ -4,7 +4,7 @@ use crate::{
         block_index_endpoint_request, chunk_endpoint_request, info_endpoint_request,
         network_config_endpoint_request, peer_list_endpoint_request, version_endpoint_request,
     },
-    utils::{mine_block, IrysNodeTest},
+    utils::IrysNodeTest,
 };
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_api_server::routes::index::NodeInfo;
@@ -55,9 +55,9 @@ async fn heavy_external_api() -> eyre::Result<()> {
     assert_eq!(json_response.block_index_height, 0);
 
     // advance one block
-    let (_header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.mine_block().await;
     // advance one block, finalizing the previous block
-    let (_header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.mine_block().await;
 
     // wait for 1 block in the index
     if let Err(e) = ctx.wait_until_height_on_chain(1, 10).await {

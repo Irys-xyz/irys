@@ -100,12 +100,8 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     let mut deploy_fut = Box::pin(deploy_builder.deploy());
 
-    let contract_address = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut deploy_fut,
-        Duration::from_millis(500),
-    )
-    .await??;
+    let contract_address =
+        future_or_mine_on_timeout(node, &mut deploy_fut, Duration::from_millis(500)).await??;
 
     let contract = IrysProgrammableDataBasic::new(contract_address, alloy_provider.clone());
 
@@ -204,13 +200,10 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         None
     });
 
-    let _start_offset = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut start_offset_fut,
-        Duration::from_millis(500),
-    )
-    .await?
-    .unwrap();
+    let _start_offset =
+        future_or_mine_on_timeout(node, &mut start_offset_fut, Duration::from_millis(500))
+            .await?
+            .unwrap();
 
     mine_blocks(&node.node_ctx, 10).await?;
 

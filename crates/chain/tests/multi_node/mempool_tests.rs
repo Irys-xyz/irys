@@ -302,6 +302,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     // mine a block
     // genesis.mine_block().await?;
     let (_block, reth_exec_env) = mine_block(&genesis.node_ctx).await?.unwrap();
+    genesis.mine_block().await?;
+    let reth_exec_env: EthBuiltPayload = ;
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 

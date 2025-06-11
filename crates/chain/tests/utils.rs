@@ -15,7 +15,6 @@ use irys_actors::block_tree_service::ReorgEvent;
 use irys_actors::mempool_service::MempoolTxs;
 use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
-    block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
     block_validation,
     mempool_service::{MempoolServiceMessage, TxIngressError},
@@ -493,7 +492,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 };
             }
             drop(ro_tx);
-            mine_block(&self.node_ctx).await.unwrap();
+            self.mine_block().await;
             sleep(Duration::from_secs(1)).await;
         }
 
@@ -938,42 +937,11 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 }
 
-pub async fn mine_blocks(
-    node_ctx: &IrysNodeCtx,
-    blocks: usize,
-) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-    let mut results = Vec::with_capacity(blocks);
-    for _ in 0..blocks {
-        results.push(mine_block(node_ctx).await?.unwrap());
-    }
-    Ok(results)
-}
-
-pub async fn mine_block(
-    node_ctx: &IrysNodeCtx,
-) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf().await?;
-    let poa_solution = capacity_chunk_solution(
-        node_ctx.config.node_config.miner_address(),
-        vdf_steps_guard.clone(),
-        &node_ctx.config,
-    )
-    .await;
-    node_ctx.stop_vdf().await?;
-
-    node_ctx
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution.clone()))
-        .await?
-}
-
 /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
 /// triggers the building/mining of a block, and then waits again.
 /// designed for use with calls that expect to be able to send and confirm a tx in a single exposed future
 pub async fn future_or_mine_on_timeout<F, T>(
-    node_ctx: IrysNodeCtx,
+    node: IrysNodeTest<IrysNodeCtx>,
     mut future: F,
     timeout_duration: Duration,
 ) -> eyre::Result<T>
@@ -990,7 +958,7 @@ where
                 info!("deployment timed out, creating new block..")
             }
         };
-        mine_block(&node_ctx).await?;
+        node.mine_block().await;
     }
 }
 

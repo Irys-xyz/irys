@@ -154,15 +154,10 @@ async fn external_api() -> eyre::Result<()> {
         None
     });
 
-    let _start_offset = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut start_offset_fut,
-        Duration::from_millis(500),
-    )
-    .await?
-    .unwrap();
-
-    mine_blocks(&node.node_ctx, 10).await?;
+    let _start_offset =
+        future_or_mine_on_timeout(node, &mut start_offset_fut, Duration::from_millis(500))
+            .await?
+            .unwrap();
 
     // sleep so the client has a chance to read the chunks
     sleep(Duration::from_millis(100_000)).await;

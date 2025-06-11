@@ -1,4 +1,4 @@
-use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
+use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
@@ -105,12 +105,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         }
     });
 
-    future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut tx_header_fut,
-        Duration::from_millis(500),
-    )
-    .await?;
+    future_or_mine_on_timeout(node.clone(), &mut tx_header_fut, Duration::from_millis(500)).await?;
 
     // upload chunk(s)
     for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
@@ -166,13 +161,10 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         None
     });
 
-    let start_offset = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut start_offset_fut,
-        Duration::from_millis(500),
-    )
-    .await?
-    .unwrap();
+    let start_offset =
+        future_or_mine_on_timeout(node, &mut start_offset_fut, Duration::from_millis(500))
+            .await?
+            .unwrap();
 
     // mine a couple blocks
     let reth_context = node.node_ctx.reth_node_adapter.clone();
@@ -184,7 +176,11 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     for i in 1..4 {
         info!("manually producing block {}", i);
-        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+        node.mine_block().await;
+        let block = node
+            .get_block_by_height(node.get_height().await)
+            .await
+            .unwrap();
 
         //check reth for built block
         let reth_block = reth_context

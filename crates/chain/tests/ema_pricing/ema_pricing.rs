@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::utils::{mine_block, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use irys_actors::{
     block_tree_service::{get_block, get_canonical_chain},
     ema_service::EmaServiceMessage,
@@ -19,7 +19,11 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
     // action
     // we start at 1 because the genesis block is already mined
     for expected_height in 1..(price_adjustment_interval * 2) {
-        let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+        ctx.mine_block().await;
+        let header = ctx
+            .get_block_by_height(ctx.get_height().await)
+            .await
+            .unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.node_ctx
             .service_senders
@@ -62,12 +66,20 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     )];
     // mine 6 blocks
     for _expected_height in 1..(price_adjustment_interval * 2) {
-        let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+        ctx.mine_block().await;
+        let header = ctx
+            .get_block_by_height(ctx.get_height().await)
+            .await
+            .unwrap();
         registered_prices.push((header.oracle_irys_price, header.ema_irys_price));
     }
 
     // action -- mine a new block. This pushes the system to use a new EMA rather than the genesis EMA
-    let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.mine_block().await;
+    let header = ctx
+        .get_block_by_height(ctx.get_height().await)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     ctx.node_ctx
@@ -113,9 +125,21 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 
     // mine 3 blocks
-    let (header_1, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
-    let (header_2, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
-    let (header_3, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.mine_block().await;
+    let header_1 = ctx
+        .get_block_by_height(ctx.get_height().await)
+        .await
+        .unwrap();
+    ctx.mine_block().await;
+    let header_2 = ctx
+        .get_block_by_height(ctx.get_height().await)
+        .await
+        .unwrap();
+    ctx.mine_block().await;
+    let header_3 = ctx
+        .get_block_by_height(ctx.get_height().await)
+        .await
+        .unwrap();
 
     // assert that all of the prices are the max allowed ones (guaranteed by the mock oracle reporting inflated values)
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
