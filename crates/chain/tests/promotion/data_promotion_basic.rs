@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use crate::utils::{get_block_parent, mine_block, post_chunk, verify_published_chunk};
+use crate::utils::{get_block_parent, post_chunk, verify_published_chunk};
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
