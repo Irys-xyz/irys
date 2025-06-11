@@ -1,4 +1,5 @@
 use crate::{
+    block_discovery::get_storage_tx_in_parallel,
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaServiceMessage,
@@ -210,13 +211,14 @@ impl BlockTreeServiceInner {
                 block_hash,
                 validation_result,
             } => {
-                self.on_block_validation_finished(block_hash, validation_result);
+                self.on_block_validation_finished(block_hash, validation_result)
+                    .await;
             }
         }
         Ok(())
     }
 
-    fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
+    async fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
         let tx = self
             .db
             .clone()
@@ -235,8 +237,24 @@ impl BlockTreeServiceInner {
 
         // Get all the transactions for the finalized block, error if not found
         // TODO: Eventually abstract this for support of `n` ledgers
-        let submit_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Submit);
-        let publish_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Publish);
+        let submit_txs = get_storage_tx_in_parallel(
+            block_header.data_ledgers[DataLedger::Submit]
+                .tx_ids
+                .0
+                .clone(),
+            &self.service_senders.mempool,
+            &self.db.clone(),
+        )
+        .await;
+        let publish_txs = get_storage_tx_in_parallel(
+            block_header.data_ledgers[DataLedger::Publish]
+                .tx_ids
+                .0
+                .clone(),
+            &self.service_senders.mempool,
+            &self.db.clone(),
+        )
+        .await;
 
         let all_txs = {
             let mut combined = submit_txs.unwrap_or_default();
@@ -300,7 +318,7 @@ impl BlockTreeServiceInner {
     /// should be finalized. If eligible, sends finalization message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    fn try_notify_services_of_block_finalization(
+    async fn try_notify_services_of_block_finalization(
         &self,
         arc_block: &Arc<IrysBlockHeader>,
         cache: &BlockTreeCache,
@@ -380,7 +398,11 @@ impl BlockTreeServiceInner {
             panic!("Unable to send finalization message to reth: {}", &e)
         }
 
-        if self.send_storage_finalized_message(finalized_hash).is_err() {
+        if self
+            .send_storage_finalized_message(finalized_hash)
+            .await
+            .is_err()
+        {
             error!("Unable to send block finalized message");
         }
     }
@@ -479,7 +501,7 @@ impl BlockTreeServiceInner {
     /// 6. Checks if any blocks are deep enough to be finalized to storage
     ///
     /// Invalid blocks are logged but currently remain in the cache.
-    fn on_block_validation_finished(
+    async fn on_block_validation_finished(
         &mut self,
         block_hash: H256,
         validation_result: ValidationResult,
@@ -610,7 +632,8 @@ impl BlockTreeServiceInner {
                 }
 
                 // Handle block finalization (move chunks to disk and add to block_index)
-                self.try_notify_services_of_block_finalization(&arc_block, &cache);
+                self.try_notify_services_of_block_finalization(&arc_block, &cache)
+                    .await;
             }
         }
     }
@@ -658,6 +681,7 @@ pub enum ValidationResult {
 }
 
 /// Fetches full transaction headers from a ledger in a block.
+/// Reads only from mdbx, not mempool
 /// Returns None if any headers are missing or on DB errors.
 fn get_ledger_tx_headers<T: DbTx>(
     tx: &T,
