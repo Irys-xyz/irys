@@ -234,9 +234,11 @@ impl BlockTreeServiceInner {
                 return Err(eyre::eyre!("Failed to get previous block header: {}", e));
             }
         };
+        drop(tx);
 
         // Get all the transactions for the finalized block, error if not found
         // TODO: Eventually abstract this for support of `n` ledgers
+        // THIS NEEDS TO USE A MEMPOOL and not mdbx
         let submit_txs = get_storage_tx_in_parallel(
             block_header.data_ledgers[DataLedger::Submit]
                 .tx_ids
@@ -318,11 +320,7 @@ impl BlockTreeServiceInner {
     /// should be finalized. If eligible, sends finalization message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    async fn try_notify_services_of_block_finalization(
-        &self,
-        arc_block: &Arc<IrysBlockHeader>,
-        cache: &BlockTreeCache,
-    ) {
+    async fn try_notify_services_of_block_finalization(&self, arc_block: &Arc<IrysBlockHeader>) {
         let migration_depth = self.consensus_config.chunk_migration_depth as usize;
 
         // Skip if block isn't deep enough for finalization
@@ -330,76 +328,93 @@ impl BlockTreeServiceInner {
             return;
         }
 
-        let (longest_chain, _) = cache.get_canonical_chain();
-        if longest_chain.len() <= migration_depth {
-            return;
-        }
+        let finalized_hash_outer;
+        {
+            let block_tree_cache = self.cache.clone();
 
-        // Find block to finalize
-        let Some(current_index) = longest_chain
-            .iter()
-            .position(|x| x.0 == arc_block.block_hash)
-        else {
-            info!(
+            let cache = block_tree_cache.read().unwrap();
+            let (longest_chain, _) = cache.get_canonical_chain();
+            drop(cache);
+            drop(block_tree_cache);
+            if longest_chain.len() <= migration_depth {
+                return;
+            }
+
+            // Find block to finalize
+            let Some(current_index) = longest_chain
+                .iter()
+                .position(|x| x.0 == arc_block.block_hash)
+            else {
+                info!(
                 "Validated block not in longest chain, block {} height: {}, skipping finalization",
                 arc_block.block_hash, arc_block.height
             );
-            return;
-        };
-
-        if current_index < migration_depth {
-            return; // Block already finalized
-        }
-
-        let finalize_index = current_index - migration_depth;
-        let (finalized_hash, finalized_height) = (
-            longest_chain[finalize_index].0,
-            longest_chain[finalize_index].1,
-        );
-
-        // Verify block isn't already finalized
-        let binding = self.block_index_guard.clone();
-        let bi = binding.read();
-        if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-            let finalized = bi.get_item(finalized_height).unwrap();
-            if finalized.block_hash == finalized_hash {
                 return;
-            }
-            panic!("Block tree and index out of sync");
-        }
+            };
 
-        match cache.get_block(&finalized_hash) {
-            Some(block) => {
-                let mut block = block.clone();
-                block.poa.chunk = None;
-                let migrated_block = Arc::new(block);
-                // Broadcast BlockMigratedEvent event using the shared sender
-                let block_migrated_event = BlockMigratedEvent {
-                    block: migrated_block.clone(),
-                };
-                if let Err(e) = self
-                    .service_senders
-                    .block_migrated_events
-                    .send(block_migrated_event)
-                {
-                    debug!("No reorg subscribers: {:?}", e);
+            if current_index < migration_depth {
+                return; // Block already finalized
+            }
+
+            let finalize_index = current_index - migration_depth;
+            let (finalized_hash, finalized_height) = (
+                longest_chain[finalize_index].0,
+                longest_chain[finalize_index].1,
+            );
+
+            // Verify block isn't already finalized
+            let binding = self.block_index_guard.clone();
+            let bi = binding.read();
+            if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
+                let finalized = bi.get_item(finalized_height).unwrap();
+                if finalized.block_hash == finalized_hash {
+                    return;
                 }
+                panic!("Block tree and index out of sync");
             }
-            None => error!("migrated block {} not found in block_tree", finalized_hash),
-        }
+            drop(bi);
+            drop(binding);
 
-        debug!(?finalized_hash, ?finalized_height, "migrating irys block");
-        // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
-        if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
-            head_hash: BlockHashType::Irys(cache.tip),
-            confirmed_hash: None,
-            finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
-        }) {
-            panic!("Unable to send finalization message to reth: {}", &e)
+            let block_tree_cache = self.cache.clone();
+            let cache = block_tree_cache.read().unwrap();
+            match cache.get_block(&finalized_hash) {
+                Some(block) => {
+                    let mut block = block.clone();
+                    block.poa.chunk = None;
+                    let migrated_block = Arc::new(block);
+                    // Broadcast BlockMigratedEvent event using the shared sender
+                    let block_migrated_event = BlockMigratedEvent {
+                        block: migrated_block.clone(),
+                    };
+                    if let Err(e) = self
+                        .service_senders
+                        .block_migrated_events
+                        .send(block_migrated_event)
+                    {
+                        debug!("No reorg subscribers: {:?}", e);
+                    }
+                }
+                None => error!("migrated block {} not found in block_tree", finalized_hash),
+            }
+
+            debug!(?finalized_hash, ?finalized_height, "migrating irys block");
+            // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
+            if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Irys(cache.tip),
+                confirmed_hash: None,
+                finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+            }) {
+                panic!("Unable to send finalization message to reth: {}", &e)
+            }
+
+            finalized_hash_outer = finalized_hash;
+
+            drop(cache);
+            drop(block_tree_cache);
         }
 
         if self
-            .send_storage_finalized_message(finalized_hash)
+            .send_storage_finalized_message(finalized_hash_outer)
             .await
             .is_err()
         {
@@ -516,123 +531,127 @@ impl BlockTreeServiceInner {
                 error!("{} INVALID BLOCK", block_hash.0.to_base58());
             }
             ValidationResult::Valid => {
-                let binding = self.cache.clone();
-                let mut cache = binding.write().unwrap();
+                let arc_block;
+                {
+                    let binding = self.cache.clone();
+                    let mut cache = binding.write().unwrap();
 
-                // Get the current tip before any changes
-                // Note: We cant rely on canonical chain here, because the canonical chain was already updated when this
-                //       block arrived and was added after pre-validation. The tip only moves after full validation.
-                let old_tip = cache.tip;
-                let old_tip_block = cache.get_block(&old_tip).unwrap().clone();
+                    // Get the current tip before any changes
+                    // Note: We cant rely on canonical chain here, because the canonical chain was already updated when this
+                    //       block arrived and was added after pre-validation. The tip only moves after full validation.
+                    let old_tip = cache.tip;
+                    let old_tip_block = cache.get_block(&old_tip).unwrap().clone();
 
-                // Mark block as validated in cache, this will update the canonical chain
-                if let Err(err) = cache.mark_block_as_valid(&block_hash) {
-                    error!("{}", err);
-                    return;
-                }
+                    // Mark block as validated in cache, this will update the canonical chain
+                    if let Err(err) = cache.mark_block_as_valid(&block_hash) {
+                        error!("{}", err);
+                        return;
+                    }
 
-                // let (longest_chain, not_on_chain_count) = cache.get_canonical_chain();
-                let Some((_block_entry, fork_blocks, _)) =
-                    cache.get_earliest_not_onchain_in_longest_chain()
-                else {
-                    if block_hash == old_tip {
-                        debug!(
+                    // let (longest_chain, not_on_chain_count) = cache.get_canonical_chain();
+                    let Some((_block_entry, fork_blocks, _)) =
+                        cache.get_earliest_not_onchain_in_longest_chain()
+                    else {
+                        if block_hash == old_tip {
+                            debug!(
                             "\u{001b}[32mSame Tip Marked current tip {} cdiff: {} height: {}\u{001b}[0m",
                             block_hash,
                             old_tip_block.cumulative_diff,
                             old_tip_block.height
                          );
-                    } else {
-                        debug!(
+                        } else {
+                            debug!(
                             "\u{001b}[32mNo new tip found {}, current tip {} cdiff: {} height: {}\u{001b}[0m",
                             block_hash,
                             old_tip_block.block_hash,
                             old_tip_block.cumulative_diff,
                             old_tip_block.height
                         );
-                    }
-                    return;
-                };
-
-                // if the old tip isn't in the fork_blocks, it's a reorg
-                let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
-
-                // Get block info before mutable operations
-                let block_entry = cache.blocks.get(&block_hash).unwrap();
-                let arc_block = Arc::new(block_entry.block.clone());
-
-                // Now do mutable operations
-                if cache.mark_tip(&block_hash).is_ok() {
-                    if is_reorg {
-                        let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
-                        orphaned_blocks.push(&old_tip_block);
-
-                        let fork_hash = orphaned_blocks.first().unwrap().block_hash;
-                        let fork_block = cache.get_block(&fork_hash).unwrap();
-                        let fork_height = fork_block.height;
-
-                        // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
-                        let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
-                        for block in &orphaned_blocks {
-                            let entry = make_chain_cache_entry(block);
-                            old_canonical.push(entry);
                         }
-                        let new_canonical = cache.get_canonical_chain();
+                        return;
+                    };
 
-                        let (old_fork, new_fork) = prune_chains_at_ancestor(
-                            old_canonical,
-                            new_canonical.0,
-                            fork_hash,
-                            fork_height,
-                        );
+                    // if the old tip isn't in the fork_blocks, it's a reorg
+                    let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
 
-                        // Build Arc'd IrysBlockHeader lists for the ReorgEvent to minimize overhead of cloning
-                        let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
-                            .iter()
-                            .map(|e| {
-                                let mut block = cache.get_block(&e.0).unwrap().clone();
-                                block.poa.chunk = None; // Strip out the chunk
-                                Arc::new(block)
-                            })
-                            .collect();
+                    // Get block info before mutable operations
+                    let block_entry = cache.blocks.get(&block_hash).unwrap();
+                    arc_block = Arc::new(block_entry.block.clone());
 
-                        let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
-                            .iter()
-                            .map(|e| {
-                                let mut block = cache.get_block(&e.0).unwrap().clone();
-                                block.poa.chunk = None; // Strip out the chunk
-                                Arc::new(block)
-                            })
-                            .collect();
+                    // Now do mutable operations
+                    if cache.mark_tip(&block_hash).is_ok() {
+                        if is_reorg {
+                            let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
+                            orphaned_blocks.push(&old_tip_block);
 
-                        debug!(
-                            "\u{001b}[32mReorg at block height {} with {}\u{001b}[0m",
-                            arc_block.height, arc_block.block_hash
-                        );
-                        let event = ReorgEvent {
-                            old_fork: Arc::new(old_fork_blocks),
-                            new_fork: Arc::new(new_fork_blocks),
-                            fork_parent: Arc::new(fork_block.clone()),
-                            new_tip: block_hash,
-                            timestamp: SystemTime::now(),
-                        };
+                            let fork_hash = orphaned_blocks.first().unwrap().block_hash;
+                            let fork_block = cache.get_block(&fork_hash).unwrap();
+                            let fork_height = fork_block.height;
 
-                        // Broadcast reorg event using the shared sender
-                        if let Err(e) = self.service_senders.reorg_events.send(event) {
-                            debug!("No reorg subscribers: {:?}", e);
-                        }
-                    } else {
-                        debug!(
+                            // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
+                            let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
+                            for block in &orphaned_blocks {
+                                let entry = make_chain_cache_entry(block);
+                                old_canonical.push(entry);
+                            }
+                            let new_canonical = cache.get_canonical_chain();
+
+                            let (old_fork, new_fork) = prune_chains_at_ancestor(
+                                old_canonical,
+                                new_canonical.0,
+                                fork_hash,
+                                fork_height,
+                            );
+
+                            // Build Arc'd IrysBlockHeader lists for the ReorgEvent to minimize overhead of cloning
+                            let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
+                                .iter()
+                                .map(|e| {
+                                    let mut block = cache.get_block(&e.0).unwrap().clone();
+                                    block.poa.chunk = None; // Strip out the chunk
+                                    Arc::new(block)
+                                })
+                                .collect();
+
+                            let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
+                                .iter()
+                                .map(|e| {
+                                    let mut block = cache.get_block(&e.0).unwrap().clone();
+                                    block.poa.chunk = None; // Strip out the chunk
+                                    Arc::new(block)
+                                })
+                                .collect();
+                            debug!(
+                                "\u{001b}[32mReorg at block height {} with {}\u{001b}[0m",
+                                arc_block.height, arc_block.block_hash
+                            );
+                            let event = ReorgEvent {
+                                old_fork: Arc::new(old_fork_blocks),
+                                new_fork: Arc::new(new_fork_blocks),
+                                fork_parent: Arc::new(fork_block.clone()),
+                                new_tip: block_hash,
+                                timestamp: SystemTime::now(),
+                            };
+
+                            // Broadcast reorg event using the shared sender
+                            if let Err(e) = self.service_senders.reorg_events.send(event) {
+                                debug!("No reorg subscribers: {:?}", e);
+                            }
+                        } else {
+                            debug!(
                             "\u{001b}[32mExtending longest chain to height {} with {} parent: {} height: {}\u{001b}[0m",
                             arc_block.height, arc_block.block_hash, old_tip_block.block_hash, old_tip_block.height
                         );
+                        }
+
+                        self.notify_services_of_block_confirmation(block_hash, &arc_block);
                     }
 
-                    self.notify_services_of_block_confirmation(block_hash, &arc_block);
+                    drop(cache);
                 }
 
                 // Handle block finalization (move chunks to disk and add to block_index)
-                self.try_notify_services_of_block_finalization(&arc_block, &cache)
+                self.try_notify_services_of_block_finalization(&arc_block)
                     .await;
             }
         }
