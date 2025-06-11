@@ -102,7 +102,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
         let db = Arc::new(self.db.clone().unwrap());
         let service_senders = self.service_senders.clone().unwrap();
 
-        // Extract transactions for each ledger
+        // Check we have the expected number of transactions with the ledger as source of truth
         let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
         let publish_tx_count = block.data_ledgers[DataLedger::Publish].tx_ids.len();
         if submit_tx_count + publish_tx_count != all_txs.len() {
@@ -117,7 +117,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
             );
         }
 
-        // the following line errors range end index 1 out of range for slice of length 0
+        // Extract transactions for each ledger
         let submit_txs = all_txs[..submit_tx_count].to_vec();
         let publish_txs = all_txs[submit_tx_count..].to_vec();
         let block_height = block.height;
