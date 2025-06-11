@@ -187,17 +187,17 @@ impl BlockStatusProvider {
     }
 
     pub fn delete_blocks_older_than(&self, height: u64) {
-        let mut lastest_block = self.tree_tip();
-        debug!("The tip is: {:?}", lastest_block);
+        let mut latest_block = self.tree_tip();
+        debug!("The tip is: {:?}", latest_block);
         let mut blocks_to_delete = vec![];
 
-        while let Some(block) = self.get_block_from_tree(&lastest_block) {
+        while let Some(block) = self.get_block_from_tree(&latest_block) {
             if block.height < height {
                 blocks_to_delete.push(block.block_hash);
             }
 
             if block.previous_block_hash != BlockHash::zero() {
-                lastest_block = block.previous_block_hash;
+                latest_block = block.previous_block_hash;
             } else {
                 debug!("No previous block hash found, breaking the loop.");
                 break;
