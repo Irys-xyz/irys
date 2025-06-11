@@ -165,12 +165,12 @@ impl BlockIndexService {
         let publish_tx_count = block.data_ledgers[DataLedger::Publish].tx_ids.len();
         if submit_tx_count + publish_tx_count != all_txs.len() {
             error!(
+                // This should have been caught in block validation. You should not ever see this error.
                 "Mismatch between ledger tx counts and provided transactions: submit={}, publish={}, provided={}",
                 submit_tx_count,
                 publish_tx_count,
                 all_txs.len()
             );
-            return;
         }
 
         let chunk_size = self.chunk_size;
