@@ -52,6 +52,10 @@ pub enum TransactionPacket {
     Stake(BalanceDecrement),
     /// Collect storage fees from an account (balance decrement). Must match storage usage.
     StorageFees(BalanceDecrement),
+    /// Pledge funds to an account (balance increment). Used for pledging operations.
+    Pledge(BalanceIncrement),
+    /// Unpledge funds from an account (balance decrement). Used for unpledging operations.
+    Unpledge(BalanceDecrement),
 }
 
 /// Topics for system transaction logs
@@ -69,6 +73,8 @@ pub mod system_tx_topics {
     pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
     pub static STORAGE_FEES: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SYSTEM_TX_STORAGE_FEES").0);
+    pub static PLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_PLEDGE").0);
+    pub static UNPLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_UNPLEDGE").0);
 }
 
 impl SystemTransaction {
@@ -150,6 +156,8 @@ impl TransactionPacket {
             Self::BlockReward(_) => (*BLOCK_REWARD).into(),
             Self::Stake(_) => (*STAKE).into(),
             Self::StorageFees(_) => (*STORAGE_FEES).into(),
+            Self::Pledge(_) => (*PLEDGE).into(),
+            Self::Unpledge(_) => (*UNPLEDGE).into(),
         }
     }
 
@@ -157,7 +165,7 @@ impl TransactionPacket {
     #[must_use]
     pub fn encoded_topic(&self) -> [u8; 32] {
         match self {
-            Self::ReleaseStake(bi) | Self::BlockReward(bi) => {
+            Self::ReleaseStake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => {
                 use alloy_dyn_abi::DynSolValue;
                 DynSolValue::Tuple(vec![
                     DynSolValue::Uint(bi.amount, 256),
@@ -167,7 +175,7 @@ impl TransactionPacket {
                 .try_into()
                 .unwrap_or_default()
             }
-            Self::Stake(bd) | Self::StorageFees(bd) => {
+            Self::Stake(bd) | Self::StorageFees(bd) | Self::Unpledge(bd) => {
                 use alloy_dyn_abi::DynSolValue;
                 DynSolValue::Tuple(vec![
                     DynSolValue::Uint(bd.amount, 256),
@@ -186,6 +194,8 @@ pub const RELEASE_STAKE_ID: u8 = 0x00;
 pub const BLOCK_REWARD_ID: u8 = 0x01;
 pub const STAKE_ID: u8 = 0x02;
 pub const STORAGE_FEES_ID: u8 = 0x03;
+pub const PLEDGE_ID: u8 = 0x04;
+pub const UNPLEDGE_ID: u8 = 0x05;
 
 #[expect(
     clippy::arithmetic_side_effects,
@@ -226,8 +236,8 @@ impl Encodable for SystemTransaction {
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
-            Self::ReleaseStake(bi) | Self::BlockReward(bi) => bi.length(),
-            Self::Stake(bd) | Self::StorageFees(bd) => bd.length(),
+            Self::ReleaseStake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => bi.length(),
+            Self::Stake(bd) | Self::StorageFees(bd) | Self::Unpledge(bd) => bd.length(),
         }
     }
 
@@ -247,6 +257,14 @@ impl Encodable for TransactionPacket {
             }
             Self::StorageFees(inner) => {
                 out.put_u8(STORAGE_FEES_ID);
+                inner.encode(out);
+            }
+            Self::Pledge(inner) => {
+                out.put_u8(PLEDGE_ID);
+                inner.encode(out);
+            }
+            Self::Unpledge(inner) => {
+                out.put_u8(UNPLEDGE_ID);
                 inner.encode(out);
             }
         }
@@ -311,6 +329,14 @@ impl Decodable for TransactionPacket {
             STORAGE_FEES_ID => {
                 let inner = BalanceDecrement::decode(buf)?;
                 Ok(Self::StorageFees(inner))
+            }
+            PLEDGE_ID => {
+                let inner = BalanceIncrement::decode(buf)?;
+                Ok(Self::Pledge(inner))
+            }
+            UNPLEDGE_ID => {
+                let inner = BalanceDecrement::decode(buf)?;
+                Ok(Self::Unpledge(inner))
             }
             _ => Err(alloy_rlp::Error::Custom(
                 "Unknown system transaction discriminant",
