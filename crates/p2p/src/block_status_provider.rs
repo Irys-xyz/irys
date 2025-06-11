@@ -12,8 +12,12 @@ use {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlockStatus {
+    /// The block is not in the index or tree.
     NotProcessed,
+    /// The block is still in the tree. It might or might not
+    /// be in the block index.
     ProcessedButCanBeReorganized,
+    /// The block is in the index, but the tree has already pruned it.
     Finalized,
 }
 
@@ -68,7 +72,6 @@ impl BlockStatusProvider {
     /// - `ProcessedButCanBeReorganized`: The block is still in the tree. It might or might not
     ///   be in the block index.
     /// - `Finalized`: The block is in the index, but the tree has already pruned it.
-    /// - `IndexHashMismatch`: The block is in the index, but the provided hash does not match the
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
         let block_is_in_the_tree = self.is_block_in_the_tree(block_hash);
         let height_is_in_the_tree = self.height_is_in_the_tree(block_height);
