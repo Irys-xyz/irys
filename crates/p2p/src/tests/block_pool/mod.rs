@@ -100,7 +100,7 @@ impl BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
         self.block_status_provider
-            .add_block_to_index_and_tree(&block);
+            .add_block_to_index_and_tree_for_testing(&block);
         self.received_blocks
             .write()
             .expect("to unlock blocks")
@@ -180,7 +180,7 @@ async fn should_process_block() {
 
     // Inserting parent block header to the db, so the current block should go to the
     //  block producer
-    block_status_provider_mock.add_block_to_index_and_tree(&parent_block_header);
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
 
     debug!(
         "Previous block hash: {:?}",
@@ -301,7 +301,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     });
 
     // Insert block1 into the database
-    block_status_provider_mock.add_block_to_index_and_tree(&block1);
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
     addr.send(ProcessBlock {
@@ -357,20 +357,20 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     let new_blocks = mock_chain[10..15].to_vec();
 
     for block in old_blocks.iter() {
-        block_status_provider_mock.add_block_to_index_and_tree(block);
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
     }
 
     for block in middle_blocks.iter() {
-        block_status_provider_mock.add_block_to_index_and_tree(block);
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
     }
 
     for block in new_blocks.iter() {
-        block_status_provider_mock.add_block_to_the_tree(block);
+        block_status_provider_mock.add_block_mock_to_the_tree(block);
     }
 
-    block_status_provider_mock.set_tip(&new_blocks.last().as_ref().unwrap().block_hash);
+    block_status_provider_mock.set_tip_for_testing(&new_blocks.last().as_ref().unwrap().block_hash);
     // Prune everything older than the 10th block
-    block_status_provider_mock.delete_blocks_older_than(10);
+    block_status_provider_mock.delete_mocked_blocks_older_than(10);
 
     let header_building_on_very_old_block =
         BlockStatusProvider::produce_mock_chain(1, old_blocks.get(1))[0].clone();
@@ -452,20 +452,20 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let new_blocks = mock_chain[10..15].to_vec();
 
     for block in old_blocks.iter() {
-        block_status_provider_mock.add_block_to_index_and_tree(block);
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
     }
 
     for block in middle_blocks.iter() {
-        block_status_provider_mock.add_block_to_index_and_tree(block);
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
     }
 
     for block in new_blocks.iter() {
-        block_status_provider_mock.add_block_to_the_tree(block);
+        block_status_provider_mock.add_block_mock_to_the_tree(block);
     }
 
-    block_status_provider_mock.set_tip(&new_blocks.last().as_ref().unwrap().block_hash);
+    block_status_provider_mock.set_tip_for_testing(&new_blocks.last().as_ref().unwrap().block_hash);
     // Prune everything older than the 10th block
-    block_status_provider_mock.delete_blocks_older_than(5);
+    block_status_provider_mock.delete_mocked_blocks_older_than(5);
 
     let bogus_block_parent_index = 1;
 

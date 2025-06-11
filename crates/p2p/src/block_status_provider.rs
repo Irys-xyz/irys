@@ -11,17 +11,10 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MismatchedBlockHashes {
-    pub hash_in_index: BlockHash,
-    pub provided_hash: BlockHash,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlockStatus {
     NotProcessed,
     ProcessedButCanBeReorganized,
     Finalized,
-    IndexHashMismatch(MismatchedBlockHashes),
 }
 
 impl BlockStatus {
@@ -33,6 +26,7 @@ impl BlockStatus {
     }
 }
 
+/// Provides information about the status of a block in the context of the block tree and index.
 #[derive(Clone, Debug)]
 pub struct BlockStatusProvider {
     block_index_read_guard: BlockIndexReadGuard,
@@ -68,6 +62,13 @@ impl BlockStatusProvider {
         binding.get_hashes_for_height(block_height).is_some()
     }
 
+    /// Returns the status of a block based on its height and hash.
+    /// Possible statuses:
+    /// - `NotProcessed`: The block is not in the index or tree.
+    /// - `ProcessedButCanBeReorganized`: The block is still in the tree. It might or might not
+    ///   be in the block index.
+    /// - `Finalized`: The block is in the index, but the tree has already pruned it.
+    /// - `IndexHashMismatch`: The block is in the index, but the provided hash does not match the
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
         let block_is_in_the_tree = self.is_block_in_the_tree(block_hash);
         let height_is_in_the_tree = self.height_is_in_the_tree(block_height);
@@ -99,8 +100,10 @@ impl BlockStatusProvider {
     }
 }
 
+/// Testing utilities for `BlockStatusProvider` to simulate different tree/index states.
 #[cfg(test)]
 impl BlockStatusProvider {
+    #[cfg(test)]
     pub async fn mock(node_config: &NodeConfig) -> Self {
         Self {
             block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
@@ -114,10 +117,12 @@ impl BlockStatusProvider {
         }
     }
 
+    #[cfg(test)]
     pub fn tree_tip(&self) -> BlockHash {
         self.block_tree_read_guard.read().tip
     }
 
+    #[cfg(test)]
     pub fn get_block_from_tree(&self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
         self.block_tree_read_guard
             .read()
@@ -125,6 +130,7 @@ impl BlockStatusProvider {
             .cloned()
     }
 
+    #[cfg(test)]
     pub fn oldest_tree_height(&self) -> u64 {
         let mut latest_block = self.tree_tip();
         let mut oldest_height = 0;
@@ -146,6 +152,7 @@ impl BlockStatusProvider {
         oldest_height
     }
 
+    #[cfg(test)]
     pub fn produce_mock_chain(
         num_blocks: u64,
         starting_block: Option<&IrysBlockHeader>,
@@ -179,55 +186,8 @@ impl BlockStatusProvider {
         blocks
     }
 
-    pub fn add_block_to_index_and_tree(&self, block: &IrysBlockHeader) {
-        self.add_block_to_index(block);
-        self.add_block_to_the_tree(block);
-        warn!(
-            "Added block {:?} (height {}) to index and tree",
-            block.block_hash, block.height
-        );
-    }
-
-    pub fn add_block_to_the_tree(&self, block: &IrysBlockHeader) {
-        self.block_tree_read_guard
-            .write()
-            .add_block(block, Arc::new(Vec::new()))
-            .expect("to add block to the tree");
-    }
-
-    pub fn set_tip(&self, block_hash: &BlockHash) {
-        self.block_tree_read_guard.write().tip = *block_hash;
-        warn!("Marked block {:?} as tip", block_hash);
-    }
-
-    pub fn delete_blocks_older_than(&self, height: u64) {
-        let mut latest_block = self.tree_tip();
-        debug!("The tip is: {:?}", latest_block);
-        let mut blocks_to_delete = vec![];
-
-        while let Some(block) = self.get_block_from_tree(&latest_block) {
-            if block.height < height {
-                blocks_to_delete.push(block.block_hash);
-            }
-
-            if block.previous_block_hash != BlockHash::zero() {
-                latest_block = block.previous_block_hash;
-            } else {
-                debug!("No previous block hash found, breaking the loop.");
-                break;
-            }
-        }
-
-        for block_hash in blocks_to_delete {
-            self.block_tree_read_guard
-                .write()
-                .test_delete(&block_hash)
-                .expect("to delete block from the tree");
-            debug!("Deleted block {:?} from the tree", block_hash);
-        }
-    }
-
-    pub fn add_block_to_index(&self, block: &IrysBlockHeader) {
+    #[cfg(test)]
+    pub fn add_block_to_index_and_tree_for_testing(&self, block: &IrysBlockHeader) {
         let mut binding = self.block_index_read_guard.write();
 
         if binding.items.is_empty() {
@@ -252,5 +212,53 @@ impl BlockStatusProvider {
             "Added block {:?} (height {}) to index",
             block.block_hash, block.height
         );
+
+        self.add_block_mock_to_the_tree(block);
+        warn!(
+            "Added block {:?} (height {}) to index and tree",
+            block.block_hash, block.height
+        );
+    }
+
+    #[cfg(test)]
+    pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
+        self.block_tree_read_guard
+            .write()
+            .add_block(block, Arc::new(Vec::new()))
+            .expect("to add block to the tree");
+    }
+
+    #[cfg(test)]
+    pub fn set_tip_for_testing(&self, block_hash: &BlockHash) {
+        self.block_tree_read_guard.write().tip = *block_hash;
+        warn!("Marked block {:?} as tip", block_hash);
+    }
+
+    #[cfg(test)]
+    pub fn delete_mocked_blocks_older_than(&self, height: u64) {
+        let mut latest_block = self.tree_tip();
+        debug!("The tip is: {:?}", latest_block);
+        let mut blocks_to_delete = vec![];
+
+        while let Some(block) = self.get_block_from_tree(&latest_block) {
+            if block.height < height {
+                blocks_to_delete.push(block.block_hash);
+            }
+
+            if block.previous_block_hash != BlockHash::zero() {
+                latest_block = block.previous_block_hash;
+            } else {
+                debug!("No previous block hash found, breaking the loop.");
+                break;
+            }
+        }
+
+        for block_hash in blocks_to_delete {
+            self.block_tree_read_guard
+                .write()
+                .test_delete(&block_hash)
+                .expect("to delete block from the tree");
+            debug!("Deleted block {:?} from the tree", block_hash);
+        }
     }
 }

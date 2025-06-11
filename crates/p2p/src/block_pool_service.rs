@@ -170,19 +170,6 @@ where
                     .into_actor(self),
                 );
             }
-            BlockStatus::IndexHashMismatch(mismatched_hashes) => {
-                let message = format!(
-                    "Failed to process block {} (height {}): index hash mismatch. Index hash is {:?}, provided hash is {:?}",
-                    block_header.block_hash.0.to_base58(),
-                    block_header.height,
-                    mismatched_hashes.hash_in_index,
-                    mismatched_hashes.provided_hash
-                );
-                debug!(message);
-                return Box::pin(
-                    async move { Err(BlockPoolError::BlockError(message)) }.into_actor(self),
-                );
-            }
         }
 
         debug!(
@@ -218,21 +205,6 @@ where
                 let previous_block_status = block_status_provider.block_status(block_header.height.saturating_sub(1), &prev_block_hash);
 
                 warn!("Previous block status: {:?}", previous_block_status);
-
-                if let BlockStatus::IndexHashMismatch(mismatched_hashes) = previous_block_status {
-                    let message = format!(
-                        "Failed to process block {} (height {}): parent hash mismatch. Index hash is {:?}, provided hash is {:?}",
-                        block_header.block_hash.0.to_base58(),
-                        block_header.height,
-                        mismatched_hashes.hash_in_index,
-                        mismatched_hashes.provided_hash
-                    );
-                    warn!(message);
-                    self_addr.do_send(RemoveBlockFromPool {
-                        block_hash: block_header.block_hash,
-                    });
-                    return Err(BlockPoolError::PreviousBlockDoesNotMatch(message));
-                }
 
                 // If the parent block is in the db, process it
                 if previous_block_status.is_processed() {
