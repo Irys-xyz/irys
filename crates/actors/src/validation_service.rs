@@ -262,14 +262,22 @@ impl ValidationServiceInner {
         };
 
         // System transaction validation
+        let config = &self.config;
+        let service_senders = &self.service_senders;
         let system_tx_task = async move {
-            system_transactions_are_valid(block, &self.reth_node_adapter, &self.db)
-                .instrument(tracing::info_span!("system transaction validation"))
-                .await
-                .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
-                .map(|_| ValidationResult::Valid)
-                // TODO: we just assume all system txs are valid until we fix the validator
-                .unwrap_or(ValidationResult::Valid)
+            system_transactions_are_valid(
+                config,
+                service_senders,
+                block,
+                &self.reth_node_adapter,
+                &self.db,
+            )
+            .instrument(tracing::info_span!("system transaction validation"))
+            .await
+            .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
+            .map(|_| ValidationResult::Valid)
+            // TODO: we just assume all system txs are valid until we fix the validator
+            .unwrap_or(ValidationResult::Valid)
         };
 
         // Wait for all three tasks to complete

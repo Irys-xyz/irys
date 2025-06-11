@@ -1,16 +1,19 @@
 use std::sync::Arc;
 
 use crate::{
+    block_discovery::get_commitment_tx_in_parallel,
     block_index_service::BlockIndexReadGuard,
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
+    services::ServiceSenders,
+    system_tx_generator::SystemTxGenerator,
 };
 use alloy_consensus::Transaction;
 use alloy_eips::HashOrNumber;
 use base58::ToBase58;
 use eyre::{ensure, OptionExt};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable;
 use irys_reth::system_tx::{
@@ -27,6 +30,7 @@ use irys_types::{
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
+use itertools::*;
 use openssl::sha;
 use reth::{providers::TransactionsProvider, revm::primitives::ruint::Uint};
 use tracing::{debug, info};
@@ -476,6 +480,8 @@ pub fn poa_is_valid(
 /// Validates that the system transactions in the EVM block match the expected system transactions
 /// generated from the Irys block data.
 pub async fn system_transactions_are_valid(
+    config: &Config,
+    service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
@@ -485,6 +491,7 @@ pub async fn system_transactions_are_valid(
         .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(block.evm_block_hash))?
+        // todo add a test what happens with an invalid evm block
         .ok_or_eyre("Block not found in reth")?;
 
     // 2. Extract system transactions from the beginning of the block
@@ -505,15 +512,18 @@ pub async fn system_transactions_are_valid(
     }
 
     // 3. Generate expected system transactions
-    let expected_txs = generate_expected_system_transactions_from_db(block, db).await?;
+    let expected_txs =
+        generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
 
     // 4. Validate they match
     validate_system_transactions_match(&system_txs, &expected_txs)
 }
 
 /// Generates expected system transactions by looking up required data from the database
-#[tracing::instrument(skip_all, err)]
+// #[tracing::instrument(skip_all, err)]
 async fn generate_expected_system_transactions_from_db(
+    config: &Config,
+    service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<SystemTransaction>> {
@@ -522,23 +532,65 @@ async fn generate_expected_system_transactions_from_db(
         .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
         .ok_or_eyre("Previous block not found")?;
 
+    // Look up commitment txs
+    let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
+
     // Look up submit transaction headers
-    let submit_ledger = block
+    let _submit_ledger = block
         .data_ledgers
         .iter()
         .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
         .ok_or_eyre("Submit ledger not found")?;
+    // todo: read the data txs from db and mempool
+    let submit_txs = [];
 
-    for _tx_id in &submit_ledger.tx_ids.0 {
-        // todo: we need to query the db and mempool at the same time because
-        // there's no guarantee where the tx will be located
-        //
-        // if let Some(tx_header) = db.view_eyre(|tx| tx_header_by_txid(tx, tx_id))? {
-        //     submit_txs.push(tx_header);
-        // }
-    }
+    let system_txs = SystemTxGenerator::new(
+        block.height,
+        block.reward_address,
+        block.reward_amount.into(),
+        &prev_block,
+    )
+    .generate_all(&commitment_txs, &submit_txs)
+    .collect::<Vec<_>>();
 
-    Ok(vec![])
+    Ok(system_txs)
+}
+
+async fn extract_commitment_txs(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
+    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let commitment_txs = if is_epoch_block {
+        // IMPORTANT: on epoch blocks we don't genertae system txs for commitment txs
+        vec![]
+    } else {
+        match &block.system_ledgers[..] {
+            [ledger] => {
+                ensure!(
+                    ledger.ledger_id == SystemLedger::Commitment,
+                    "only commitment ledger supported"
+                );
+                // ledger
+                let txs = get_commitment_tx_in_parallel(
+                    ledger.tx_ids.0.clone(),
+                    &service_senders.mempool,
+                    db,
+                )
+                .await?;
+                txs
+            }
+            [] => {
+                // this is valid as we can have a block that contains 0 system ledgers
+                vec![]
+            }
+            // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
+            [..] => eyre::bail!("Currently we support at most 1 system ledger per block"),
+        }
+    };
+    Ok(commitment_txs)
 }
 
 /// Validates that the actual system transactions match the expected ones
@@ -556,14 +608,18 @@ fn validate_system_transactions_match(
     );
 
     // Validate each expected system transaction
-    for (i, (actual_tx, expected_tx)) in actual.iter().zip(expected.iter()).enumerate() {
+    for (idx, data) in actual.iter().zip_longest(expected.iter()).enumerate() {
         // Check block height using getter method
+        let EitherOrBoth::Both(actual, expected) = data else {
+            tracing::warn!(?data, "system tx len mismatch");
+            eyre::bail!("actual and expected system txs lens differ");
+        };
         ensure!(
-            actual_tx == expected_tx,
+            actual == expected,
             "System transaction mismatch at idx {}. expected {:?}, got {:?}",
-            i,
-            expected_tx,
-            actual_tx
+            idx,
+            expected,
+            actual
         );
     }
 
