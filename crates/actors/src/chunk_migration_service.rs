@@ -104,6 +104,20 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
 
         // Extract transactions for each ledger
         let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
+        let publish_tx_count = block.data_ledgers[DataLedger::Publish].tx_ids.len();
+        if submit_tx_count + publish_tx_count != all_txs.len() {
+            error!(
+                "Mismatch between ledger tx counts and provided transactions: submit={}, publish={}, provided={}",
+                submit_tx_count,
+                publish_tx_count,
+                all_txs.len()
+            );
+            return Box::pin(
+                async move { Err(eyre!("invalid transaction data for finalized block")) },
+            );
+        }
+
+        // the following line errors range end index 1 out of range for slice of length 0
         let submit_txs = all_txs[..submit_tx_count].to_vec();
         let publish_txs = all_txs[submit_tx_count..].to_vec();
         let block_height = block.height;
