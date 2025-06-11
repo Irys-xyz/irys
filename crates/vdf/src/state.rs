@@ -373,7 +373,7 @@ pub mod test_helpers {
     use std::sync::RwLock;
     use tokio::sync::mpsc::channel;
 
-    pub async fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
+    pub fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
 
         let state = VdfState {

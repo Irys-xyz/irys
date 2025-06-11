@@ -220,7 +220,7 @@ impl Default for MempoolService {
 
 impl MempoolService {
     /// Spawn a new Mempool service
-    pub async fn spawn_service(
+    pub fn spawn_service(
         exec: &TaskExecutor,
         irys_db: DatabaseProvider,
         reth_node_adapter: IrysRethNodeAdapter,
@@ -295,7 +295,7 @@ impl MempoolService {
                 // Handle reorg events
                 reorg_result = self.reorg_rx.recv() => {
                     if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
-                        self.inner.handle_reorg(event).await?;
+                        self.inner.handle_reorg(event)?;
                     }
                 }
 
@@ -508,7 +508,7 @@ impl Inner {
         }
         drop(mempool_state_guard);
 
-        if let Ok(read_tx) = self.read_tx().await {
+        if let Ok(read_tx) = self.read_tx() {
             let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
             return tx_header.clone();
         }
@@ -759,7 +759,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
+    fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing reorg: {} orphaned blocks from height {}",
             event.old_fork.len(),
@@ -825,7 +825,6 @@ impl Inner {
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
             .read_tx()
-            .await
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let binding = self.storage_modules_guard.read().clone();
@@ -1027,7 +1026,6 @@ impl Inner {
         // check if we have all the chunks for this tx
         let read_tx = self
             .read_tx()
-            .await
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let mut cursor = read_tx
@@ -1260,10 +1258,7 @@ impl Inner {
             Ok(v) => v,
         };
 
-        let read_tx = self
-            .read_tx()
-            .await
-            .map_err(|_| TxIngressError::DatabaseError)?;
+        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
@@ -1397,7 +1392,7 @@ impl Inner {
             Ok(true)
         } else {
             drop(mempool_state_guard);
-            let read_tx = self.read_tx().await;
+            let read_tx = self.read_tx();
 
             if read_tx.is_err() {
                 Err(TxIngressError::DatabaseError)
@@ -1525,7 +1520,7 @@ impl Inner {
     ///
     /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
     /// if the transaction could not be created. Logs an error if the transaction fails.
-    async fn read_tx(
+    fn read_tx(
         &self,
     ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
         self.irys_db
@@ -1724,12 +1719,9 @@ impl Inner {
     ) -> Result<IrysBlockHeader, TxIngressError> {
         let mempool_state = &self.mempool_state;
 
-        let read_tx = self
-            .read_tx()
-            .await
-            .map_err(|_| TxIngressError::DatabaseError)?;
+        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
-        let latest_height = self.get_latest_block_height().await?;
+        let latest_height = self.get_latest_block_height()?;
         let anchor_expiry_depth = self
             .config
             .node_config
@@ -1769,7 +1761,7 @@ impl Inner {
     }
 
     // Helper to get the canonical chain and latest height
-    async fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
+    fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
         let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
         let latest = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),

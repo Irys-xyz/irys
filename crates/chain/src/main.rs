@@ -45,7 +45,7 @@ async fn main() -> eyre::Result<()> {
 
     // start the node
     info!("starting the node, mode: {:?}", &config.mode);
-    let handle = IrysNode::new(config).await?.start().await?;
+    let handle = IrysNode::new(config)?.start().await?;
     handle.start_mining().await?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down

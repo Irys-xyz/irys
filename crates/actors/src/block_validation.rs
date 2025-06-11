@@ -327,7 +327,7 @@ pub async fn recall_recall_range_is_valid(
     )
 }
 
-pub async fn get_recall_range(
+pub fn get_recall_range(
     step_num: u64,
     config: &ConsensusConfig,
     steps_guard: &VdfStateReadonly,

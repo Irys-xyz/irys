@@ -350,7 +350,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub(crate) async fn run_service(
+    pub(crate) fn run_service(
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
