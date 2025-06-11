@@ -2,13 +2,12 @@
 //!
 //! This module defines the system transaction types used in the Irys protocol. System transactions
 //! are special EVM transactions that encode protocol-level actions, such as block rewards, storage
-//! fee collection, stake management, and nonce resets. The Irys Consensus Layer (CL) is responsible
+//! fee collection, stake and pledge management. The Irys Consensus Layer (CL) is responsible
 //! for validating these transactions in every block, ensuring protocol rules are enforced:
 //!
 //! - **Block rewards** must go to the Irys block producer
 //! - **Balance increments** correspond to rewards
 //! - **Balance decrements** correspond to storage transaction fees
-//! - **Every block must end with a nonce reset system tx**
 
 use alloy_primitives::keccak256;
 use alloy_primitives::Address;
@@ -44,8 +43,8 @@ pub enum SystemTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 pub enum TransactionPacket {
-    /// Release staked funds to an account (balance increment). Used for unstaking or protocol rewards.
-    ReleaseStake(BalanceIncrement),
+    /// Unstake funds to an account (balance increment). Used for unstaking or protocol rewards.
+    Unstake(BalanceIncrement),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
     BlockReward(BalanceIncrement),
     /// Stake funds from an account (balance decrement). Used for staking operations.
@@ -66,8 +65,8 @@ pub enum TransactionPacket {
 pub mod system_tx_topics {
     use super::*;
 
-    pub static RELEASE_STAKE: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SYSTEM_TX_RELEASE_STAKE").0);
+    pub static UNSTAKE: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SYSTEM_TX_UNSTAKE").0);
     pub static BLOCK_REWARD: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SYSTEM_TX_BLOCK_REWARD").0);
     pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
@@ -152,7 +151,7 @@ impl TransactionPacket {
     pub fn topic(&self) -> FixedBytes<32> {
         use system_tx_topics::*;
         match self {
-            Self::ReleaseStake(_) => (*RELEASE_STAKE).into(),
+            Self::Unstake(_) => (*UNSTAKE).into(),
             Self::BlockReward(_) => (*BLOCK_REWARD).into(),
             Self::Stake(_) => (*STAKE).into(),
             Self::StorageFees(_) => (*STORAGE_FEES).into(),
@@ -165,7 +164,7 @@ impl TransactionPacket {
     #[must_use]
     pub fn encoded_topic(&self) -> [u8; 32] {
         match self {
-            Self::ReleaseStake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => {
+            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => {
                 use alloy_dyn_abi::DynSolValue;
                 DynSolValue::Tuple(vec![
                     DynSolValue::Uint(bi.amount, 256),
@@ -190,7 +189,7 @@ impl TransactionPacket {
 }
 
 /// Stable 1-byte discriminants
-pub const RELEASE_STAKE_ID: u8 = 0x00;
+pub const UNSTAKE_ID: u8 = 0x00;
 pub const BLOCK_REWARD_ID: u8 = 0x01;
 pub const STAKE_ID: u8 = 0x02;
 pub const STORAGE_FEES_ID: u8 = 0x03;
@@ -236,15 +235,15 @@ impl Encodable for SystemTransaction {
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
-            Self::ReleaseStake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => bi.length(),
+            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => bi.length(),
             Self::Stake(bd) | Self::StorageFees(bd) | Self::Unpledge(bd) => bd.length(),
         }
     }
 
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
-            Self::ReleaseStake(inner) => {
-                out.put_u8(RELEASE_STAKE_ID);
+            Self::Unstake(inner) => {
+                out.put_u8(UNSTAKE_ID);
                 inner.encode(out);
             }
             Self::BlockReward(inner) => {
@@ -314,9 +313,9 @@ impl Decodable for TransactionPacket {
         *buf = &buf[1..]; // advance past the discriminant byte
 
         match disc {
-            RELEASE_STAKE_ID => {
+            UNSTAKE_ID => {
                 let inner = BalanceIncrement::decode(buf)?;
-                Ok(Self::ReleaseStake(inner))
+                Ok(Self::Unstake(inner))
             }
             BLOCK_REWARD_ID => {
                 let inner = BalanceIncrement::decode(buf)?;
@@ -387,7 +386,7 @@ pub struct BalanceDecrement {
     pub target: Address,
 }
 
-/// Balance increment: used for block rewards and stake release system txs.
+/// Balance increment: used for block rewards and unstake system txs.
 #[derive(
     serde::Deserialize,
     serde::Serialize,

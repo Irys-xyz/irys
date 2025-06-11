@@ -404,12 +404,12 @@ mod tests {
 
     use crate::system_tx::{
         BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID,
-        RELEASE_STAKE_ID,
+        UNSTAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
         advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance, pledge,
-        release_stake, sign_tx, stake, storage_fees, unpledge,
+        sign_tx, stake, storage_fees, unpledge, unstake,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
     use alloy_eips::Encodable2718;
@@ -602,8 +602,8 @@ mod tests {
     // assert that "incrementing" system txs update account state
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
-    #[case::release_stake(release_stake, signer_b())]
-    #[case::release_stake_init_no_balance(release_stake, signer_random())]
+    #[case::unstake(unstake, signer_b())]
+    #[case::unstake_init_no_balance(unstake, signer_random())]
     #[case::block_reward(block_reward, signer_b())]
     #[case::block_reward_init_no_balance(block_reward, signer_random())]
     async fn incr_system_txs(
@@ -736,7 +736,7 @@ mod tests {
 
         // Create system transactions with lower effective priority
         let system_tx = create_system_tx(
-            RELEASE_STAKE_ID,
+            UNSTAKE_ID,
             ctx.target_account.address(),
             1,
             ctx.genesis_blockhash,
@@ -1493,11 +1493,11 @@ mod tests {
         expected_tx_hashes.push(*block_reward_tx.hash());
         system_txs.push(block_reward_tx);
 
-        // 2. Release stake
-        let release_stake_tx = release_stake(address_b, 1, ctx.genesis_blockhash);
-        let release_stake_tx = sign_system_tx(release_stake_tx, &ctx.block_producer_a).await?;
-        expected_tx_hashes.push(*release_stake_tx.hash());
-        system_txs.push(release_stake_tx);
+        // 2. Unstake
+        let unstake_tx = unstake(address_b, 1, ctx.genesis_blockhash);
+        let unstake_tx = sign_system_tx(unstake_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*unstake_tx.hash());
+        system_txs.push(unstake_tx);
 
         // 3. Storage fees
         let storage_fees_tx = storage_fees(address_c, 1, ctx.genesis_blockhash);
@@ -2185,7 +2185,7 @@ pub mod test_utils {
         use crate::system_tx::*;
         match tx_type {
             BLOCK_REWARD_ID => block_reward(address, valid_for_block_height, parent_blockhash),
-            RELEASE_STAKE_ID => release_stake(address, valid_for_block_height, parent_blockhash),
+            UNSTAKE_ID => unstake(address, valid_for_block_height, parent_blockhash),
             STAKE_ID => stake(address, valid_for_block_height, parent_blockhash),
             STORAGE_FEES_ID => storage_fees(address, valid_for_block_height, parent_blockhash),
             PLEDGE_ID => pledge(address, valid_for_block_height, parent_blockhash),
@@ -2265,8 +2265,8 @@ pub mod test_utils {
         Ok(block_payloads)
     }
 
-    /// Compose a system tx for releasing stake.
-    pub fn release_stake(
+    /// Compose a system tx for unstaking.
+    pub fn unstake(
         address: Address,
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
@@ -2274,7 +2274,7 @@ pub mod test_utils {
         SystemTransaction::new_v1(
             valid_for_block_height,
             parent_blockhash,
-            TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
+            TransactionPacket::Unstake(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),

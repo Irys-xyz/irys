@@ -316,7 +316,7 @@ where
 
         match system_tx {
             system_tx::SystemTransaction::V1 { packet, .. } => match packet {
-                system_tx::TransactionPacket::ReleaseStake(balance_increment)
+                system_tx::TransactionPacket::Unstake(balance_increment)
                 | system_tx::TransactionPacket::BlockReward(balance_increment)
                 | system_tx::TransactionPacket::Pledge(balance_increment) => {
                     let log = Self::create_system_log(
