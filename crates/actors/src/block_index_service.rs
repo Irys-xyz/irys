@@ -3,8 +3,8 @@ use actix::prelude::*;
 use base58::ToBase58;
 use irys_database::{block_header_by_hash, BlockIndex};
 use irys_types::{
-    BlockIndexItem, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
-    H256, U256,
+    BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, IrysBlockHeader,
+    IrysTransactionHeader, H256, U256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -157,6 +157,19 @@ impl BlockIndexService {
     ) {
         if self.block_index.is_none() {
             error!("block_index service not initialized");
+            return;
+        }
+
+        // Check we have the expected number of transactions with the ledger as source of truth
+        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
+        let publish_tx_count = block.data_ledgers[DataLedger::Publish].tx_ids.len();
+        if submit_tx_count + publish_tx_count != all_txs.len() {
+            error!(
+                "Mismatch between ledger tx counts and provided transactions: submit={}, publish={}, provided={}",
+                submit_tx_count,
+                publish_tx_count,
+                all_txs.len()
+            );
             return;
         }
 
