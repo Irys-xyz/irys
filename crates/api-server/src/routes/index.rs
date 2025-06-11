@@ -26,14 +26,14 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
     let block_index_height = state.block_index.read().latest_height();
 
     let (chain, blocks) = get_canonical_chain(state.block_tree.clone()).await.unwrap();
-    let (block_hash, height, _, _) = chain.last().unwrap();
+    let latest = chain.last().unwrap();
 
     let node_info = NodeInfo {
         version: "0.0.1".into(),
         peer_count: state.peer_list.peer_count().await.unwrap_or(0),
         chain_id: state.config.consensus.chain_id,
-        height: *height,
-        block_hash: *block_hash,
+        height: latest.height,
+        block_hash: latest.block_hash,
         block_index_height,
         blocks: blocks as u64,
         is_syncing: state.sync_state.is_syncing(),
