@@ -436,7 +436,7 @@ mod price_cache_context {
             let chain = get_canonical_chain(block_tree_read_guard).await?.0;
             let chain = chain
                 .into_iter()
-                .map(|(hash, height, ..)| (hash, height))
+                .map(|e| (e.block_hash, e.height))
                 .collect();
             Ok(chain)
         }
@@ -1320,8 +1320,9 @@ mod tests {
 
         // setup -- generate new blocks to be added
         let (chain, ..) = get_canonical_chain(ctx.guard.clone()).await.unwrap();
-        let (mut latest_block_hash, ..) = *chain.last().unwrap();
+        let latest = chain.last().unwrap();
         let (new_blocks, ..) = build_tree(initial_block_count, 100);
+        let mut latest_block_hash = latest.block_hash;
 
         // extract the final price that we expect.
         // in total there are 110 blocks once we add the new ones.
