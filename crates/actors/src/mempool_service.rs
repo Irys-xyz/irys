@@ -631,10 +631,10 @@ impl Inner {
                 "handle_get_transaction_message() {:?} FOUND in guard.valid_tx",
                 tx
             );
-            return Some(tx_header.clone());
+            Some(tx_header.clone())
+        } else {
+            None
         }
-        drop(mempool_state_guard);
-        None
     }
 
     //TODO this is using a flatmap because at the time of writing,
