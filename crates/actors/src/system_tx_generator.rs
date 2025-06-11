@@ -39,7 +39,7 @@ impl SystemTxGenerator {
             .chain(self.generate_data_storage_system_transactions(submit_txs))
     }
 
-    /// Generates the expected data system transactions for a given block
+    /// Generates the expected header system transactions for a given block
     pub fn generate_system_tx_header(&self) -> impl std::iter::Iterator<Item = SystemTransaction> {
         std::iter::once(SystemTransaction::new_v1(
             self.block_height,
@@ -74,14 +74,14 @@ impl SystemTxGenerator {
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
     ) -> impl std::iter::Iterator<Item = SystemTransaction> + use<'a> {
-        commitment_txs
-            .into_iter()
-            .map(move |tx| match tx.commitment_type {
+        commitment_txs.into_iter().map(move |tx| {
+            let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
+            match tx.commitment_type {
                 irys_primitives::CommitmentType::Stake => SystemTransaction::new_v1(
                     self.block_height,
                     self.parent_evm_block_hash.into(),
                     TransactionPacket::Stake(BalanceDecrement {
-                        amount: Uint::from(tx.total_fee()),
+                        amount: Uint::from(tx.total_fee()) + commitment_value,
                         target: tx.signer,
                     }),
                 ),
@@ -89,7 +89,7 @@ impl SystemTxGenerator {
                     self.block_height,
                     self.parent_evm_block_hash.into(),
                     TransactionPacket::Pledge(BalanceIncrement {
-                        amount: Uint::from(tx.total_fee()),
+                        amount: Uint::from(tx.total_fee()) + commitment_value,
                         target: tx.signer,
                     }),
                 ),
@@ -97,7 +97,7 @@ impl SystemTxGenerator {
                     self.block_height,
                     self.parent_evm_block_hash.into(),
                     TransactionPacket::Unpledge(BalanceDecrement {
-                        amount: Uint::from(tx.total_fee()),
+                        amount: commitment_value - Uint::from(tx.total_fee()),
                         target: tx.signer,
                     }),
                 ),
@@ -105,10 +105,11 @@ impl SystemTxGenerator {
                     self.block_height,
                     self.parent_evm_block_hash.into(),
                     TransactionPacket::Unstake(BalanceIncrement {
-                        amount: Uint::from(tx.total_fee()),
+                        amount: commitment_value - Uint::from(tx.total_fee()),
                         target: tx.signer,
                     }),
                 ),
-            })
+            }
+        })
     }
 }
