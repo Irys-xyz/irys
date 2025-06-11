@@ -56,14 +56,14 @@ impl BlockStatusProvider {
         }
     }
 
-    pub fn is_block_in_the_tree(&self, block_hash: &H256) -> bool {
+    fn is_block_in_the_tree(&self, block_hash: &H256) -> bool {
         self.block_tree_read_guard
             .read()
             .get_block(block_hash)
             .is_some()
     }
 
-    pub fn height_is_in_the_tree(&self, block_height: u64) -> bool {
+    fn height_is_in_the_tree(&self, block_height: u64) -> bool {
         let binding = self.block_tree_read_guard.read();
         binding.get_hashes_for_height(block_height).is_some()
     }
@@ -80,16 +80,17 @@ impl BlockStatusProvider {
 
         if height_is_in_the_index {
             if block_is_in_the_tree {
-                // Block has been processed, but all blocks in the tree are not finalized yet
+                // Block has been processed, but all blocks in the tree are not considered finalized
                 BlockStatus::ProcessedButCanBeReorganized
             } else if height_is_in_the_tree_but_the_block_is_not_processed {
                 // Block might be a fork after a network partition
                 BlockStatus::NotProcessed
             } else {
-                // Block is in the index, but the tree already pruned it
+                // Block is in the index, but the tree has already pruned it
                 BlockStatus::Finalized
             }
         } else if block_is_in_the_tree {
+            // All blocks in the tree are a subject of reorganization
             BlockStatus::ProcessedButCanBeReorganized
         } else {
             // No information about the block in the index or tree
