@@ -19,7 +19,6 @@ use crate::{
     block_tree_service::{BlockTreeReadGuard, ReorgEvent},
     services::ServiceSenders,
 };
-use futures::FutureExt;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
@@ -165,11 +164,8 @@ impl EmaService {
                     }
                 }
                 result = self.reorg_rx.recv() => {
-                    match handle_broadcast_recv(result)? {
-                        Some(event) => {
-                            self.inner.handle_reorg(event).await?;
-                        }
-                        None => {}
+                    if let Some(event) = handle_broadcast_recv(result)? {
+                        self.inner.handle_reorg(event).await?;
                     }
                 }
                 shutdown = &mut shutdown_future => {
@@ -1091,8 +1087,8 @@ mod tests {
             let (chain, _) = tree.get_canonical_chain();
             let fork_parent_hash = chain
                 .iter()
-                .find(|(_, height, _, _)| *height == common_ancestor_height)
-                .map(|(hash, _, _, _)| *hash)
+                .find(|entry| entry.height == common_ancestor_height)
+                .map(|entry| entry.block_hash)
                 .expect("Fork height should exist in chain");
 
             let block = tree.get_block(&fork_parent_hash).unwrap();
@@ -1108,9 +1104,9 @@ mod tests {
             let (chain, _) = tree.get_canonical_chain();
 
             // Collect prices from genesis (height 0) up to and including the fork point
-            for (hash, height, _, _) in chain.iter() {
-                if *height <= common_ancestor_height {
-                    let block = tree.get_block(hash).unwrap();
+            for entry in chain.iter() {
+                if entry.height <= common_ancestor_height {
+                    let block = tree.get_block(&entry.block_hash).unwrap();
                     fork_prices.push(PriceInfo {
                         oracle: block.oracle_irys_price,
                         ema: block.ema_irys_price,
