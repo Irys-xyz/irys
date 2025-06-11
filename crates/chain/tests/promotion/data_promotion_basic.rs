@@ -42,7 +42,7 @@ async fn heavy_data_promotion_test() {
     .unwrap();
 
     // mine an initial empty block
-    let _block1 = mine_block(&node.node_ctx).await.unwrap().unwrap();
+    node.mine_block().await.unwrap();
 
     let app = node.start_public_api().await;
 

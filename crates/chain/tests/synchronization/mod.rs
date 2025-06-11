@@ -106,7 +106,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     )
     .await?;
 
-    mine_block(&node.node_ctx).await?;
+    node.mine_block().await.unwrap();
     // Waiting a little for the block
     tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -124,7 +124,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     };
 
     // Add one block on top to confirm previous one
-    mine_block(&node.node_ctx).await?;
+    node.mine_block().await.unwrap();
     // Waiting a little for the block
     tokio::time::sleep(Duration::from_secs(3)).await;
 
