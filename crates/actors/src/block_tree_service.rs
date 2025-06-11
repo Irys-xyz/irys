@@ -1351,6 +1351,11 @@ impl BlockTreeCache {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
+    /// Returns the current possible set of candidate hashes for a given height.
+    pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
+        self.height_index.get(&height)
+    }
+
     /// Gets block and its current validation status
     #[must_use]
     pub fn get_block_and_status(

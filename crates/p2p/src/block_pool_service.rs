@@ -23,6 +23,7 @@ pub enum BlockPoolError {
     OtherInternal(String),
     BlockError(String),
     AlreadyProcessed(BlockHash),
+    TryingToReprocessFinalizedBlock(BlockHash),
     PreviousBlockDoesNotMatch(String),
 }
 
@@ -144,26 +145,29 @@ where
 
         match block_status {
             BlockStatus::NotProcessed => {}
-            BlockStatus::ProcessedButSubjectToReorg => {
+            BlockStatus::ProcessedButCanBeReorganized => {
                 debug!(
-                    "Block pool: Block {} (height {}) is already processed",
-                    block_header.block_hash.0.to_base58(),
-                    block_header.height,
+                    "Block pool: Block {:?} (height {}) is already processed",
+                    block_header.block_hash, block_header.height,
                 );
                 return Box::pin(
                     async move { Err(BlockPoolError::AlreadyProcessed(block_header.block_hash)) }
                         .into_actor(self),
                 );
             }
-            BlockStatus::Processed => {
+            BlockStatus::Finalized => {
                 debug!(
-                    "Block pool: Block {} (height {}) is already processed and cannot be reorganized",
-                    block_header.block_hash.0.to_base58(),
+                    "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
                     block_header.height,
+                    block_header.block_hash,
                 );
                 return Box::pin(
-                    async move { Err(BlockPoolError::AlreadyProcessed(block_header.block_hash)) }
-                        .into_actor(self),
+                    async move {
+                        Err(BlockPoolError::TryingToReprocessFinalizedBlock(
+                            block_header.block_hash,
+                        ))
+                    }
+                    .into_actor(self),
                 );
             }
             BlockStatus::IndexHashMismatch(mismatched_hashes) => {
@@ -174,7 +178,7 @@ where
                     mismatched_hashes.hash_in_index,
                     mismatched_hashes.provided_hash
                 );
-                warn!(message);
+                debug!(message);
                 return Box::pin(
                     async move { Err(BlockPoolError::BlockError(message)) }.into_actor(self),
                 );

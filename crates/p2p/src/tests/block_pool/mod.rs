@@ -368,11 +368,17 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         block_status_provider_mock.add_block_to_the_tree(block);
     }
 
+    block_status_provider_mock.set_tip(&new_blocks.last().as_ref().unwrap().block_hash);
     // Prune everything older than the 10th block
     block_status_provider_mock.delete_blocks_older_than(10);
 
     let header_building_on_very_old_block =
         BlockStatusProvider::produce_mock_chain(1, old_blocks.get(1))[0].clone();
+
+    debug!(
+        "Sending bogus block: {:?}",
+        header_building_on_very_old_block.block_hash
+    );
 
     let res = addr
         .send(ProcessBlock {
@@ -382,7 +388,10 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         .expect("can't send block");
 
     assert!(res.is_err());
-    assert!(matches!(res, Err(BlockPoolError::BlockError(_))));
+    assert!(matches!(
+        res,
+        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
+    ));
 }
 
 #[actix_rt::test]
@@ -466,7 +475,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             .clone();
     bogus_block.height = 15;
 
-    debug!("Bimba");
     let oldest_block = block_status_provider_mock.oldest_tree_height();
     assert_eq!(oldest_block, 5);
 
@@ -517,6 +525,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let processing_error = error_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(matches!(
         processing_error,
-        BlockPoolError::AlreadyProcessed(_)
+        BlockPoolError::TryingToReprocessFinalizedBlock(_)
     ));
 }

@@ -19,8 +19,8 @@ pub struct MismatchedBlockHashes {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlockStatus {
     NotProcessed,
-    ProcessedButSubjectToReorg,
-    Processed,
+    ProcessedButCanBeReorganized,
+    Finalized,
     IndexHashMismatch(MismatchedBlockHashes),
 }
 
@@ -28,7 +28,7 @@ impl BlockStatus {
     pub fn is_processed(&self) -> bool {
         matches!(
             self,
-            BlockStatus::Processed | BlockStatus::ProcessedButSubjectToReorg
+            BlockStatus::Finalized | BlockStatus::ProcessedButCanBeReorganized
         )
     }
 }
@@ -63,23 +63,36 @@ impl BlockStatusProvider {
             .is_some()
     }
 
+    pub fn height_is_in_the_tree(&self, block_height: u64) -> bool {
+        let binding = self.block_tree_read_guard.read();
+        binding.get_hashes_for_height(block_height).is_some()
+    }
+
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
         let block_is_in_the_tree = self.is_block_in_the_tree(block_hash);
+        let height_is_in_the_tree = self.height_is_in_the_tree(block_height);
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
+        let height_is_in_the_index = index_item.is_some();
 
-        if let Some(index_item) = index_item {
-            if &index_item.block_hash == block_hash {
-                BlockStatus::Processed
+        let height_is_in_the_tree_but_the_block_is_not_processed =
+            height_is_in_the_tree && !block_is_in_the_tree;
+
+        if height_is_in_the_index {
+            if block_is_in_the_tree {
+                // Block has been processed, but all blocks in the tree are not finalized yet
+                BlockStatus::ProcessedButCanBeReorganized
+            } else if height_is_in_the_tree_but_the_block_is_not_processed {
+                // Block might be a fork after a network partition
+                BlockStatus::NotProcessed
             } else {
-                BlockStatus::IndexHashMismatch(MismatchedBlockHashes {
-                    hash_in_index: index_item.block_hash,
-                    provided_hash: *block_hash,
-                })
+                // Block is in the index, but the tree already pruned it
+                BlockStatus::Finalized
             }
         } else if block_is_in_the_tree {
-            BlockStatus::ProcessedButSubjectToReorg
+            BlockStatus::ProcessedButCanBeReorganized
         } else {
+            // No information about the block in the index or tree
             BlockStatus::NotProcessed
         }
     }
