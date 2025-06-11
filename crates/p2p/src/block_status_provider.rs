@@ -112,14 +112,14 @@ impl BlockStatusProvider {
     }
 
     pub fn oldest_tree_height(&self) -> u64 {
-        let mut lastest_block = self.tree_tip();
+        let mut latest_block = self.tree_tip();
         let mut oldest_height = 0;
-        debug!("The tip is: {:?}", lastest_block);
+        debug!("The tip is: {:?}", latest_block);
 
-        while let Some(block) = self.get_block_from_tree(&lastest_block) {
+        while let Some(block) = self.get_block_from_tree(&latest_block) {
             oldest_height = block.height;
             if block.previous_block_hash != BlockHash::zero() {
-                lastest_block = block.previous_block_hash;
+                latest_block = block.previous_block_hash;
             } else {
                 break;
             }
@@ -127,7 +127,7 @@ impl BlockStatusProvider {
 
         debug!(
             "The oldest block height in the tree is: {} ({:?})",
-            oldest_height, lastest_block
+            oldest_height, latest_block
         );
         oldest_height
     }
