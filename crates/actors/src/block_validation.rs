@@ -21,8 +21,9 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
-    Address, Config, ConsensusConfig, DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
-    IrysTransactionCommon, IrysTransactionHeader, PoaData, H256,
+    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader,
+    PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -510,47 +511,6 @@ pub async fn system_transactions_are_valid(
     validate_system_transactions_match(&system_txs, &expected_txs)
 }
 
-/// Generates the expected system transactions for a given block
-///
-/// Safety: block rewards are already validated in block prevalidation thus we trust them at face-value
-pub fn generate_expected_system_transactions(
-    block_height: u64,
-    reward_address: Address,
-    reward_amount: reth::revm::primitives::U256,
-    parent_evm_block_hash: H256,
-    submit_txs: &[IrysTransactionHeader],
-) -> eyre::Result<Vec<SystemTransaction>> {
-    let mut expected_txs = Vec::new();
-
-    // 1. Block reward transaction (always first)
-    let block_reward_tx = SystemTransaction::new_v1(
-        block_height,
-        parent_evm_block_hash.into(),
-        TransactionPacket::BlockReward(BalanceIncrement {
-            amount: reward_amount,
-            target: reward_address,
-        }),
-    );
-    expected_txs.push(block_reward_tx);
-
-    // create a storage fee system txs
-    for submit_tx in submit_txs {
-        let storage_fee_tx = SystemTransaction::new_v1(
-            block_height,
-            parent_evm_block_hash.into(),
-            TransactionPacket::StorageFees(BalanceDecrement {
-                amount: Uint::from(submit_tx.total_fee()),
-                target: submit_tx.signer,
-            }),
-        );
-        expected_txs.push(storage_fee_tx);
-    }
-
-    // TODO: create staking system txs
-
-    Ok(expected_txs)
-}
-
 /// Generates expected system transactions by looking up required data from the database
 #[tracing::instrument(skip_all, err)]
 async fn generate_expected_system_transactions_from_db(
@@ -569,7 +529,6 @@ async fn generate_expected_system_transactions_from_db(
         .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
         .ok_or_eyre("Submit ledger not found")?;
 
-    let submit_txs = Vec::new();
     for _tx_id in &submit_ledger.tx_ids.0 {
         // todo: we need to query the db and mempool at the same time because
         // there's no guarantee where the tx will be located
@@ -579,13 +538,7 @@ async fn generate_expected_system_transactions_from_db(
         // }
     }
 
-    generate_expected_system_transactions(
-        block.height,
-        block.reward_address,
-        block.reward_amount.into(),
-        H256(prev_block.evm_block_hash.0),
-        &submit_txs,
-    )
+    Ok(vec![])
 }
 
 /// Validates that the actual system transactions match the expected ones
