@@ -474,21 +474,21 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // ----- STAGE 3.3: pledge commitment tx
     // Ingress a pledge commitment
     let pledge_commitment_tx = new_pledge_tx(&anchor, &signers[0]);
-    let (c_tx, c_rx) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::CommitmentTxIngressMessage(pledge_commitment_tx.clone(), c_tx),
+        MempoolServiceMessage::CommitmentTxIngressMessage(pledge_commitment_tx.clone(), sender),
     )?;
     assert!(
-        c_rx.await?.is_ok(),
+        receiver.await?.is_ok(),
         "Failure on mempool pledge CommitmentTxIngressMessage"
     );
 
     // Get pledge commitment by id, ensuring it entered the mempool
-    let (c_sender, c_receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::GetCommitmentTxById(pledge_commitment_tx.id, c_sender),
+        MempoolServiceMessage::GetCommitmentTxById(pledge_commitment_tx.id, sender),
     )?;
-    let fetched_commitment = c_receiver.await?;
+    let fetched_commitment = receiver.await?;
     assert_eq!(
         fetched_commitment,
         Some(pledge_commitment_tx.clone()),
