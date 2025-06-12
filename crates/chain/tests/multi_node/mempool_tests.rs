@@ -125,6 +125,8 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 #[actix::test]
 /// Test mempool persists to disk during shutdown
 ///
+/// FIXME: This test will not be effective until mempool tree/index separation work is complete
+///
 /// post stake, post pledge, restart node
 /// confirm pledge is present in mempool
 /// post storage tx, restart node
