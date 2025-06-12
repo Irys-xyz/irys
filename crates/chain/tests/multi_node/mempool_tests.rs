@@ -419,6 +419,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     );
 
     // ----- STAGE 3: Block progresses state -----
+    assert_eq!(genesis_node.get_height().await, 0);
     genesis_node.mine_block().await.unwrap();
     let block = Arc::new(genesis_node.get_block_by_height(1).await?);
     genesis_node
@@ -482,7 +483,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool pledge CommitmentTxIngressMessage"
     );
 
-    // Get pledge commitment by id
+    // Get pledge commitment by id, ensuring it entered the mempool
     let (c_sender, c_receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
         MempoolServiceMessage::GetCommitmentTxById(pledge_commitment_tx.id, c_sender),
@@ -493,6 +494,11 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         Some(pledge_commitment_tx.clone()),
         "Failure on mempool pledge GetCommitmentTxById"
     );
+
+    // ----- STAGE 3.4: advance one block, so pledge is included in a block
+    assert_eq!(genesis_node.get_height().await, 1);
+    genesis_node.mine_block().await.unwrap();
+    let block = Arc::new(genesis_node.get_block_by_height(2).await?);
 
     // TEARDOWN
     genesis_node.stop().await;
