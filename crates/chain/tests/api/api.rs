@@ -33,7 +33,7 @@ async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn api_end_to_end_test(chunk_size: usize) {
+async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let entropy_packing_iterations = 1_000;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
@@ -207,4 +207,6 @@ async fn api_end_to_end_test(chunk_size: usize) {
     );
 
     node.node_ctx.stop().await;
+
+    Ok(())
 }
