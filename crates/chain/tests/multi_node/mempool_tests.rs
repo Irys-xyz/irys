@@ -493,7 +493,22 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // ----- STAGE 3.4: advance one block, so pledge is included in a block
     assert_eq!(genesis_node.get_height().await, 1);
     genesis_node.mine_block().await.unwrap();
-    let block = Arc::new(genesis_node.get_block_by_height(2).await?);
+    assert_eq!(genesis_node.get_height().await, 2);
+
+    let best = genesis_node.get_best_mempool_tx(None).await;
+    // The storage tx should still be returned as it was not included in the last block
+    assert_eq!(
+        best.storage_tx,
+        vec![storage_tx.header.clone()],
+        "Failure on mempool get_best_mempool_tx for storage tx"
+    );
+    // The pledge commitment tx was included in the last block so will not be returned
+    assert_eq!(
+        best.commitment_tx,
+        vec![],
+        "Failure on mempool get_best_mempool_tx for commitment tx"
+    );
+
 
     // TEARDOWN
     genesis_node.stop().await;
