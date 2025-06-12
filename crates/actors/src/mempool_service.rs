@@ -1101,7 +1101,9 @@ impl Inner {
             Ok(hash_256) => {
                 if path_result.leaf_hash != hash_256 {
                     warn!(
-                        "{:?}: leaf_hash does not match hashed chunk_bytes",
+                        "{:?}: leaf_hash {:?} does not match hashed chunk_bytes {:?}",
+                        path_result.leaf_hash.to_base58(),
+                        hash_256.to_base58(),
                         ChunkIngressError::InvalidDataHash,
                     );
                     return Err(ChunkIngressError::InvalidDataHash);
