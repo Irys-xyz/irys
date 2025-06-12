@@ -4,17 +4,17 @@ use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use assert_matches::assert_matches;
-use irys_actors::{block_tree_service::BlockMigratedEvent, mempool_service::MempoolServiceMessage};
+use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_chain::IrysNodeCtx;
-use irys_database::commitment_tx_by_txid;
+use irys_database::Ledgers;
 use irys_reth_node_bridge::{
     ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Base64, CommitmentTransaction, DataLedger, DatabaseProvider,
-    LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk, H256,
+    irys::IrysSigner, Base64, CommitmentTransaction, DataLedger, LedgerChunkOffset, NodeConfig,
+    TxChunkOffset, UnpackedChunk, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::{
@@ -25,7 +25,7 @@ use reth::{
         types::{Block, Header, TransactionRequest},
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::{sync::oneshot, time::sleep};
 
 #[actix::test]
@@ -237,6 +237,8 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // SETUP
     initialize_tracing();
+    // TODO add const for 32
+    // TODO improve the error messaging when the chunk size does not match the config chunk_size i.e. check the length prior to failing on hashing
     // test config
     let mut genesis_config = NodeConfig::testnet();
     // this must match the size of chunk added
@@ -251,6 +253,10 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // Create a signer (keypair) for transactions and fund it
     let signers = vec![genesis_config.new_random_signer()];
     genesis_config.fund_genesis_accounts(&signers);
+    // NOTE anchor can be one of the last 20 or so blocks or a another tx
+    // Anchor is both a source of randomness AND a link to a block or other tx
+    // It must not be reused for commitment txs
+    // It can be reused for storage txs
     let anchor = H256::default();
     // test storage data
     let chunks = [[10; 32], [20; 32], [30; 32]];
@@ -260,7 +266,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    let _api_started = genesis_node.start_public_api().await;
+    //let _api_started = genesis_node.start_public_api().await;
     //FIXME: it's currently not possible to check for an error state on start_public_api()
     //assert!(api_started.is_ok(), "Failure when waiting for node api");
 
@@ -426,6 +432,19 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     genesis_node.mine_block().await.unwrap();
     assert_eq!(genesis_node.get_height().await, 1);
 
+    let chunk_one_status = genesis_node
+        .node_ctx
+        .chunk_provider
+        .get_chunk_by_data_root(
+            DataLedger::Submit,
+            storage_tx.header.data_root,
+            TxChunkOffset::from(0),
+        )?;
+    assert!(
+        chunk_one_status.is_some(),
+        "Chunk not found, but should have been"
+    );
+
     // ----- STAGE 3.1: show best txns were included in mined block
     let best = genesis_node.get_best_mempool_tx(None).await;
     // The storage tx should still be returned as it was not included in the last block
@@ -493,6 +512,8 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool pledge GetCommitmentTxById"
     );
 
+    // related: if i need two blocks to get a stake + pledge, is this possible currently?
+
     // ----- STAGE 3.4: advance one block, so pledge is included in a block
     assert_eq!(genesis_node.get_height().await, 1);
     genesis_node.mine_block().await.unwrap();
@@ -500,17 +521,94 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
 
     let best = genesis_node.get_best_mempool_tx(None).await;
     // The storage tx should still be returned as it was not included in the last block
+    // TODO So we need to see why it was not included in the a prior block...
     assert_eq!(
         best.storage_tx,
         vec![storage_tx.header.clone()],
         "Failure on mempool get_best_mempool_tx for storage tx"
     );
     // The pledge commitment tx was included in the last block so will not be returned
+    // DAN INFO: this is no longer in the valid_tx subset but should still be in the mempool
     assert_eq!(
         best.commitment_tx,
         vec![],
         "Failure on mempool get_best_mempool_tx for commitment tx"
     );
+
+    // get chunk for chunk provider
+    /*let chunk_one_status = genesis_node
+        .node_ctx
+        .chunk_provider
+        .get_chunk_by_data_root(
+            DataLedger::Publish,
+            storage_tx.header.data_root,
+            TxChunkOffset::from(0),
+        )?;
+    assert!(
+        chunk_one_status.is_some(),
+        "Chunk not found, but should have been"
+    );*/
+
+    // get chunk for chunk provider
+    //tracing::error
+    let chunk_one_status = genesis_node
+        .node_ctx
+        .chunk_provider
+        .get_chunk_by_data_root(
+            DataLedger::Submit,
+            storage_tx.header.data_root,
+            TxChunkOffset::from(0),
+        )?;
+    assert!(
+        chunk_one_status.is_some(),
+        "Chunk not found, but should have been"
+    );
+
+    // ----- STAGE 3.5: advance one block, promoting storage transaction
+
+    // DO AN API CHUNK CALL HERE or grab from the chunk provider directly
+    // Q4DAN: storage tx promotion is in scope?
+    // Q4DAN: getting a chunk is possible from what stage?
+    // A: immediately but consider chunk provider directly call vs api chunk endpoint
+
+    /*
+        // ----- STAGE 4: Block moves from tree to index -----
+
+
+        sleep(Duration::from_secs(1)).await;
+
+        // ----- STAGE 5: Confirm mempool cleared and txs migrated -----
+        let (exist_tx, exist_rx) = oneshot::channel();
+        genesis_node.node_ctx.service_senders.mempool.send(
+            MempoolServiceMessage::StorageTxExistenceQuery(tx.header.id, exist_tx),
+        )?;
+        assert!(
+            !exist_rx.await.is_ok(),
+            "Failure on mempool StorageTxExistenceQuery"
+        );
+
+        let (exist_tx, exist_rx) = oneshot::channel();
+        genesis_node.node_ctx.service_senders.mempool.send(
+            MempoolServiceMessage::CommitmentTxExistenceQuery(commitment_tx.id, exist_tx),
+        )?;
+        assert!(
+            !exist_rx.await.is_ok(),
+            "Failure on mempool CommitmentTxExistenceQuery"
+        );
+
+        let hdr = genesis_node.get_tx_header(&tx.header.id)?;
+        assert_eq!(hdr.id, tx.header.id);
+    */
+    /*
+        let stored_commitment = genesis_node
+            .node_ctx
+            .db
+            .view_eyre(|ro_tx| commitment_tx_by_txid(ro_tx, &commitment_tx.id))?
+            .unwrap();
+        assert_eq!(stored_commitment.id, commitment_tx.id);
+    */
+
+    // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // TEARDOWN
     genesis_node.stop().await;

@@ -959,7 +959,7 @@ impl Inner {
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
 
-        info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
+        tracing::error!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
@@ -1040,9 +1040,11 @@ impl Inner {
         let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
         let path_buff = &chunk.data_path;
 
-        info!(
+        tracing::error!(
             "chunk_offset:{} data_size:{} offset:{}",
-            chunk.tx_offset, chunk.data_size, target_offset
+            chunk.tx_offset,
+            chunk.data_size,
+            target_offset
         );
 
         let path_result = match validate_path(root_hash, path_buff, target_offset)
@@ -1127,7 +1129,7 @@ impl Inner {
                 .unwrap_or_default()
                 .is_empty()
             {
-                info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
+                tracing::error!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
                 let result = sm
                     .write_data_chunk(&chunk)
                     .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()));
@@ -1187,6 +1189,11 @@ impl Inner {
         // add one as index is 0-indexed
         let expected_chunk_count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
 
+        tracing::error!(
+            "chunk_count {} == {} expected_chunk_count",
+            chunk_count,
+            expected_chunk_count
+        );
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
             // dispatch a ingress proof task
