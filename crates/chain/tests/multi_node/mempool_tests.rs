@@ -260,14 +260,16 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // ----- STAGE 1: Ingress -----
 
     // Ingress a storage tx
-    let tx = signers[0]
+    let storage_tx = signers[0]
         .create_transaction(data, Some(anchor))
         .expect("Expect to create a storage transaction from the data");
-    let tx = signers[0]
-        .sign_transaction(tx)
+    let storage_tx = signers[0]
+        .sign_transaction(storage_tx)
         .expect("to sign the storage transaction");
 
-    let tx_ingress_result = genesis_node.mempool_tx_ingress(tx.header.clone()).await;
+    let tx_ingress_result = genesis_node
+        .mempool_tx_ingress(storage_tx.header.clone())
+        .await;
     assert!(tx_ingress_result.is_ok(), "Failure on mempool TX Ingress");
 
     // Ingress a stake commitment
@@ -284,9 +286,9 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // Ingress transaction chunks
     for (i, chunk) in chunks.iter().enumerate() {
         let unpacked_chunk = UnpackedChunk {
-            data_root: tx.header.data_root,
-            data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[i].proof.to_vec()),
+            data_root: storage_tx.header.data_root,
+            data_size: storage_tx.header.data_size,
+            data_path: Base64(storage_tx.proofs[i].proof.to_vec()),
             bytes: Base64((*chunk).to_vec()),
             tx_offset: TxChunkOffset::from(i as u32),
         };
