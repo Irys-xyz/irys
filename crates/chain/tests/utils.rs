@@ -646,7 +646,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 //if transaction exists in mempool
                 if oneshot_rx
                     .await
-                    .expect("to process ChunkIngressMessage")
+                    .expect("to process GetCommitmentTxs")
                     .get(&tx_id)
                     .is_some()
                 {
