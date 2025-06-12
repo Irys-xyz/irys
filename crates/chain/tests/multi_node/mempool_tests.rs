@@ -284,7 +284,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     )?;
     assert!(
         c_rx.await?.is_ok(),
-        "Failure on mempool CommitmentTxIngressMessage"
+        "Failure on mempool stake CommitmentTxIngressMessage"
     );
 
     // Ingress transaction chunks
@@ -468,6 +468,30 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         commitment_map.get(&stake_commitment_tx.id),
         Some(&stake_commitment_tx),
         "Failure on mempool GetCommitmentTxs"
+    );
+
+    // ----- STAGE 3.3: pledge commitment tx
+    // Ingress a pledge commitment
+    let pledge_commitment_tx = new_pledge_tx(&anchor, &signers[0]);
+    let (c_tx, c_rx) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::CommitmentTxIngressMessage(stake_commitment_tx.clone(), c_tx),
+    )?;
+    assert!(
+        c_rx.await?.is_ok(),
+        "Failure on mempool pledge CommitmentTxIngressMessage"
+    );
+
+    // Get pledge commitment by id
+    let (c_sender, c_receiver) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::GetCommitmentTxById(pledge_commitment_tx.id, c_sender),
+    )?;
+    let fetched_commitment = c_receiver.await?;
+    assert_eq!(
+        fetched_commitment,
+        Some(stake_commitment_tx.clone()),
+        "Failure on mempool pledge GetCommitmentTxById"
     );
 
     // TEARDOWN
