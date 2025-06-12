@@ -528,10 +528,10 @@ pub async fn system_transactions_are_valid(
 
 /// Generates expected system transactions by looking up required data from the database
 #[tracing::instrument(skip_all, err)]
-async fn generate_expected_system_transactions_from_db(
+async fn generate_expected_system_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
-    block: &IrysBlockHeader,
+    block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<SystemTransaction>> {
     // Look up previous block to get EVM hash

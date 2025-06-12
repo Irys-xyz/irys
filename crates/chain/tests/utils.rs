@@ -288,6 +288,87 @@ impl IrysNodeTest<IrysNodeCtx> {
         ];
         peer_config
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn testnet_peer_with_assignments(
+        &self,
+        peer_signer: &IrysSigner,
+    ) -> IrysNodeTest<IrysNodeCtx> {
+        let seconds_to_wait = 20;
+
+        // Create a new peer config using the provided signer
+        let peer_config = self.testnet_peer_with_signer(peer_signer);
+
+        // Start the peer node
+        let peer_node = IrysNodeTest::new(peer_config)
+            .start_with_name("PEER_WITH_ASSIGNMENTS")
+            .await;
+
+        // Get the latest block hash to use as anchor
+        let current_height = self.get_height().await;
+        let latest_block = self
+            .get_block_by_height(current_height)
+            .await
+            .expect("to get latest block");
+        let anchor = latest_block.block_hash;
+
+        // Post stake + pledge commitments to establish validator status
+        let stake_tx = peer_node.post_stake_commitment(anchor).await;
+        let pledge_tx = peer_node.post_pledge_commitment(anchor).await;
+
+        // Wait for commitment transactions to show up in this node's mempool
+        self.wait_for_mempool(stake_tx.id, seconds_to_wait)
+            .await
+            .expect("stake tx to be in mempool");
+        self.wait_for_mempool(pledge_tx.id, seconds_to_wait)
+            .await
+            .expect("pledge tx to be in mempool");
+
+        // Mine a block to get the commitments included
+        self.mine_block()
+            .await
+            .expect("to mine block with commitments");
+
+        // Get epoch configuration to calculate when next epoch round occurs
+        let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+        let current_height_after_commitment = self.get_height().await;
+
+        // Calculate how many blocks we need to mine to reach the next epoch
+        let blocks_until_next_epoch =
+            num_blocks_in_epoch - (current_height_after_commitment % num_blocks_in_epoch);
+
+        // Mine blocks until we reach the next epoch round
+        for _ in 0..blocks_until_next_epoch {
+            self.mine_block()
+                .await
+                .expect("to mine block towards next epoch");
+        }
+
+        let final_height = self.get_height().await;
+
+        // Wait for the peer to receive & process the epoch block
+        peer_node
+            .wait_until_height(final_height, seconds_to_wait)
+            .await
+            .expect("peer to sync to epoch height");
+
+        // Wait for packing to complete on the peer (this indicates partition assignments are active)
+        peer_node.wait_for_packing(seconds_to_wait).await;
+
+        // Verify that partition assignments were created
+        let peer_assignments = peer_node
+            .get_partition_assignments(peer_signer.address())
+            .await;
+
+        // Ensure at least one partition has been assigned
+        assert!(
+            !peer_assignments.is_empty(),
+            "Peer should have at least one partition assignment"
+        );
+
+        peer_node
+    }
+
     pub async fn wait_until_height_on_chain(
         &self,
         target_height: u64,

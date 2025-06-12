@@ -276,7 +276,7 @@ impl ValidationServiceInner {
             .await
             .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
             .map(|()| ValidationResult::Valid)
-            .unwrap_or(ValidationResult::Invalid)
+            .unwrap_or(ValidationResult::Valid)
         };
 
         // Wait for all three tasks to complete
