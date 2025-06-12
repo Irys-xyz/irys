@@ -427,7 +427,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         .mempool
         .send(MempoolServiceMessage::BlockConfirmedMessage(block.clone()))?;
 
-    // get best txs to include in the next block
+    // ----- STAGE 3.1: show best txns were included in mined block
     let best = genesis_node.get_best_mempool_tx(None).await;
     // The storage tx should still be returned as it was not included in the last block
     assert_eq!(
@@ -442,7 +442,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool get_best_mempool_tx for commitment tx"
     );
 
-    // confirm txs remain in mempool as we have not hit the chunk_migration_depth
+    // ----- STAGE 3.2: confirm txs remain in mempool as we have not hit the chunk_migration_depth
     // Get the same multiple storage txs
     let (tx_sender, tx_receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
