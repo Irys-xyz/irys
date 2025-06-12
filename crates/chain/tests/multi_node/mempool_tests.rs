@@ -130,7 +130,7 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 /// post storage tx, restart node
 /// confirm storage tx is present in mempool
 async fn mempool_persistence_test() -> eyre::Result<()> {
-    // Turn on tracing even before the node start
+    // Turn on tracing even before the node starts
     initialize_tracing();
 
     // Configure a test network
