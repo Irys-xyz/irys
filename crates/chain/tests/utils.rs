@@ -406,6 +406,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 info!("chunk found {} attempts", attempt);
                 return Ok(());
             }
+            self.mine_block().await?;
             sleep(delay).await;
         }
 
