@@ -421,7 +421,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // ----- STAGE 3: Block progresses state -----
     assert_eq!(genesis_node.get_height().await, 0);
     genesis_node.mine_block().await.unwrap();
-    let block = Arc::new(genesis_node.get_block_by_height(1).await?);
+    assert_eq!(genesis_node.get_height().await, 1);
 
     // ----- STAGE 3.1: show best txns were included in mined block
     let best = genesis_node.get_best_mempool_tx(None).await;
