@@ -1554,8 +1554,27 @@ impl Inner {
             file.commit()?;
         }
 
-        // TODO: Do the same for all the pending storage tx
-        let _storage_tx_path = base_path.join("storage_tx");
+        let storage_tx_path = base_path.join("storage_tx");
+        fs::create_dir_all(storage_tx_path.clone()).expect("to create the mempool/storage_tx dir");
+        let storage_hash_map = self.get_all_storage_tx().await;
+        for tx in storage_hash_map.values() {
+            // Create a filepath for this transaction
+            let tx_path = storage_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+
+            // Check to see if the file exists
+            if tx_path.exists() {
+                continue;
+            }
+
+            // If not, write it to  {mempool_dir}/storage_tx/{txid}.json
+            let json = serde_json::to_string(tx).unwrap();
+            debug!("{}", json);
+            debug!("{}", tx_path.to_str().unwrap());
+
+            let mut file = get_atomic_file(tx_path).unwrap();
+            file.write_all(json.as_bytes())?;
+            file.commit()?;
+        }
 
         Ok(())
     }
@@ -1586,6 +1605,21 @@ impl Inner {
             .for_each(|(tx_id, tx)| {
                 hash_map.insert(*tx_id, tx.clone());
             });
+
+        hash_map
+    }
+
+    async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, IrysTransactionHeader> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the storage transactions
+        let mempool_state = &self.mempool_state;
+        let mempool_state_guard = mempool_state.read().await;
+
+        // Get any IrysTransaction from the valid storage txs
+        mempool_state_guard.valid_tx.values().for_each(|tx| {
+            hash_map.insert(tx.id, tx.clone());
+        });
 
         hash_map
     }
