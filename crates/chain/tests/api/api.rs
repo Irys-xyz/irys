@@ -16,19 +16,21 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[actix_web::test]
-async fn heavy_api_end_to_end_test_32b() {
+async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_32kb"), false);
     if PACKING_TYPE == PackingType::CPU {
-        api_end_to_end_test(32).await;
+        api_end_to_end_test(32).await?;
     } else {
         info!("C packing implementation does not support chunk size different from CHUNK_SIZE");
     }
+    Ok(())
 }
 
 #[actix_web::test]
-async fn heavy_api_end_to_end_test_256kb() {
+async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
     setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_256kb"), false);
-    api_end_to_end_test(256 * 1024).await;
+    api_end_to_end_test(256 * 1024).await?;
+    Ok(())
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
