@@ -152,9 +152,9 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     genesis_node.post_commitment_tx(&stake_tx).await;
     genesis_node.mine_block().await.unwrap();
 
-    let unconfirmed_txs = vec![stake_tx.id];
+    let expected_txs = vec![stake_tx.id];
     let result = genesis_node
-        .wait_for_mempool_commitment_txs(unconfirmed_txs, 20)
+        .wait_for_mempool_commitment_txs(expected_txs, 20)
         .await;
     assert!(result.is_ok());
 
@@ -171,9 +171,9 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .post_storage_tx_without_gossip(H256::zero(), data, &signer)
         .await;
 
-    let unconfirmed_txs = vec![storage_tx.header.id];
+    let expected_txs = vec![storage_tx.header.id];
     let result = genesis_node
-        .wait_for_mempool_storage_txs(unconfirmed_txs, 20)
+        .wait_for_mempool_storage_txs(expected_txs, 20)
         .await;
     assert!(result.is_ok());
 
@@ -199,9 +199,9 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     }
 
     // Validate the SystemLedger in the block that it contains the correct commitments
-    let unconfirmed_txs = vec![stake_tx.id, pledge_tx.id];
+    let expected_txs = vec![stake_tx.id, pledge_tx.id];
     let result = restarted_node
-        .wait_for_mempool_commitment_txs(unconfirmed_txs, 20)
+        .wait_for_mempool_commitment_txs(expected_txs, 20)
         .await;
     assert!(result.is_ok());
 
