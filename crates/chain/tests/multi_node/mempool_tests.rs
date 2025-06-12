@@ -239,15 +239,13 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     initialize_tracing();
     // test config
     let mut genesis_config = NodeConfig::testnet();
+    // todo: this value is required to prevent InvalidDataHash. Why?
     genesis_config.consensus.get_mut().chunk_size = 32;
+    // todo: this value is required to prevent InvalidDataHash. Why?
     genesis_config
         .consensus
         .get_mut()
         .num_chunks_in_recall_range = 2;
-    tracing::warn!(
-        "self.config.consensus.chunk_size {:?}",
-        genesis_config.consensus.get_mut().chunk_size,
-    );
     // Create a signer (keypair) for transactions and fund it
     let signers = vec![genesis_config.new_random_signer()];
     genesis_config.fund_genesis_accounts(&signers);
@@ -261,7 +259,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         .start()
         .await;
     let _api_started = genesis_node.start_public_api().await;
-    //FIXME, it's currently not possible to check for an error state on start_public_api()
+    //FIXME: it's currently not possible to check for an error state on start_public_api()
     //assert!(api_started.is_ok(), "Failure when waiting for node api");
 
     // ----- STAGE 1: Ingress -----
