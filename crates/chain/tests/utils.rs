@@ -444,6 +444,8 @@ impl IrysNodeTest<IrysNodeCtx> {
                 assert_eq!(*tx, header);
                 info!("Transaction was retrieved ok after {} attempts", attempt);
                 unconfirmed_txs.pop();
+                // don't wait and don't mine a block. Go straight to next check
+                continue;
             };
             drop(ro_tx);
             mine_blocks(&self.node_ctx, 1).await.unwrap();
@@ -491,6 +493,8 @@ impl IrysNodeTest<IrysNodeCtx> {
                     assert_eq!(proof.data_root, tx_header.data_root);
                     tracing::info!("Proofs available after {} attempts", attempts);
                     unconfirmed_promotions.pop();
+                    // don't wait and don't mine a block. Go straight to next check
+                    continue;
                 };
             }
             drop(ro_tx);
