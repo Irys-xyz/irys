@@ -305,6 +305,31 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         );
     }
 
+    // ----- STAGE 2: Read -----
+    // Get single storage tx
+    let (tx_sender, tx_receiver) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::GetStorageTransaction(storage_tx.header.id, tx_sender),
+    )?;
+    let fetched = tx_receiver.await?;
+    assert_eq!(
+        fetched,
+        Some(storage_tx.header.clone()),
+        "Failure on mempool GetStorageTransaction"
+    );
+
+    // Get multiple storage txs
+    let (tx_sender, tx_receiver) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::GetStorageTransactions(vec![storage_tx.header.id], tx_sender),
+    )?;
+    let fetched_vec = tx_receiver.await?;
+    assert_eq!(
+        fetched_vec,
+        vec![Some(storage_tx.header.clone())],
+        "Failure on mempool GetStorageTransactions"
+    );
+
     Ok(())
 }
 
