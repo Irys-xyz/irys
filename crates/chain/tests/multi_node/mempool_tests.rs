@@ -241,11 +241,6 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testnet();
     // todo: this value is required to prevent InvalidDataHash. Why?
     genesis_config.consensus.get_mut().chunk_size = 32;
-    // todo: this value is required to prevent InvalidDataHash. Why?
-    genesis_config
-        .consensus
-        .get_mut()
-        .num_chunks_in_recall_range = 2;
     // Create a signer (keypair) for transactions and fund it
     let signers = vec![genesis_config.new_random_signer()];
     genesis_config.fund_genesis_accounts(&signers);
