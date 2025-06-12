@@ -626,6 +626,53 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    pub async fn wait_for_mempool_commitment_txs(
+        &self,
+        mut tx_ids: Vec<H256>,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait; // 1 second per retry
+
+        while let Some(tx_id) = tx_ids.pop() {
+            'inner: while retries < max_retries {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
+                    commitment_tx_ids: vec![tx_id.clone()],
+                    response: oneshot_tx,
+                })?;
+
+                //if transaction exists in mempool
+                if oneshot_rx
+                    .await
+                    .expect("to process ChunkIngressMessage")
+                    .get(&tx_id)
+                    .is_some()
+                {
+                    break 'inner;
+                }
+
+                sleep(Duration::from_secs(1)).await;
+                retries += 1;
+            }
+        }
+
+        if retries == max_retries {
+            tracing::error!(
+                "transaction not found in mempool after {} retries",
+                &retries
+            );
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transactions found in mempool after {} retries", &retries);
+            Ok(())
+        }
+    }
+
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block
     // if None is provided, it will use the latest state.
     pub async fn get_best_mempool_tx(&self, parent_evm_block_hash: Option<BlockId>) -> MempoolTxs {
