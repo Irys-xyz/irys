@@ -442,6 +442,34 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool get_best_mempool_tx for commitment tx"
     );
 
+    // confirm txs remain in mempool as we have not hit the chunk_migration_depth
+    // Get the same multiple storage txs
+    let (tx_sender, tx_receiver) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::GetStorageTransactions(vec![storage_tx.header.id], tx_sender),
+    )?;
+    let fetched_vec = tx_receiver.await?;
+    assert_eq!(
+        fetched_vec,
+        vec![Some(storage_tx.header.clone())],
+        "Failure on mempool GetStorageTransactions"
+    );
+
+    // Get commitments map
+    let (c_sender, c_receiver) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::GetCommitmentTxs {
+            commitment_tx_ids: vec![stake_commitment_tx.id],
+            response: c_sender,
+        },
+    )?;
+    let commitment_map = c_receiver.await?;
+    assert_eq!(
+        commitment_map.get(&stake_commitment_tx.id),
+        Some(&stake_commitment_tx),
+        "Failure on mempool GetCommitmentTxs"
+    );
+
     // TEARDOWN
     genesis_node.stop().await;
 
