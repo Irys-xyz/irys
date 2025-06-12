@@ -228,6 +228,7 @@ impl IrysBlockHeader {
         previous_ema_recalculation_block_height(self.height, blocks_in_price_adjustment_interval)
     }
 
+    /// get storage ledger txs from blocks data ledger
     pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
         let mut commitment_txids = Vec::new();
         // Because of a circular dependency the types crate can't import the SystemLedger enum
@@ -239,6 +240,21 @@ impl IrysBlockHeader {
         }
 
         commitment_txids
+    }
+
+    /// get both submit and publish storage ledger txs from blocks data ledger
+    /// FIXME as it's just reading ledge 1 .. and not 0
+    pub fn get_storage_ledger_tx_ids(&self) -> Vec<H256> {
+        let mut storage_txids = Vec::new();
+        // Because of a circular dependency the types crate can't import the DataLedger enum
+        // SystemLedger::Commitments = 0, so finding `ledger_id: 0` here, locates the commitment ledger
+        let storage_ledger = self.data_ledgers.iter().find(|l| l.ledger_id == 1);
+
+        if let Some(storage_ledger) = storage_ledger {
+            storage_txids = storage_ledger.tx_ids.0.clone();
+        }
+
+        storage_txids
     }
 }
 
