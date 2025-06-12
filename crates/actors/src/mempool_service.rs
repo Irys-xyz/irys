@@ -1238,6 +1238,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
+        let mut confirmed_storage_txs = HashSet::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
 
@@ -1332,13 +1333,34 @@ impl Inner {
             }
         }
 
+        // Get a list of all recently confirmed storage txids in the canonical chain
+        let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        for (block_hash, _, _, _) in canonical {
+            // TODO: replace this with data from the canonical chain entry when block_tree refactors the tuple
+            let storage_tx_ids = self
+                .block_tree_read_guard
+                .read()
+                .get_block(&block_hash)
+                .unwrap()
+                .get_storage_ledger_tx_ids();
+
+            // Remove any confirmed commitment tx
+            for tx_id in storage_tx_ids {
+                confirmed_storage_txs.insert(tx_id);
+            }
+        }
+
         // Prepare storage transactions for inclusion after commitments
         let mut all_storage_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
-
         drop(mempool_state_guard);
 
         // Sort storage transactions by fee (highest first) to maximize revenue
         all_storage_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+
+        // exclude txs from recent blocks
+        let _ = all_storage_txs
+            .iter()
+            .filter(|x| confirmed_storage_txs.get(&x.id).is_none());
 
         // Apply block size constraint and funding checks to storage transactions
         let mut storage_tx = Vec::new();
