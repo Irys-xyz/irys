@@ -241,6 +241,9 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testnet();
     // todo: this value is required to prevent InvalidDataHash. Why?
     genesis_config.consensus.get_mut().chunk_size = 32;
+    // create non existnig H256. This will be used to test failure cases
+    let mut non_existent_h256 = H256::default();
+    non_existent_h256.randomize();
     // Create a signer (keypair) for transactions and fund it
     let signers = vec![genesis_config.new_random_signer()];
     genesis_config.fund_genesis_accounts(&signers);
@@ -370,6 +373,48 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         best.commitment_tx,
         vec![commitment_tx.clone()],
         "Failure on mempool get_best_mempool_tx for commitment tx"
+    );
+
+    // Existence queries
+    // Check positive CommitmentTxExistenceQuery
+    let (tx, rx) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::CommitmentTxExistenceQuery(commitment_tx.id, tx),
+    )?;
+    let result = rx.await?.unwrap();
+    assert_eq!(
+        result, true,
+        "Failure on mempool positive CommitmentTxExistenceQuery"
+    );
+    // Check negative CommitmentTxExistenceQuery
+    let (tx, rx) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::CommitmentTxExistenceQuery(non_existent_h256, tx),
+    )?;
+    let result = rx.await?.unwrap();
+    assert_eq!(
+        result, false,
+        "Failure on mempool negative CommitmentTxExistenceQuery"
+    );
+    // Check positive StorageTxExistenceQuery
+    let (tx, rx) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::StorageTxExistenceQuery(storage_tx.header.id, tx),
+    )?;
+    let result = rx.await?.unwrap();
+    assert_eq!(
+        result, true,
+        "Failure to retrieve positive storage tx on mempool StorageTxExistenceQuery"
+    );
+    // Check negative StorageTxExistenceQuery
+    let (tx, rx) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::StorageTxExistenceQuery(non_existent_h256, tx),
+    )?;
+    let result = rx.await?.unwrap();
+    assert_eq!(
+        result, false,
+        "Failure on mempool negative StorageTxExistenceQuery"
     );
 
     Ok(())
