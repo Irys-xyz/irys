@@ -239,10 +239,19 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     initialize_tracing();
     // test config
     let mut genesis_config = NodeConfig::testnet();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config
+        .consensus
+        .get_mut()
+        .num_chunks_in_recall_range = 2;
+    tracing::warn!(
+        "self.config.consensus.chunk_size {:?}",
+        genesis_config.consensus.get_mut().chunk_size,
+    );
     // Create a signer (keypair) for transactions and fund it
     let signers = vec![genesis_config.new_random_signer()];
     genesis_config.fund_genesis_accounts(&signers);
-    let anchor = H256::zero();
+    let anchor = H256::default();
     // test storage data
     let chunks = [[10; 32], [20; 32], [30; 32]];
     let data: Vec<u8> = chunks.concat();
@@ -278,6 +287,28 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         c_rx.await?.is_ok(),
         "Failure on mempool CommitmentTxIngressMessage"
     );
+
+    // Ingress transaction chunks
+    for (i, chunk) in chunks.iter().enumerate() {
+        let unpacked_chunk = UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[i].proof.to_vec()),
+            bytes: Base64((*chunk).to_vec()),
+            tx_offset: TxChunkOffset::from(i as u32),
+        };
+
+        let (chunk_tx, chunk_rx) = oneshot::channel();
+        genesis_node.node_ctx.service_senders.mempool.send(
+            MempoolServiceMessage::ChunkIngressMessage(unpacked_chunk, chunk_tx),
+        )?;
+        let result = chunk_rx.await?;
+        assert!(
+            result.is_ok(),
+            "Failure on mempool ChunkIngressMessage: {:?}",
+            result
+        );
+    }
 
     Ok(())
 }
