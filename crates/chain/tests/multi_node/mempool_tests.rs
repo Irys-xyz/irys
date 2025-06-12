@@ -357,6 +357,21 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool GetCommitmentTxs"
     );
 
+    // Get best txs prior to block confirmation
+    // TODO: Best txns implies not all txns
+    //       Ensure an unhappy path is covered where we have txns that should not be returned as they are not "best"
+    let best = genesis_node.get_best_mempool_tx(None).await;
+    assert_eq!(
+        best.storage_tx,
+        vec![storage_tx.header.clone()],
+        "Failure on mempool get_best_mempool_tx for storage tx"
+    );
+    assert_eq!(
+        best.commitment_tx,
+        vec![commitment_tx.clone()],
+        "Failure on mempool get_best_mempool_tx for commitment tx"
+    );
+
     Ok(())
 }
 
