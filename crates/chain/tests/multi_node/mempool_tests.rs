@@ -241,6 +241,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testnet();
     // todo: this value is required to prevent InvalidDataHash. Why?
     genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().chunk_migration_depth = 5;
     // create non existnig H256. This will be used to test failure cases
     let mut non_existent_h256 = H256::default();
     non_existent_h256.randomize();
