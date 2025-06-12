@@ -523,7 +523,7 @@ pub async fn system_transactions_are_valid(
         generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
 
     // 4. Validate they match
-    validate_system_transactions_match(&system_txs, &expected_txs)
+    validate_system_transactions_match(system_txs.into_iter(), expected_txs.into_iter())
 }
 
 /// Generates expected system transactions by looking up required data from the database
@@ -552,14 +552,14 @@ async fn generate_expected_system_transactions_from_db(
     let submit_txs = [];
 
     let system_txs = SystemTxGenerator::new(
-        block.height,
-        block.reward_address,
-        block.reward_amount.into(),
+        &block.height,
+        &block.reward_address,
+        &block.reward_amount,
         &prev_block,
-    )
-    .generate_all(&commitment_txs, &submit_txs)
-    .collect::<Vec<_>>();
-
+    );
+    let system_txs = system_txs
+        .generate_all(&commitment_txs, &submit_txs)
+        .collect();
     Ok(system_txs)
 }
 
@@ -603,21 +603,14 @@ async fn extract_commitment_txs(
 /// Validates that the actual system transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
 fn validate_system_transactions_match(
-    actual: &[SystemTransaction],
-    expected: &[SystemTransaction],
+    actual: impl Iterator<Item = SystemTransaction>,
+    expected: impl Iterator<Item = SystemTransaction>,
 ) -> eyre::Result<()> {
-    // Check that we have at least the expected number of system transactions
-    ensure!(
-        actual.len() >= expected.len(),
-        "Insufficient system transactions: expected at least {}, got {}",
-        expected.len(),
-        actual.len()
-    );
-
     // Validate each expected system transaction
-    for (idx, data) in actual.iter().zip_longest(expected.iter()).enumerate() {
-        // Check block height using getter method
+    for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
+            // If either of the systxs is not present, it means it was not generated as `expected`
+            // or it was not it was not included in the block. either way - an error
             tracing::warn!(?data, "system tx len mismatch");
             eyre::bail!("actual and expected system txs lens differ");
         };
