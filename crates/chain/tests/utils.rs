@@ -682,6 +682,20 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    pub async fn mempool_tx_ingress(
+        &self,
+        tx: IrysTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::TxIngressMessage(tx, oneshot_tx);
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(tx_ingress_msg)
+            .expect("to send MempoolServiceMessage");
+        oneshot_rx.await.expect("to ingress tx to mempool")
+    }
+
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block
     // if None is provided, it will use the latest state.
     pub async fn get_best_mempool_tx(&self, parent_evm_block_hash: Option<BlockId>) -> MempoolTxs {

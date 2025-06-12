@@ -210,6 +210,64 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Test all variants of mempool tokio channel MempoolServiceMessage
+/// To focus on mempool testing, HTTP API and RPC are not used,
+/// The order of testing is logical, to minimise the total test time
+/// Stage 1: Ingress
+///     MempoolServiceMessage::TxIngressMessage
+///     MempoolServiceMessage::CommitmentTxIngressMessage
+///     MempoolServiceMessage::ChunkIngressMessage
+/// Stage 2: Read
+///     MempoolServiceMessage::GetStorageTransaction
+///     MempoolServiceMessage::GetStorageTransactions
+///     MempoolServiceMessage::GetCommitmentTxById
+///     MempoolServiceMessage::GetCommitmentTxs
+///     MempoolServiceMessage::GetBestMempoolTxs
+///     MempoolServiceMessage::CommitmentTxExistenceQuery
+///     MempoolServiceMessage::StorageTxExistenceQuery
+/// Stage 3: Block progresses state
+///     MempoolServiceMessage::BlockConfirmedMessage
+///     MempoolServiceMessage::GetBestMempoolTxs (for the second time)
+/// Stage 4: Block moves from tree to index
+///     block_tree_service::BlockMigratedEvent
+/// Stage 5: confirm mempool has been cleared, and txs are in mbdx
+#[actix_web::test]
+async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
+    // SETUP
+    initialize_tracing();
+    // test config
+    let mut genesis_config = NodeConfig::testnet();
+    // Create a signer (keypair) for transactions and fund it
+    let signers = vec![genesis_config.new_random_signer()];
+    genesis_config.fund_genesis_accounts(&signers);
+    let anchor = H256::zero();
+    // test storage data
+    let chunks = [[10; 32], [20; 32], [30; 32]];
+    let data: Vec<u8> = chunks.concat();
+
+    // START NODE
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let _api_started = genesis_node.start_public_api().await;
+    //FIXME, it's currently not possible to check for an error state on start_public_api()
+    //assert!(api_started.is_ok(), "Failure when waiting for node api");
+
+    // STAGE 1: Ingress
+
+    let tx = signers[0]
+        .create_transaction(data, Some(anchor))
+        .expect("Expect to create a storage transaction from the data");
+    let tx = signers[0]
+        .sign_transaction(tx)
+        .expect("to sign the storage transaction");
+
+    let tx_ingress_result = genesis_node.mempool_tx_ingress(tx.header).await;
+    assert!(tx_ingress_result.is_ok(), "Failure on mempool TX Ingress");
+
+    Ok(())
+}
+
 // This test aims to (currently) test how the EVM interacts with forks and reorgs in the context of the mempool deciding which txs it should select
 // it does this by:
 // 1.) creating a fork with a transfer that would allow an account (recipient2) to afford a storage transaction (& validating this tx is included by the mempool)
