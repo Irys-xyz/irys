@@ -130,7 +130,7 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 /// post storage tx, restart node
 /// confirm storage tx is present in mempool
 async fn mempool_persistence_test() -> eyre::Result<()> {
-    // Turn on tracing even before the nodes start
+    // Turn on tracing even before the node start
     initialize_tracing();
 
     // Configure a test network
@@ -209,8 +209,6 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 
     Ok(())
 }
-
-
 
 // This test aims to (currently) test how the EVM interacts with forks and reorgs in the context of the mempool deciding which txs it should select
 // it does this by:
