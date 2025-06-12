@@ -17,6 +17,7 @@ use tracing::{debug, info};
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
+    setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_32kb"), false);
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
@@ -26,6 +27,7 @@ async fn heavy_api_end_to_end_test_32b() {
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_256kb() {
+    setup_tracing_and_temp_dir(Some("heavy_api_end_to_end_test_256kb"), false);
     api_end_to_end_test(256 * 1024).await;
 }
 
