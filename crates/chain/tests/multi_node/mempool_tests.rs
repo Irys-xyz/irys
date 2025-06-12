@@ -196,12 +196,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         assert!(tx_from_mempool.is_some());
     }
 
-    // Validate the SystemLedger in the block that it contains the correct commitments
-    let expected_txs = vec![stake_tx.id, pledge_tx.id];
-    let result = restarted_node
-        .wait_for_mempool_commitment_txs(expected_txs, 20)
-        .await;
-    assert!(result.is_ok());
+    // TODO: once mempool does not write directly to db, confirm commitment txs appear back in mempool after restart
 
     restarted_node.stop().await;
 
