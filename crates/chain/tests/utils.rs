@@ -414,6 +414,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    // FIXME: This fn does not gaurantee the tx is "confirmed"
     pub async fn wait_for_confirmed_txs(
         &self,
         mut unconfirmed_txs: Vec<IrysTransactionHeader>,
