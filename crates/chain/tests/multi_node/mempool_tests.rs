@@ -277,10 +277,10 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     assert!(tx_ingress_result.is_ok(), "Failure on mempool TX Ingress");
 
     // Ingress a stake commitment
-    let commitment_tx = new_stake_tx(&anchor, &signers[0]);
+    let stake_commitment_tx = new_stake_tx(&anchor, &signers[0]);
     let (c_tx, c_rx) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx.clone(), c_tx),
+        MempoolServiceMessage::CommitmentTxIngressMessage(stake_commitment_tx.clone(), c_tx),
     )?;
     assert!(
         c_rx.await?.is_ok(),
@@ -337,12 +337,12 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // Get commitment by id
     let (c_sender, c_receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::GetCommitmentTxById(commitment_tx.id, c_sender),
+        MempoolServiceMessage::GetCommitmentTxById(stake_commitment_tx.id, c_sender),
     )?;
     let fetched_commitment = c_receiver.await?;
     assert_eq!(
         fetched_commitment,
-        Some(commitment_tx.clone()),
+        Some(stake_commitment_tx.clone()),
         "Failure on mempool GetCommitmentTxById"
     );
 
@@ -350,14 +350,14 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     let (c_sender, c_receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
         MempoolServiceMessage::GetCommitmentTxs {
-            commitment_tx_ids: vec![commitment_tx.id],
+            commitment_tx_ids: vec![stake_commitment_tx.id],
             response: c_sender,
         },
     )?;
     let commitment_map = c_receiver.await?;
     assert_eq!(
-        commitment_map.get(&commitment_tx.id),
-        Some(&commitment_tx),
+        commitment_map.get(&stake_commitment_tx.id),
+        Some(&stake_commitment_tx),
         "Failure on mempool GetCommitmentTxs"
     );
 
@@ -372,7 +372,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     );
     assert_eq!(
         best.commitment_tx,
-        vec![commitment_tx.clone()],
+        vec![stake_commitment_tx.clone()],
         "Failure on mempool get_best_mempool_tx for commitment tx"
     );
 
@@ -380,7 +380,7 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     // Check positive CommitmentTxExistenceQuery
     let (tx, rx) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::CommitmentTxExistenceQuery(commitment_tx.id, tx),
+        MempoolServiceMessage::CommitmentTxExistenceQuery(stake_commitment_tx.id, tx),
     )?;
     let result = rx.await?.unwrap();
     assert_eq!(
