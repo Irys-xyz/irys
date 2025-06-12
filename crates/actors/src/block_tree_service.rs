@@ -1121,6 +1121,11 @@ impl BlockTreeCache {
         Ok(())
     }
 
+    #[cfg(feature = "test-utils")]
+    pub fn test_delete(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
+        self.delete_block(block_hash)
+    }
+
     /// Removes a block and all its descendants recursively
     pub fn remove_block(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
         // Get children before deleting the block
@@ -1344,6 +1349,11 @@ impl BlockTreeCache {
     #[must_use]
     pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
         self.blocks.get(block_hash).map(|entry| &entry.block)
+    }
+
+    /// Returns the current possible set of candidate hashes for a given height.
+    pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
+        self.height_index.get(&height)
     }
 
     /// Gets block and its current validation status
