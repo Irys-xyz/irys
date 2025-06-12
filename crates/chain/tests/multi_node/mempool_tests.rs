@@ -239,9 +239,12 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     initialize_tracing();
     // test config
     let mut genesis_config = NodeConfig::testnet();
-    // todo: this value is required to prevent InvalidDataHash. Why?
+    // this must match the size of chunk added
     genesis_config.consensus.get_mut().chunk_size = 32;
+    // migrate blocks from tree to index after this many blocks
     genesis_config.consensus.get_mut().chunk_migration_depth = 5;
+    // set cache_clean_config high to prevent chunks from being pruned too early
+    genesis_config.cache.cache_clean_lag = 100;
     // create non existnig H256. This will be used to test failure cases
     let mut non_existent_h256 = H256::default();
     non_existent_h256.randomize();
@@ -508,7 +511,6 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         vec![],
         "Failure on mempool get_best_mempool_tx for commitment tx"
     );
-
 
     // TEARDOWN
     genesis_node.stop().await;
