@@ -442,6 +442,9 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool get_best_mempool_tx for commitment tx"
     );
 
+    // TEARDOWN
+    genesis_node.stop().await;
+
     Ok(())
 }
 
