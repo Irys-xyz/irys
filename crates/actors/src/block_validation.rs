@@ -352,6 +352,13 @@ pub async fn get_recall_range(
 }
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
+#[tracing::instrument(skip_all, fields(
+    ?miner_address,
+    chunk_offset = ?poa.partition_chunk_offset,
+    partition_hash = ?poa.partition_hash,
+    entropy_packing_iterations = ?config.entropy_packing_iterations,
+    chunk_size = ?config.chunk_size
+), err)]
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
@@ -359,7 +366,7 @@ pub fn poa_is_valid(
     config: &ConsensusConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
-    debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
+    debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
         Some(chunk) => chunk.clone().into(),
         None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
@@ -520,7 +527,7 @@ pub async fn system_transactions_are_valid(
 }
 
 /// Generates expected system transactions by looking up required data from the database
-// #[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err)]
 async fn generate_expected_system_transactions_from_db(
     config: &Config,
     service_senders: &ServiceSenders,
