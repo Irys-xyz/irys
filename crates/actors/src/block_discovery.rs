@@ -442,18 +442,8 @@ pub async fn get_commitment_tx_in_parallel(
 
     // Query mempool and database in parallel
     let (mempool_results, db_results) = tokio::join!(mempool_future, db_future);
-
     let mempool_map = mempool_results?;
     let db_map = db_results?;
-
-    debug!(
-        "mempool_results:\n {:?}",
-        mempool_map.iter().map(|x| x.0).collect::<Vec<_>>()
-    );
-    debug!(
-        "db_results:\n {:?}",
-        db_map.iter().map(|x| x.0).collect::<Vec<_>>()
-    );
 
     // Combine results, preferring mempool
     let mut headers = Vec::with_capacity(commitment_tx_ids.len());

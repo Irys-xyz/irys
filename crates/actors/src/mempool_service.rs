@@ -7,7 +7,6 @@ use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
 use futures::future::BoxFuture;
-use irys_database::insert_commitment_tx;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
@@ -16,6 +15,7 @@ use irys_database::{
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
     tx_header_by_txid,
 };
+use irys_database::{insert_commitment_tx, SystemLedger};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
@@ -1191,7 +1191,7 @@ impl Inner {
 
             let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
 
-            let (_, latest_height, _, _) = canon_chain
+            let latest = canon_chain
                 .0
                 .last()
                 .ok_or(ChunkIngressError::ServiceUninitialized)
@@ -1199,7 +1199,7 @@ impl Inner {
 
             let db = self.irys_db.clone();
             let signer = self.config.irys_signer();
-            let latest_height = *latest_height;
+            let latest_height = latest.height;
             self.exec.clone().spawn_blocking(async move {
                 generate_ingress_proof(db.clone(), root_hash, data_size, chunk_size, signer)
                     // TODO: handle results instead of unwrapping
@@ -1284,18 +1284,15 @@ impl Inner {
 
         // Get a list of all recently confirmed commitment txids in the canonical chain
         let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
-        for (block_hash, _, _, _) in canonical {
+        for entry in canonical {
             // TODO: replace this with data from the canonical chain entry when block_tree refactors the tuple
-            let commitment_tx_ids = self
-                .block_tree_read_guard
-                .read()
-                .get_block(&block_hash)
-                .unwrap()
-                .get_commitment_ledger_tx_ids();
+            let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
 
             // Remove any confirmed commitment tx
-            for tx_id in commitment_tx_ids {
-                confirmed_commitments.insert(tx_id);
+            if let Some(commitment_tx_ids) = commitment_tx_ids {
+                for tx_id in &commitment_tx_ids.0 {
+                    confirmed_commitments.insert(*tx_id);
+                }
             }
         }
 
@@ -1942,9 +1939,9 @@ impl Inner {
         // Allow transactions to use the txid of a transaction in the mempool
         if anchor_found_in_recent_valid_txs {
             let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
-            let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
+            let latest = canonical_blocks.last().unwrap();
             // Just provide the most recent block as an anchor
-            match irys_database::block_header_by_hash(&read_tx, latest_block_hash, false) {
+            match irys_database::block_header_by_hash(&read_tx, &latest.block_hash, false) {
                 Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
                     debug!("valid txid anchor {} for tx {}", anchor, tx_id);
                     return Ok(hdr);
@@ -1970,11 +1967,11 @@ impl Inner {
     // Helper to get the canonical chain and latest height
     async fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
         let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
-        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
+        let latest = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
 
-        Ok(*latest_height)
+        Ok(latest.height)
     }
 
     // Helper to verify signature
