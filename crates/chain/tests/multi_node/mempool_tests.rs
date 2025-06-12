@@ -171,10 +171,8 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .post_storage_tx_without_gossip(H256::zero(), data, &signer)
         .await;
 
-    let expected_txs = vec![storage_tx.header.id];
-    let result = genesis_node
-        .wait_for_mempool_storage_txs(expected_txs, 20)
-        .await;
+    let expected_txs = vec![storage_tx.header.clone()];
+    let result = genesis_node.wait_for_confirmed_txs(expected_txs, 20).await;
     assert!(result.is_ok());
 
     // Restart the node
