@@ -13,6 +13,8 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::{Arc};
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 1000;
@@ -33,7 +35,7 @@ impl From<PeerListFacadeError> for BlockPoolError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct BlockPoolService<A, R, B>
 where
     A: ApiClient,
@@ -43,8 +45,7 @@ where
     /// Database provider for accessing transaction headers and related data.
     pub(crate) db: Option<DatabaseProvider>,
 
-    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, IrysBlockHeader>,
-    pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
+    pub(crate) blocks_cache: BlockCache,
 
     pub(crate) block_producer: Option<B>,
     pub(crate) peer_list: Option<PeerListFacade<A, R>>,
@@ -63,12 +64,7 @@ where
     fn default() -> Self {
         Self {
             db: None,
-            orphaned_blocks_by_parent: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
-            ),
-            block_hash_to_parent_hash: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
-            ),
+            blocks_cache: BlockCache::new(),
             block_producer: None,
             peer_list: None,
             sync_state: SyncState::default(),
@@ -106,6 +102,60 @@ where
 {
 }
 
+#[derive(Clone, Debug)]
+pub struct BlockCache {
+    pub orphaned_blocks_by_parent: Arc<RwLock<LruCache<BlockHash, IrysBlockHeader>>>,
+    pub block_hash_to_parent_hash: Arc<RwLock<LruCache<BlockHash, BlockHash>>>,
+}
+
+impl BlockCache {
+    pub fn new() -> Self {
+        Self {
+            orphaned_blocks_by_parent: Arc::new(RwLock::new(LruCache::new(
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+            ))),
+            block_hash_to_parent_hash: Arc::new(RwLock::new(LruCache::new(
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+            ))),
+        }
+    }
+
+    pub async fn add_block(
+        &self,
+        block_header: IrysBlockHeader,
+    ) {
+        let mut orphaned_blocks_by_parent = self.orphaned_blocks_by_parent.write().await;
+        let mut block_hash_to_parent_hash = self.block_hash_to_parent_hash.write().await;
+
+        orphaned_blocks_by_parent.put(block_header.previous_block_hash, block_header.clone());
+        block_hash_to_parent_hash.put(block_header.block_hash, block_header.previous_block_hash);
+    }
+
+    pub async fn remove_block(&self, block_hash: &BlockHash) {
+        let mut orphaned_blocks_by_parent = self.orphaned_blocks_by_parent.write().await;
+        let mut block_hash_to_parent_hash = self.block_hash_to_parent_hash.write().await;
+
+        if let Some(parent_hash) = block_hash_to_parent_hash.pop(block_hash) {
+            orphaned_blocks_by_parent.pop(&parent_hash);
+        }
+    }
+
+    pub async fn contains_block(&self, block_hash: &BlockHash) -> bool {
+        let orphaned_blocks_by_parent = self.orphaned_blocks_by_parent.write().await;
+        orphaned_blocks_by_parent.contains(block_hash)
+    }
+
+    pub async fn get_block_header_cloned(&self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.write().await.get(&block_hash) {
+            if let Some(header) = self.orphaned_blocks_by_parent.write().await.get(parent_hash) {
+                return Some(header.clone());
+            }
+        }
+
+        None
+    }
+}
+
 impl<A, R, B> BlockPoolService<A, R, B>
 where
     A: ApiClient,
@@ -121,12 +171,7 @@ where
     ) -> Self {
         Self {
             db: Some(db),
-            orphaned_blocks_by_parent: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
-            ),
-            block_hash_to_parent_hash: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
-            ),
+            blocks_cache: BlockCache::new(),
             peer_list: Some(peer_list),
             block_producer: Some(block_producer_addr),
             sync_state,
@@ -184,18 +229,17 @@ where
         let self_addr = ctx.address();
         let block_discovery = self.block_producer.clone();
 
-        // Adding the block to the pool, so if a block depending on that block arrives,
-        // this block won't be requested from the network
-        self.orphaned_blocks_by_parent
-            .put(prev_block_hash, block_header.clone());
-        self.block_hash_to_parent_hash
-            .put(current_block_hash, prev_block_hash);
-
+        let block_cache = self.blocks_cache.clone();
         let sync_state = self.sync_state.clone();
         let block_status_provider = self.block_status_provider.clone();
 
         Box::pin(
             async move {
+                // TODO: move that to the beginning of the function
+                // Adding the block to the pool, so if a block depending on that block arrives,
+                // this block won't be requested from the network
+                block_cache.add_block(block_header.clone()).await;
+
                 debug!(
                     "Searching for parent block {} for block {} in the db",
                     prev_block_hash.0.to_base58(),
@@ -225,9 +269,7 @@ where
                         .await
                     {
                             error!("Block pool: Block validation error for block {}: {:?}. Removing block from the pool", block_header.block_hash.0.to_base58(), block_discovery_error);
-                            self_addr.do_send(RemoveBlockFromPool {
-                                block_hash: block_header.block_hash,
-                            });
+                            block_cache.remove_block(&block_header.block_hash).await;
                             return Err(BlockPoolError::BlockError(format!("{:?}", block_discovery_error)))
                     }
 
@@ -236,9 +278,7 @@ where
                         current_block_hash.0.to_base58()
                     );
                     sync_state.mark_processed(current_block_height as usize);
-                    self_addr.do_send(RemoveBlockFromPool {
-                        block_hash: block_header.block_hash,
-                    });
+                    block_cache.remove_block(&block_header.block_hash).await;
 
                     // Check if the currently processed block has any ancestors in the orphaned blocks pool
                     self_addr
@@ -320,12 +360,16 @@ where
         let block_header = msg.header;
         let self_addr = ctx.address();
         let previous_block_hash = block_header.previous_block_hash;
-        let parent_is_already_in_the_pool = self
-            .block_hash_to_parent_hash
-            .contains(&previous_block_hash);
+        let blocks_cache = self.blocks_cache.clone();
 
         Box::pin(
             async move {
+                let parent_is_already_in_the_pool = blocks_cache
+                    .block_hash_to_parent_hash
+                    .read()
+                    .await
+                    .contains(&previous_block_hash);
+
                 // If the parent is also in the cache it's likely that processing has already started
                 if !parent_is_already_in_the_pool {
                     debug!(
@@ -358,28 +402,6 @@ where
 
 /// Adds a block to the block pool for processing.
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-struct RemoveBlockFromPool {
-    pub block_hash: BlockHash,
-}
-
-impl<A, R, B> Handler<RemoveBlockFromPool> for BlockPoolService<A, R, B>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    B: BlockDiscoveryFacade,
-{
-    type Result = ();
-
-    fn handle(&mut self, msg: RemoveBlockFromPool, _ctx: &mut Self::Context) {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.pop(&msg.block_hash) {
-            self.orphaned_blocks_by_parent.pop(&parent_hash);
-        }
-    }
-}
-
-/// Adds a block to the block pool for processing.
-#[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), BlockPoolError>")]
 struct RequestBlockFromTheNetwork {
     pub block_hash: BlockHash,
@@ -396,7 +418,7 @@ where
     fn handle(&mut self, msg: RequestBlockFromTheNetwork, ctx: &mut Self::Context) -> Self::Result {
         let block_hash = msg.block_hash;
         let peer_list_addr = self.peer_list.clone();
-        let self_addr = ctx.address();
+        let block_cache = self.blocks_cache.clone();
 
         let fut = async move {
             // Handle case where peer list address is not set
@@ -417,12 +439,7 @@ where
                 }
                 Err(error) => {
                     error!("Error while trying to fetch parent block {}: {:?}. Removing the block from the pool", block_hash.0.to_base58(), error);
-                    if let Err(err) = self_addr.send(RemoveBlockFromPool { block_hash }).await {
-                        error!(
-                            "Error while trying to request the block from the network: {:?}",
-                            err
-                        );
-                    }
+                    block_cache.remove_block(&block_hash).await;
                     Err(error.into())
                 }
             }
@@ -445,24 +462,27 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
 {
-    type Result = Result<Option<IrysBlockHeader>, BlockPoolError>;
+    type Result = ResponseActFuture<Self, Result<Option<IrysBlockHeader>, BlockPoolError>>;
 
     fn handle(&mut self, msg: BlockDataRequest, _ctx: &mut Self::Context) -> Self::Result {
         let block_hash = msg.block_hash;
+        let block_cache = self.blocks_cache.clone();
+        let db = self.db.clone();
 
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return Ok(Some(header.clone()));
+        let fut = async move {
+            if let Some(header) = block_cache.get_block_header_cloned(&block_hash).await {
+                return Ok(Some(header));
             }
-        }
 
-        self.db
-            .as_ref()
-            .ok_or(BlockPoolError::DatabaseError(
-                "Database is not connected".into(),
-            ))?
-            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
-            .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
+            db.as_ref()
+                .ok_or(BlockPoolError::DatabaseError(
+                    "Database is not connected".into(),
+                ))?
+                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
+                .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
+        };
+
+        Box::pin(fut.into_actor(self))
     }
 }
 
@@ -480,7 +500,7 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
 {
-    type Result = Result<bool, BlockPoolError>;
+    type Result = ResponseActFuture<Self, Result<bool, BlockPoolError>>;
 
     fn handle(
         &mut self,
@@ -489,15 +509,20 @@ where
     ) -> Self::Result {
         let block_hash = msg.block_hash;
         let block_height = msg.block_height;
+        let block_cache = self.blocks_cache.clone();
+        let block_status_provider = self.block_status_provider.clone();
 
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
-            return Ok(self.orphaned_blocks_by_parent.contains(parent_hash));
-        }
+        let fut = async move {
+            if let Some(parent_hash) = block_cache.block_hash_to_parent_hash.write().await.get(&block_hash) {
+                return Ok(block_cache.orphaned_blocks_by_parent.write().await.contains(parent_hash));
+            }
 
-        Ok(self
-            .block_status_provider
-            .block_status(block_height, &block_hash)
-            .is_processed())
+            Ok(block_status_provider
+                .block_status(block_height, &block_hash)
+                .is_processed())
+        };
+
+        Box::pin(fut.into_actor(self))
     }
 }
 
@@ -517,10 +542,13 @@ where
 
     fn handle(&mut self, msg: ProcessOrphanedAncestor, ctx: &mut Self::Context) -> Self::Result {
         let address = ctx.address();
-        let maybe_orphaned_block = self.orphaned_blocks_by_parent.get(&msg.block_hash).cloned();
+        let block_cache = self.blocks_cache.clone();
 
         Box::pin(
             async move {
+                let maybe_orphaned_block =
+                    block_cache.orphaned_blocks_by_parent.write().await.get(&msg.block_hash).cloned();
+
                 if let Some(orphaned_block) = maybe_orphaned_block {
                     let block_hash_string = orphaned_block.block_hash.0.to_base58();
                     info!(
