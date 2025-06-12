@@ -9,6 +9,7 @@ use irys_types::{
 use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};
+
 //==============================================================================
 // BlockIndexReadGuard
 //------------------------------------------------------------------------------
@@ -57,12 +58,6 @@ impl BlockIndexReadGuard {
                 error!("Block index and height do not match!");
             }
         }
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    /// Accessor method to get a write guard for the `block_index`
-    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, BlockIndex> {
-        self.block_index_data.write().unwrap()
     }
 }
 

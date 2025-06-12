@@ -281,13 +281,10 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     println!("old_fork:\n  {:?}", old_fork);
     println!("new_fork:\n  {:?}", new_fork);
 
-    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash]);
+    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().0]);
     assert_eq!(
         new_fork,
-        vec![
-            canon.0[canon.0.len() - 2].block_hash,
-            canon.0.last().unwrap().block_hash
-        ]
+        vec![canon.0[canon.0.len() - 2].0, canon.0.last().unwrap().0]
     );
 
     assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());

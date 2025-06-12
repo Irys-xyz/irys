@@ -13,12 +13,10 @@ use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context};
 use futures::future::Either;
-use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid, SystemLedger,
-};
+use irys_database::{block_header_by_hash, tx_header_by_txid};
 use irys_types::{
-    Address, BlockHash, Config, ConsensusConfig, DataLedger, DatabaseProvider, H256List,
-    IrysBlockHeader, IrysTransactionHeader, H256, U256,
+    Address, BlockHash, Config, ConsensusConfig, DataLedger, DatabaseProvider, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionId, H256, U256,
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::{transaction::DbTx, Database as _};
@@ -360,8 +358,8 @@ impl BlockTreeServiceInner {
 
             let finalize_index = current_index - migration_depth;
             let (finalized_hash, finalized_height) = (
-               longest_chain[finalize_index].block_hash,
-                longest_chain[finalize_index].height,
+                longest_chain[finalize_index].0,
+                longest_chain[finalize_index].1,
             );
 
             // Verify block isn't already finalized
@@ -569,77 +567,6 @@ impl BlockTreeServiceInner {
                             old_tip_block.cumulative_diff,
                             old_tip_block.height
                         );
-                    }
-                    return;
-                };
-
-                // if the old tip isn't in the fork_blocks, it's a reorg
-                let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
-
-                // Get block info before mutable operations
-                let block_entry = cache.blocks.get(&block_hash).unwrap();
-                let arc_block = Arc::new(block_entry.block.clone());
-                let all_tx = block_entry.all_tx.clone();
-
-                // Now do mutable operations
-                if cache.mark_tip(&block_hash).is_ok() {
-                    if is_reorg {
-                        let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
-                        orphaned_blocks.push(&old_tip_block);
-
-                        let fork_hash = orphaned_blocks.first().unwrap().block_hash;
-                        let fork_block = cache.get_block(&fork_hash).unwrap();
-                        let fork_height = fork_block.height;
-
-                        // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
-                        let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
-                        for block in &orphaned_blocks {
-                            let entry = make_chain_cache_entry(block);
-                            old_canonical.push(entry);
-                        }
-                        let new_canonical = cache.get_canonical_chain();
-
-                        let (old_fork, new_fork) = prune_chains_at_ancestor(
-                            old_canonical,
-                            new_canonical.0,
-                            fork_hash,
-                            fork_height,
-                        );
-
-                        // Build Arc'd IrysBlockHeader lists for the ReorgEvent to minimize overhead of cloning
-                        let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
-                            .iter()
-                            .map(|e| {
-                                let mut block = cache.get_block(&e.block_hash).unwrap().clone();
-                                block.poa.chunk = None; // Strip out the chunk
-                                Arc::new(block)
-                            })
-                            .collect();
-
-                        let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
-                            .iter()
-                            .map(|e| {
-                                let mut block = cache.get_block(&e.block_hash).unwrap().clone();
-                                block.poa.chunk = None; // Strip out the chunk
-                                Arc::new(block)
-                            })
-                            .collect();
-
-                        debug!(
-                            "\u{001b}[32mReorg at block height {} with {}\u{001b}[0m",
-                            arc_block.height, arc_block.block_hash
-                        );
-                        let event = ReorgEvent {
-                            old_fork: Arc::new(old_fork_blocks),
-                            new_fork: Arc::new(new_fork_blocks),
-                            fork_parent: Arc::new(fork_block.clone()),
-                            new_tip: block_hash,
-                            timestamp: SystemTime::now(),
-                        };
-
-                        // Broadcast reorg event using the shared sender
-                        if let Err(e) = self.service_senders.reorg_events.send(event) {
-                            debug!("No reorg subscribers: {:?}", e);
                         }
                         return;
                     };
@@ -731,68 +658,32 @@ impl BlockTreeServiceInner {
     }
 }
 
-fn make_chain_cache_entry(block: &IrysBlockHeader) -> BlockTreeEntry {
-    // DataLedgers
-    let mut data_ledgers = BTreeMap::new();
+fn make_chain_cache_entry(block: &IrysBlockHeader) -> ChainCacheEntry {
+    let publish_txs = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
 
-    // TODO: potentially loop through DataLedger::ALL and add them to the entry
-    //       to better support more data ledgers in the future.
+    let submit_txs = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
 
-    let publish_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|tx_ledger| tx_ledger.ledger_id == DataLedger::Publish as u32);
-
-    if let Some(publish_ledger) = publish_ledger {
-        data_ledgers.insert(DataLedger::Publish, publish_ledger.tx_ids.clone());
-    }
-
-    let submit_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|tx_ledger| tx_ledger.ledger_id == DataLedger::Submit as u32);
-
-    if let Some(submit_ledger) = submit_ledger {
-        data_ledgers.insert(DataLedger::Submit, submit_ledger.tx_ids.clone());
-    }
-
-    // System Ledgers
-    let mut system_ledgers = BTreeMap::new();
-    let commitment_ledger = block
-        .system_ledgers
-        .iter()
-        .find(|tx_ledger| tx_ledger.ledger_id == SystemLedger::Commitment as u32);
-
-    if let Some(commitment_ledger) = commitment_ledger {
-        system_ledgers.insert(SystemLedger::Commitment, commitment_ledger.tx_ids.clone());
-    }
-
-    BlockTreeEntry {
-        block_hash: block.block_hash,
-        height: block.height,
-        data_ledgers,
-        system_ledgers,
-    }
+    (block.block_hash, block.height, publish_txs, submit_txs)
 }
 
 /// Prunes two canonical chains at the specified common ancestor, returning only the divergent portions
 /// Returns (old_chain_from_fork, new_chain_from_fork)
 pub fn prune_chains_at_ancestor(
-    old_chain: Vec<BlockTreeEntry>,
-    new_chain: Vec<BlockTreeEntry>,
+    old_chain: Vec<ChainCacheEntry>,
+    new_chain: Vec<ChainCacheEntry>,
     ancestor_hash: BlockHash,
     ancestor_height: u64,
-) -> (Vec<BlockTreeEntry>, Vec<BlockTreeEntry>) {
+) -> (Vec<ChainCacheEntry>, Vec<ChainCacheEntry>) {
     // Find the ancestor index in the old chain
     let old_ancestor_idx = old_chain
         .iter()
-        .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)
+        .position(|(hash, height, _, _)| *hash == ancestor_hash && *height == ancestor_height)
         .expect("Common ancestor should exist in old chain");
 
     // Find the ancestor index in the new chain
     let new_ancestor_idx = new_chain
         .iter()
-        .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)
+        .position(|(hash, height, _, _)| *hash == ancestor_hash && *height == ancestor_height)
         .expect("Common ancestor should exist in new chain");
 
     // Return the portions after the common ancestor (excluding the ancestor itself)
@@ -842,13 +733,12 @@ fn get_ledger_tx_headers<T: DbTx>(
 /// Number of blocks to retain in cache from chain head
 const BLOCK_CACHE_DEPTH: u64 = 50;
 
-#[derive(Debug, Clone)]
-pub struct BlockTreeEntry {
-    pub block_hash: BlockHash,
-    pub height: u64,
-    pub data_ledgers: BTreeMap<DataLedger, H256List>,
-    pub system_ledgers: BTreeMap<SystemLedger, H256List>,
-}
+type ChainCacheEntry = (
+    BlockHash,
+    u64,
+    Vec<IrysTransactionId>,
+    Vec<IrysTransactionId>,
+); // (block_hash, height, publish_txs, submit_txs)
 
 #[derive(Debug)]
 pub struct BlockTreeCache {
@@ -868,7 +758,7 @@ pub struct BlockTreeCache {
     height_index: BTreeMap<u64, HashSet<BlockHash>>,
 
     // Cache of longest chain: (block/tx pairs, count of non-onchain blocks)
-    longest_chain_cache: (Vec<BlockTreeEntry>, usize),
+    longest_chain_cache: (Vec<ChainCacheEntry>, usize),
 }
 
 #[derive(Debug)]
@@ -942,9 +832,16 @@ impl BlockTreeCache {
         solutions.insert(solution_hash, HashSet::from([block_hash]));
         height_index.insert(height, HashSet::from([block_hash]));
 
-        // Initialize longest chain cache to contain the genesis block
-        let entry = make_chain_cache_entry(block);
-        let longest_chain_cache = (vec![(entry)], 0);
+        // Initialize longest chain cache with just the genesis block
+        let longest_chain_cache = (
+            vec![(
+                block_hash,
+                height,
+                block.data_ledgers[DataLedger::Publish].tx_ids.0.clone(), // Publish ledger txs
+                block.data_ledgers[DataLedger::Submit].tx_ids.0.clone(),  // Submit ledger txs
+            )],
+            0,
+        );
 
         Self {
             blocks,
@@ -1162,11 +1059,6 @@ impl BlockTreeCache {
         Ok(())
     }
 
-    #[cfg(feature = "test-utils")]
-    pub fn test_delete(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
-        self.delete_block(block_hash)
-    }
-
     /// Removes a block and all its descendants recursively
     pub fn remove_block(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
         // Get children before deleting the block
@@ -1198,7 +1090,7 @@ impl BlockTreeCache {
     /// 0th element -- genesis block
     /// last element -- the latest block
     #[must_use]
-    pub fn get_canonical_chain(&self) -> (Vec<BlockTreeEntry>, usize) {
+    pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
         self.longest_chain_cache.clone()
     }
 
@@ -1390,11 +1282,6 @@ impl BlockTreeCache {
     #[must_use]
     pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
         self.blocks.get(block_hash).map(|entry| &entry.block)
-    }
-
-    /// Returns the current possible set of candidate hashes for a given height.
-    pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
-        self.height_index.get(&height)
     }
 
     /// Gets block and its current validation status
@@ -1655,7 +1542,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
 /// Notably useful in single-threaded tokio based unittests.
 pub async fn get_canonical_chain(
     tree: BlockTreeReadGuard,
-) -> eyre::Result<(Vec<BlockTreeEntry>, usize)> {
+) -> eyre::Result<(Vec<ChainCacheEntry>, usize)> {
     let canonical_chain =
         tokio::task::spawn_blocking(move || tree.read().get_canonical_chain()).await?;
     Ok(canonical_chain)
@@ -2523,7 +2410,10 @@ mod tests {
         cache: &BlockTreeCache,
     ) -> eyre::Result<()> {
         let (canonical_blocks, not_onchain_count) = cache.get_canonical_chain();
-        let actual_blocks: Vec<_> = canonical_blocks.iter().map(|e| e.block_hash).collect();
+        let actual_blocks: Vec<_> = canonical_blocks
+            .iter()
+            .map(|(hash, _, _, _)| *hash)
+            .collect();
 
         ensure!(
             actual_blocks

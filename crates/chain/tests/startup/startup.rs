@@ -27,7 +27,7 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
         .unwrap();
     assert_eq!(
         header_1.height,
-        chain.last().unwrap().height,
+        chain.last().unwrap().1,
         "expect only the first manually mined block to be saved"
     );
     assert_eq!(
@@ -78,7 +78,7 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
         .unwrap();
     assert_eq!(
         header_1.height,
-        chain.last().unwrap().height,
+        chain.last().unwrap().1,
         "expect only the first manually mined block to be saved"
     );
     assert_eq!(

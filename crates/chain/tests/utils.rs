@@ -365,7 +365,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .last()
             .unwrap()
-            .height
+            .1
             < target_height
             && retries < max_retries
         {
@@ -519,7 +519,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .last()
             .unwrap()
-            .height
+            .1
     }
 
     /// Returns a future that resolves when a reorg is detected.
@@ -792,12 +792,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .unwrap()
             .0
             .iter()
-            .find(|e| e.height == height)
-            .and_then(|e| {
+            .find(|(_, blk_height, _, _)| *blk_height == height)
+            .and_then(|(blk_hash, _, _, _)| {
                 self.node_ctx
                     .block_tree_guard
                     .read()
-                    .get_block(&e.block_hash)
+                    .get_block(blk_hash)
                     .cloned()
             })
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))

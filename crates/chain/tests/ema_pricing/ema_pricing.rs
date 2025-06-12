@@ -122,7 +122,7 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         .await
         .unwrap();
     assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
-    let genesis_block = get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash)
+    let genesis_block = get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].0)
         .await
         .unwrap()
         .unwrap();

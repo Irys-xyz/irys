@@ -7,7 +7,6 @@
     reason = "I don't know how to name it"
 )]
 use crate::block_pool_service::BlockPoolService;
-use crate::block_status_provider::BlockStatusProvider;
 use crate::cache::GossipCacheKey;
 use crate::peer_list::PeerListFacade;
 use crate::server_data_handler::GossipServerDataHandler;
@@ -159,7 +158,6 @@ impl P2PService {
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
         listener: TcpListener,
-        block_status_provider: BlockStatusProvider,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -172,7 +170,6 @@ impl P2PService {
             peer_list.clone(),
             block_discovery.clone(),
             self.sync_state.clone(),
-            block_status_provider,
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =

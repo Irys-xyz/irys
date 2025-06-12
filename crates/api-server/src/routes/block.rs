@@ -30,8 +30,8 @@ pub async fn get_block(
                 .get_canonical_chain()
                 .0
                 .iter()
-                .find_map(|e| match e.height == height {
-                    true => Some(&e.block_hash),
+                .find_map(|(hash, hght, _, _)| match *hght == height {
+                    true => Some(hash),
                     false => None,
                 })
                 .cloned();

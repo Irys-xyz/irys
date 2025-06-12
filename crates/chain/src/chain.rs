@@ -33,11 +33,11 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
+    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, BlockIndex,
+    SystemLedger,
 };
 use irys_p2p::{
-    BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
-    ServiceHandleWithShutdownSignal, SyncState,
+    P2PService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::SystemTxStore;
@@ -343,7 +343,9 @@ impl IrysNode {
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                return self.create_new_genesis_block(genesis_block.clone()).await;
+                return self
+                    .create_new_genesis_block(irys_db, genesis_block.clone())
+                    .await;
             }
             NodeMode::PeerSync => {
                 // Fetch genesis data from trusted peer when joining network
@@ -393,6 +395,7 @@ impl IrysNode {
 
     async fn create_new_genesis_block(
         &self,
+        irys_db: &DatabaseProvider,
         mut genesis_block: IrysBlockHeader,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
         // Generate genesis commitments from configuration
@@ -413,7 +416,10 @@ impl IrysNode {
         // Add commitment transactions to genesis block
         add_genesis_commitments(&mut genesis_block, &self.config);
 
-        // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
+        // Also persist them to the db
+        for commitment_tx in commitments.iter() {
+            let _ = irys_db.update(|tx| insert_commitment_tx(tx, commitment_tx));
+        }
 
         run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
 
@@ -899,13 +905,8 @@ impl IrysNode {
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
         // Spawn EMA service
-        let _handle = EmaService::spawn_service(
-            task_exec,
-            block_tree_guard.clone(),
-            receivers.ema,
-            &config,
-            &service_senders,
-        );
+        let _handle =
+            EmaService::spawn_service(task_exec, block_tree_guard.clone(), receivers.ema, &config);
 
         // Spawn the CommitmentCache service
         let _commitcache_handle = CommitmentCache::spawn_service(
@@ -993,7 +994,6 @@ impl IrysNode {
             peer_list_service.clone(),
             irys_db.clone(),
             gossip_listener,
-            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
         )?;
 
         // set up the price oracle
