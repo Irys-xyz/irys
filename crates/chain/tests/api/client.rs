@@ -3,13 +3,16 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
+use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
     ProtocolVersion, VersionRequest,
 };
 use semver::Version;
-use std::net::{IpAddr, SocketAddr};
-use std::str::FromStr;
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+};
 use tracing::debug;
 
 async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: SocketAddr) {
