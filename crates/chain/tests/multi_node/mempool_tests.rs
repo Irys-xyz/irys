@@ -278,12 +278,12 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
 
     // Ingress a stake commitment
     let stake_commitment_tx = new_stake_tx(&anchor, &signers[0]);
-    let (c_tx, c_rx) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::CommitmentTxIngressMessage(stake_commitment_tx.clone(), c_tx),
+        MempoolServiceMessage::CommitmentTxIngressMessage(stake_commitment_tx.clone(), sender),
     )?;
     assert!(
-        c_rx.await?.is_ok(),
+        receiver.await?.is_ok(),
         "Failure on mempool stake CommitmentTxIngressMessage"
     );
 
@@ -297,9 +297,9 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
             tx_offset: TxChunkOffset::from(i as u32),
         };
 
-        let (chunk_tx, chunk_rx) = oneshot::channel();
+        let (sender, chunk_rx) = oneshot::channel();
         genesis_node.node_ctx.service_senders.mempool.send(
-            MempoolServiceMessage::ChunkIngressMessage(unpacked_chunk, chunk_tx),
+            MempoolServiceMessage::ChunkIngressMessage(unpacked_chunk, sender),
         )?;
         let result = chunk_rx.await?;
         assert!(
@@ -311,11 +311,11 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
 
     // ----- STAGE 2: Read -----
     // Get single storage tx
-    let (tx_sender, tx_receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::GetStorageTransaction(storage_tx.header.id, tx_sender),
+        MempoolServiceMessage::GetStorageTransaction(storage_tx.header.id, sender),
     )?;
-    let fetched = tx_receiver.await?;
+    let fetched = receiver.await?;
     assert_eq!(
         fetched,
         Some(storage_tx.header.clone()),
@@ -323,11 +323,11 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     );
 
     // Get multiple storage txs
-    let (tx_sender, tx_receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::GetStorageTransactions(vec![storage_tx.header.id], tx_sender),
+        MempoolServiceMessage::GetStorageTransactions(vec![storage_tx.header.id], sender),
     )?;
-    let fetched_vec = tx_receiver.await?;
+    let fetched_vec = receiver.await?;
     assert_eq!(
         fetched_vec,
         vec![Some(storage_tx.header.clone())],
@@ -335,11 +335,11 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     );
 
     // Get commitment by id
-    let (c_sender, c_receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::GetCommitmentTxById(stake_commitment_tx.id, c_sender),
+        MempoolServiceMessage::GetCommitmentTxById(stake_commitment_tx.id, sender),
     )?;
-    let fetched_commitment = c_receiver.await?;
+    let fetched_commitment = receiver.await?;
     assert_eq!(
         fetched_commitment,
         Some(stake_commitment_tx.clone()),
@@ -347,14 +347,14 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     );
 
     // Get commitments map
-    let (c_sender, c_receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
         MempoolServiceMessage::GetCommitmentTxs {
             commitment_tx_ids: vec![stake_commitment_tx.id],
-            response: c_sender,
+            response: sender,
         },
     )?;
-    let commitment_map = c_receiver.await?;
+    let commitment_map = receiver.await?;
     assert_eq!(
         commitment_map.get(&stake_commitment_tx.id),
         Some(&stake_commitment_tx),
@@ -378,41 +378,41 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
 
     // Existence queries
     // Check positive CommitmentTxExistenceQuery
-    let (tx, rx) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::CommitmentTxExistenceQuery(stake_commitment_tx.id, tx),
+        MempoolServiceMessage::CommitmentTxExistenceQuery(stake_commitment_tx.id, sender),
     )?;
-    let result = rx.await?.unwrap();
+    let result = receiver.await?.unwrap();
     assert_eq!(
         result, true,
         "Failure on mempool positive CommitmentTxExistenceQuery"
     );
     // Check negative CommitmentTxExistenceQuery
-    let (tx, rx) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::CommitmentTxExistenceQuery(non_existent_h256, tx),
+        MempoolServiceMessage::CommitmentTxExistenceQuery(non_existent_h256, sender),
     )?;
-    let result = rx.await?.unwrap();
+    let result = receiver.await?.unwrap();
     assert_eq!(
         result, false,
         "Failure on mempool negative CommitmentTxExistenceQuery"
     );
     // Check positive StorageTxExistenceQuery
-    let (tx, rx) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::StorageTxExistenceQuery(storage_tx.header.id, tx),
+        MempoolServiceMessage::StorageTxExistenceQuery(storage_tx.header.id, sender),
     )?;
-    let result = rx.await?.unwrap();
+    let result = receiver.await?.unwrap();
     assert_eq!(
         result, true,
         "Failure to retrieve positive storage tx on mempool StorageTxExistenceQuery"
     );
     // Check negative StorageTxExistenceQuery
-    let (tx, rx) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::StorageTxExistenceQuery(non_existent_h256, tx),
+        MempoolServiceMessage::StorageTxExistenceQuery(non_existent_h256, sender),
     )?;
-    let result = rx.await?.unwrap();
+    let result = receiver.await?.unwrap();
     assert_eq!(
         result, false,
         "Failure on mempool negative StorageTxExistenceQuery"
@@ -445,11 +445,11 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
 
     // ----- STAGE 3.2: confirm txs remain in mempool as we have not hit the chunk_migration_depth
     // Get the same multiple storage txs
-    let (tx_sender, tx_receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::GetStorageTransactions(vec![storage_tx.header.id], tx_sender),
+        MempoolServiceMessage::GetStorageTransactions(vec![storage_tx.header.id], sender),
     )?;
-    let fetched_vec = tx_receiver.await?;
+    let fetched_vec = receiver.await?;
     assert_eq!(
         fetched_vec,
         vec![Some(storage_tx.header.clone())],
@@ -457,14 +457,14 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     );
 
     // Get commitments map
-    let (c_sender, c_receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel();
     genesis_node.node_ctx.service_senders.mempool.send(
         MempoolServiceMessage::GetCommitmentTxs {
             commitment_tx_ids: vec![stake_commitment_tx.id],
-            response: c_sender,
+            response: sender,
         },
     )?;
-    let commitment_map = c_receiver.await?;
+    let commitment_map = receiver.await?;
     assert_eq!(
         commitment_map.get(&stake_commitment_tx.id),
         Some(&stake_commitment_tx),
