@@ -1592,7 +1592,8 @@ impl Inner {
 
     async fn restore_mempool_from_disk(&mut self) {
         let recovered =
-            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir()).await;
+            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
+                .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
             self.handle_commitment_tx_ingress_message(commitment_tx)
@@ -1600,7 +1601,9 @@ impl Inner {
                 .unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
         }
 
-        // TODO: Similar logic for storage_tx
+        for (_txid, storage_tx) in recovered.storage_txs {
+            self.handle_tx_ingress_message(storage_tx).await.unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
+        }
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
