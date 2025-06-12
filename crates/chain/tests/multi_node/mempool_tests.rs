@@ -330,6 +330,33 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool GetStorageTransactions"
     );
 
+    // Get commitment by id
+    let (c_sender, c_receiver) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::GetCommitmentTxById(commitment_tx.id, c_sender),
+    )?;
+    let fetched_commitment = c_receiver.await?;
+    assert_eq!(
+        fetched_commitment,
+        Some(commitment_tx.clone()),
+        "Failure on mempool GetCommitmentTxById"
+    );
+
+    // Get commitments map
+    let (c_sender, c_receiver) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::GetCommitmentTxs {
+            commitment_tx_ids: vec![commitment_tx.id],
+            response: c_sender,
+        },
+    )?;
+    let commitment_map = c_receiver.await?;
+    assert_eq!(
+        commitment_map.get(&commitment_tx.id),
+        Some(&commitment_tx),
+        "Failure on mempool GetCommitmentTxs"
+    );
+
     Ok(())
 }
 
