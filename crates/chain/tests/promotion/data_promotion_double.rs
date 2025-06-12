@@ -107,7 +107,7 @@ async fn heavy_double_root_data_promotion_test() {
     // ==============================
     // Post Tx chunks out of order
     // ------------------------------
-    
+
     let tx_index = 1;
 
     // Middle Tx, middle chunk
