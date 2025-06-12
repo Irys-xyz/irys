@@ -4,15 +4,17 @@ use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use assert_matches::assert_matches;
-use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_actors::{block_tree_service::BlockMigratedEvent, mempool_service::MempoolServiceMessage};
 use irys_chain::IrysNodeCtx;
+use irys_database::commitment_tx_by_txid;
 use irys_reth_node_bridge::{
     ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, LedgerChunkOffset, NodeConfig, H256,
+    irys::IrysSigner, Base64, CommitmentTransaction, DataLedger, DatabaseProvider,
+    LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::{
@@ -23,7 +25,7 @@ use reth::{
         types::{Block, Header, TransactionRequest},
     },
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
 
 #[actix::test]
@@ -253,8 +255,9 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
     //FIXME, it's currently not possible to check for an error state on start_public_api()
     //assert!(api_started.is_ok(), "Failure when waiting for node api");
 
-    // STAGE 1: Ingress
+    // ----- STAGE 1: Ingress -----
 
+    // Ingress a storage tx
     let tx = signers[0]
         .create_transaction(data, Some(anchor))
         .expect("Expect to create a storage transaction from the data");
@@ -262,8 +265,19 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         .sign_transaction(tx)
         .expect("to sign the storage transaction");
 
-    let tx_ingress_result = genesis_node.mempool_tx_ingress(tx.header).await;
+    let tx_ingress_result = genesis_node.mempool_tx_ingress(tx.header.clone()).await;
     assert!(tx_ingress_result.is_ok(), "Failure on mempool TX Ingress");
+
+    // Ingress a stake commitment
+    let commitment_tx = new_stake_tx(&anchor, &signers[0]);
+    let (c_tx, c_rx) = oneshot::channel();
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx.clone(), c_tx),
+    )?;
+    assert!(
+        c_rx.await?.is_ok(),
+        "Failure on mempool CommitmentTxIngressMessage"
+    );
 
     Ok(())
 }
