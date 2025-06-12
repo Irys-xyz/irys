@@ -280,8 +280,7 @@ where
                 block_height: block_header.height,
             })
             .await
-            .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
-            .map_err(GossipError::BlockPool)?;
+            .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?;
 
         if has_block_already_been_processed {
             debug!(

@@ -154,6 +154,14 @@ impl BlockCache {
 
         None
     }
+
+    pub async fn contains_block_header(&self, block_hash: &BlockHash) -> bool {
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.write().await.get(&block_hash) {
+            self.orphaned_blocks_by_parent.read().await.contains(parent_hash)
+        } else {
+            false
+        }
+    }
 }
 
 impl<A, R, B> BlockPoolService<A, R, B>
@@ -488,7 +496,7 @@ where
 
 /// Adds a block to the block pool for processing.
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "Result<bool, BlockPoolError>")]
+#[rtype(result = "bool")]
 pub(crate) struct BlockProcessedOrProcessing {
     pub block_hash: BlockHash,
     pub block_height: u64,
@@ -500,7 +508,7 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: BlockDiscoveryFacade,
 {
-    type Result = ResponseActFuture<Self, Result<bool, BlockPoolError>>;
+    type Result = ResponseActFuture<Self, bool>;
 
     fn handle(
         &mut self,
@@ -514,12 +522,12 @@ where
 
         let fut = async move {
             if let Some(parent_hash) = block_cache.block_hash_to_parent_hash.write().await.get(&block_hash) {
-                return Ok(block_cache.orphaned_blocks_by_parent.write().await.contains(parent_hash));
+                block_cache.orphaned_blocks_by_parent.write().await.contains(parent_hash)
+            } else {
+                block_status_provider
+                    .block_status(block_height, &block_hash)
+                    .is_processed()
             }
-
-            Ok(block_status_provider
-                .block_status(block_height, &block_hash)
-                .is_processed())
         };
 
         Box::pin(fut.into_actor(self))
