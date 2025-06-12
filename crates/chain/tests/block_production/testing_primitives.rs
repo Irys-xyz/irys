@@ -7,7 +7,7 @@ use crate::utils::IrysNodeTest;
 
 #[actix::test]
 async fn heavy_test_wait_until_height() {
-    let irys_node = IrysNodeTest::default_async().await.start().await;
+    let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_height().await;
     info!("height: {}", height);
     let steps = 2;
@@ -24,7 +24,7 @@ async fn heavy_test_wait_until_height() {
 
 #[actix::test]
 async fn heavy_test_mine() {
-    let irys_node = IrysNodeTest::default_async().await.start().await;
+    let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_height().await;
     info!("height: {}", height);
     let blocks = 4;

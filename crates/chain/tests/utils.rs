@@ -106,7 +106,6 @@ pub async fn capacity_chunk_solution(
         &vdf_steps_guard,
         &partition_hash,
     )
-    .await
     .expect("valid recall range");
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(config.consensus.chunk_size as usize);
@@ -150,7 +149,7 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub async fn random_port() -> eyre::Result<u16> {
+pub fn random_port() -> eyre::Result<u16> {
     let listener = create_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
     //the assigned port will be random (decided by the OS)
     let port = listener
@@ -179,7 +178,7 @@ pub struct IrysNodeTest<T = ()> {
 }
 
 impl IrysNodeTest<()> {
-    pub async fn default_async() -> Self {
+    pub fn default_async() -> Self {
         let config = NodeConfig::testnet();
         Self::new_genesis(config)
     }
@@ -207,7 +206,7 @@ impl IrysNodeTest<()> {
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
-        let node = IrysNode::new(self.cfg.clone()).await.unwrap();
+        let node = IrysNode::new(self.cfg.clone()).unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: self.cfg,
@@ -817,7 +816,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
-    pub async fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+    pub fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
             .gossip_broadcast

@@ -540,7 +540,7 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new(None);
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        let vdf_state = mocked_vdf_service(&config).await;
+        let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
@@ -660,7 +660,7 @@ mod tests {
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
-        let vdf_state = mocked_vdf_service(&config).await;
+        let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let hash: H256 = H256::random();

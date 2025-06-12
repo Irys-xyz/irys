@@ -294,7 +294,7 @@ mod tests {
         let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
         mining_state_tx.send(true).await.unwrap();
 
-        let vdf_state = mocked_vdf_service(&config).await;
+        let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
