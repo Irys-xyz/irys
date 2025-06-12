@@ -85,6 +85,8 @@ async fn heavy_data_promotion_test() {
         assert_eq!(status, StatusCode::OK);
     }
 
+    node.mine_block().await.unwrap();
+
     // Wait for all the transactions to be confirmed
     let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
