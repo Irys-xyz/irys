@@ -418,6 +418,30 @@ async fn heavy_mempool_message_and_block_migration_test() -> eyre::Result<()> {
         "Failure on mempool negative StorageTxExistenceQuery"
     );
 
+    // ----- STAGE 3: Block progresses state -----
+    genesis_node.mine_block().await.unwrap();
+    let block = Arc::new(genesis_node.get_block_by_height(1).await?);
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::BlockConfirmedMessage(block.clone()))?;
+
+    // get best txs to include in the next block
+    let best = genesis_node.get_best_mempool_tx(None).await;
+    // The storage tx should still be returned as it was not included in the last block
+    assert_eq!(
+        best.storage_tx,
+        vec![storage_tx.header.clone()],
+        "Failure on mempool get_best_mempool_tx for storage tx"
+    );
+    // The stake commitment tx was included in the last block so will not be returned
+    assert_eq!(
+        best.commitment_tx,
+        vec![],
+        "Failure on mempool get_best_mempool_tx for commitment tx"
+    );
+
     Ok(())
 }
 
