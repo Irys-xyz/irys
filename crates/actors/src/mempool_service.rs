@@ -527,7 +527,7 @@ pub fn generate_ingress_proof(
 
 impl Inner {
     /// check the mempool and mdbx for data transaction
-    async fn handle_get_data_transactions_message(
+    async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
     ) -> Vec<Option<IrysTransactionHeader>> {
@@ -828,7 +828,7 @@ impl Inner {
         let migrated_block = event.block;
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
         let commitments = self
-            .handle_get_commitment_transactions_message(commitment_tx_ids)
+            .handle_get_commitment_tx_message(commitment_tx_ids)
             .await;
 
         let tx = self
@@ -1260,7 +1260,7 @@ impl Inner {
         }
     }
 
-    async fn handle_tx_ingress_message(
+    async fn handle_data_tx_ingress_message(
         &mut self,
         tx: IrysTransactionHeader,
     ) -> Result<(), TxIngressError> {
@@ -1429,10 +1429,7 @@ impl Inner {
     }
 
     /// checks mempool and mdbx
-    async fn handle_data_transaction_exists_message(
-        &self,
-        txid: H256,
-    ) -> Result<bool, TxReadError> {
+    async fn handle_data_tx_exists_message(&self, txid: H256) -> Result<bool, TxReadError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
@@ -1460,7 +1457,7 @@ impl Inner {
         }
     }
 
-    async fn handle_get_commitment_transactions_message(
+    async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
     ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
@@ -1514,7 +1511,7 @@ impl Inner {
         Box::pin(async move {
             match msg {
                 MempoolServiceMessage::GetDataTxs(txs, response) => {
-                    let response_message = self.handle_get_data_transactions_message(txs).await;
+                    let response_message = self.handle_get_data_tx_message(txs).await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1548,14 +1545,14 @@ impl Inner {
                     response,
                 } => {
                     let response_value = self
-                        .handle_get_commitment_transactions_message(commitment_tx_ids)
+                        .handle_get_commitment_tx_message(commitment_tx_ids)
                         .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
                 MempoolServiceMessage::DataTxExists(txid, response) => {
-                    let response_value = self.handle_data_transaction_exists_message(txid).await;
+                    let response_value = self.handle_data_tx_exists_message(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1567,7 +1564,7 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::DataTxIngress(tx, response) => {
-                    let response_value = self.handle_tx_ingress_message(tx).await;
+                    let response_value = self.handle_data_tx_ingress_message(tx).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1699,7 +1696,7 @@ impl Inner {
 
         for (_txid, storage_tx) in recovered.storage_txs {
             let _ = self
-                .handle_tx_ingress_message(storage_tx)
+                .handle_data_tx_ingress_message(storage_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")
