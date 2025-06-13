@@ -25,6 +25,7 @@ base58.workspace = true
 actix-rt.workspace = true
 reth-tasks.workspace = true
 lru.workspace = true
+async-trait = "0.1"
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
