@@ -423,8 +423,8 @@ mod tests {
         providers::{AccountReader, BlockHashReader, BlockNumReader},
         rpc::server_types::eth::EthApiError,
     };
-    use reth_storage_api::BlockReaderIdExt;
     use reth_e2e_test_utils::wallet::Wallet;
+    use reth_storage_api::BlockReaderIdExt;
     use reth_transaction_pool::{PoolTransaction, TransactionPool};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -1709,7 +1709,11 @@ mod tests {
         let block_payload = mine_block(&mut node, &system_tx_store, system_txs).await?;
 
         // Verify all transactions are included in block in correct order
-        assert_txs_in_block(&block_payload, &expected_tx_hashes, "Pledge/Unpledge transactions");
+        assert_txs_in_block(
+            &block_payload,
+            &expected_tx_hashes,
+            "Pledge/Unpledge transactions",
+        );
 
         // Get the transaction hashes from the block in order
         let block_tx_hashes: Vec<_> = block_payload

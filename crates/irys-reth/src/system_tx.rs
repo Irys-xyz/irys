@@ -65,8 +65,7 @@ pub enum TransactionPacket {
 pub mod system_tx_topics {
     use super::*;
 
-    pub static UNSTAKE: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SYSTEM_TX_UNSTAKE").0);
+    pub static UNSTAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_UNSTAKE").0);
     pub static BLOCK_REWARD: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SYSTEM_TX_BLOCK_REWARD").0);
     pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);

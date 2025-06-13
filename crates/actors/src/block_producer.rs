@@ -1,5 +1,14 @@
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_tree_service::BlockTreeReadGuard,  broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, ema_service::EmaServiceMessage, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool_service::MempoolServiceMessage, reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor}, services::ServiceSenders, system_tx_generator::SystemTxGenerator, CommitmentCacheMessage
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_tree_service::BlockTreeReadGuard,
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    ema_service::EmaServiceMessage,
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
+    mempool_service::MempoolServiceMessage,
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
+    system_tx_generator::SystemTxGenerator,
+    CommitmentCacheMessage,
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
@@ -20,7 +29,10 @@ use irys_reth::compose_system_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, next_cumulative_diff, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionLedger, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
+    next_cumulative_diff, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionLedger,
+    H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
+    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -303,7 +315,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Construct commitment ledger based on block type (epoch vs regular)
 
             let commitment_ledger;
-            let commitment_txs_to_bill: &[CommitmentTransaction]; 
+            let commitment_txs_to_bill: &[CommitmentTransaction];
             if is_epoch_block {
                 // In epoch blocks: collect and reference all previously validated commitments
                 // from the current epoch without re-inserting them into the database
@@ -338,7 +350,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     tx_ids: txids
                 };
                 // IMPORTANT: Commitment txs get billed on regular blocks
-                commitment_txs_to_bill = submit_txs.commitment_tx.as_slice(); 
+                commitment_txs_to_bill = submit_txs.commitment_tx.as_slice();
             };
 
             // Only add the system ledger to the block when commitments exist
