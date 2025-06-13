@@ -12,9 +12,7 @@ use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context};
 use futures::future::Either;
-use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid, SystemLedger,
-};
+use irys_database::{block_header_by_hash, tx_header_by_txid, SystemLedger};
 use irys_types::{
     Address, BlockHash, Config, ConsensusConfig, DataLedger, DatabaseProvider, H256List,
     IrysBlockHeader, IrysTransactionHeader, H256, U256,
@@ -65,7 +63,6 @@ pub enum BlockTreeServiceMessage {
     },
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
-        all_txs: Arc<Vec<IrysTransactionHeader>>,
         response: oneshot::Sender<eyre::Result<()>>,
     },
     BlockValidationFinished {
@@ -205,12 +202,8 @@ impl BlockTreeServiceInner {
                 let guard = BlockTreeReadGuard::new(self.cache.clone());
                 let _ = response.send(guard);
             }
-            BlockTreeServiceMessage::BlockPreValidated {
-                block,
-                all_txs,
-                response,
-            } => {
-                let result = self.on_block_prevalidated(block, all_txs).await;
+            BlockTreeServiceMessage::BlockPreValidated { block, response } => {
+                let result = self.on_block_prevalidated(block).await;
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::BlockValidationFinished {
@@ -276,7 +269,6 @@ impl BlockTreeServiceInner {
         &self,
         tip_hash: BlockHash,
         confirmed_block: &Arc<IrysBlockHeader>,
-        all_tx: Arc<Vec<IrysTransactionHeader>>,
     ) {
         debug!(
             "JESSEDEBUG confirming irys block evm_block_hash: {} ({})",
@@ -296,7 +288,6 @@ impl BlockTreeServiceInner {
             .mempool
             .send(MempoolServiceMessage::BlockConfirmed(
                 confirmed_block.clone(),
-                all_tx,
             ))
             .expect("mempool service has unexpectedly become unreachable");
         self.service_senders
@@ -403,11 +394,7 @@ impl BlockTreeServiceInner {
     ///
     /// After adding the block, it's scheduled for full validation and the previous
     /// block is marked for storage finalization.
-    async fn on_block_prevalidated(
-        &mut self,
-        block: Arc<IrysBlockHeader>,
-        all_txs: Arc<Vec<IrysTransactionHeader>>,
-    ) -> eyre::Result<()> {
+    async fn on_block_prevalidated(&mut self, block: Arc<IrysBlockHeader>) -> eyre::Result<()> {
         let miner_address = self.miner_address;
         let ema_service = self.service_senders.ema.clone();
 
@@ -433,10 +420,10 @@ impl BlockTreeServiceInner {
                 // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
                 // extension while full validation is still pending. This prevents blocking
                 // new block production while validation completes.
-                cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
+                cache.add_validated_block((*block).clone(), BlockState::Unknown)
             } else {
                 // For blocks from peers: Add via standard path requiring validation
-                cache.add_block(&block, all_txs)
+                cache.add_block(&block)
             };
 
             if add_result.is_ok() {
@@ -551,7 +538,6 @@ impl BlockTreeServiceInner {
                 // Get block info before mutable operations
                 let block_entry = cache.blocks.get(&block_hash).unwrap();
                 let arc_block = Arc::new(block_entry.block.clone());
-                let all_tx = block_entry.all_tx.clone();
 
                 // Now do mutable operations
                 if cache.mark_tip(&block_hash).is_ok() {
@@ -620,7 +606,7 @@ impl BlockTreeServiceInner {
                         );
                     }
 
-                    self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
+                    self.notify_services_of_block_confirmation(block_hash, &arc_block);
                 }
 
                 // Handle block finalization (move chunks to disk and add to block_index)
@@ -772,7 +758,6 @@ pub struct BlockTreeCache {
 #[derive(Debug)]
 pub struct BlockEntry {
     block: IrysBlockHeader,
-    all_tx: Arc<Vec<IrysTransactionHeader>>,
     chain_state: ChainState,
     timestamp: SystemTime,
     children: HashSet<H256>,
@@ -827,15 +812,10 @@ impl BlockTreeCache {
         let mut solutions = HashMap::new();
         let mut height_index = BTreeMap::new();
 
-        // No transactions to cache for genesis block - transaction data
-        // has already been confirmed and stored in the permanent chain state
-        let all_tx = Arc::new(vec![]);
-
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
         let block_entry = BlockEntry {
             block: block.clone(),
-            all_tx,
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -898,10 +878,9 @@ impl BlockTreeCache {
             let block = block_header_by_hash(&tx, &block_hash, false)
                 .unwrap()
                 .unwrap();
-            let all_txs = Arc::new(Self::get_all_txs_for_block(&block, db.clone()).unwrap());
 
             cache
-                .add_validated_block(block, BlockState::ValidBlock, all_txs)
+                .add_validated_block(block, BlockState::ValidBlock)
                 .unwrap();
         }
 
@@ -918,53 +897,10 @@ impl BlockTreeCache {
         cache
     }
 
-    fn get_all_txs_for_block(
-        block: &IrysBlockHeader,
-        db: DatabaseProvider,
-    ) -> Result<Vec<IrysTransactionHeader>, eyre::Report> {
-        // Collect submit transactions
-        let submit_txs = block.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                db.view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                error!("Failed to collect submit tx headers: {}", e);
-                e
-            })?;
-
-        // Collect publish transactions
-        let publish_txs = block.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                db.view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                error!("Failed to collect publish tx headers: {}", e);
-                e
-            })?;
-
-        // Combine transactions
-        let mut all_txs = submit_txs;
-        all_txs.extend(publish_txs);
-        Ok(all_txs)
-    }
-
     pub fn add_common(
         &mut self,
         hash: BlockHash,
         block: &IrysBlockHeader,
-        all_tx: Arc<Vec<IrysTransactionHeader>>,
         status: ChainState,
     ) -> eyre::Result<()> {
         let prev_hash = block.previous_block_hash;
@@ -1002,7 +938,6 @@ impl BlockTreeCache {
             hash,
             BlockEntry {
                 block: block.clone(),
-                all_tx,
                 chain_state: status,
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
@@ -1013,11 +948,7 @@ impl BlockTreeCache {
         Ok(())
     }
 
-    pub fn add_block(
-        &mut self,
-        block: &IrysBlockHeader,
-        all_tx: Arc<Vec<IrysTransactionHeader>>,
-    ) -> eyre::Result<()> {
+    pub fn add_block(&mut self, block: &IrysBlockHeader) -> eyre::Result<()> {
         let hash = block.block_hash;
 
         debug!(
@@ -1032,12 +963,7 @@ impl BlockTreeCache {
             debug!(?hash, "already part of the main chian state");
             return Ok(());
         }
-        self.add_common(
-            hash,
-            block,
-            all_tx,
-            ChainState::NotOnchain(BlockState::Unknown),
-        )
+        self.add_common(hash, block, ChainState::NotOnchain(BlockState::Unknown))
     }
 
     /// Adds a validated block to the cache.
@@ -1054,7 +980,6 @@ impl BlockTreeCache {
         &mut self,
         block: IrysBlockHeader,
         block_state: BlockState,
-        all_tx: Arc<Vec<IrysTransactionHeader>>,
     ) -> eyre::Result<()> {
         let hash = block.block_hash;
         let prev_hash = block.previous_block_hash;
@@ -1074,7 +999,7 @@ impl BlockTreeCache {
             "Previous block not validated"
         );
 
-        self.add_common(hash, &block, all_tx, ChainState::Validated(block_state))
+        self.add_common(hash, &block, ChainState::Validated(block_state))
     }
 
     /// Helper function to delete a single block without recursion
@@ -1649,9 +1574,6 @@ mod tests {
     async fn test_block_cache() {
         let b1 = random_block(U256::from(0));
 
-        // For the purposes of these tests, the block cache will not track transaction headers
-        let all_tx = Arc::new(vec![]);
-
         // Initialize block tree cache from `b1`
         let mut cache = BlockTreeCache::new(&b1);
 
@@ -1688,7 +1610,7 @@ mod tests {
         b1_test.data_ledgers[DataLedger::Submit]
             .tx_ids
             .push(H256::random());
-        assert_matches!(cache.add_block(&b1_test, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b1_test), Ok(_));
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
@@ -1713,7 +1635,7 @@ mod tests {
 
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
-        assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b2), Ok(_));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1729,7 +1651,7 @@ mod tests {
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b2), Ok(_));
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -1761,10 +1683,10 @@ mod tests {
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
-        assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b2), Ok(_));
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
-        assert_matches!(cache.add_block(&b1_2, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b1_2), Ok(_));
 
         println!(
             "b1:   {} cdiff: {} solution_hash: {}",
@@ -1896,15 +1818,15 @@ mod tests {
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
         let mut cache = BlockTreeCache::new(&b1);
-        assert_matches!(cache.add_block(&b1_2, all_tx.clone()), Ok(_));
-        assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b1_2), Ok(_));
+        assert_matches!(cache.add_block(&b2), Ok(_));
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
-        assert_matches!(cache.add_block(&b2_2, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b2_2), Ok(_));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1921,7 +1843,7 @@ mod tests {
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
-        assert_matches!(cache.add_block(&b2_3, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b2_3), Ok(_));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1936,7 +1858,7 @@ mod tests {
 
         // Now b2_2->b2->b1 are validated.
         assert_matches!(
-            cache.add_validated_block(b2_2.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b2_2.clone(), BlockState::ValidBlock),
             Ok(_)
         );
         assert_eq!(
@@ -1960,9 +1882,9 @@ mod tests {
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
-        assert_matches!(cache.add_block(&b3, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b3), Ok(_));
         assert_matches!(
-            cache.add_validated_block(b3.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b3.clone(), BlockState::ValidBlock),
             Ok(_)
         );
         assert_matches!(cache.mark_tip(&b3.block_hash), Ok(_));
@@ -1988,7 +1910,7 @@ mod tests {
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
-        assert_matches!(cache.add_block(&b4, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b4), Ok(_));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2122,7 +2044,7 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11);
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_block(&b12, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b12), Ok(_));
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
@@ -2141,7 +2063,7 @@ mod tests {
         println!("tip: {} before mark_tip()", cache.tip);
 
         assert_matches!(
-            cache.add_validated_block(b13.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b13.clone(), BlockState::ValidBlock),
             Ok(_)
         );
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
@@ -2185,7 +2107,7 @@ mod tests {
 
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
-        assert_matches!(cache.add_block(&b14, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b14), Ok(_));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2267,7 +2189,7 @@ mod tests {
 
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
-        assert_matches!(cache.add_block(&b15, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b15), Ok(_));
         assert_matches!(
             check_earliest_not_onchian(
                 &b14.block_hash,
@@ -2280,7 +2202,7 @@ mod tests {
 
         // Validate b14
         assert_matches!(
-            cache.add_validated_block(b14.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b14.clone(), BlockState::ValidBlock),
             Ok(_)
         );
         assert_matches!(
@@ -2300,7 +2222,7 @@ mod tests {
 
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
-        assert_matches!(cache.add_block(&b16, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b16), Ok(_));
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
             Ok(_)
@@ -2352,7 +2274,7 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11);
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_block(&b12, all_tx.clone()), Ok(_));
+        assert_matches!(cache.add_block(&b12), Ok(_));
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
@@ -2362,7 +2284,7 @@ mod tests {
 
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
-            cache.add_validated_block(b12.clone(), BlockState::ValidationScheduled, all_tx.clone()),
+            cache.add_validated_block(b12.clone(), BlockState::ValidationScheduled),
             Ok(())
         );
         assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(_));
@@ -2385,7 +2307,7 @@ mod tests {
 
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_validated_block(b12.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b12.clone(), BlockState::ValidBlock),
             Ok(_)
         );
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
@@ -2397,11 +2319,11 @@ mod tests {
         let b13b = extend_chain(random_block(U256::from(2)), &b12);
 
         assert_matches!(
-            cache.add_validated_block(b13a.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b13a.clone(), BlockState::ValidBlock),
             Ok(_)
         );
         assert_matches!(
-            cache.add_validated_block(b13b.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b13b.clone(), BlockState::ValidBlock),
             Ok(_)
         );
 
@@ -2413,7 +2335,7 @@ mod tests {
         // extend the fork to make it canonical
         let b14b = extend_chain(random_block(U256::from(3)), &b13b);
         assert_matches!(
-            cache.add_validated_block(b14b.clone(), BlockState::ValidBlock, all_tx.clone()),
+            cache.add_validated_block(b14b.clone(), BlockState::ValidBlock),
             Ok(_)
         );
 
