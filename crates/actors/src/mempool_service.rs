@@ -158,8 +158,10 @@ pub enum MempoolServiceMessage {
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
     ),
-    /// Confirm if tx exists in database
+    /// Confirm data/storage tx exists in mempool or database
     GetDataTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
+    /// Confirm commitment tx exists in mempool
+    GetCommitmentTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngressChunk(
         UnpackedChunk,
@@ -1390,6 +1392,22 @@ impl Inner {
         Ok(())
     }
 
+    /// checks only the mempool
+    async fn handle_get_commitment_existence_message(
+        &self,
+        commitment_tx_id: H256,
+    ) -> Result<bool, TxIngressError> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+
+        Ok(mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flatten()
+            .any(|tx| tx.id == commitment_tx_id))
+    }
+
+    /// checks mempool and mdbx
     async fn handle_get_data_transaction_existence_message(
         &self,
         txid: H256,
@@ -1520,6 +1538,12 @@ impl Inner {
                     let response_value = self
                         .handle_get_data_transaction_existence_message(txid)
                         .await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetCommitmentTxExistence(txid, response) => {
+                    let response_value = self.handle_get_commitment_existence_message(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
