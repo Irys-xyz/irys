@@ -910,7 +910,7 @@ mod tests {
                 block_hash = block.block_hash;
             }
             block_tree_cache
-                .add_common(block.block_hash, block, Arc::new(Vec::new()), state.clone())
+                .add_common(block.block_hash, block, state.clone())
                 .unwrap();
         }
         let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
@@ -1143,7 +1143,6 @@ mod tests {
                 tree.add_common(
                     header.block_hash,
                     &header,
-                    Arc::new(Vec::new()),
                     ChainState::Validated(crate::block_tree_service::BlockState::ValidBlock),
                 )
                 .unwrap();
@@ -1569,13 +1568,8 @@ mod tests {
                 block.cumulative_diff = block.height.into();
                 latest_block_hash = H256::random();
                 block.block_hash = latest_block_hash;
-                tree.add_common(
-                    block.block_hash,
-                    &block,
-                    Arc::new(Vec::new()),
-                    ChainState::Onchain,
-                )
-                .unwrap();
+                tree.add_common(block.block_hash, &block, ChainState::Onchain)
+                    .unwrap();
             }
             drop(tree)
         };
