@@ -16,25 +16,20 @@ use eyre::{ensure, OptionExt};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable;
-use irys_reth::system_tx::{
-    BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket,
-};
+use irys_reth::system_tx::SystemTransaction;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader,
-    PoaData, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::{
-    providers::TransactionsProvider, revm::primitives::ruint::Uint, rpc::api::EngineApiClient,
-};
+use reth::providers::TransactionsProvider;
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
@@ -601,13 +596,9 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
                 // ledger
-                let txs = get_commitment_tx_in_parallel(
-                    ledger.tx_ids.0.clone(),
-                    &service_senders.mempool,
-                    db,
-                )
-                .await?;
-                txs
+
+                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                    .await?
             }
             [] => {
                 // this is valid as we can have a block that contains 0 system ledgers

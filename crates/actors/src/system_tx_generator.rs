@@ -57,7 +57,7 @@ impl<'a> SystemTxGenerator<'a> {
         submit_txs: &'a [IrysTransactionHeader],
     ) -> impl std::iter::Iterator<Item = SystemTransaction> + use<'a> {
         // create a storage fee system txs
-        submit_txs.into_iter().map(move |tx| {
+        submit_txs.iter().map(move |tx| {
             SystemTransaction::new_v1(
                 *self.block_height,
                 H256::from_slice(&*self.parent_block.evm_block_hash).into(),
@@ -74,7 +74,7 @@ impl<'a> SystemTxGenerator<'a> {
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
     ) -> impl std::iter::Iterator<Item = SystemTransaction> + use<'a> {
-        commitment_txs.into_iter().map(move |tx| {
+        commitment_txs.iter().map(move |tx| {
             let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
             match tx.commitment_type {
                 irys_primitives::CommitmentType::Stake => SystemTransaction::new_v1(

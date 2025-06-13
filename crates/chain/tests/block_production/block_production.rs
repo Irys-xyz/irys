@@ -818,11 +818,16 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .collect::<Vec<_>>();
 
     // Block should contain exactly 3 transactions: block reward, stake, pledge (in that order)
-    assert_eq!(block_txs1.len(), 3, "Block should contain exactly 3 transactions");
+    assert_eq!(
+        block_txs1.len(),
+        3,
+        "Block should contain exactly 3 transactions"
+    );
 
     // First transaction should be block reward
-    let block_reward_tx = SystemTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
-        .expect("First transaction should be decodable as system transaction");
+    let block_reward_tx =
+        SystemTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
+            .expect("First transaction should be decodable as system transaction");
     assert!(
         matches!(
             block_reward_tx.as_v1().unwrap(),
@@ -832,8 +837,9 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // Second transaction should be stake
-    let stake_tx = SystemTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
-        .expect("Second transaction should be decodable as system transaction");
+    let stake_tx =
+        SystemTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
+            .expect("Second transaction should be decodable as system transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
@@ -842,8 +848,9 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     }
 
     // Third transaction should be pledge
-    let pledge_tx = SystemTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
-        .expect("Third transaction should be decodable as system transaction");
+    let pledge_tx =
+        SystemTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
+            .expect("Third transaction should be decodable as system transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)

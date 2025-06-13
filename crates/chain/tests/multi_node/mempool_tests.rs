@@ -182,7 +182,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     let restarted_node = genesis_node.stop().await.start().await;
 
     // confirm the mempool tx have appeared back in the mempool after a restart
-    for txid_to_check in vec![storage_tx.header.id] {
+    for txid_to_check in [storage_tx.header.id] {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let get_tx_msg = MempoolServiceMessage::GetTransaction(txid_to_check, oneshot_tx);
         if let Err(err) = restarted_node

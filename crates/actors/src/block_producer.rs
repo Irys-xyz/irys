@@ -458,7 +458,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
             // Generate expected system transactions using shared logic
             let system_txs = SystemTxGenerator::new(&block_height, &config.node_config.reward_address, &reward_amount.amount, &prev_block_header);
-            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx).into_iter().map(|tx| {
+            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx).map(|tx| {
                 let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
                 let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))

@@ -722,7 +722,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             'inner: while retries < max_retries {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
-                    commitment_tx_ids: vec![tx_id.clone()],
+                    commitment_tx_ids: vec![tx_id],
                     response: oneshot_tx,
                 })?;
 
@@ -730,8 +730,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 if oneshot_rx
                     .await
                     .expect("to process GetCommitmentTxs")
-                    .get(&tx_id)
-                    .is_some()
+                    .contains_key(&tx_id)
                 {
                     break 'inner;
                 }
