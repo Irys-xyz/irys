@@ -1,6 +1,6 @@
 use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -229,6 +229,17 @@ impl CommitmentTransaction {
         self.encode_for_signing(&mut bytes);
 
         keccak256(&bytes).0
+    }
+
+    /// TODO: assume that staking, pledging, etc just work with +/1 IRYS increments
+    /// This should be a proper implementation in the future
+    pub fn commitment_value(&self) -> U256 {
+        match self.commitment_type {
+            CommitmentType::Stake => U256::one(),
+            CommitmentType::Pledge => U256::one(),
+            CommitmentType::Unpledge => U256::one(),
+            CommitmentType::Unstake => U256::one(),
+        }
     }
 
     /// Validates the transaction signature by:

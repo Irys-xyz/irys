@@ -1,13 +1,13 @@
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::BlockTreeReadGuard,
-    block_validation::generate_expected_system_transactions,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
+    system_tx_generator::SystemTxGenerator,
     CommitmentCacheMessage,
 };
 use actix::prelude::*;
@@ -30,8 +30,8 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, Base64, Config, DataLedger, DataTransactionLedger, H256List,
-    IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
+    next_cumulative_diff, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionLedger,
+    H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
     SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -313,7 +313,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let is_epoch_block = block_height % config.consensus.epoch.num_blocks_in_epoch == 0;
 
             // Construct commitment ledger based on block type (epoch vs regular)
-            let commitment_ledger = if is_epoch_block {
+
+            let commitment_ledger;
+            let commitment_txs_to_bill: &[CommitmentTransaction];
+            if is_epoch_block {
                 // In epoch blocks: collect and reference all previously validated commitments
                 // from the current epoch without re-inserting them into the database
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -328,10 +331,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     txids.push(tx.id);
                 }
 
-                SystemTransactionLedger {
+                commitment_ledger = SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: txids
-                }
+                };
+                // IMPORTANT: On epoch blocks we don't bill the user for system txs
+                commitment_txs_to_bill = &[];
             } else {
                 // In regular blocks: process new commitment transactions
                 // from the mempool and create a ledger entry referencing them
@@ -340,10 +345,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     txids.push(ctx.id);
                 });
 
-                SystemTransactionLedger {
+                commitment_ledger = SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: txids
-                }
+                };
+                // IMPORTANT: Commitment txs get billed on regular blocks
+                commitment_txs_to_bill = submit_txs.commitment_tx.as_slice();
             };
 
             // Only add the system ledger to the block when commitments exist
@@ -450,22 +457,19 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
             // Generate expected system transactions using shared logic
-            let expected_system_txs = generate_expected_system_transactions(
-                block_height,
-                config.node_config.reward_address,
-                reward_amount.amount.into(),
-                H256(prev_block_header.evm_block_hash.0),
-                &submit_txs.storage_tx,
-            )?;
-            let system_txs = expected_system_txs.into_iter().map(|tx| {
-                let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
-                let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
-                let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
-                    .try_into_recovered()
-                    .expect("system tx must always be signable");
+            let system_txs = SystemTxGenerator::new(&block_height, &config.node_config.reward_address, &reward_amount.amount, &prev_block_header);
+            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx)
+                .map(|tx_result| {
+                    let tx = tx_result?;
+                    let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
+                    let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
+                    let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
+                        .try_into_recovered()
+                        .expect("system tx must always be signable");
 
-                EthPooledTransaction::new(tx.clone(), 300)
-            }).collect::<Vec<_>>();
+                    Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx.clone(), 300))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             // generate payload attributes
             let timestamp = now.as_secs();
