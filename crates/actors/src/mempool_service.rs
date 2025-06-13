@@ -1391,12 +1391,6 @@ impl Inner {
         // Cache the data_root in the database
         match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, &tx)?;
-            // TODO: tx headers should not immediately be added to the database
-            // this is a work around until the mempool can persist its state
-            // during shutdown. Currently this has the potential to create
-            // orphaned tx headers in the database with expired anchors and
-            // not linked to any blocks.
-            irys_database::insert_tx_header(db_tx, &tx)?;
             Ok(())
         }) {
             Ok(()) => {
