@@ -59,7 +59,10 @@ async fn heavy_test_mine_tx() {
     irys_node.mine_block().await.unwrap();
     let next_height = irys_node.get_height().await;
     assert_eq!(next_height, height + 1_u64);
-    let tx_header = irys_node.get_tx_header(&tx.header.id).unwrap();
+    let tx_header = irys_node
+        .get_storage_tx_header_from_mempool(&tx.header.id)
+        .await
+        .expect("expected storage tx to be found in mempool");
     assert_eq!(tx_header, tx.header);
     irys_node.stop().await;
 }
