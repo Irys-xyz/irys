@@ -1,4 +1,5 @@
 mod block_pool_service;
+mod block_status_provider;
 mod cache;
 mod gossip_client;
 mod gossip_service;
@@ -10,6 +11,7 @@ mod sync;
 mod tests;
 mod types;
 
+pub use block_status_provider::{BlockStatus, BlockStatusProvider};
 pub use gossip_client::GossipClient;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;

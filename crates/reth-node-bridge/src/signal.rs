@@ -13,12 +13,10 @@ where
     let fut = pin!(fut);
     tokio::select! {
         err = tasks => {
-            err?;
-            eyre::bail!("task panicked");
+            Ok(err?)
         },
         res = fut => {
-            res?;
-            eyre::bail!("future returned an error");
+            Ok(res?)
         }
     }
 }

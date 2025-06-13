@@ -22,7 +22,7 @@ use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default_async().await;
+    let mut node = IrysNodeTest::default_async();
     let user_account = IrysSigner::random_signer(&node.cfg.consensus_config());
     node.cfg.consensus.extend_genesis_accounts(vec![
         (
@@ -165,7 +165,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
 #[test_log::test(tokio::test)]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
-    let node = IrysNodeTest::default_async().await.start().await;
+    let node = IrysNodeTest::default_async().start().await;
 
     node.node_ctx.start_mining().await?;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
@@ -188,7 +188,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
-    let node = IrysNodeTest::default_async().await.start().await;
+    let node = IrysNodeTest::default_async().start().await;
 
     let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
@@ -322,7 +322,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
-    let node = IrysNodeTest::default_async().await;
+    let node = IrysNodeTest::default_async();
     let node = node.start().await;
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();
@@ -373,7 +373,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default_async().await;
+    let mut node = IrysNodeTest::default_async();
     let unfunded_user = IrysSigner::random_signer(&node.cfg.consensus_config());
 
     // Set up genesis accounts - unfunded user gets zero balance
@@ -464,7 +464,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default_async().await;
+    let mut node = IrysNodeTest::default_async();
     let nonexistent_user = IrysSigner::random_signer(&node.cfg.consensus_config());
 
     // Set up genesis accounts - only add the block reward address, nonexistent_user is not in genesis
@@ -549,7 +549,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default_async().await;
+    let mut node = IrysNodeTest::default_async();
     let user = IrysSigner::random_signer(&node.cfg.consensus_config());
 
     // Set up genesis accounts - user gets balance 2, but total fee is 2 (perm_fee=1 + term_fee=1)

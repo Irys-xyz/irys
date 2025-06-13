@@ -4,6 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::node::{eth_payload_attributes, RethNode};
 use crate::node::{RethNodeAdapter, RethNodeAddOns};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
@@ -17,9 +18,8 @@ use reth::transaction_pool::EthPooledTransaction;
 use reth_e2e_test_utils::node::NodeTestContext;
 use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadTypes};
 use reth_payload_builder::EthPayloadBuilderAttributes;
+use reth_payload_builder::PayloadKind;
 use reth_provider::BlockReaderIdExt as _;
-
-use crate::node::{eth_payload_attributes, RethNode};
 
 #[derive(Clone)]
 pub struct IrysRethNodeAdapter {
@@ -160,7 +160,7 @@ impl IrysRethNodeAdapter {
             .reth_node
             .payload
             .payload_builder
-            .best_payload(payload_id)
+            .resolve_kind(payload_id, PayloadKind::WaitForPending)
             .await
             .unwrap()?;
         Ok(payload)

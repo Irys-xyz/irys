@@ -106,7 +106,6 @@ pub async fn capacity_chunk_solution(
         &vdf_steps_guard,
         &partition_hash,
     )
-    .await
     .expect("valid recall range");
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(config.consensus.chunk_size as usize);
@@ -150,7 +149,7 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub async fn random_port() -> eyre::Result<u16> {
+pub fn random_port() -> eyre::Result<u16> {
     let listener = create_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
     //the assigned port will be random (decided by the OS)
     let port = listener
@@ -179,7 +178,7 @@ pub struct IrysNodeTest<T = ()> {
 }
 
 impl IrysNodeTest<()> {
-    pub async fn default_async() -> Self {
+    pub fn default_async() -> Self {
         let config = NodeConfig::testnet();
         Self::new_genesis(config)
     }
@@ -207,7 +206,7 @@ impl IrysNodeTest<()> {
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
-        let node = IrysNode::new(self.cfg.clone()).await.unwrap();
+        let node = IrysNode::new(self.cfg.clone()).unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: self.cfg,
@@ -496,6 +495,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    // FIXME: This fn does not guarantee the tx is "confirmed"
+    //        Essentially there is nothing in the fn that confirms the tx is in a block, simply that it is in the mdbx
     pub async fn wait_for_confirmed_txs(
         &self,
         mut unconfirmed_txs: Vec<IrysTransactionHeader>,
@@ -660,7 +661,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
-        self.node_ctx.set_partition_mining(false).await
+        self.node_ctx.stop_mining().await
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -704,6 +705,53 @@ impl IrysNodeTest<IrysNodeCtx> {
             ))
         } else {
             info!("transaction found in mempool after {} retries", &retries);
+            Ok(())
+        }
+    }
+
+    pub async fn wait_for_mempool_commitment_txs(
+        &self,
+        mut tx_ids: Vec<H256>,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait * 5; // 200ms per retry
+
+        while let Some(tx_id) = tx_ids.pop() {
+            'inner: while retries < max_retries {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
+                    commitment_tx_ids: vec![tx_id.clone()],
+                    response: oneshot_tx,
+                })?;
+
+                //if transaction exists in mempool
+                if oneshot_rx
+                    .await
+                    .expect("to process GetCommitmentTxs")
+                    .get(&tx_id)
+                    .is_some()
+                {
+                    break 'inner;
+                }
+
+                sleep(Duration::from_millis(200)).await;
+                retries += 1;
+            }
+        }
+
+        if retries == max_retries {
+            tracing::error!(
+                "transaction not found in mempool after {} retries",
+                &retries
+            );
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transactions found in mempool after {} retries", &retries);
             Ok(())
         }
     }
@@ -828,7 +876,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
-    pub async fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+    pub fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
             .gossip_broadcast

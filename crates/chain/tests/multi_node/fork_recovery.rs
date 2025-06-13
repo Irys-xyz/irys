@@ -151,8 +151,8 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // their own.
     assert_eq!(peer1_block.cumulative_diff, peer2_block.cumulative_diff);
 
-    peer2_node.gossip_block(&peer2_block).await?;
-    peer1_node.gossip_block(&peer1_block).await?;
+    peer2_node.gossip_block(&peer2_block)?;
+    peer1_node.gossip_block(&peer1_block)?;
 
     // Wait for gossip, may need a better way to do this.
     // Possibly ask the block tree if it has the other block_hash?

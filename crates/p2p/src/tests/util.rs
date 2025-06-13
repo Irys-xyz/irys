@@ -1,6 +1,6 @@
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
-use crate::{P2PService, ServiceHandleWithShutdownSignal};
+use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
@@ -265,12 +265,7 @@ pub(crate) struct GossipServiceTestFixture {
     #[allow(dead_code)]
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
-}
-
-impl Default for GossipServiceTestFixture {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub block_status_provider: BlockStatusProvider,
 }
 
 #[derive(Debug, Clone)]
@@ -292,10 +287,12 @@ impl GossipServiceTestFixture {
     /// # Panics
     /// Can panic
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
-        let config = NodeConfig::testnet().into();
+        let mut node_config = NodeConfig::testnet();
+        node_config.base_directory = temp_dir.path().to_path_buf();
+        let config = Config::new(node_config);
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
@@ -326,6 +323,8 @@ impl GossipServiceTestFixture {
 
         let tokio_runtime = tokio::runtime::Handle::current();
 
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
 
@@ -345,12 +344,13 @@ impl GossipServiceTestFixture {
             api_client_stub: ApiClientStub::new(),
             task_manager,
             task_executor,
+            block_status_provider: block_status_provider_mock,
         }
     }
 
     /// # Panics
     /// Can panic
-    pub(crate) async fn run_service(
+    pub(crate) fn run_service(
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
@@ -386,6 +386,7 @@ impl GossipServiceTestFixture {
                 self.peer_list.clone().into(),
                 self.db.clone(),
                 gossip_listener,
+                self.block_status_provider.clone(),
             )
             .expect("failed to run gossip service");
 

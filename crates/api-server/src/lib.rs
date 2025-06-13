@@ -93,7 +93,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/version", web::post().to(post_version::post_version))
 }
 
-pub async fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
+pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
     info!(?port, "Starting API server");
 

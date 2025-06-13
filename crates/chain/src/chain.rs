@@ -33,11 +33,11 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, BlockIndex,
-    SystemLedger,
+    add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
 use irys_p2p::{
-    P2PService, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
+    BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
+    ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::SystemTxStore;
@@ -143,17 +143,17 @@ impl IrysNodeCtx {
     pub async fn stop_mining(&self) -> eyre::Result<()> {
         // stop the VDF thread
         self.stop_vdf().await?;
-        self.set_partition_mining(false).await
+        self.set_partition_mining(false)
     }
     /// Start VDF thread and send a message to all known partition actors to begin mining when they receive a VDF step
     pub async fn start_mining(&self) -> eyre::Result<()> {
         // start the VDF thread
         self.start_vdf().await?;
-        self.set_partition_mining(true).await
+        self.set_partition_mining(true)
     }
     // Send a custom control message to all known partition actors to enable/disable partition mining
     // does NOT modify the state of the  VDF thread!
-    pub async fn set_partition_mining(&self, should_mine: bool) -> eyre::Result<()> {
+    pub fn set_partition_mining(&self, should_mine: bool) -> eyre::Result<()> {
         // Send a custom control message to all known partition actors
         for part in &self.actor_addresses.partitions {
             part.try_send(MiningControl(should_mine))?;
@@ -270,7 +270,7 @@ pub struct IrysNode {
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub async fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
+    pub fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
         // we create the listener here so we know the port before we start passing around `config`
         let http_listener = create_listener(
             format!(
@@ -336,26 +336,24 @@ impl IrysNode {
 
         if has_existing_data {
             // CASE 1: Load existing genesis block and commitments from database
-            return self.load_existing_genesis(irys_db, block_index).await;
+            return self.load_existing_genesis(irys_db, block_index);
         }
 
         // CASE 2: No existing data - handle based on node mode
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                return self
-                    .create_new_genesis_block(irys_db, genesis_block.clone())
-                    .await;
+                self.create_new_genesis_block(genesis_block.clone())
             }
             NodeMode::PeerSync => {
                 // Fetch genesis data from trusted peer when joining network
-                return self.fetch_genesis_from_trusted_peer().await;
+                self.fetch_genesis_from_trusted_peer().await
             }
         }
     }
 
     // Helper methods to flatten the main function
-    async fn load_existing_genesis(
+    fn load_existing_genesis(
         &self,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
@@ -393,9 +391,8 @@ impl IrysNode {
         (genesis_block, commitments)
     }
 
-    async fn create_new_genesis_block(
+    fn create_new_genesis_block(
         &self,
-        irys_db: &DatabaseProvider,
         mut genesis_block: IrysBlockHeader,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
         // Generate genesis commitments from configuration
@@ -416,10 +413,7 @@ impl IrysNode {
         // Add commitment transactions to genesis block
         add_genesis_commitments(&mut genesis_block, &self.config);
 
-        // Also persist them to the db
-        for commitment_tx in commitments.iter() {
-            let _ = irys_db.update(|tx| insert_commitment_tx(tx, commitment_tx));
-        }
+        // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
         run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
 
@@ -464,7 +458,7 @@ impl IrysNode {
     ///
     /// # Returns
     /// * `eyre::Result<()>` - Success or error result of the database operations
-    async fn persist_genesis_block_and_commitments(
+    fn persist_genesis_block_and_commitments(
         &self,
         genesis_block: &IrysBlockHeader,
         genesis_commitments: &[CommitmentTransaction],
@@ -524,8 +518,7 @@ impl IrysNode {
                 &genesis_commitments,
                 &irys_db,
                 &mut block_index,
-            )
-            .await?;
+            )?;
         }
 
         // all async tasks will be run on a new tokio runtime
@@ -647,7 +640,7 @@ impl IrysNode {
                     System::new().block_on(async move {
                         // read the latest block info
                         let (latest_block_height, latest_block) =
-                            read_latest_block_data(&block_index, &irys_db).await;
+                            read_latest_block_data(&block_index, &irys_db);
                         latest_block_height_tx
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
@@ -767,7 +760,7 @@ impl IrysNode {
                         fut,
                     )
                     .await
-                    .inspect_err(|e| error!("Reth thread error: {}", &e));
+                    .inspect_err(|e| error!("Reth thread error: {:?}", &e));
 
                     debug!("Sending shutdown signal to the main actor thread");
                     let _ = main_actor_thread_shutdown_tx.try_send(());
@@ -935,8 +928,7 @@ impl IrysNode {
             receivers.mempool,
             &config,
             &service_senders,
-        )
-        .await;
+        );
         let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
 
         // spawn the chunk migration service
@@ -998,6 +990,7 @@ impl IrysNode {
             peer_list_service.clone(),
             irys_db.clone(),
             gossip_listener,
+            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
         )?;
 
         // set up the price oracle
@@ -1148,8 +1141,7 @@ impl IrysNode {
                 sync_state,
             },
             http_listener,
-        )
-        .await;
+        );
 
         // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
         // this is "safe", as the OnceLock is always set before this start function returns
@@ -1446,7 +1438,7 @@ impl IrysNode {
     }
 }
 
-async fn read_latest_block_data(
+fn read_latest_block_data(
     block_index: &BlockIndex,
     irys_db: &DatabaseProvider,
 ) -> (u64, Arc<IrysBlockHeader>) {

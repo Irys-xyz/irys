@@ -147,7 +147,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
-    BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
+    BlockConfirmedMessage(Arc<IrysBlockHeader>),
     /// Get IrysTransactionHeader
     GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -220,7 +220,7 @@ impl Default for MempoolService {
 
 impl MempoolService {
     /// Spawn a new Mempool service
-    pub async fn spawn_service(
+    pub fn spawn_service(
         exec: &TaskExecutor,
         irys_db: DatabaseProvider,
         reth_node_adapter: IrysRethNodeAdapter,
@@ -295,7 +295,7 @@ impl MempoolService {
                 // Handle reorg events
                 reorg_result = self.reorg_rx.recv() => {
                     if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
-                        self.inner.handle_reorg(event).await?;
+                        self.inner.handle_reorg(event)?;
                     }
                 }
 
@@ -508,7 +508,7 @@ impl Inner {
         }
         drop(mempool_state_guard);
 
-        if let Ok(read_tx) = self.read_tx().await {
+        if let Ok(read_tx) = self.read_tx() {
             let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
             return tx_header.clone();
         }
@@ -680,7 +680,6 @@ impl Inner {
     async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
-        all_txs: Arc<Vec<IrysTransactionHeader>>,
     ) -> Result<(), TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
@@ -750,16 +749,12 @@ impl Inner {
             mut_tx.commit().expect("expect to commit to database");
         }
 
-        info!(
-            "Removing confirmed tx - Block height: {} num tx: {}",
-            block.height,
-            all_txs.len()
-        );
+        info!("Removing confirmed tx - Block height: {}", block.height,);
 
         Ok(())
     }
 
-    async fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
+    fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing reorg: {} orphaned blocks from height {}",
             event.old_fork.len(),
@@ -825,7 +820,6 @@ impl Inner {
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
             .read_tx()
-            .await
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let binding = self.storage_modules_guard.read().clone();
@@ -1027,7 +1021,6 @@ impl Inner {
         // check if we have all the chunks for this tx
         let read_tx = self
             .read_tx()
-            .await
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let mut cursor = read_tx
@@ -1260,10 +1253,7 @@ impl Inner {
             Ok(v) => v,
         };
 
-        let read_tx = self
-            .read_tx()
-            .await
-            .map_err(|_| TxIngressError::DatabaseError)?;
+        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
@@ -1397,7 +1387,7 @@ impl Inner {
             Ok(true)
         } else {
             drop(mempool_state_guard);
-            let read_tx = self.read_tx().await;
+            let read_tx = self.read_tx();
 
             if read_tx.is_err() {
                 Err(TxIngressError::DatabaseError)
@@ -1470,9 +1460,8 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
-                    let _unused_response_message =
-                        self.handle_block_confirmed_message(block, all_txs).await;
+                MempoolServiceMessage::BlockConfirmedMessage(block) => {
+                    let _unused_response_message = self.handle_block_confirmed_message(block).await;
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
                     let response_message = self
@@ -1525,7 +1514,7 @@ impl Inner {
     ///
     /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
     /// if the transaction could not be created. Logs an error if the transaction fails.
-    async fn read_tx(
+    fn read_tx(
         &self,
     ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
         self.irys_db
@@ -1559,8 +1548,25 @@ impl Inner {
             file.commit()?;
         }
 
-        // TODO: Do the same for all the pending storage tx
-        let _storage_tx_path = base_path.join("storage_tx");
+        let storage_tx_path = base_path.join("storage_tx");
+        fs::create_dir_all(storage_tx_path.clone()).expect("to create the mempool/storage_tx dir");
+        let storage_hash_map = self.get_all_storage_tx().await;
+        for tx in storage_hash_map.values() {
+            // Create a filepath for this transaction
+            let tx_path = storage_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+
+            // Check to see if the file exists
+            if tx_path.exists() {
+                continue;
+            }
+
+            // If not, write it to  {mempool_dir}/storage_tx/{txid}.json
+            let json = serde_json::to_string(tx).unwrap();
+
+            let mut file = get_atomic_file(tx_path).unwrap();
+            file.write_all(json.as_bytes())?;
+            file.commit()?;
+        }
 
         Ok(())
     }
@@ -1595,17 +1601,43 @@ impl Inner {
         hash_map
     }
 
+    async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, IrysTransactionHeader> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the storage transactions
+        let mempool_state = &self.mempool_state;
+        let mempool_state_guard = mempool_state.read().await;
+
+        // Get any IrysTransaction from the valid storage txs
+        mempool_state_guard.valid_tx.values().for_each(|tx| {
+            hash_map.insert(tx.id, tx.clone());
+        });
+
+        hash_map
+    }
+
     async fn restore_mempool_from_disk(&mut self) {
         let recovered =
-            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir()).await;
+            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
+                .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            self.handle_commitment_tx_ingress_message(commitment_tx)
+            let _ = self
+                .handle_commitment_tx_ingress_message(commitment_tx)
                 .await
-                .unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
+                .inspect_err(|_| {
+                    tracing::warn!("Commitment tx ingress error during mempool restore from disk")
+                });
         }
 
-        // TODO: Similar logic for storage_tx
+        for (_txid, storage_tx) in recovered.storage_txs {
+            let _ = self
+                .handle_tx_ingress_message(storage_tx)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!("Storage tx ingress error during mempool restore from disk")
+                });
+        }
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -1724,12 +1756,9 @@ impl Inner {
     ) -> Result<IrysBlockHeader, TxIngressError> {
         let mempool_state = &self.mempool_state;
 
-        let read_tx = self
-            .read_tx()
-            .await
-            .map_err(|_| TxIngressError::DatabaseError)?;
+        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
-        let latest_height = self.get_latest_block_height().await?;
+        let latest_height = self.get_latest_block_height()?;
         let anchor_expiry_depth = self
             .config
             .node_config
@@ -1769,7 +1798,7 @@ impl Inner {
     }
 
     // Helper to get the canonical chain and latest height
-    async fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
+    fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
         let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
         let latest = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),

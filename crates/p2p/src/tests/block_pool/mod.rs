@@ -1,14 +1,12 @@
-use crate::block_pool_service::{BlockPoolService, ProcessBlock};
+use crate::block_pool_service::{BlockPoolError, BlockPoolService, ProcessBlock};
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
-use crate::SyncState;
+use crate::{BlockStatusProvider, SyncState};
 use actix::Actor;
 use async_trait::async_trait;
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_api_client::ApiClient;
-use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, insert_block_header};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -17,9 +15,10 @@ use irys_types::{
     NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use std::net::SocketAddr;
+use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, error};
 
 #[derive(Clone, Default, Debug)]
 struct MockApiClient {
@@ -77,10 +76,18 @@ impl ApiClient for MockApiClient {
     }
 }
 
+fn create_test_config() -> Config {
+    let temp_dir = setup_tracing_and_temp_dir(None, false);
+    let mut node_config = NodeConfig::testnet();
+    node_config.base_directory = temp_dir.path().to_path_buf();
+    node_config.trusted_peers = vec![];
+    Config::new(node_config)
+}
+
 #[derive(Clone)]
 struct BlockDiscoveryStub {
     received_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
-    db: DatabaseProvider,
+    block_status_provider: BlockStatusProvider,
 }
 
 impl BlockDiscoveryStub {
@@ -92,7 +99,8 @@ impl BlockDiscoveryStub {
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
-        self.db.update_eyre(|tx| insert_block_header(tx, &block))?;
+        self.block_status_provider
+            .add_block_to_index_and_tree_for_testing(&block);
         self.received_blocks
             .write()
             .expect("to unlock blocks")
@@ -101,34 +109,60 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
     }
 }
 
+struct MockedServices {
+    block_status_provider_mock: BlockStatusProvider,
+    block_discovery_stub: BlockDiscoveryStub,
+    peer_list_service_addr:
+        actix::Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
+    db: DatabaseProvider,
+}
+
+impl MockedServices {
+    async fn new(config: &Config) -> Self {
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&config.node_config.base_directory)
+                .expect("can't open temp dir"),
+        ));
+
+        let mock_client = MockApiClient {
+            block_response: None,
+        };
+
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+
+        let block_discovery_stub = BlockDiscoveryStub {
+            received_blocks: Arc::new(RwLock::new(vec![])),
+            block_status_provider: block_status_provider_mock.clone(),
+        };
+        let reth_service = MockRethServiceActor {};
+        let reth_addr = reth_service.start();
+        let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+            db.clone(),
+            config,
+            mock_client.clone(),
+            reth_addr,
+        );
+        let peer_addr = peer_list_service.start();
+
+        Self {
+            block_status_provider_mock,
+            block_discovery_stub,
+            peer_list_service_addr: peer_addr,
+            db,
+        }
+    }
+}
+
 #[actix_rt::test]
 async fn should_process_block() {
-    let temp_dir = setup_tracing_and_temp_dir(None, false);
-    let mut node_config = NodeConfig::testnet();
-    node_config.trusted_peers = vec![];
-    let config = Config::new(node_config);
+    let config = create_test_config();
 
-    let db = DatabaseProvider(Arc::new(
-        open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-            .expect("can't open temp dir"),
-    ));
-
-    let mock_client = MockApiClient {
-        block_response: None,
-    };
-    let block_discovery_stub = BlockDiscoveryStub {
-        received_blocks: Arc::new(RwLock::new(vec![])),
-        db: db.clone(),
-    };
-    let reth_service = MockRethServiceActor {};
-    let reth_addr = reth_service.start();
-    let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
-        db.clone(),
-        &config,
-        mock_client.clone(),
-        reth_addr,
-    );
-    let peer_addr = peer_list_service.start();
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_service_addr: peer_addr,
+        db,
+    } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false);
     let service = BlockPoolService::new_with_client(
@@ -136,48 +170,17 @@ async fn should_process_block() {
         peer_addr.into(),
         block_discovery_stub.clone(),
         sync_state,
+        block_status_provider_mock.clone(),
     );
     let addr = service.start();
 
-    let parent_block_header = IrysBlockHeader {
-        block_hash: BlockHash::random(),
-        height: 1,
-        ..Default::default()
-    };
-    let parent_block_hash = parent_block_header.block_hash;
-
-    let test_header = IrysBlockHeader {
-        block_hash: BlockHash::random(),
-        previous_block_hash: parent_block_hash,
-        height: parent_block_header.height + 1,
-        ..Default::default()
-    };
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
+    let parent_block_header = mock_chain[0].clone();
+    let test_header = mock_chain[1].clone();
 
     // Inserting parent block header to the db, so the current block should go to the
     //  block producer
-    {
-        db.update_eyre(|tx| insert_block_header(tx, &parent_block_header))
-            .expect("to insert block");
-        debug!(
-            "Inserted parent block {:?} for block {:?}",
-            parent_block_header.block_hash.0.to_base58(),
-            test_header.block_hash.0.to_base58()
-        );
-    }
-
-    let fetched_block = db
-        .view_eyre(|tx| block_header_by_hash(tx, &parent_block_hash, false))
-        .expect("to fetch a block")
-        .expect("block should exist");
-
-    debug!(
-        "Block in the db: {}",
-        fetched_block.block_hash.0.to_base58()
-    );
-    debug!(
-        "Block previous_block_hash: {:?}",
-        fetched_block.previous_block_hash.0.to_base58()
-    );
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
 
     debug!(
         "Previous block hash: {:?}",
@@ -201,15 +204,7 @@ async fn should_process_block() {
 
 #[actix_rt::test]
 async fn should_process_block_with_intermediate_block_in_api() {
-    let temp_dir = setup_tracing_and_temp_dir(None, false);
-    let mut node_config = NodeConfig::testnet();
-    node_config.trusted_peers = vec![];
-    let config = Config::new(node_config);
-
-    let db = DatabaseProvider(Arc::new(
-        open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-            .expect("can't open temp dir"),
-    ));
+    let config = create_test_config();
 
     let gossip_server = FakeGossipServer::new();
     let (server_handle, fake_peer_gossip_addr) =
@@ -224,28 +219,14 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // block1: in database
     // block2: in API client
     // block3: test block to be processed
+    let test_chain = BlockStatusProvider::produce_mock_chain(3, None);
 
-    // Create block1 (will be in database)
-    let block1 = IrysBlockHeader {
-        block_hash: BlockHash::random(),
-        ..Default::default()
-    };
-
-    let block1_hash = block1.block_hash;
-
-    // Create block2 (will be in API client)
-    let block2 = IrysBlockHeader {
-        block_hash: BlockHash::random(),
-        previous_block_hash: block1.block_hash,
-        ..Default::default()
-    };
-
+    // Create block1 (will be in the database)
+    let block1 = test_chain[0].clone();
+    // Create block2 (will be in the API client)
+    let block2 = test_chain[1].clone();
     // Create block3 (test block)
-    let block3 = IrysBlockHeader {
-        block_hash: BlockHash::random(),
-        previous_block_hash: block2.block_hash,
-        ..Default::default()
-    };
+    let block3 = test_chain[2].clone();
 
     debug!("Block 1: {:?}", block1.block_hash);
     debug!("Block 2: {:?}", block2.block_hash);
@@ -263,22 +244,14 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block3.previous_block_hash
     );
 
-    // Setup MockApiClient to return block2 when queried
-    let mock_client = MockApiClient::default();
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_service_addr: peer_addr,
+        db,
+    } = MockedServices::new(&config).await;
 
-    let block_discovery_stub = BlockDiscoveryStub {
-        received_blocks: Arc::new(RwLock::new(vec![])),
-        db: db.clone(),
-    };
-    let reth_service = MockRethServiceActor {};
-    let reth_addr = reth_service.start();
-    let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
-        db.clone(),
-        &config,
-        mock_client.clone(),
-        reth_addr,
-    );
-    let peer_addr = peer_list_service.start();
+    // Set the mock client to return block2 when requested
     // Adding a peer so we can send a request to the mock client
     peer_addr
         .send(AddPeer {
@@ -304,6 +277,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         peer_addr.into(),
         block_discovery_stub.clone(),
         sync_state,
+        block_status_provider_mock.clone(),
     );
     let addr = service.start();
 
@@ -316,38 +290,18 @@ async fn should_process_block_with_intermediate_block_in_api() {
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
         tokio::spawn(async move {
             debug!("Send block to block pool");
-            addr.send(ProcessBlock { header: block })
-                .await
-                .expect("to send message")
-                .expect("to process block");
+            addr.send(ProcessBlock {
+                header: block.clone(),
+            })
+            .await
+            .expect("to send message")
+            .expect("to process block");
         });
         true
     });
 
     // Insert block1 into the database
-    {
-        db.update_eyre(|tx| insert_block_header(tx, &block1))
-            .expect("to insert block1");
-        debug!(
-            "Inserted block1 {:?} into database",
-            block1.block_hash.0.to_base58()
-        );
-    }
-
-    // Verify block1 is in the database
-    let fetched_block = db
-        .view_eyre(|tx| block_header_by_hash(tx, &block1_hash, false))
-        .expect("to fetch a block")
-        .expect("block should exist");
-
-    debug!(
-        "Block in the db: {:?}",
-        fetched_block.block_hash.0.to_base58()
-    );
-    debug!(
-        "Block3 previous_block_hash: {:?}",
-        block3.previous_block_hash.0.to_base58()
-    );
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
     addr.send(ProcessBlock {
@@ -370,4 +324,207 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     assert_eq!(discovered_block2, block2);
     assert_eq!(discovered_block3, block3);
+}
+
+#[actix_rt::test]
+async fn should_warn_about_mismatches_for_very_old_block() {
+    let config = create_test_config();
+
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_service_addr: peer_addr,
+        db,
+    } = MockedServices::new(&config).await;
+
+    let sync_state = SyncState::new(false);
+    let service = BlockPoolService::new_with_client(
+        db.clone(),
+        peer_addr.into(),
+        block_discovery_stub.clone(),
+        sync_state,
+        block_status_provider_mock.clone(),
+    );
+    let addr = service.start();
+
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
+
+    // Test case: 5 older blocks are in the index, but pruned from the tree;
+    // 5 newer blocks are in the tree and in the index
+    // 5 newest blocks are in the tree, but not in the index
+    let old_blocks = mock_chain[0..5].to_vec();
+    let middle_blocks = mock_chain[5..10].to_vec();
+    let new_blocks = mock_chain[10..15].to_vec();
+
+    for block in old_blocks.iter() {
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
+    }
+
+    for block in middle_blocks.iter() {
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
+    }
+
+    for block in new_blocks.iter() {
+        block_status_provider_mock.add_block_mock_to_the_tree(block);
+    }
+
+    block_status_provider_mock.set_tip_for_testing(&new_blocks.last().as_ref().unwrap().block_hash);
+    // Prune everything older than the 10th block
+    block_status_provider_mock.delete_mocked_blocks_older_than(10);
+
+    let header_building_on_very_old_block =
+        BlockStatusProvider::produce_mock_chain(1, old_blocks.get(1))[0].clone();
+
+    debug!(
+        "Sending bogus block: {:?}",
+        header_building_on_very_old_block.block_hash
+    );
+
+    let res = addr
+        .send(ProcessBlock {
+            header: header_building_on_very_old_block.clone(),
+        })
+        .await
+        .expect("can't send block");
+
+    assert!(res.is_err());
+    assert!(matches!(
+        res,
+        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
+    ));
+}
+
+#[actix_rt::test]
+async fn should_refuse_fresh_block_trying_to_build_old_chain() {
+    let config = create_test_config();
+
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_service_addr: peer_addr,
+        db,
+    } = MockedServices::new(&config).await;
+
+    let gossip_server = FakeGossipServer::new();
+    let (server_handle, fake_peer_gossip_addr) =
+        gossip_server.run(SocketAddr::from(([127, 0, 0, 1], 0)));
+
+    tokio::spawn(server_handle);
+
+    // Wait for the server to start
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Adding a peer so we can send a request to the mock client
+    peer_addr
+        .send(AddPeer {
+            mining_addr: Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
+            peer: PeerListItem {
+                reputation_score: PeerScore::new(100),
+                response_time: 0,
+                address: PeerAddress {
+                    gossip: fake_peer_gossip_addr,
+                    ..PeerAddress::default()
+                },
+                last_seen: 0,
+                is_online: true,
+            },
+        })
+        .await
+        .expect("can't send message to peer list");
+
+    let sync_state = SyncState::new(false);
+    let service = BlockPoolService::new_with_client(
+        db.clone(),
+        peer_addr.into(),
+        block_discovery_stub.clone(),
+        sync_state,
+        block_status_provider_mock.clone(),
+    );
+    let addr = service.start();
+
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
+
+    // Test case: 5 older blocks are in the index, but pruned from the tree;
+    // 5 newer blocks are in the tree and in the index
+    // 5 newest blocks are in the tree, but not in the index
+    let old_blocks = mock_chain[0..5].to_vec();
+    let middle_blocks = mock_chain[5..10].to_vec();
+    let new_blocks = mock_chain[10..15].to_vec();
+
+    for block in old_blocks.iter() {
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
+    }
+
+    for block in middle_blocks.iter() {
+        block_status_provider_mock.add_block_to_index_and_tree_for_testing(block);
+    }
+
+    for block in new_blocks.iter() {
+        block_status_provider_mock.add_block_mock_to_the_tree(block);
+    }
+
+    block_status_provider_mock.set_tip_for_testing(&new_blocks.last().as_ref().unwrap().block_hash);
+    // Prune everything older than the 10th block
+    block_status_provider_mock.delete_mocked_blocks_older_than(5);
+
+    let bogus_block_parent_index = 1;
+
+    // Fresh block that t
+    let mut bogus_block =
+        BlockStatusProvider::produce_mock_chain(1, old_blocks.get(bogus_block_parent_index))[0]
+            .clone();
+    bogus_block.height = 15;
+
+    let oldest_block = block_status_provider_mock.oldest_tree_height();
+    assert_eq!(oldest_block, 5);
+
+    // Set the fake server to mimic get_data -> gossip_service sends message to block pool
+    let addr_for_server = addr.clone();
+    let blocks = mock_chain.clone();
+    let (errors_sender, error_receiver) = channel::<BlockPoolError>();
+    gossip_server.set_on_block_data_request(move |block_hash| {
+        let block = blocks
+            .iter()
+            .find(|block| block.block_hash == block_hash)
+            .cloned();
+        let addr = addr_for_server.clone();
+        debug!("Receive get block: {:?}", block_hash.0.to_base58());
+        let errors_sender = errors_sender.clone();
+        if let Some(block) = block {
+            tokio::spawn(async move {
+                debug!("Send block to block pool");
+                let res = addr
+                    .send(ProcessBlock {
+                        header: block.clone(),
+                    })
+                    .await
+                    .expect("to send message");
+                if let Err(err) = res {
+                    error!("Error processing block: {:?}", err);
+                    errors_sender.send(err).unwrap();
+                } else {
+                    debug!("Block processed successfully");
+                }
+            });
+            true
+        } else {
+            debug!("Block not found");
+            false
+        }
+    });
+
+    debug!("Sending bogus block: {:?}", bogus_block.block_hash);
+    let res = addr
+        .send(ProcessBlock {
+            header: bogus_block.clone(),
+        })
+        .await
+        .expect("can't send block");
+
+    assert!(res.is_ok());
+    let processing_error = error_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        processing_error,
+        BlockPoolError::TryingToReprocessFinalizedBlock(_)
+    ));
 }

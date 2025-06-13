@@ -414,7 +414,7 @@ nursery = { priority = -9, level = "allow" }     # cherry pick
 
 module_inception = "allow"
 doc-overindented-list-items = "allow"
-# await-holding-lock = "allow"
+unused-async = "deny"
 large-enum-variant = "allow"
 doc-lazy-continuation = "allow"
 # to enable in the future

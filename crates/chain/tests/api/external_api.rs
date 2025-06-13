@@ -16,7 +16,7 @@ use tracing::info;
 async fn heavy_external_api() -> eyre::Result<()> {
     initialize_tracing();
 
-    let ctx = IrysNodeTest::default_async().await.start().await;
+    let ctx = IrysNodeTest::default_async().start().await;
 
     let address = format!(
         "http://127.0.0.1:{}",

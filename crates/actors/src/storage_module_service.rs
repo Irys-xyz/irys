@@ -74,7 +74,7 @@ impl StorageModuleServiceInner {
         }
     }
 
-    async fn handle_message(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
+    fn handle_message(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
         match msg {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos,
@@ -272,7 +272,7 @@ impl StorageModuleService {
             let mut msg_rx = pin!(self.msg_rx.recv());
             match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
                 Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
+                    self.inner.handle_message(msg)?;
                 }
                 Either::Left((None, _)) => {
                     tracing::warn!("receiver channel closed");
@@ -287,7 +287,7 @@ impl StorageModuleService {
 
         tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+            self.inner.handle_message(msg)?
         }
 
         // explicitly inform the TaskManager that we're shutting down

@@ -24,11 +24,13 @@ serde = { workspace = true }
 base58.workspace = true
 actix-rt.workspace = true
 reth-tasks.workspace = true
+lru.workspace = true
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-client = { workspace = true, features = ["test-utils"] }
+irys-actors = { workspace = true, features = ["test-utils"] }
 irys-storage.workspace = true
 async-trait = "0.1"
 

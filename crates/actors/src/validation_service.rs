@@ -213,7 +213,7 @@ impl ValidationServiceInner {
         )?;
 
         // Fast forward VDF steps
-        fast_forward_vdf_steps_from_block(&vdf_info, &self.service_senders.vdf_fast_forward).await;
+        fast_forward_vdf_steps_from_block(&vdf_info, &self.service_senders.vdf_fast_forward);
         self.vdf_state
             .wait_for_step(vdf_info.global_step_number)
             .await;
