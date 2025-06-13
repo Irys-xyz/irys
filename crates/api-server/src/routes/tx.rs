@@ -5,7 +5,10 @@ use actix_web::{
     HttpResponse, Result,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
+use irys_actors::{
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    mempool_service::{MempoolServiceMessage, TxIngressError},
+};
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
@@ -130,54 +133,27 @@ pub async fn get_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
 ) -> Result<IrysTransactionResponse, ApiError> {
-    // try to get data tx from mempool
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx);
-    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
-        tracing::error!(
-            "API Failed to deliver MempoolServiceMessage::GetDataTxs: {:?}",
-            err
-        );
-    }
-    let mempool_response = oneshot_rx.await.expect(
-        "to receive IrysTransactionResponse from MempoolServiceMessage::GetDataTxs message",
-    );
-    let maybe_mempool_tx = mempool_response.first();
-    if let Some(result) = maybe_mempool_tx {
-        if let Some(tx) = result {
-            return Ok(IrysTransactionResponse::Storage(tx.clone()));
+    let vec = vec![tx_id];
+    if let Ok(mut result) =
+        get_commitment_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
+    {
+        if let Some(tx) = result.pop() {
+            return Ok(IrysTransactionResponse::Commitment(tx));
         }
-    }
-
-    // try to get commitment tx from mempool
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs {
-        commitment_tx_ids: vec![tx_id],
-        response: oneshot_tx,
     };
-    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
-        tracing::error!(
-            "API Failed to deliver MempoolServiceMessage::GetCommitmentTxs: {:?}",
-            err
-        );
-    }
-    let mempool_response = oneshot_rx.await.expect(
-        "to receive IrysTransactionResponse from MempoolServiceMessage::GetCommitmentTxs message",
-    );
-    let maybe_mempool_tx = mempool_response.get(&tx_id);
-    if let Some(tx) = maybe_mempool_tx {
-        return Ok(IrysTransactionResponse::Commitment(tx.clone()));
-    }
 
-    // get from database
-    get_storage_transaction(state, tx_id)
-        .map(IrysTransactionResponse::Storage)
-        .or_else(|err| match err {
-            ApiError::ErrNoId { .. } => {
-                get_commitment_transaction(state, tx_id).map(IrysTransactionResponse::Commitment)
-            }
-            other => Err(other),
-        })
+    if let Ok(mut result) =
+        get_data_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
+    {
+        if let Some(tx) = result.pop() {
+            return Ok(IrysTransactionResponse::Storage(tx));
+        }
+    };
+
+    Err(ApiError::ErrNoId {
+        id: tx_id.to_string(),
+        err: "id not found".to_string(),
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
