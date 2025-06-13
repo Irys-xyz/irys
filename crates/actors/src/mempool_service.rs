@@ -1568,8 +1568,6 @@ impl Inner {
 
             // If not, write it to  {mempool_dir}/storage_tx/{txid}.json
             let json = serde_json::to_string(tx).unwrap();
-            debug!("{}", json);
-            debug!("{}", tx_path.to_str().unwrap());
 
             let mut file = get_atomic_file(tx_path).unwrap();
             file.write_all(json.as_bytes())?;
