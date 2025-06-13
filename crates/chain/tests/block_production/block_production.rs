@@ -674,6 +674,18 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .await;
     peer_node.start_public_api().await;
 
+    // Get initial balance of the peer signer
+    let reth_context = genesis_node.node_ctx.reth_node_adapter.clone();
+    let initial_balance = reth_context
+        .inner
+        .provider
+        .basic_account(&peer_signer.address())
+        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get peer balance: {}", err);
+            U256::ZERO
+        });
+
     // Post stake + pledge commitments to the peer
     let stake_tx = peer_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
     let pledge_tx = peer_node.post_pledge_commitment(H256::zero()).await;
@@ -686,10 +698,108 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .wait_for_mempool(pledge_tx.id, seconds_to_wait)
         .await?;
 
-    // Mine a block to get the commitments included
-    let (_irys_block, reth_exec_env) = mine_block(&genesis_node.node_ctx).await?.unwrap();
-    // Mine another block to get pledges included
-    let (_irys_block, reth_exec_env) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+    // Mine a block to get the stake commitment included
+    let (_irys_block1, reth_exec_env1) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+
+    // Get receipts for the first block
+    let receipts1 = reth_context
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(reth_exec_env1.block().hash()))?
+        .unwrap();
+
+    // Verify block contains all expected system transactions
+    // Based on the logs, both stake and pledge are included in the same block
+    assert_eq!(
+        receipts1.len(),
+        3,
+        "Block should contain exactly 3 receipts: block reward, stake, and pledge"
+    );
+
+    // Find and verify the stake system transaction receipt
+    let stake_receipt = receipts1
+        .iter()
+        .find(|r| {
+            r.logs
+                .iter()
+                .any(|log| log.topics()[0] == *system_tx_topics::STAKE)
+        })
+        .expect("Stake system transaction receipt not found");
+
+    assert!(stake_receipt.success, "Stake transaction should succeed");
+    assert_eq!(
+        stake_receipt.cumulative_gas_used, 0,
+        "System tx should not consume gas"
+    );
+    assert_eq!(
+        stake_receipt.logs[0].address,
+        peer_signer.address(),
+        "Stake transaction should target the peer's address"
+    );
+
+    // Find and verify the pledge system transaction receipt (it's in the same block)
+    let pledge_receipt = receipts1
+        .iter()
+        .find(|r| {
+            r.logs
+                .iter()
+                .any(|log| log.topics()[0] == *system_tx_topics::PLEDGE)
+        })
+        .expect("Pledge system transaction receipt not found");
+
+    assert!(pledge_receipt.success, "Pledge transaction should succeed");
+    assert_eq!(
+        pledge_receipt.cumulative_gas_used, 0,
+        "System tx should not consume gas"
+    );
+    assert_eq!(
+        pledge_receipt.logs[0].address,
+        peer_signer.address(),
+        "Pledge transaction should target the peer's address"
+    );
+
+    // Get balance after both stake and pledge transactions
+    let balance_after_block1 = reth_context
+        .inner
+        .provider
+        .basic_account(&peer_signer.address())
+        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get peer balance: {}", err);
+            U256::ZERO
+        });
+
+    // In the same block:
+    // - Stake decreases balance by (commitment_value + fee)
+    // - Pledge decreases balance by (commitment_value + fee)
+    // Both decrease balance by 2 each, so total decrease is 4
+    assert_eq!(
+        balance_after_block1,
+        initial_balance - U256::from(4),
+        "Balance should decrease by 4 (2 for stake + 2 for pledge)"
+    );
+
+    // Mine another block to verify the system continues to work
+    let (_irys_block2, reth_exec_env2) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+
+    // Get receipts for the second block
+    let receipts2 = reth_context
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(reth_exec_env2.block().hash()))?
+        .unwrap();
+
+    // Second block should only have block reward
+    assert_eq!(
+        receipts2.len(),
+        1,
+        "Second block should only contain block reward"
+    );
+    assert_eq!(
+        receipts2[0].logs[0].topics()[0],
+        *system_tx_topics::BLOCK_REWARD,
+        "Second block should only have block reward system tx"
+    );
 
     // Get the genesis nodes view of the peers assignments
     let peer_assignments = genesis_node
@@ -699,7 +809,47 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Verify that one partition has been assigned to the peer to match its pledge
     assert_eq!(peer_assignments.len(), 1);
 
-    // todo: validate that we have included system txs for staking and pledging
+    // Verify block transactions contain the expected system transactions in the correct order
+    let block_txs1 = reth_exec_env1
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .collect::<Vec<_>>();
+
+    // Block should contain exactly 3 transactions: block reward, stake, pledge (in that order)
+    assert_eq!(block_txs1.len(), 3, "Block should contain exactly 3 transactions");
+
+    // First transaction should be block reward
+    let block_reward_tx = SystemTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
+        .expect("First transaction should be decodable as system transaction");
+    assert!(
+        matches!(
+            block_reward_tx.as_v1().unwrap(),
+            TransactionPacket::BlockReward(_)
+        ),
+        "First transaction should be block reward"
+    );
+
+    // Second transaction should be stake
+    let stake_tx = SystemTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
+        .expect("Second transaction should be decodable as system transaction");
+    if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
+        assert_eq!(bd.target, peer_signer.address());
+        assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
+    } else {
+        panic!("Second transaction should be stake");
+    }
+
+    // Third transaction should be pledge
+    let pledge_tx = SystemTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
+        .expect("Third transaction should be decodable as system transaction");
+    if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
+        assert_eq!(bd.target, peer_signer.address());
+        assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
+    } else {
+        panic!("Third transaction should be pledge");
+    }
 
     Ok(())
 }

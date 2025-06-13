@@ -51,10 +51,10 @@ pub enum TransactionPacket {
     Stake(BalanceDecrement),
     /// Collect storage fees from an account (balance decrement). Must match storage usage.
     StorageFees(BalanceDecrement),
-    /// Pledge funds to an account (balance increment). Used for pledging operations.
-    Pledge(BalanceIncrement),
-    /// Unpledge funds from an account (balance decrement). Used for unpledging operations.
-    Unpledge(BalanceDecrement),
+    /// Pledge funds to an account (balance decrement). Used for pledging operations.
+    Pledge(BalanceDecrement),
+    /// Unpledge funds from an account (balance increment). Used for unpledging operations.
+    Unpledge(BalanceIncrement),
 }
 
 /// Topics for system transaction logs
@@ -163,7 +163,7 @@ impl TransactionPacket {
     #[must_use]
     pub fn encoded_topic(&self) -> [u8; 32] {
         match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => {
+            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => {
                 use alloy_dyn_abi::DynSolValue;
                 DynSolValue::Tuple(vec![
                     DynSolValue::Uint(bi.amount, 256),
@@ -173,7 +173,7 @@ impl TransactionPacket {
                 .try_into()
                 .unwrap_or_default()
             }
-            Self::Stake(bd) | Self::StorageFees(bd) | Self::Unpledge(bd) => {
+            Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => {
                 use alloy_dyn_abi::DynSolValue;
                 DynSolValue::Tuple(vec![
                     DynSolValue::Uint(bd.amount, 256),
@@ -234,8 +234,8 @@ impl Encodable for SystemTransaction {
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Pledge(bi) => bi.length(),
-            Self::Stake(bd) | Self::StorageFees(bd) | Self::Unpledge(bd) => bd.length(),
+            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => bi.length(),
+            Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => bd.length(),
         }
     }
 
@@ -329,11 +329,11 @@ impl Decodable for TransactionPacket {
                 Ok(Self::StorageFees(inner))
             }
             PLEDGE_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
+                let inner = BalanceDecrement::decode(buf)?;
                 Ok(Self::Pledge(inner))
             }
             UNPLEDGE_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
+                let inner = BalanceIncrement::decode(buf)?;
                 Ok(Self::Unpledge(inner))
             }
             _ => Err(alloy_rlp::Error::Custom(

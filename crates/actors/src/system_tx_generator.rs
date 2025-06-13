@@ -88,7 +88,7 @@ impl<'a> SystemTxGenerator<'a> {
                 irys_primitives::CommitmentType::Pledge => SystemTransaction::new_v1(
                     *self.block_height,
                     H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-                    TransactionPacket::Pledge(BalanceIncrement {
+                    TransactionPacket::Pledge(BalanceDecrement {
                         amount: Uint::from(tx.total_fee()) + commitment_value,
                         target: tx.signer,
                     }),
@@ -96,7 +96,7 @@ impl<'a> SystemTxGenerator<'a> {
                 irys_primitives::CommitmentType::Unpledge => SystemTransaction::new_v1(
                     *self.block_height,
                     H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-                    TransactionPacket::Unpledge(BalanceDecrement {
+                    TransactionPacket::Unpledge(BalanceIncrement {
                         amount: commitment_value - Uint::from(tx.total_fee()),
                         target: tx.signer,
                     }),
