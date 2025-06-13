@@ -143,8 +143,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
-<<<<<<< craig/mempool-MempoolServiceMessage-additions
-    BlockConfirmed(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
+    BlockConfirmed(Arc<IrysBlockHeader>),
     /// Return filtered list of candidate txns
     /// Filtering based on funding status etc based on the provided EVM block ID
     /// If `None` is provided, the latest canonical block is used
@@ -154,9 +153,6 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-=======
-    BlockConfirmedMessage(Arc<IrysBlockHeader>),
->>>>>>> master
     /// Get IrysTransactionHeader
     GetDataTxs(
         Vec<IrysTransactionId>,
@@ -1523,14 +1519,8 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-<<<<<<< craig/mempool-MempoolServiceMessage-additions
-                MempoolServiceMessage::BlockConfirmed(block, all_txs) => {
-                    let _unused_response_message =
-                        self.handle_block_confirmed_message(block, all_txs).await;
-=======
-                MempoolServiceMessage::BlockConfirmedMessage(block) => {
+                MempoolServiceMessage::BlockConfirmed(block) => {
                     let _unused_response_message = self.handle_block_confirmed_message(block).await;
->>>>>>> master
                 }
                 MempoolServiceMessage::IngressCommitmentTx(commitment_tx, response) => {
                     let response_message = self
