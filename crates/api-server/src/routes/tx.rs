@@ -83,9 +83,9 @@ pub async fn get_transaction_api(
 ) -> Result<Json<IrysTransactionResponse>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
-    get_transaction(&state, tx_id).map(web::Json)
+    get_transaction(&state, tx_id).await.map(web::Json)
 }
-// Helper function to retrieve IrysTransactionHeader
+// Helper function to retrieve IrysTransactionHeader from mdbx
 pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
@@ -104,7 +104,7 @@ pub fn get_storage_transaction(
         })
 }
 
-// Helper function to retrieve CommitmentTransaction
+// Helper function to retrieve CommitmentTransaction from mdbx
 pub fn get_commitment_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
@@ -124,10 +124,52 @@ pub fn get_commitment_transaction(
 }
 
 // Combined function to get either type of transaction
-pub fn get_transaction(
+// it can retrieve both data or commitment txs
+// from either mempool or mdbx
+pub async fn get_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
 ) -> Result<IrysTransactionResponse, ApiError> {
+    // try to get data tx from mempool
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx);
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        tracing::error!(
+            "API Failed to deliver MempoolServiceMessage::GetDataTxs: {:?}",
+            err
+        );
+    }
+    let mempool_response = oneshot_rx.await.expect(
+        "to receive IrysTransactionResponse from MempoolServiceMessage::GetDataTxs message",
+    );
+    let maybe_mempool_tx = mempool_response.first();
+    if let Some(result) = maybe_mempool_tx {
+        if let Some(tx) = result {
+            return Ok(IrysTransactionResponse::Storage(tx.clone()));
+        }
+    }
+
+    // try to get commitment tx from mempool
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs {
+        commitment_tx_ids: vec![tx_id],
+        response: oneshot_tx,
+    };
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+        tracing::error!(
+            "API Failed to deliver MempoolServiceMessage::GetCommitmentTxs: {:?}",
+            err
+        );
+    }
+    let mempool_response = oneshot_rx.await.expect(
+        "to receive IrysTransactionResponse from MempoolServiceMessage::GetCommitmentTxs message",
+    );
+    let maybe_mempool_tx = mempool_response.get(&tx_id);
+    if let Some(tx) = maybe_mempool_tx {
+        return Ok(IrysTransactionResponse::Commitment(tx.clone()));
+    }
+
+    // get from database
     get_storage_transaction(state, tx_id)
         .map(IrysTransactionResponse::Storage)
         .or_else(|err| match err {
