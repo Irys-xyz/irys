@@ -154,7 +154,10 @@ pub enum MempoolServiceMessage {
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
     /// Get IrysTransactionHeader
-    GetDataTxs(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
+    GetDataTxs(
+        Vec<IrysTransactionId>,
+        oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
+    ),
     /// Confirm if tx exists in database
     GetTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -495,21 +498,34 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
-    async fn handle_get_data_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
+    /// check the mempool and mdbx for data transaction
+    async fn handle_get_data_transactions_message(
+        &self,
+        txs: Vec<H256>,
+    ) -> Vec<Option<IrysTransactionHeader>> {
+        let mut found_txs = Vec::with_capacity(txs.len());
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
-        // if tx exists
-        if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
-            return Some(tx_header.clone());
+
+        for tx in txs {
+            // if data tx exists in mempool
+            if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+                found_txs.push(Some(tx_header.clone()));
+                continue;
+            }
+            // if data tx exists in mdbx
+            if let Ok(read_tx) = self.read_tx() {
+                if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
+                    found_txs.push(Some(tx_header.clone()));
+                    continue;
+                }
+            }
+            // not found anywhere
+            found_txs.push(None);
         }
+
         drop(mempool_state_guard);
-
-        if let Ok(read_tx) = self.read_tx() {
-            let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
-            return tx_header.clone();
-        }
-
-        None
+        found_txs
     }
 
     async fn handle_ingress_commitment_tx_message(
@@ -1455,8 +1471,8 @@ impl Inner {
     ) -> BoxFuture<'a, eyre::Result<()>> {
         Box::pin(async move {
             match msg {
-                MempoolServiceMessage::GetDataTxs(tx, response) => {
-                    let response_message = self.handle_get_data_transaction_message(tx).await;
+                MempoolServiceMessage::GetDataTxs(txs, response) => {
+                    let response_message = self.handle_get_data_transactions_message(txs).await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
