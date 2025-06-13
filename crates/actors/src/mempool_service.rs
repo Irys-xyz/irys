@@ -934,8 +934,6 @@ impl Inner {
             return Err(ChunkIngressError::InvalidDataSize);
         }
 
-        let mempool_state_guard = mempool_state.read().await;
-
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
@@ -1118,7 +1116,6 @@ impl Inner {
                 .unwrap();
             });
         }
-        drop(mempool_state_guard);
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
         let gossip_data = GossipData::Chunk(chunk);
