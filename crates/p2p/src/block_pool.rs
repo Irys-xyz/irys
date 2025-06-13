@@ -31,9 +31,9 @@ impl From<PeerListFacadeError> for BlockPoolError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BlockPool<R, B>
+pub(crate) struct BlockPool<P, B>
 where
-    R: PeerList,
+    P: PeerList,
     B: BlockDiscoveryFacade,
 {
     /// Database provider for accessing transaction headers and related data.
@@ -42,7 +42,7 @@ where
     blocks_cache: BlockCache,
 
     pub(crate) block_discovery: B,
-    pub(crate) peer_list: R,
+    pub(crate) peer_list: P,
 
     sync_state: SyncState,
 
@@ -103,14 +103,14 @@ impl BlockCache {
     }
 }
 
-impl<R, B> BlockPool<R, B>
+impl<P, B> BlockPool<P, B>
 where
-    R: PeerList,
+    P: PeerList,
     B: BlockDiscoveryFacade,
 {
     pub(crate) fn new(
         db: DatabaseProvider,
-        peer_list: R,
+        peer_list: P,
         block_discovery: B,
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,

@@ -6,7 +6,7 @@
     clippy::module_name_repetitions,
     reason = "I don't know how to name it"
 )]
-use crate::block_pool_service::BlockPool;
+use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
 use crate::cache::GossipCacheKey;
 use crate::peer_list::PeerList;

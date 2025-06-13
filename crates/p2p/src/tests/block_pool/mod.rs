@@ -1,4 +1,4 @@
-use crate::block_pool_service::{BlockPool, BlockPoolError};
+use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::peer_list::PeerListServiceWithClient;
 use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
 use crate::{BlockStatusProvider, PeerList, SyncState};

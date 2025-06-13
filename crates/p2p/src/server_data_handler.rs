@@ -1,6 +1,6 @@
 use crate::peer_list::PeerList;
 use crate::{
-    block_pool_service::BlockPool,
+    block_pool::BlockPool,
     cache::{GossipCache, GossipCacheKey},
     sync::SyncState,
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},

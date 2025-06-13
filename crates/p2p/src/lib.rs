@@ -1,4 +1,4 @@
-mod block_pool_service;
+mod block_pool;
 mod block_status_provider;
 mod cache;
 mod gossip_client;

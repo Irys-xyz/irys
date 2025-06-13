@@ -83,7 +83,7 @@ impl SyncState {
         self.sync_target_height.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// [`crate::block_pool_service::BlockPool`] marks block as processed once the
+    /// [`crate::block_pool::BlockPool`] marks block as processed once the
     /// BlockDiscovery finished the pre-validation and scheduled the block for full validation
     pub fn mark_processed(&self, height: usize) {
         let current_height = self.highest_processed_block.load(Ordering::Relaxed);
@@ -93,14 +93,14 @@ impl SyncState {
         }
     }
 
-    /// Highest pre-validated block height. Set by the [`crate::block_pool_service::BlockPool`]
+    /// Highest pre-validated block height. Set by the [`crate::block_pool::BlockPool`]
     pub fn highest_processed_block(&self) -> usize {
         self.highest_processed_block.load(Ordering::Relaxed)
     }
 
     /// Checks if more blocks can be scheduled for validation by checking the
     /// number of blocks scheduled for validation so far versus the highest block
-    /// marked by [`crate::block_pool_service::BlockPool`] after pre-validation
+    /// marked by [`crate::block_pool::BlockPool`] after pre-validation
     pub fn is_queue_full(&self) -> bool {
         // We already past the sync target height, so there's nothing in the queue
         //  scheduled by the sync task specifically (gossip still can schedule blocks)
