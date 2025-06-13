@@ -10,7 +10,6 @@ use crate::{
 };
 use actix::prelude::*;
 use async_trait::async_trait;
-use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
@@ -121,37 +120,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         //====================================
-        // Submit ledger TX validation
-        //------------------------------------
-        // Get all the submit ledger transactions for the new block, error if not found
-        // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
-        // If they are in our mempool and validated we know they are real, if not we have
-        // to retrieve and validate them from the block producer.
-        // TODO: in the future we'll retrieve the missing transactions from the block
-        // producer and validate them.
-        let submit_txs = match new_block_header.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| {
-                            eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
-                        })
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(txs) => txs,
-            Err(e) => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!("Failed to collect submit tx headers: {}", e))
-                });
-            }
-        };
-
-        //====================================
         // Publish ledger TX Validation
         //------------------------------------
         // 1. Validate the proof
@@ -222,9 +190,42 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
+        let mempool = self.service_senders.mempool.clone();
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
+
+            //====================================
+            // Submit ledger TX validation
+            //------------------------------------
+            // Get all the submit ledger transactions for the new block, error if not found
+            // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
+            // If they are in our mempool and validated we know they are real, if not we have
+            // to retrieve and validate them from the block producer.
+            // TODO: in the future we'll retrieve the missing transactions from the block
+            // producer and validate them.
+
+            let submit_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Submit]
+                .tx_ids
+                .0
+                .clone();
+
+            let (tx, rx) = oneshot::channel();
+            mempool.send(MempoolServiceMessage::GetDataTxs(
+                submit_tx_ids_to_check.clone(),
+                tx,
+            ))?;
+
+            let submit_txs = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<IrysTransactionHeader>>();
+
+            if submit_txs.len() != submit_tx_ids_to_check.len() {
+                return Err(eyre::eyre!("Failed to collect submit tx headers"));
+            }
 
             //====================================
             // Commitment ledger TX Validation
