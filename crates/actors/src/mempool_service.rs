@@ -55,7 +55,7 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
-    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
 }
 
 #[derive(Clone, Debug)]
@@ -113,11 +113,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process ChunkIngressMessage")
     }
 
-    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::GetDataTxExistence(tx_id, oneshot_tx))
-            .map_err(|_| TxIngressError::Other("Error sending TxExistenceQuery ".to_owned()))?;
+            .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
     }
@@ -159,9 +159,9 @@ pub enum MempoolServiceMessage {
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
     ),
     /// Confirm data/storage tx exists in mempool or database
-    GetDataTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
+    GetDataTxExistence(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// Confirm commitment tx exists in mempool
-    GetCommitmentTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
+    GetCommitmentTxExistence(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngressChunk(
         UnpackedChunk,
@@ -403,6 +403,32 @@ pub enum ChunkIngressError {
 }
 
 impl ChunkIngressError {
+    /// Returns an other error with the given message.
+    pub fn other(err: impl Into<String>) -> Self {
+        Self::Other(err.into())
+    }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display) -> Self {
+        Self::Other(err.to_string())
+    }
+}
+
+/// Reasons why reading a transaction might fail
+#[derive(Debug, Clone)]
+pub enum TxReadError {
+    /// Some database error occurred when reading
+    DatabaseError,
+    /// The service is uninitialized
+    ServiceUninitialized,
+    /// The commitment transaction is not found in the mempool
+    CommitmentTxNotInMempool,
+    /// The transaction is not found in the mempool
+    DataTxNotInMempool,
+    /// Catch-all variant for other errors.
+    Other(String),
+}
+
+impl TxReadError {
     /// Returns an other error with the given message.
     pub fn other(err: impl Into<String>) -> Self {
         Self::Other(err.into())
@@ -1396,7 +1422,7 @@ impl Inner {
     async fn handle_get_commitment_existence_message(
         &self,
         commitment_tx_id: H256,
-    ) -> Result<bool, TxIngressError> {
+    ) -> Result<bool, TxReadError> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
 
@@ -1411,7 +1437,7 @@ impl Inner {
     async fn handle_get_data_transaction_existence_message(
         &self,
         txid: H256,
-    ) -> Result<bool, TxIngressError> {
+    ) -> Result<bool, TxReadError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
@@ -1428,11 +1454,11 @@ impl Inner {
             let read_tx = self.read_tx();
 
             if read_tx.is_err() {
-                Err(TxIngressError::DatabaseError)
+                Err(TxReadError::DatabaseError)
             } else {
                 Ok(
                     tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
-                        .map_err(|_| TxIngressError::DatabaseError)?
+                        .map_err(|_| TxReadError::DatabaseError)?
                         .is_some(),
                 )
             }

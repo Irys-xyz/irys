@@ -148,7 +148,17 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_transaction(tx_id).await? {
+        if self
+            .mempool
+            .is_known_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })?
+        {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -200,7 +210,17 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_transaction(tx_id).await? {
+        if self
+            .mempool
+            .is_known_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })?
+        {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -377,7 +397,16 @@ where
     }
 
     async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        Ok(self.mempool.is_known_transaction(tx_id).await?)
+        Ok(self
+            .mempool
+            .is_known_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })?)
     }
 
     pub(crate) async fn handle_get_data(
