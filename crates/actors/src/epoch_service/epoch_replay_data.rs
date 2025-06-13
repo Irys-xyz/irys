@@ -39,7 +39,7 @@ impl EpochReplayData {
     )> {
         // Recover any mempool commitment transactions that were persisted
         let recovered =
-            RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir()).await;
+            RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir(), false).await;
 
         let block_index = block_index_guard.read();
 
