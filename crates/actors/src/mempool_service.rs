@@ -855,10 +855,9 @@ impl Inner {
                 })
                 .expect("expected to read/write to database");
 
-            for storage_tx_id in storage_tx_ids.iter() {
-                if let Some(storage_tx_header) =
-                    self.handle_transaction_message(*storage_tx_id).await
-                {
+            let data_tx_headers = self.handle_get_data_tx_message(storage_tx_ids).await;
+            for maybe_storage_tx_header in data_tx_headers {
+                if let Some(storage_tx_header) = maybe_storage_tx_header {
                     if let Err(err) = insert_tx_header(&mut_tx, &storage_tx_header) {
                         error!(
                             "Could not insert transaction header - txid: {} err: {}",
@@ -866,10 +865,7 @@ impl Inner {
                         );
                     }
                 } else {
-                    error!(
-                        "Could not find transaction header in mempool - txid: {}",
-                        storage_tx_id,
-                    );
+                    error!("Could not find transaction header in mempool");
                 }
             }
 
