@@ -154,7 +154,7 @@ pub enum MempoolServiceMessage {
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
     /// Get IrysTransactionHeader
-    GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
+    GetTx(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
     /// Confirm if tx exists in database
     GetTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -1455,7 +1455,7 @@ impl Inner {
     ) -> BoxFuture<'a, eyre::Result<()>> {
         Box::pin(async move {
             match msg {
-                MempoolServiceMessage::GetTransaction(tx, response) => {
+                MempoolServiceMessage::GetTx(tx, response) => {
                     let response_message = self.handle_transaction_message(tx).await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
