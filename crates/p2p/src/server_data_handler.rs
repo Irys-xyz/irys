@@ -78,7 +78,7 @@ where
         let source_miner_address = chunk_request.miner_address;
         let chunk = chunk_request.data;
         let chunk_path_hash = chunk.chunk_path_hash();
-        match self.mempool.handle_chunk(chunk).await {
+        match self.mempool.handle_chunk_ingress(chunk).await {
             Ok(()) => {
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
@@ -148,7 +148,17 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_tx(tx_id).await? {
+        if self
+            .mempool
+            .is_known_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })?
+        {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -158,7 +168,7 @@ where
 
         match self
             .mempool
-            .handle_data_transaction(tx)
+            .handle_data_transaction_ingress(tx)
             .await
             .map_err(GossipError::from)
         {
@@ -200,7 +210,17 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_tx(tx_id).await? {
+        if self
+            .mempool
+            .is_known_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })?
+        {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -210,7 +230,7 @@ where
 
         match self
             .mempool
-            .handle_commitment_transaction(tx)
+            .handle_commitment_transaction_ingress(tx)
             .await
             .map_err(GossipError::from)
         {
@@ -344,12 +364,12 @@ where
                 IrysTransactionResponse::Commitment(commitment_tx) => {
                     tx_id = commitment_tx.id;
                     self.mempool
-                        .handle_commitment_transaction(commitment_tx)
+                        .handle_commitment_transaction_ingress(commitment_tx)
                         .await
                 }
                 IrysTransactionResponse::Storage(tx) => {
                     tx_id = tx.id;
-                    self.mempool.handle_data_transaction(tx).await
+                    self.mempool.handle_data_transaction_ingress(tx).await
                 }
             };
 
@@ -377,7 +397,12 @@ where
     }
 
     async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        Ok(self.mempool.is_known_tx(tx_id).await?)
+        self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "is_known_transaction() errored: {:?}",
+                e
+            )))
+        })
     }
 
     pub(crate) async fn handle_get_data(

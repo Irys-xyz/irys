@@ -10,7 +10,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
-    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError},
+    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
 };
 use irys_api_client::ApiClient;
 use irys_primitives::Address;
@@ -52,7 +52,7 @@ impl MempoolStub {
 
 #[async_trait]
 impl MempoolFacade for MempoolStub {
-    async fn handle_data_transaction(
+    async fn handle_data_transaction_ingress(
         &self,
         tx_header: IrysTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
@@ -82,14 +82,14 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_commitment_transaction(
+    async fn handle_commitment_transaction_ingress(
         &self,
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
-    async fn handle_chunk(
+    async fn handle_chunk_ingress(
         &self,
         chunk: UnpackedChunk,
     ) -> std::result::Result<(), ChunkIngressError> {
@@ -109,7 +109,7 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> std::result::Result<bool, TxIngressError> {
+    async fn is_known_transaction(&self, tx_id: H256) -> std::result::Result<bool, TxReadError> {
         let exists = self
             .txs
             .read()

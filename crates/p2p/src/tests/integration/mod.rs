@@ -93,7 +93,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
         .first()
         .expect("to have a fixture")
         .mempool_stub
-        .handle_data_transaction(generate_test_tx().header)
+        .handle_data_transaction_ingress(generate_test_tx().header)
         .await
         .expect("To handle tx");
 
