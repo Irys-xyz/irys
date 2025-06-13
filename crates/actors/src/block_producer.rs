@@ -458,15 +458,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
             // Generate expected system transactions using shared logic
             let system_txs = SystemTxGenerator::new(&block_height, &config.node_config.reward_address, &reward_amount.amount, &prev_block_header);
-            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx).map(|tx| {
-                let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
-                let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
-                let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
-                    .try_into_recovered()
-                    .expect("system tx must always be signable");
+            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx)
+                .map(|tx_result| {
+                    let tx = tx_result?;
+                    let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
+                    let signature = local_signer.sign_transaction_sync(&mut tx_raw).expect("system tx must always be signable");
+                    let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
+                        .try_into_recovered()
+                        .expect("system tx must always be signable");
 
-                EthPooledTransaction::new(tx.clone(), 300)
-            }).collect::<Vec<_>>();
+                    Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx.clone(), 300))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             // generate payload attributes
             let timestamp = now.as_secs();

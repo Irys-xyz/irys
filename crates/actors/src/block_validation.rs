@@ -574,7 +574,7 @@ async fn generate_expected_system_transactions_from_db<'a>(
     );
     let system_txs = system_txs
         .generate_all(&commitment_txs, &submit_txs)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(system_txs)
 }
 
