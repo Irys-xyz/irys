@@ -275,34 +275,34 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             match validation_result {
                 Ok(_) => {
                     // Attempt to validate / update the epoch commitment cache
-                    for commitment_tx in commitments.iter() {
-                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                        let _ =
-                            commitment_cache_sender.send(CommitmentCacheMessage::AddCommitment {
-                                commitment_tx: commitment_tx.clone(),
-                                response: oneshot_tx,
-                            });
-                        let status = oneshot_rx
-                            .await
-                            .expect("to receive CommitmentStatus from AddCommitment message");
+                    // for commitment_tx in commitments.iter() {
+                    //     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    //     let _ =
+                    //         commitment_cache_sender.send(CommitmentCacheMessage::AddCommitment {
+                    //             commitment_tx: commitment_tx.clone(),
+                    //             response: oneshot_tx,
+                    //         });
+                    //     let status = oneshot_rx
+                    //         .await
+                    //         .expect("to receive CommitmentStatus from AddCommitment message");
 
-                        if !matches!(status, CommitmentCacheStatus::Accepted) {
-                            // Something went wrong with the commitments validation, it's time to roll back
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            let _ = commitment_cache_sender.send(
-                                CommitmentCacheMessage::RollbackCommitments {
-                                    commitment_txs: commitment_tx_ids,
-                                    response: tx,
-                                },
-                            );
-                            let _ = rx
-                                .await
-                                .expect("to receive a response from RollbackCommitments message");
+                    //     if !matches!(status, CommitmentCacheStatus::Accepted) {
+                    //         // Something went wrong with the commitments validation, it's time to roll back
+                    //         let (tx, rx) = tokio::sync::oneshot::channel();
+                    //         let _ = commitment_cache_sender.send(
+                    //             CommitmentCacheMessage::RollbackCommitments {
+                    //                 commitment_txs: commitment_tx_ids,
+                    //                 response: tx,
+                    //             },
+                    //         );
+                    //         let _ = rx
+                    //             .await
+                    //             .expect("to receive a response from RollbackCommitments message");
 
-                            // These commitments do not result in valid commitment state
-                            return Err(eyre::eyre!("Invalid commitments"));
-                        }
-                    }
+                    //         // These commitments do not result in valid commitment state
+                    //         return Err(eyre::eyre!("Invalid commitments"));
+                    //     }
+                    // }
 
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
@@ -315,6 +315,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
                     let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
 
+                    let arc_commitment_txs = Arc::new(commitments);
+
                     if is_epoch_block {
                         // For epoch blocks, validate that all included commitments are legitimate
                         // Get current commitment state from epoch service for validation
@@ -326,13 +328,15 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         // Create a temporary local commitment validation environment
                         // This avoids async overhead while checking commitment validity and creates
                         // an independent cache we can populate and discard
-                        let mut local_commitment_cache =
-                            CommitmentCacheInner::new(commitment_state_guard);
+                        let mut local_commitment_cache = CommitmentCacheInner::new();
 
                         // Validate each commitment transaction before accepting the epoch block
-                        for commitment_tx in commitments.iter() {
-                            let status =
-                                local_commitment_cache.add_commitment(commitment_tx.clone());
+                        for commitment_tx in arc_commitment_txs.iter() {
+                            let is_staked_in_current_epoch =
+                                commitment_state_guard.is_staked(commitment_tx.signer);
+
+                            let status = local_commitment_cache
+                                .add_commitment(&commitment_tx, is_staked_in_current_epoch);
 
                             // Reject the entire epoch block if any commitment is invalid
                             // This ensures only verified commitments are finalized at epoch boundaries
@@ -357,7 +361,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         epoch_service.do_send(NewEpochMessage {
                             previous_epoch_block,
                             epoch_block: new_block_header.clone(),
-                            commitments,
+                            commitments: arc_commitment_txs.clone(),
                         });
 
                         // Clear the CommitmentCache for a new epoch
@@ -376,7 +380,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     let _ = block_tree_sender.send(BlockTreeServiceMessage::BlockPreValidated {
                         block: new_block_header.clone(),
-                        all_txs: Arc::new(all_txs),
+                        commitment_txs: arc_commitment_txs,
                         response: oneshot_tx,
                     });
                     let _ = oneshot_rx

@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, HashSet};
 
 use futures::future::Either;
+use irys_database::database;
 use irys_primitives::CommitmentType;
-use irys_types::{Address, CommitmentTransaction, H256List, H256};
+use irys_types::{
+    Address, CommitmentTransaction, ConsensusConfig, DatabaseProvider, H256List, H256,
+};
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use reth_db::Database;
 use std::pin::pin;
 use tokio::{
     sync::{mpsc::UnboundedReceiver, oneshot},
@@ -11,7 +15,10 @@ use tokio::{
 };
 use tracing::debug;
 
-use crate::CommitmentStateReadGuard;
+use crate::{
+    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
+    CommitmentStateReadGuard,
+};
 
 // Messages that the CommitmentCache service supports
 #[derive(Debug)]
@@ -51,13 +58,12 @@ pub struct CommitmentCache {
     inner: CommitmentCacheInner,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CommitmentCacheInner {
     cache: BTreeMap<Address, MinerCommitments>,
-    commitment_state_guard: CommitmentStateReadGuard,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct MinerCommitments {
     stake: Option<CommitmentTransaction>,
     pledges: Vec<CommitmentTransaction>,
@@ -65,11 +71,75 @@ struct MinerCommitments {
 
 impl CommitmentCacheInner {
     /// Create a new CommitmentCacheInner instance
-    pub fn new(commitment_state_guard: CommitmentStateReadGuard) -> Self {
+    pub fn new() -> Self {
         Self {
             cache: BTreeMap::new(),
-            commitment_state_guard,
         }
+    }
+
+    pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
+        let mut cache = Self::new();
+
+        if let Some(commitment_txs) = commitment_txs {
+            for commitment_tx in commitment_txs {
+                let _status = cache.add_commitment(&commitment_tx, false);
+            }
+        }
+
+        cache
+    }
+
+    pub fn current_epoch_commitments(
+        block_index_guard: BlockIndexReadGuard,
+        commitment_state_guard: CommitmentStateReadGuard,
+        db: DatabaseProvider,
+        consensus_config: &ConsensusConfig,
+    ) -> Self {
+        let num_blocks_in_epoch = consensus_config.epoch.num_blocks_in_epoch;
+        let block_index = block_index_guard.read();
+        let latest_item = block_index.get_latest_item();
+
+        let mut commitment_cache = Self::new();
+
+        if let Some(latest_item) = latest_item {
+            let tx = db.tx().unwrap();
+
+            let latest = database::block_header_by_hash(&tx, &latest_item.block_hash, false)
+                .unwrap()
+                .expect("block_index block to be in database");
+            let last_epoch_block_height = latest.height - (latest.height % num_blocks_in_epoch);
+
+            let start = last_epoch_block_height + 1;
+
+            // Loop though all the blocks starting with the first block following the last epoch block
+            for height in start..=latest.height {
+                // Query each block to see if they have commitment txids
+                let block_item = block_index.get_item(height).unwrap();
+                let block = database::block_header_by_hash(&tx, &block_item.block_hash, false)
+                    .unwrap()
+                    .expect("block_index block to be in database");
+
+                let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+                if commitment_tx_ids.len() > 0 {
+                    // If so, retrieve the full commitment transactions
+                    for txid in commitment_tx_ids {
+                        let commitment_tx = database::commitment_tx_by_txid(&tx, &txid)
+                            .unwrap()
+                            .expect("commitment transactions to be in database");
+
+                        let is_staked_in_current_epoch =
+                            commitment_state_guard.is_staked(commitment_tx.signer);
+
+                        // Apply them to the commitment cache
+                        let _status = commitment_cache
+                            .add_commitment(&commitment_tx, is_staked_in_current_epoch);
+                    }
+                }
+            }
+        }
+
+        // Return the initialized commitment cache
+        commitment_cache
     }
 
     /// Checks and returns the status of a commitment transaction
@@ -139,7 +209,8 @@ impl CommitmentCacheInner {
     /// Adds a new commitment transaction to the cache and validates its acceptance
     pub fn add_commitment(
         &mut self,
-        commitment_tx: CommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
+        is_staked_in_current_epoch: bool,
     ) -> CommitmentCacheStatus {
         debug!("AddCommitment message received");
         let signer = &commitment_tx.signer;
@@ -150,17 +221,10 @@ impl CommitmentCacheInner {
             return CommitmentCacheStatus::Unsupported;
         }
 
-        // Check if address is already staked in current epoch
-        let is_staked_in_epoch = self
-            .commitment_state_guard
-            .read()
-            .stake_commitments
-            .contains_key(signer);
-
         // Handle stake commitments
         if matches!(tx_type, CommitmentType::Stake) {
             // Check existing commitments in epoch service
-            if is_staked_in_epoch {
+            if is_staked_in_current_epoch {
                 // Already staked in current epoch, no need to add again
                 return CommitmentCacheStatus::Accepted;
             }
@@ -180,7 +244,7 @@ impl CommitmentCacheInner {
             // Handle pledge commitments - only accept if address has a stake
 
             // First check if staked in current epoch
-            if is_staked_in_epoch {
+            if is_staked_in_current_epoch {
                 // Address is staked in current epoch, add pledge
                 let miner_commitments = self.cache.entry(*signer).or_default();
 
@@ -285,10 +349,10 @@ impl CommitmentCacheInner {
                 commitment_tx,
                 response,
             } => {
-                let status = self.add_commitment(commitment_tx);
-                let _ = response.send(status).inspect_err(|_| {
-                    tracing::warn!("AddCommitment response could not be returned, sender dropped their half of the channel")
-                });
+                // let status = self.add_commitment(commitment_tx);
+                // let _ = response.send(status).inspect_err(|_| {
+                //     tracing::warn!("AddCommitment response could not be returned, sender dropped their half of the channel")
+                // });
             }
             CommitmentCacheMessage::RollbackCommitments {
                 commitment_txs,
@@ -321,7 +385,6 @@ impl CommitmentCache {
     pub fn spawn_service(
         exec: &TaskExecutor,
         rx: UnboundedReceiver<CommitmentCacheMessage>,
-        commitment_state_guard: CommitmentStateReadGuard,
     ) -> JoinHandle<()> {
         exec.spawn_critical_with_graceful_shutdown_signal(
             "CommitmentCache Service",
@@ -329,7 +392,7 @@ impl CommitmentCache {
                 let pending_commitments_cache = Self {
                     shutdown,
                     msg_rx: rx,
-                    inner: CommitmentCacheInner::new(commitment_state_guard),
+                    inner: CommitmentCacheInner::new(),
                 };
                 pending_commitments_cache
                     .start()

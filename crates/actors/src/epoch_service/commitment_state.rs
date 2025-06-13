@@ -14,7 +14,7 @@ pub struct CommitmentStateEntry {
     pub amount: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CommitmentState {
     pub stake_commitments: BTreeMap<Address, CommitmentStateEntry>,
     pub pledge_commitments: BTreeMap<Address, Vec<CommitmentStateEntry>>,

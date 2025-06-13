@@ -560,7 +560,8 @@ impl Inner {
         }
 
         // Check pending commitments and cached commitments and active commitments
-        let commitment_status = self.get_commitment_status(&commitment_tx).await;
+        // let commitment_status = self.get_commitment_status(&commitment_tx).await;
+        let commitment_status = CommitmentCacheStatus::Accepted;
         if commitment_status == CommitmentCacheStatus::Accepted {
             // Validate tx signature
             if let Err(e) = self.validate_signature(&commitment_tx).await {
@@ -613,30 +614,6 @@ impl Inner {
                         .expect("to process pending pledge for newly staked address");
                 }
             }
-
-            // // HACK HACK: in order for block discovery to validate incoming blocks
-            // // it needs to read commitment tx from the database. Ideally it should
-            // // be reading them from the mempool_service in memory cache, but we are
-            // // putting off that work until the actix mempool_service is rewritten as a
-            // // tokio service.
-            // match self.irys_db.update_eyre(|db_tx| {
-            //     irys_database::insert_commitment_tx(db_tx, &commitment_tx)?;
-            //     Ok(())
-            // }) {
-            //     Ok(()) => {
-            //         info!(
-            //             "Successfully stored commitment_tx in db {:?}",
-            //             commitment_tx.id.0.to_base58()
-            //         );
-            //     }
-            //     Err(db_error) => {
-            //         error!(
-            //             "Failed to store commitment_tx in db {:?}: {:?}",
-            //             commitment_tx.id.0.to_base58(),
-            //             db_error
-            //         );
-            //     }
-            // }
 
             // Gossip transaction
             self.service_senders

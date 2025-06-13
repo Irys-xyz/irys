@@ -63,7 +63,7 @@ async fn genesis_test() {
         NewEpochMessage {
             previous_epoch_block: None,
             epoch_block: genesis_block.into(),
-            commitments,
+            commitments: Arc::new(commitments),
         },
         &mut Context::new(),
     );
@@ -234,7 +234,7 @@ async fn add_slots_test() {
         NewEpochMessage {
             previous_epoch_block: Some(genesis_block.clone()),
             epoch_block: new_epoch_block.clone().into(),
-            commitments: Vec::new(),
+            commitments: Arc::new(Vec::new()),
         },
         &mut ctx,
     );
@@ -268,7 +268,7 @@ async fn add_slots_test() {
         NewEpochMessage {
             previous_epoch_block,
             epoch_block: new_epoch_block.clone().into(),
-            commitments: Vec::new(),
+            commitments: Arc::new(Vec::new()),
         },
         &mut ctx,
     );
@@ -508,7 +508,7 @@ async fn partition_expiration_and_repacking_test() {
             .send(NewEpochMessage {
                 previous_epoch_block,
                 epoch_block: new_epoch_block.clone().into(),
-                commitments: Vec::new(),
+                commitments: Arc::new(Vec::new()),
             })
             .await
             .unwrap();
@@ -788,7 +788,7 @@ async fn epoch_blocks_reinitialization_test() {
             NewEpochMessage {
                 previous_epoch_block,
                 epoch_block: new_epoch_block.clone().into(),
-                commitments: Vec::new(),
+                commitments: Arc::new(Vec::new()),
             },
             &mut ctx,
         );
@@ -938,7 +938,7 @@ async fn partitions_assignment_determinism_test() {
             NewEpochMessage {
                 previous_epoch_block,
                 epoch_block: new_epoch_block.clone().into(),
-                commitments: Vec::new(),
+                commitments: Arc::new(Vec::new()),
             },
             &mut ctx,
         );

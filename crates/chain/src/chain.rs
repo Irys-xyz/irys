@@ -883,6 +883,7 @@ impl IrysNode {
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
+            commitment_state_guard.clone(),
             &config,
             &service_senders,
             reth_service_actor.clone(),
@@ -907,11 +908,8 @@ impl IrysNode {
         );
 
         // Spawn the CommitmentCache service
-        let _commitcache_handle = CommitmentCache::spawn_service(
-            task_exec,
-            receivers.commitments_cache,
-            commitment_state_guard.clone(),
-        );
+        let _commitcache_handle =
+            CommitmentCache::spawn_service(task_exec, receivers.commitments_cache);
 
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) =
