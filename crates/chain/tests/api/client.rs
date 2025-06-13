@@ -3,7 +3,7 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_testing_utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{
     AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
     ProtocolVersion, VersionRequest,
@@ -143,7 +143,7 @@ async fn check_get_block_endpoint(
 #[actix_rt::test]
 #[test_log::test]
 async fn heavy_api_client_all_endpoints_should_work() {
-    setup_tracing_and_temp_dir(Some("heavy_api_client_all_endpoints_should_work"), false);
+    initialize_tracing();
     let config = NodeConfig::testnet();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 
