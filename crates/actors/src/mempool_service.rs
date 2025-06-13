@@ -802,7 +802,49 @@ impl Inner {
         }
         tx.inner.commit()?;
 
-        // TODO: Also migrate publish and submit ledger tx
+        // move data transactions to index
+        let storage_tx_ids = migrated_block.get_storage_ledger_tx_ids();
+        {
+            let mut_tx = self
+                .irys_db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            for storage_tx_id in storage_tx_ids.iter() {
+                if let Some(storage_tx_header) =
+                    self.handle_transaction_message(*storage_tx_id).await
+                {
+                    if let Err(err) = insert_tx_header(&mut_tx, &storage_tx_header) {
+                        error!(
+                            "Could not insert transaction header - txid: {} err: {}",
+                            storage_tx_header.id, err
+                        );
+                    }
+                } else {
+                    error!(
+                        "Could not find transaction header in mempool - txid: {}",
+                        storage_tx_id,
+                    );
+                }
+            }
+
+            mut_tx.commit().expect("expect to commit to database");
+        }
+
+        let mempool_state = &self.mempool_state.clone();
+        let mut mempool_state_write_guard = mempool_state.write().await;
+        for txid in migrated_block.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .iter()
+        {
+            // Remove the submit tx from the pending valid_tx pool
+            mempool_state_write_guard.valid_tx.remove(txid);
+            mempool_state_write_guard.recent_valid_tx.remove(txid);
+        }
+        drop(mempool_state_write_guard);
 
         Ok(())
     }
