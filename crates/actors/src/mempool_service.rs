@@ -1628,13 +1628,21 @@ impl Inner {
                 .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            self.handle_commitment_tx_ingress_message(commitment_tx)
+            let _ = self
+                .handle_commitment_tx_ingress_message(commitment_tx)
                 .await
-                .unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
+                .inspect_err(|_| {
+                    tracing::warn!("Commitment tx ingress error during mempool restore from disk")
+                });
         }
 
         for (_txid, storage_tx) in recovered.storage_txs {
-            self.handle_tx_ingress_message(storage_tx).await.unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
+            let _ = self
+                .handle_tx_ingress_message(storage_tx)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!("Storage tx ingress error during mempool restore from disk")
+                });
         }
     }
 
