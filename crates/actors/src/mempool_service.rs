@@ -697,15 +697,6 @@ impl Inner {
         &mut self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
-        let mempool_state = &self.mempool_state.clone();
-        let mut mempool_state_write_guard = mempool_state.write().await;
-        for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-            // Remove the submit tx from the pending valid_tx pool
-            mempool_state_write_guard.valid_tx.remove(txid);
-            mempool_state_write_guard.recent_valid_tx.remove(txid);
-        }
-        drop(mempool_state_write_guard);
-
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
         // Loop though the promoted transactions and remove their ingress proofs
