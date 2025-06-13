@@ -635,7 +635,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
-        let max_retries = seconds_to_wait; // 1 second per retry
+        let max_retries = seconds_to_wait * 5; // 200ms per retry
 
         while let Some(tx_id) = tx_ids.pop() {
             'inner: while retries < max_retries {
@@ -655,7 +655,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                     break 'inner;
                 }
 
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_millis(200)).await;
                 retries += 1;
             }
         }
