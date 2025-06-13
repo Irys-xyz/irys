@@ -188,12 +188,12 @@ impl TransactionPacket {
 }
 
 /// Stable 1-byte discriminants
-pub const UNSTAKE_ID: u8 = 0x00;
-pub const BLOCK_REWARD_ID: u8 = 0x01;
-pub const STAKE_ID: u8 = 0x02;
-pub const STORAGE_FEES_ID: u8 = 0x03;
-pub const PLEDGE_ID: u8 = 0x04;
-pub const UNPLEDGE_ID: u8 = 0x05;
+pub const UNSTAKE_ID: u8 = 0x01;
+pub const BLOCK_REWARD_ID: u8 = 0x02;
+pub const STAKE_ID: u8 = 0x03;
+pub const STORAGE_FEES_ID: u8 = 0x04;
+pub const PLEDGE_ID: u8 = 0x05;
+pub const UNPLEDGE_ID: u8 = 0x06;
 
 #[expect(
     clippy::arithmetic_side_effects,
