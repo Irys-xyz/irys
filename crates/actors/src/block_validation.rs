@@ -32,7 +32,9 @@ use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::{providers::TransactionsProvider, revm::primitives::ruint::Uint};
+use reth::{
+    providers::TransactionsProvider, revm::primitives::ruint::Uint, rpc::api::EngineApiClient,
+};
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
@@ -493,6 +495,24 @@ pub async fn system_transactions_are_valid(
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
 ) -> eyre::Result<()> {
+    // pending work:
+    // the local reth node does not have access to the incoming evm block.
+    // the responsibility for providing this evm block data is on the CL (irys)
+    // we need to propagate ExecutioinPayload in Irys gossip, and provide it here.
+    // The interactoin with the reth node then becomes:
+    //
+    // todo: we need to validate the executeion paylad (check that no `withdrawls` are present)
+    // let engine_api = reth_adapter.inner.engine_http_client();
+    // let result = engine_api
+    //     .new_payload_v3(
+    //         execution_payload_v3,
+    //         vec![], // blob version hashes are empty
+    //         parent_irys_block_hash,
+    //     )
+    //     .await?;
+    // // todo if result.is_syncing() we need to postpone the validation and attempt later
+    // ensure!(result.is_valid());
+
     // 1. Fetch EVM block transactions
     let block_txs = reth_adapter
         .inner
