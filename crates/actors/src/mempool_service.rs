@@ -1414,7 +1414,7 @@ impl Inner {
     }
 
     /// checks only the mempool
-    async fn handle_get_commitment_existence_message(
+    async fn handle_commitment_tx_exists_message(
         &self,
         commitment_tx_id: H256,
     ) -> Result<bool, TxReadError> {
@@ -1429,7 +1429,7 @@ impl Inner {
     }
 
     /// checks mempool and mdbx
-    async fn handle_get_data_transaction_existence_message(
+    async fn handle_data_transaction_exists_message(
         &self,
         txid: H256,
     ) -> Result<bool, TxReadError> {
@@ -1555,15 +1555,13 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::DataTxExists(txid, response) => {
-                    let response_value = self
-                        .handle_get_data_transaction_existence_message(txid)
-                        .await;
+                    let response_value = self.handle_data_transaction_exists_message(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
                 MempoolServiceMessage::CommitmentTxExists(txid, response) => {
-                    let response_value = self.handle_get_commitment_existence_message(txid).await;
+                    let response_value = self.handle_commitment_tx_exists_message(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
