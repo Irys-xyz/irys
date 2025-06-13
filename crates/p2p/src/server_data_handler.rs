@@ -397,14 +397,12 @@ where
     }
 
     async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        let known = self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
+        self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
             GossipError::Internal(InternalGossipError::Unknown(format!(
                 "is_known_transaction() errored: {:?}",
                 e
             )))
         });
-
-        known
     }
 
     pub(crate) async fn handle_get_data(
