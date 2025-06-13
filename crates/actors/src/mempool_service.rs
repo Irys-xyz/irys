@@ -144,8 +144,19 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
     BlockConfirmed(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
+    /// Return filtered list of candidate txns
+    /// Filtering based on funding status etc based on the provided EVM block ID
+    /// If `None` is provided, the latest canonical block is used
+    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<MempoolTxs>),
+    /// Retrieves a list of CommitmentTransactions based on the provided tx ids
+    GetCommitmentTxs {
+        commitment_tx_ids: Vec<IrysTransactionId>,
+        response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
+    },
     /// Get IrysTransactionHeader
     GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
+    /// Confirm if tx exists in database
+    GetTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngressChunk(
         UnpackedChunk,
@@ -164,17 +175,6 @@ pub enum MempoolServiceMessage {
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
-    /// Return filtered list of candidate txns
-    /// Filtering based on funding status etc based on the provided EVM block ID
-    /// If `None` is provided, the latest canonical block is used
-    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<MempoolTxs>),
-    /// Retrieves a list of CommitmentTransactions based on the provided tx ids
-    GetCommitmentTxs {
-        commitment_tx_ids: Vec<IrysTransactionId>,
-        response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
-    },
-    /// Confirm if tx exists in database
-    GetTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// validate and process an incoming IrysTransactionHeader
     IngressDataTx(
         IrysTransactionHeader,
