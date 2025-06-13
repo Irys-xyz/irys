@@ -402,7 +402,7 @@ where
                 "is_known_transaction() errored: {:?}",
                 e
             )))
-        });
+        })
     }
 
     pub(crate) async fn handle_get_data(
