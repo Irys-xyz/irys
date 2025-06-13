@@ -20,7 +20,7 @@ pub async fn post_commitment_tx(
 
     // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::CommitmentTxIngress(tx, oneshot_tx);
+    let tx_ingress_msg = MempoolServiceMessage::IngestCommitmentTx(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!(
             "API Failed to deliver MempoolServiceMessage::CommitmentTxIngressMessage: {:?}",

@@ -720,7 +720,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             self.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::DataTxIngress(
+                .send(MempoolServiceMessage::IngestDataTx(
                     tx.header.clone(),
                     oneshot_tx,
                 ));
