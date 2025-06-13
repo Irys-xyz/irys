@@ -2,12 +2,10 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
+use crate::peer_list::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
-use actix::{Actor, Context, Handler};
 use core::time::Duration;
-use irys_api_client::ApiClient;
-use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
+use irys_types::{Address, GossipData, GossipRequest, PeerListItem};
 use reqwest::Response;
 use serde::Serialize;
 use tracing::error;
@@ -101,15 +99,14 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    pub async fn send_data_and_update_score<R, A>(
+    pub async fn send_data_and_update_score<P>(
         &self,
         peer: (&Address, &PeerListItem),
         data: &GossipData,
-        peer_list_service: &PeerListFacade<A, R>,
+        peer_list_service: &P,
     ) -> GossipResult<()>
     where
-        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-        A: ApiClient,
+        P: PeerList,
     {
         let peer_miner_address = peer.0;
         let peer = peer.1;

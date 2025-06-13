@@ -1,8 +1,8 @@
-use crate::{GossipError, GossipResult, PeerListFacade};
-use actix::{Actor, Context, Handler};
+use crate::peer_list::PeerList;
+use crate::{GossipError, GossipResult};
 use base58::ToBase58;
 use irys_api_client::ApiClient;
-use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode, RethPeerInfo};
+use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
 use rand::prelude::SliceRandom;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -83,7 +83,7 @@ impl SyncState {
         self.sync_target_height.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// [`crate::block_pool_service::BlockPoolService`] marks block as processed once the
+    /// [`crate::block_pool_service::BlockPool`] marks block as processed once the
     /// BlockDiscovery finished the pre-validation and scheduled the block for full validation
     pub fn mark_processed(&self, height: usize) {
         let current_height = self.highest_processed_block.load(Ordering::Relaxed);
@@ -93,14 +93,14 @@ impl SyncState {
         }
     }
 
-    /// Highest pre-validated block height. Set by the [`crate::block_pool_service::BlockPoolService`]
+    /// Highest pre-validated block height. Set by the [`crate::block_pool_service::BlockPool`]
     pub fn highest_processed_block(&self) -> usize {
         self.highest_processed_block.load(Ordering::Relaxed)
     }
 
     /// Checks if more blocks can be scheduled for validation by checking the
     /// number of blocks scheduled for validation so far versus the highest block
-    /// marked by [`crate::block_pool_service::BlockPoolService`] after pre-validation
+    /// marked by [`crate::block_pool_service::BlockPool`] after pre-validation
     pub fn is_queue_full(&self) -> bool {
         // We already past the sync target height, so there's nothing in the queue
         //  scheduled by the sync task specifically (gossip still can schedule blocks)
@@ -140,13 +140,10 @@ impl SyncState {
     }
 }
 
-pub async fn sync_chain<
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
->(
+pub async fn sync_chain<A: ApiClient, P: PeerList>(
     sync_state: SyncState,
     api_client: A,
-    peer_list_service: PeerListFacade<A, R>,
+    peer_list_service: P,
     node_mode: &NodeMode,
     start_sync_from_height: usize,
     genesis_peer_discovery_timeout_millis: u64,
@@ -267,11 +264,8 @@ pub async fn sync_chain<
     Ok(())
 }
 
-async fn get_block_index<
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
->(
-    peer_list_service: &PeerListFacade<A, R>,
+async fn get_block_index<A: ApiClient, R: PeerList>(
+    peer_list_service: &R,
     api_client: &A,
     start: usize,
     limit: usize,
@@ -335,6 +329,7 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_list::PeerListServiceWithClient;
+        use actix::Actor;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
@@ -415,7 +410,7 @@ mod tests {
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
             );
-            let peer_list = PeerListFacade::new(peer_list_service.start());
+            let peer_list = peer_list_service.start();
             peer_list
                 .add_peer(
                     Address::repeat_byte(2),

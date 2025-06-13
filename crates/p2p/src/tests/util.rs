@@ -376,6 +376,8 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
+        let peer_list = self.peer_list.clone();
+
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
@@ -383,7 +385,7 @@ impl GossipServiceTestFixture {
                 block_discovery_stub,
                 self.api_client_stub.clone(),
                 &self.task_executor,
-                self.peer_list.clone().into(),
+                peer_list,
                 self.db.clone(),
                 gossip_listener,
                 self.block_status_provider.clone(),
