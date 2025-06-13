@@ -25,7 +25,7 @@ pub async fn post_chunk(
 
     // Create a message and send it
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::ChunkIngressMessage(chunk, oneshot_tx);
+    let tx_ingress_msg = MempoolServiceMessage::IngressChunk(chunk, oneshot_tx);
 
     // Handle failure to deliver the message (e.g., channel closed)
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {

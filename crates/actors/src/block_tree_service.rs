@@ -294,7 +294,7 @@ impl BlockTreeServiceInner {
         }
         self.service_senders
             .mempool
-            .send(MempoolServiceMessage::BlockConfirmedMessage(
+            .send(MempoolServiceMessage::BlockConfirmed(
                 confirmed_block.clone(),
                 all_tx,
             ))
