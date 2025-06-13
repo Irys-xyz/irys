@@ -46,16 +46,16 @@ use tracing::{debug, error, info, warn};
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
-    async fn handle_data_transaction(
+    async fn handle_data_transaction_ingress(
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError>;
-    async fn handle_commitment_transaction(
+    async fn handle_commitment_transaction_ingress(
         &self,
         tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
-    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+    async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
+    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxIngressError>;
 }
 
 #[derive(Clone, Debug)]
@@ -71,7 +71,7 @@ impl From<UnboundedSender<MempoolServiceMessage>> for MempoolServiceFacadeImpl {
 
 #[async_trait::async_trait]
 impl MempoolFacade for MempoolServiceFacadeImpl {
-    async fn handle_data_transaction(
+    async fn handle_data_transaction_ingress(
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError> {
@@ -85,7 +85,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process TxIngressMessage")
     }
 
-    async fn handle_commitment_transaction(
+    async fn handle_commitment_transaction_ingress(
         &self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
@@ -104,7 +104,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .expect("to process CommitmentTxIngressMessage")
     }
 
-    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
+    async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::ChunkIngressMessage(
@@ -117,7 +117,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process ChunkIngressMessage")
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))

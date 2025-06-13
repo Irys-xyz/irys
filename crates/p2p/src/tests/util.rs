@@ -52,7 +52,7 @@ impl MempoolStub {
 
 #[async_trait]
 impl MempoolFacade for MempoolStub {
-    async fn handle_data_transaction(
+    async fn handle_data_transaction_ingress(
         &self,
         tx_header: IrysTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
@@ -82,14 +82,14 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_commitment_transaction(
+    async fn handle_commitment_transaction_ingress(
         &self,
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
-    async fn handle_chunk(
+    async fn handle_chunk_ingress(
         &self,
         chunk: UnpackedChunk,
     ) -> std::result::Result<(), ChunkIngressError> {
@@ -109,7 +109,7 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> std::result::Result<bool, TxIngressError> {
+    async fn is_known_transaction(&self, tx_id: H256) -> std::result::Result<bool, TxIngressError> {
         let exists = self
             .txs
             .read()
