@@ -154,7 +154,7 @@ pub enum MempoolServiceMessage {
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
     /// Get IrysTransactionHeader
-    GetTx(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
+    GetDataTxs(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
     /// Confirm if tx exists in database
     GetTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -495,7 +495,7 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
-    async fn handle_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
+    async fn handle_get_data_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
         // if tx exists
@@ -512,7 +512,7 @@ impl Inner {
         None
     }
 
-    async fn handle_commitment_tx_ingress_message(
+    async fn handle_ingress_commitment_tx_message(
         &mut self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
@@ -1455,8 +1455,8 @@ impl Inner {
     ) -> BoxFuture<'a, eyre::Result<()>> {
         Box::pin(async move {
             match msg {
-                MempoolServiceMessage::GetTx(tx, response) => {
-                    let response_message = self.handle_transaction_message(tx).await;
+                MempoolServiceMessage::GetDataTxs(tx, response) => {
+                    let response_message = self.handle_get_data_transaction_message(tx).await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1467,7 +1467,7 @@ impl Inner {
                 }
                 MempoolServiceMessage::IngressCommitmentTx(commitment_tx, response) => {
                     let response_message = self
-                        .handle_commitment_tx_ingress_message(commitment_tx)
+                        .handle_ingress_commitment_tx_message(commitment_tx)
                         .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -1627,7 +1627,7 @@ impl Inner {
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
             let _ = self
-                .handle_commitment_tx_ingress_message(commitment_tx)
+                .handle_ingress_commitment_tx_message(commitment_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Commitment tx ingress error during mempool restore from disk")
