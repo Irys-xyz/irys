@@ -792,7 +792,9 @@ impl Inner {
 
         let migrated_block = event.block;
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
-        let commitments = self.handle_get_commitment_txs(commitment_tx_ids).await;
+        let commitments = self
+            .handle_get_commitment_transactions_message(commitment_tx_ids)
+            .await;
 
         let tx = self
             .irys_db
@@ -1378,7 +1380,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
+    async fn handle_tx_existence_query_message(&self, txid: H256) -> Result<bool, TxIngressError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
@@ -1406,7 +1408,7 @@ impl Inner {
         }
     }
 
-    async fn handle_get_commitment_txs(
+    async fn handle_get_commitment_transactions_message(
         &self,
         commitment_tx_ids: Vec<H256>,
     ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
@@ -1435,7 +1437,7 @@ impl Inner {
             });
 
         debug!(
-            "handle_get_commitment_tsx: {:?}",
+            "handle_get_commitment_transactions_message: {:?}",
             hash_map.iter().map(|x| x.0).collect::<Vec<_>>()
         );
 
@@ -1494,13 +1496,15 @@ impl Inner {
                     commitment_tx_ids,
                     response,
                 } => {
-                    let response_value = self.handle_get_commitment_txs(commitment_tx_ids).await;
+                    let response_value = self
+                        .handle_get_commitment_transactions_message(commitment_tx_ids)
+                        .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
                 MempoolServiceMessage::TxExistenceQuery(txid, response) => {
-                    let response_value = self.handle_tx_existence_query(txid).await;
+                    let response_value = self.handle_tx_existence_query_message(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
