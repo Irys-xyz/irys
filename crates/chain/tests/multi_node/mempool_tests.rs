@@ -182,21 +182,21 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     let restarted_node = genesis_node.stop().await.start().await;
 
     // confirm the mempool tx have appeared back in the mempool after a restart
-    for txid_to_check in vec![storage_tx.header.id] {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let get_tx_msg = MempoolServiceMessage::GetTransaction(txid_to_check, oneshot_tx);
-        if let Err(err) = restarted_node
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(get_tx_msg)
-        {
-            tracing::error!("error sending message to mempool: {:?}", err);
-        }
-        let tx_from_mempool = oneshot_rx.await.expect("expected result");
-        tracing::error!("transaction: {:?}", txid_to_check);
-        assert!(tx_from_mempool.is_some());
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let get_tx_msg = MempoolServiceMessage::GetDataTxs(vec![storage_tx.header.id], oneshot_tx);
+    if let Err(err) = restarted_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(get_tx_msg)
+    {
+        tracing::error!("error sending message to mempool: {:?}", err);
     }
+    let tx_from_mempool = oneshot_rx.await.expect("expected result");
+    assert!(tx_from_mempool
+        .first()
+        .expect("expected a data tx")
+        .is_some());
 
     // TODO: once mempool does not write directly to db, confirm commitment txs appear back in mempool after restart
 

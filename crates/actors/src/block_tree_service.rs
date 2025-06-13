@@ -286,7 +286,7 @@ impl BlockTreeServiceInner {
         }
         self.service_senders
             .mempool
-            .send(MempoolServiceMessage::BlockConfirmedMessage(
+            .send(MempoolServiceMessage::BlockConfirmed(
                 confirmed_block.clone(),
             ))
             .expect("mempool service has unexpectedly become unreachable");
