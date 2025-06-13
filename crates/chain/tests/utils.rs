@@ -826,6 +826,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         account.sign_transaction(tx).map_err(AddTxError::CreateTx)
     }
 
+    /// read storage tx from mbdx i.e. block index
     pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
         match self
             .node_ctx
@@ -836,6 +837,58 @@ impl IrysNodeTest<IrysNodeCtx> {
             Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
             Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
         }
+    }
+
+    /// read storage tx from mempool
+    pub async fn get_storage_tx_header_from_mempool(
+        &self,
+        tx_id: &H256,
+    ) -> eyre::Result<IrysTransactionHeader> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx);
+        if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
+            tracing::error!(
+                "API Failed to deliver MempoolServiceMessage::GetDataTxs: {:?}",
+                err
+            );
+        }
+        let mempool_response = oneshot_rx.await.expect(
+            "to receive IrysTransactionResponse from MempoolServiceMessage::GetDataTxs message",
+        );
+        let maybe_mempool_tx = mempool_response.first();
+        if let Some(result) = maybe_mempool_tx {
+            if let Some(tx) = result {
+                return Ok(tx.clone());
+            }
+        }
+        Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
+    }
+
+    /// read commitment tx from mempool
+    pub async fn get_commitment_tx_from_mempool(
+        &self,
+        tx_id: &H256,
+    ) -> eyre::Result<CommitmentTransaction> {
+        // try to get commitment tx from mempool
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs {
+            commitment_tx_ids: vec![*tx_id],
+            response: oneshot_tx,
+        };
+        if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
+            tracing::error!(
+                "API Failed to deliver MempoolServiceMessage::GetCommitmentTxs: {:?}",
+                err
+            );
+        }
+        let mempool_response = oneshot_rx.await.expect(
+            "to receive IrysTransactionResponse from MempoolServiceMessage::GetCommitmentTxs message",
+        );
+        let maybe_mempool_tx = mempool_response.get(&tx_id);
+        if let Some(tx) = maybe_mempool_tx {
+            return Ok(tx.clone());
+        }
+        Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
     pub fn get_block_by_height_on_chain(
