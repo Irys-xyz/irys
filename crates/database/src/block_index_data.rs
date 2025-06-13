@@ -85,6 +85,12 @@ impl BlockIndex {
         Ok(())
     }
 
+    pub fn truncate(&mut self, to: usize) {
+        let mut items_vec = self.items.to_vec();
+        items_vec.truncate(to);
+        self.items = items_vec.into();
+    }
+
     pub fn push_block(
         &mut self,
         block: &IrysBlockHeader,
