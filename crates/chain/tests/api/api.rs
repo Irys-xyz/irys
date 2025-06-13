@@ -50,7 +50,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let chain_id = config.consensus_config().chain_id;
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    node.node_ctx.start_mining().await.unwrap();
+    node.node_ctx.start_mining().await?;
 
     let app = node.start_public_api().await;
 
@@ -58,8 +58,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
-    .await
-    .unwrap();
+    .await?;
 
     // Create 2.5 chunks worth of data *  fill the data with random bytes
     let data_size = chunk_size * 2_usize;
@@ -79,7 +78,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         .set_json(&tx.header)
         .to_request();
 
-    info!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
+    info!("{}", serde_json::to_string_pretty(&tx.header)?);
 
     // Call the service
     let resp = test::call_service(&app, req).await;
