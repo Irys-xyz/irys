@@ -602,7 +602,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         for _ in 0..max_retries {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            mempool_service.send(MempoolServiceMessage::GetTxExistence(tx_id, oneshot_tx))?;
+            mempool_service.send(MempoolServiceMessage::GetDataTxExistence(tx_id, oneshot_tx))?;
 
             //if transaction exists
             if oneshot_rx

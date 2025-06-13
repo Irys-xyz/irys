@@ -116,7 +116,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetTxExistence(tx_id, oneshot_tx))
+            .send(MempoolServiceMessage::GetDataTxExistence(tx_id, oneshot_tx))
             .map_err(|_| TxIngressError::Other("Error sending TxExistenceQuery ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
@@ -159,7 +159,7 @@ pub enum MempoolServiceMessage {
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
     ),
     /// Confirm if tx exists in database
-    GetTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
+    GetDataTxExistence(H256, oneshot::Sender<Result<bool, TxIngressError>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngressChunk(
         UnpackedChunk,
@@ -1390,7 +1390,10 @@ impl Inner {
         Ok(())
     }
 
-    async fn handle_tx_existence_query_message(&self, txid: H256) -> Result<bool, TxIngressError> {
+    async fn handle_get_data_transaction_existence_message(
+        &self,
+        txid: H256,
+    ) -> Result<bool, TxIngressError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
@@ -1513,8 +1516,10 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::GetTxExistence(txid, response) => {
-                    let response_value = self.handle_tx_existence_query_message(txid).await;
+                MempoolServiceMessage::GetDataTxExistence(txid, response) => {
+                    let response_value = self
+                        .handle_get_data_transaction_existence_message(txid)
+                        .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
