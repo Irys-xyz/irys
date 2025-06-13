@@ -18,13 +18,18 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::ensure;
-use futures::future::Either;
+use futures::future::{poll_immediate, select, Either};
+use futures::FutureExt;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use std::future::{poll_fn, Future};
+use std::ops::ControlFlow;
+use std::pin::Pin;
+use std::task::Poll;
 use std::{pin::pin, sync::Arc};
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 use tracing::{debug, error, info, instrument, warn, Instrument};
@@ -37,18 +42,16 @@ pub enum ValidationServiceMessage {
 }
 
 /// Main validation service structure
-#[derive(Debug)]
 pub struct ValidationService {
     /// Graceful shutdown handle
     shutdown: GracefulShutdown,
     /// Message receiver
     msg_rx: UnboundedReceiver<ValidationServiceMessage>,
     /// Inner service logic
-    inner: ValidationServiceInner,
+    inner: Arc<ValidationServiceInner>,
 }
 
 /// Inner service structure containing business logic
-#[derive(Debug)]
 struct ValidationServiceInner {
     /// Read only view of the block index
     block_index_guard: BlockIndexReadGuard,
@@ -64,8 +67,19 @@ struct ValidationServiceInner {
     reth_node_adapter: IrysRethNodeAdapter,
     /// Database provider for transaction lookups
     db: DatabaseProvider,
-    /// Rayon thread pool that executes vdf steps
+    /// Rayon thread pool that executes vdf steps   
     pool: rayon::ThreadPool,
+}
+
+impl std::fmt::Debug for ValidationService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+impl std::fmt::Debug for ValidationServiceInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
 }
 
 impl ValidationService {
@@ -90,7 +104,7 @@ impl ValidationService {
                 let validation_service = Self {
                     shutdown,
                     msg_rx: rx,
-                    inner: ValidationServiceInner {
+                    inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
                             .build()
@@ -102,7 +116,7 @@ impl ValidationService {
                         service_senders,
                         reth_node_adapter,
                         db,
-                    },
+                    }),
                 };
 
                 validation_service
@@ -117,36 +131,82 @@ impl ValidationService {
     async fn start(mut self) -> eyre::Result<()> {
         info!("starting validation service");
 
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            // Handle shutdown or message reception
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await;
-                }
-                Either::Left((None, _)) => {
-                    warn!("receiver channel closed");
-                    break None;
-                }
-                Either::Right((shutdown, _)) => {
-                    warn!("shutdown signal received");
-                    break Some(shutdown);
+        let mut shutdown_future = pin!(&mut self.shutdown);
+        let mut active_validations = Vec::new();
+
+        'shutdown: loop {
+            // Check if we should try to receive new messages (max 10 concurrent validations)
+            let should_receive_new = active_validations.len() < 10;
+
+            'outer: {
+                if should_receive_new {
+                    // Try to receive a new message
+                    let msg_rx = pin!(self.msg_rx.recv());
+
+                    if let Some(shutdwon) = poll_immediate(&mut shutdown_future).await {
+                        drop(shutdwon);
+                        break 'shutdown;
+                    }
+
+                    let Some(msg) = poll_immediate(msg_rx).await else {
+                        // no messages in the queue
+                        break 'outer;
+                    };
+
+                    let Some(msg) = msg else {
+                        warn!("receiver channel closed");
+                        break 'shutdown;
+                    };
+
+                    // Transform message to validation future
+                    let fut = self.inner.clone().create_validation_future(msg).boxed();
+                    active_validations.push(fut);
                 }
             }
-        };
 
-        // Process remaining messages before shutdown
-        debug!(
-            amount_of_messages = ?self.msg_rx.len(),
-            "processing last in-bound messages before shutdown"
-        );
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await;
+            // Poll active validations
+            let mut to_remove = Vec::with_capacity(active_validations.len());
+            {
+                let active_validations = &mut active_validations;
+                let to_remove = &mut to_remove;
+                poll_fn(move |cx| {
+                    use std::task::Poll::*;
+                    for (idx, item) in active_validations.iter_mut().enumerate() {
+                        let Ready(()) = item.poll_unpin(cx) else {
+                            continue;
+                        };
+                        to_remove.push(idx);
+                    }
+                    Ready(())
+                })
+                .await;
+            }
+
+            // iterate from the other end to prevent idx mismatches
+            for idx_to_remove in to_remove.into_iter().rev() {
+                // safe to drop the validation_task because the future is completed
+                let validation_task = active_validations.remove(idx_to_remove);
+                drop(validation_task);
+            }
+
+            // If no active validations and channel closed, exit
+            if active_validations.is_empty() && self.msg_rx.is_closed() {
+                break;
+            }
+
+            // Yield to prevent busy loop
+            tokio::task::yield_now().await;
         }
 
-        // Explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
+        // Drain remaining validations
+        info!(
+            "draining {} active validations before shutdown",
+            active_validations.len()
+        );
+        while !active_validations.is_empty() {
+            // self.inner.poll_active_validations().await;
+            tokio::task::yield_now().await;
+        }
 
         info!("shutting down validation service");
         Ok(())
@@ -156,7 +216,7 @@ impl ValidationService {
 impl ValidationServiceInner {
     /// Handle incoming messages
     #[instrument(skip_all)]
-    async fn handle_message(&mut self, msg: ValidationServiceMessage) {
+    async fn create_validation_future(self: Arc<Self>, msg: ValidationServiceMessage) {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
                 let block_hash = block.block_hash;
