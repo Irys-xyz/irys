@@ -1,12 +1,10 @@
 //! endpoint tests
 use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
-use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse,
@@ -64,33 +62,7 @@ async fn test_get_tx() -> eyre::Result<()> {
         Some(_tx_header) => info!("commitment_tx found!"),
     };
 
-    let app_state = ApiState {
-        ema_service: node.node_ctx.service_senders.ema.clone(),
-        reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node
-            .node_ctx
-            .reth_handle
-            .rpc_server_handle()
-            .http_url()
-            .unwrap(),
-        block_index: node.node_ctx.block_index_guard.clone(),
-        block_tree: node.node_ctx.block_tree_guard.clone(),
-        db: node.node_ctx.db.clone(),
-        mempool_service: node.node_ctx.service_senders.mempool.clone(),
-        peer_list: node.node_ctx.peer_list.clone(),
-        chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: config.into(),
-        sync_state: node.node_ctx.sync_state.clone(),
-    };
-
-    // Start the actix webserver
-    let app = actix_web::test::init_service(
-        App::new()
-            .wrap(Logger::default())
-            .app_data(actix_web::web::Data::new(app_state))
-            .service(routes()),
-    )
-    .await;
+    let app = node.start_public_api().await;
 
     // Test storage transaction
     let id: String = storage_tx.id.as_bytes().to_base58();

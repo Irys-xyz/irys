@@ -227,7 +227,7 @@ impl BlockStatusProvider {
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
         self.block_tree_read_guard
             .write()
-            .add_block(block, Arc::new(Vec::new()))
+            .add_block(block)
             .expect("to add block to the tree");
     }
 
