@@ -230,13 +230,9 @@ where
         }
     }
 
-    async fn handle_invalid_data(
-        peer_miner_address: &Address,
-        error: &GossipError,
-        peer_list_service: &P,
-    ) {
+    async fn handle_invalid_data(peer_miner_address: &Address, error: &GossipError, peer_list: &P) {
         if let GossipError::InvalidData(_) = error {
-            if let Err(error) = peer_list_service
+            if let Err(error) = peer_list
                 .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData)
                 .await
             {

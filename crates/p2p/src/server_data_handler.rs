@@ -34,7 +34,7 @@ where
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
-    pub peer_list_service: TPeerList,
+    pub peer_list: TPeerList,
     pub sync_state: SyncState,
     /// Tracing span
     pub span: Span,
@@ -54,7 +54,7 @@ where
             cache: Arc::clone(&self.cache),
             api_client: self.api_client.clone(),
             gossip_client: self.gossip_client.clone(),
-            peer_list_service: self.peer_list_service.clone(),
+            peer_list: self.peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: self.span.clone(),
         }
@@ -375,7 +375,7 @@ where
         request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<bool> {
         let peer_list_item = self
-            .peer_list_service
+            .peer_list
             .peer_by_mining_address(request.miner_address)
             .await?;
         let Some(peer_info) = peer_list_item else {
@@ -400,7 +400,7 @@ where
                             .send_data_and_update_score(
                                 (&request.miner_address, &peer_info),
                                 &GossipData::Block(block),
-                                &self.peer_list_service,
+                                &self.peer_list,
                             )
                             .await
                         {

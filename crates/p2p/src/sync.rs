@@ -140,10 +140,10 @@ impl SyncState {
     }
 }
 
-pub async fn sync_chain<A: ApiClient, P: PeerList>(
+pub async fn sync_chain(
     sync_state: SyncState,
-    api_client: A,
-    peer_list_service: P,
+    api_client: impl ApiClient,
+    peer_list: impl PeerList,
     node_mode: &NodeMode,
     start_sync_from_height: usize,
     genesis_peer_discovery_timeout_millis: u64,
@@ -164,7 +164,7 @@ pub async fn sync_chain<A: ApiClient, P: PeerList>(
         warn!("Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", genesis_peer_discovery_timeout_millis);
         match timeout(
             Duration::from_millis(genesis_peer_discovery_timeout_millis),
-            peer_list_service.wait_for_active_peers(),
+            peer_list.wait_for_active_peers(),
         )
         .await
         {
@@ -178,7 +178,7 @@ pub async fn sync_chain<A: ApiClient, P: PeerList>(
             }
         };
     } else {
-        peer_list_service.wait_for_active_peers().await?;
+        peer_list.wait_for_active_peers().await?;
     }
 
     debug!("Sync task: Syncing started");
@@ -187,7 +187,7 @@ pub async fn sync_chain<A: ApiClient, P: PeerList>(
 
     let mut block_queue = VecDeque::new();
     let block_index = get_block_index(
-        &peer_list_service,
+        &peer_list,
         &api_client,
         sync_state.sync_target_height(),
         limit,
@@ -211,7 +211,7 @@ pub async fn sync_chain<A: ApiClient, P: PeerList>(
             block.block_hash.0.to_base58(),
             sync_state.sync_target_height()
         );
-        match peer_list_service
+        match peer_list
             .request_block_from_the_network(block.block_hash)
             .await
         {
@@ -237,7 +237,7 @@ pub async fn sync_chain<A: ApiClient, P: PeerList>(
         if blocks_left_to_process == 0 {
             block_queue.extend(
                 get_block_index(
-                    &peer_list_service,
+                    &peer_list,
                     &api_client,
                     sync_state.sync_target_height(),
                     limit,
@@ -264,18 +264,18 @@ pub async fn sync_chain<A: ApiClient, P: PeerList>(
     Ok(())
 }
 
-async fn get_block_index<A: ApiClient, R: PeerList>(
-    peer_list_service: &R,
-    api_client: &A,
+async fn get_block_index(
+    peer_list: &impl PeerList,
+    api_client: &impl ApiClient,
     start: usize,
     limit: usize,
     retries: usize,
     fetch_from_the_trusted_peer: bool,
 ) -> GossipResult<Vec<BlockIndexItem>> {
     let peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
-        peer_list_service.top_trusted_peer().await?
+        peer_list.top_trusted_peer().await?
     } else {
-        peer_list_service.top_active_peers(Some(5), None).await?
+        peer_list.top_active_peers(Some(5), None).await?
     };
 
     if peers_to_fetch_index_from.is_empty() {

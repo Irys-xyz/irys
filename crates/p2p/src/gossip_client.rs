@@ -103,7 +103,7 @@ impl GossipClient {
         &self,
         peer: (&Address, &PeerListItem),
         data: &GossipData,
-        peer_list_service: &P,
+        peer_list: &P,
     ) -> GossipResult<()>
     where
         P: PeerList,
@@ -115,7 +115,7 @@ impl GossipClient {
         match res {
             Ok(()) => {
                 // Successful send, increase score
-                if let Err(e) = peer_list_service
+                if let Err(e) = peer_list
                     .increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online)
                     .await
                 {
@@ -125,7 +125,7 @@ impl GossipClient {
             }
             Err(error) => {
                 // Failed to send, decrease score
-                if let Err(e) = peer_list_service
+                if let Err(e) = peer_list
                     .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline)
                     .await
                 {
