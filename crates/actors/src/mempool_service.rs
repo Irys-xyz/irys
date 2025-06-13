@@ -77,7 +77,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngressDataTx(tx_header, oneshot_tx))
+            .send(MempoolServiceMessage::DataTxIngress(tx_header, oneshot_tx))
             .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxIngressMessage")
@@ -89,7 +89,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngressCommitmentTx(
+            .send(MempoolServiceMessage::CommitmentTxIngress(
                 commitment_tx,
                 oneshot_tx,
             ))
@@ -105,7 +105,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngressChunk(chunk, oneshot_tx))
+            .send(MempoolServiceMessage::ChunkIngress(chunk, oneshot_tx))
             .map_err(|_| {
                 ChunkIngressError::Other("Error sending ChunkIngressMessage ".to_owned())
             })?;
@@ -116,7 +116,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetDataTxExistence(tx_id, oneshot_tx))
+            .send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))
             .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
@@ -144,6 +144,33 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
     BlockConfirmed(Arc<IrysBlockHeader>),
+    /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
+    ChunkIngress(
+        UnpackedChunk,
+        oneshot::Sender<Result<(), ChunkIngressError>>,
+    ),
+    /// Confirm commitment tx exists in mempool
+    CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
+    /// Ingress CommitmentTransaction into the mempool
+    ///
+    /// This function performs a series of checks and validations:
+    /// - Skips the transaction if it is already known to be invalid or previously processed
+    /// - Validates the transaction's anchor and signature
+    /// - Inserts the valid transaction into the mempool and database
+    /// - Processes any pending pledge transactions that depended on this commitment
+    /// - Gossips the transaction to peers if accepted
+    /// - Caches the transaction for unstaked signers to be reprocessed later
+    CommitmentTxIngress(
+        CommitmentTransaction,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// Confirm data/storage tx exists in mempool or database
+    DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
+    /// validate and process an incoming IrysTransactionHeader
+    DataTxIngress(
+        IrysTransactionHeader,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
     /// Return filtered list of candidate txns
     /// Filtering based on funding status etc based on the provided EVM block ID
     /// If `None` is provided, the latest canonical block is used
@@ -157,33 +184,6 @@ pub enum MempoolServiceMessage {
     GetDataTxs(
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
-    ),
-    /// Confirm data/storage tx exists in mempool or database
-    GetDataTxExistence(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// Confirm commitment tx exists in mempool
-    GetCommitmentTxExistence(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
-    IngressChunk(
-        UnpackedChunk,
-        oneshot::Sender<Result<(), ChunkIngressError>>,
-    ),
-    /// Ingress CommitmentTransaction into the mempool
-    ///
-    /// This function performs a series of checks and validations:
-    /// - Skips the transaction if it is already known to be invalid or previously processed
-    /// - Validates the transaction's anchor and signature
-    /// - Inserts the valid transaction into the mempool and database
-    /// - Processes any pending pledge transactions that depended on this commitment
-    /// - Gossips the transaction to peers if accepted
-    /// - Caches the transaction for unstaked signers to be reprocessed later
-    IngressCommitmentTx(
-        CommitmentTransaction,
-        oneshot::Sender<Result<(), TxIngressError>>,
-    ),
-    /// validate and process an incoming IrysTransactionHeader
-    IngressDataTx(
-        IrysTransactionHeader,
-        oneshot::Sender<Result<(), TxIngressError>>,
     ),
 }
 
@@ -643,7 +643,7 @@ impl Inner {
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     // todo switch _ to actually handle the result
                     let _ = self
-                        .handle_message(MempoolServiceMessage::IngressCommitmentTx(
+                        .handle_message(MempoolServiceMessage::CommitmentTxIngress(
                             pledge_tx, oneshot_tx,
                         ))
                         .await;
@@ -1390,7 +1390,7 @@ impl Inner {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 //todo check the value rather than _
                 let _ = self
-                    .handle_message(MempoolServiceMessage::IngressChunk(chunk, oneshot_tx))
+                    .handle_message(MempoolServiceMessage::ChunkIngress(chunk, oneshot_tx))
                     .await;
 
                 let msg_result = oneshot_rx
@@ -1522,7 +1522,7 @@ impl Inner {
                 MempoolServiceMessage::BlockConfirmed(block) => {
                     let _unused_response_message = self.handle_block_confirmed_message(block).await;
                 }
-                MempoolServiceMessage::IngressCommitmentTx(commitment_tx, response) => {
+                MempoolServiceMessage::CommitmentTxIngress(commitment_tx, response) => {
                     let response_message = self
                         .handle_ingress_commitment_tx_message(commitment_tx)
                         .await;
@@ -1530,7 +1530,7 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::IngressChunk(chunk, response) => {
+                MempoolServiceMessage::ChunkIngress(chunk, response) => {
                     let response_value = self.handle_chunk_ingress_message(chunk).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -1554,7 +1554,7 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::GetDataTxExistence(txid, response) => {
+                MempoolServiceMessage::DataTxExists(txid, response) => {
                     let response_value = self
                         .handle_get_data_transaction_existence_message(txid)
                         .await;
@@ -1562,13 +1562,13 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::GetCommitmentTxExistence(txid, response) => {
+                MempoolServiceMessage::CommitmentTxExists(txid, response) => {
                     let response_value = self.handle_get_commitment_existence_message(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::IngressDataTx(tx, response) => {
+                MempoolServiceMessage::DataTxIngress(tx, response) => {
                     let response_value = self.handle_tx_ingress_message(tx).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
