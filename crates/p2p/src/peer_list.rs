@@ -1689,13 +1689,7 @@ mod tests {
             },
             ctx,
         );
-        service.handle(
-            AddPeer {
-                mining_addr,
-                peer: peer,
-            },
-            ctx,
-        );
+        service.handle(AddPeer { mining_addr, peer }, ctx);
 
         // Verify only one entry exists using KnownPeersRequest
         let known_peers = service.handle(KnownPeersRequest, ctx);

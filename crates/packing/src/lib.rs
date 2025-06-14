@@ -178,7 +178,6 @@ pub enum PackingType {
     CPU,
     #[cfg(feature = "nvidia")]
     CUDA,
-    #[allow(unused)]
     AMD,
 }
 

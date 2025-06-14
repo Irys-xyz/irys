@@ -493,7 +493,7 @@ pub fn split_interval(
     let start = interval.start();
     let end = interval.end();
 
-    #[allow(
+    #[expect(
         clippy::comparison_chain,
         reason = "Proposed match chain is less readable"
     )]

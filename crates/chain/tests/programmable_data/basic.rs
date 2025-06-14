@@ -28,7 +28,6 @@ use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(
-    #[allow(missing_docs)]
     #[sol(rpc)]
     IrysProgrammableDataBasic,
     "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"

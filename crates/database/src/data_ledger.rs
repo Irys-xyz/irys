@@ -236,7 +236,7 @@ impl Ledgers {
     }
 
     /// The number of ledgers being managed
-    #[allow(
+    #[expect(
         clippy::len_without_is_empty,
         reason = "Doesn't make sense to add here right now"
     )]

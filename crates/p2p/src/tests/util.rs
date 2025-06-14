@@ -262,7 +262,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub api_client_stub: ApiClientStub,
     // Tets need the task manager to be stored somewhere
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,

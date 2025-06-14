@@ -51,7 +51,7 @@ impl IrysSigner {
         transaction.header.term_fee = 1;
 
         // Fetch and set last_tx if not provided (primarily for testing).
-        #[allow(clippy::manual_unwrap_or_default, reason = "TODO")]
+        #[expect(clippy::manual_unwrap_or_default, reason = "TODO")]
         let anchor = if let Some(anchor) = anchor {
             anchor
         } else {

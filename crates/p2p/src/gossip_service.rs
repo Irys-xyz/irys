@@ -204,12 +204,8 @@ impl P2PService {
 
         let cache_pruning_task_handle = spawn_cache_pruning_task(cache, task_executor);
 
-        let broadcast_task_handle = spawn_broadcast_task(
-            mempool_data_receiver,
-            self,
-            task_executor,
-            peer_list,
-        );
+        let broadcast_task_handle =
+            spawn_broadcast_task(mempool_data_receiver, self, task_executor, peer_list);
 
         let gossip_service_handle = spawn_watcher_task(
             server,

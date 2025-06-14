@@ -103,6 +103,6 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
         sleep(Duration::from_millis(10_000)).await;
     }
 
-    #[allow(unreachable_code)]
+    #[expect(unreachable_code)]
     Ok(())
 }

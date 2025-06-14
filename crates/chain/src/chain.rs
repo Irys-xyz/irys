@@ -1148,9 +1148,7 @@ impl IrysNode {
         let mut w = irys_provider
             .write()
             .map_err(|_| eyre::eyre!("lock poisoned"))?;
-        *w = Some(IrysRethProviderInner {
-            chunk_provider,
-        });
+        *w = Some(IrysRethProviderInner { chunk_provider });
 
         Ok((
             irys_node_ctx,
@@ -1170,7 +1168,7 @@ impl IrysNode {
         Arc::new(chunk_provider)
     }
 
-    #[allow(clippy::path_ends_with_ext, reason = "Core pinning logic")]
+    #[expect(clippy::path_ends_with_ext, reason = "Core pinning logic")]
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,

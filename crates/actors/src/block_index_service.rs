@@ -113,13 +113,13 @@ impl SystemService for BlockIndexService {
 
 #[derive(Debug)]
 struct BlockLogEntry {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub block_hash: H256,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub height: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub timestamp: u128,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub difficulty: U256,
 }
 

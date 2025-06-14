@@ -1471,7 +1471,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
-        #[allow(clippy::if_same_then_else, reason = "readability")]
+        #[expect(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard.valid_tx.contains_key(&txid) {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
@@ -1744,7 +1744,6 @@ impl Inner {
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
-    #[allow(dead_code)]
     async fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
 

@@ -422,6 +422,8 @@ type-complexity = "allow"
 needless-range-loop = "allow"
 too-many-arguments = "allow"
 redundant-clone = "deny"
+allow_attributes = "deny"
+
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]

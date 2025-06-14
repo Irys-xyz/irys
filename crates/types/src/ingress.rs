@@ -162,11 +162,7 @@ mod tests {
             .chunks(testnet_config.chunk_size as usize)
             .map(Vec::from)
             .collect();
-        let proof = generate_ingress_proof(
-            signer,
-            data_root,
-            chunks.clone().into_iter().map(Ok),
-        )?;
+        let proof = generate_ingress_proof(signer, data_root, chunks.clone().into_iter().map(Ok))?;
 
         // Verify the ingress proof
         assert!(verify_ingress_proof(

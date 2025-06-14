@@ -671,7 +671,7 @@ mod tests {
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
         pub consensus_config: ConsensusConfig,
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         pub node_config: NodeConfig,
     }
 
@@ -861,7 +861,7 @@ mod tests {
     async fn poa_test(
         context: &TestContext,
         txs: &[IrysTransaction],
-        #[allow(
+        #[expect(
             clippy::ptr_arg,
             reason = "we need to clone this so it needs to be a Vec"
         )]

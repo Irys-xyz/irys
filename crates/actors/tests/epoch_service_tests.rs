@@ -908,8 +908,7 @@ async fn partitions_assignment_determinism_test() {
     let pledge_count = 20;
     let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
     let service_senders = ServiceSenders::new().0;
     let mut epoch_service =
         EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);

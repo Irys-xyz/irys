@@ -9,7 +9,6 @@ use crate::ApiState;
 #[derive(Debug)]
 pub enum ProxyError {
     RequestError(awc::error::SendRequestError),
-    #[allow(unused)]
     ParseError(String),
     MethodNotAllowed,
 }

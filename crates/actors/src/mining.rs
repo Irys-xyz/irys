@@ -424,7 +424,6 @@ mod tests {
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
     ) -> BlockProducerMockActor {
-        let closure_arc = closure_arc;
         BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
             let solution_message: SolutionFoundMessage =
                 *msg.downcast::<SolutionFoundMessage>().unwrap();
@@ -441,7 +440,7 @@ mod tests {
     }
 
     #[test_log::test(actix_rt::test)]
-    #[allow(clippy::await_holding_lock, reason = "test")]
+    #[expect(clippy::await_holding_lock, reason = "test")]
 
     async fn test_solution() {
         let chunk_count = 4;
