@@ -17,7 +17,7 @@ pub enum CommitmentCacheStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct CommitmentCacheInner {
+pub struct CommitmentCache {
     cache: BTreeMap<Address, MinerCommitments>,
 }
 
@@ -27,7 +27,7 @@ struct MinerCommitments {
     pledges: Vec<CommitmentTransaction>,
 }
 
-impl CommitmentCacheInner {
+impl CommitmentCache {
     /// Create a new CommitmentCacheInner instance
     pub fn new() -> Self {
         Self {

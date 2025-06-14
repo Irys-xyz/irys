@@ -225,11 +225,11 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::CommitmentCacheInner;
+        use irys_actors::CommitmentCache;
 
         self.block_tree_read_guard
             .write()
-            .add_peer_block(block, Arc::new(CommitmentCacheInner::new()))
+            .add_peer_block(block, Arc::new(CommitmentCache::new()))
             .expect("to add block to the tree");
     }
 

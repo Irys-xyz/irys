@@ -5,7 +5,7 @@ use crate::{
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
-    CommitmentCacheInner, CommitmentCacheStatus, GetCommitmentStateGuardMessage,
+    CommitmentCache, CommitmentCacheStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -331,7 +331,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         // Create a temporary local commitment validation environment
                         // This avoids async overhead while checking commitment validity and creates
                         // an independent cache we can populate and discard
-                        let mut local_commitment_cache = CommitmentCacheInner::new();
+                        let mut local_commitment_cache = CommitmentCache::new();
 
                         // Validate each commitment transaction before accepting the epoch block
                         for commitment_tx in arc_commitment_txs.iter() {
