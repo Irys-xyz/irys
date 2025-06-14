@@ -836,9 +836,7 @@ mod price_cache_context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_tree_service::{
-        get_canonical_chain, BlockState, BlockTreeCache, ChainState, ReorgEvent,
-    };
+    use crate::block_tree_service::{get_canonical_chain, BlockTreeCache, ChainState, ReorgEvent};
     use crate::CommitmentCacheInner;
     use irys_types::{
         block_height_to_use_for_price, storage_pricing::TOKEN_SCALE, ConsensusConfig,
@@ -913,7 +911,12 @@ mod tests {
                 block_hash = block.block_hash;
             }
             block_tree_cache
-                .add_local_block(&block, state.clone(), Arc::new(CommitmentCacheInner::new()))
+                .add_common(
+                    block.block_hash,
+                    block,
+                    Arc::new(CommitmentCacheInner::new()),
+                    state.clone(),
+                )
                 .unwrap();
         }
         let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
@@ -1143,10 +1146,11 @@ mod tests {
                 });
 
                 // Add to block tree as validated but not yet canonical
-                tree.add_local_block(
+                tree.add_common(
+                    header.block_hash,
                     &header,
-                    ChainState::Validated(BlockState::ValidBlock),
                     Arc::new(CommitmentCacheInner::new()),
+                    ChainState::Validated(crate::block_tree_service::BlockState::ValidBlock),
                 )
                 .unwrap();
 
@@ -1571,10 +1575,11 @@ mod tests {
                 block.cumulative_diff = block.height.into();
                 latest_block_hash = H256::random();
                 block.block_hash = latest_block_hash;
-                tree.add_local_block(
+                tree.add_common(
+                    block.block_hash,
                     &block,
-                    ChainState::Onchain,
                     Arc::new(CommitmentCacheInner::new()),
+                    ChainState::Onchain,
                 )
                 .unwrap();
             }

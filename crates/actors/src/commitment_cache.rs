@@ -1,47 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
-
-use futures::future::Either;
+use crate::{block_index_service::BlockIndexReadGuard, CommitmentStateReadGuard};
 use irys_database::database;
 use irys_primitives::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, ConsensusConfig, DatabaseProvider, H256List, H256,
 };
-use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database;
-use std::pin::pin;
-use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot},
-    task::JoinHandle,
-};
+use std::collections::{BTreeMap, HashSet};
 use tracing::debug;
-
-use crate::{
-    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
-    CommitmentStateReadGuard,
-};
-
-// Messages that the CommitmentCache service supports
-#[derive(Debug)]
-pub enum CommitmentCacheMessage {
-    GetCommitmentStatus {
-        commitment_tx: CommitmentTransaction,
-        response: oneshot::Sender<CommitmentCacheStatus>,
-    },
-    AddCommitment {
-        commitment_tx: CommitmentTransaction,
-        response: oneshot::Sender<CommitmentCacheStatus>,
-    },
-    RollbackCommitments {
-        commitment_txs: H256List,
-        response: oneshot::Sender<eyre::Result<()>>,
-    },
-    GetEpochCommitments {
-        response: oneshot::Sender<Vec<CommitmentTransaction>>,
-    },
-    ClearCache {
-        response: oneshot::Sender<eyre::Result<()>>,
-    },
-}
 
 #[derive(Debug, PartialEq)]
 pub enum CommitmentCacheStatus {
@@ -49,13 +14,6 @@ pub enum CommitmentCacheStatus {
     Unknown,     // The commitment is unknown to the cache & has no status
     Unsupported, // The commitment is an unsupported type (unstake/unpledge)
     Unstaked,    // The pledge commitment doesn't have a corresponding stake
-}
-
-#[derive(Debug)]
-pub struct CommitmentCache {
-    shutdown: GracefulShutdown,
-    msg_rx: UnboundedReceiver<CommitmentCacheMessage>,
-    inner: CommitmentCacheInner,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +103,7 @@ impl CommitmentCacheInner {
     /// Checks and returns the status of a commitment transaction
     pub fn get_commitment_status(
         &self,
-        commitment_tx: CommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
     ) -> CommitmentCacheStatus {
         debug!("GetCommitmentStatus message received");
 
@@ -212,7 +170,7 @@ impl CommitmentCacheInner {
         commitment_tx: &CommitmentTransaction,
         is_staked_in_current_epoch: bool,
     ) -> CommitmentCacheStatus {
-        debug!("AddCommitment message received");
+        debug!("add_commitment() called for {}", commitment_tx.id);
         let signer = &commitment_tx.signer;
         let tx_type = commitment_tx.commitment_type;
 
@@ -247,6 +205,15 @@ impl CommitmentCacheInner {
             if is_staked_in_current_epoch {
                 // Address is staked in current epoch, add pledge
                 let miner_commitments = self.cache.entry(*signer).or_default();
+
+                let existing = miner_commitments
+                    .pledges
+                    .iter()
+                    .find(|t| t.id == commitment_tx.id);
+
+                if let Some(existing) = existing {
+                    debug!("DUPLICATING PLEDGE: {}", existing.id)
+                }
 
                 miner_commitments.pledges.push(commitment_tx.clone());
                 return CommitmentCacheStatus::Accepted;
@@ -323,115 +290,5 @@ impl CommitmentCacheInner {
         }
 
         commitment_tx
-    }
-
-    pub fn clear_cache(&mut self) -> eyre::Result<()> {
-        // Clear out all the existing cached commitments as they have
-        // been applied to the CommitmentState in the epoch service
-        self.cache.clear();
-        Ok(())
-    }
-
-    /// Dispatches received messages to appropriate handler methods and sends responses
-    #[tracing::instrument(skip_all, err)]
-    async fn handle_message(&mut self, msg: CommitmentCacheMessage) -> eyre::Result<()> {
-        match msg {
-            CommitmentCacheMessage::GetCommitmentStatus {
-                commitment_tx,
-                response,
-            } => {
-                let status = self.get_commitment_status(commitment_tx);
-                let _ = response.send(status).inspect_err(|_| {
-                    tracing::warn!("GetCommitmentStatus response could not be returned, sender dropped their half of the channel")
-                });
-            }
-            CommitmentCacheMessage::AddCommitment {
-                commitment_tx,
-                response,
-            } => {
-                // let status = self.add_commitment(commitment_tx);
-                // let _ = response.send(status).inspect_err(|_| {
-                //     tracing::warn!("AddCommitment response could not be returned, sender dropped their half of the channel")
-                // });
-            }
-            CommitmentCacheMessage::RollbackCommitments {
-                commitment_txs,
-                response,
-            } => {
-                let result = self.rollback_commitments(&commitment_txs);
-                let _ = response.send(result).inspect_err(|_| {
-                    tracing::warn!("RollbackCommitments response could not be returned, sender dropped their half of the channel")
-                });
-            }
-            CommitmentCacheMessage::GetEpochCommitments { response } => {
-                let commitments = self.get_epoch_commitments();
-                let _ = response.send(commitments).inspect_err(|_| {
-                    tracing::warn!("GetEpochCommitments response could not be delivered, sender dropped their half of the channel")
-                });
-            }
-            CommitmentCacheMessage::ClearCache { response } => {
-                let result = self.clear_cache();
-                let _ = response.send(result).inspect_err(|_| {
-                    tracing::warn!("StartNewEpoch response could not be returned, sender dropped their half of the channel")
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-impl CommitmentCache {
-    /// Spawn a new CommitmentCache service
-    pub fn spawn_service(
-        exec: &TaskExecutor,
-        rx: UnboundedReceiver<CommitmentCacheMessage>,
-    ) -> JoinHandle<()> {
-        exec.spawn_critical_with_graceful_shutdown_signal(
-            "CommitmentCache Service",
-            |shutdown| async move {
-                let pending_commitments_cache = Self {
-                    shutdown,
-                    msg_rx: rx,
-                    inner: CommitmentCacheInner::new(),
-                };
-                pending_commitments_cache
-                    .start()
-                    .await
-                    .expect("CommitmentCache encountered an irrecoverable error")
-            },
-        )
-    }
-
-    async fn start(mut self) -> eyre::Result<()> {
-        tracing::info!("starting CommitmentCache service");
-
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
-                }
-                Either::Left((None, _)) => {
-                    tracing::warn!("receiver channel closed");
-                    break None;
-                }
-                Either::Right((shutdown, _)) => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
-                }
-            }
-        };
-
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
-        }
-
-        // explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
-
-        tracing::info!("shutting down CommitmentCache service");
-        Ok(())
     }
 }

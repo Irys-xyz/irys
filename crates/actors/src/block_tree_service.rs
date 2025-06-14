@@ -12,9 +12,7 @@ use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context};
 use futures::future::Either;
-use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid, SystemLedger,
-};
+use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, SystemLedger};
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DatabaseProvider, H256List, IrysBlockHeader, IrysTransactionHeader, H256, U256,
@@ -134,16 +132,20 @@ impl BlockTreeService {
         let consensus_config = config.node_config.consensus_config().clone();
         let service_senders = service_senders.clone();
         let system = System::current();
+        let bi_guard = block_index_guard.clone();
+        let cs_guard = commitment_state_guard.clone();
+
         exec.spawn_critical_with_graceful_shutdown_signal(
             "BlockTree Service",
             |shutdown| async move {
-                let cache = BlockTreeCache::initialize(
-                    block_index_guard.clone(),
-                    commitment_state_guard.clone(),
+                let cache = BlockTreeCache::restore_from_db(
+                    bi_guard.clone(),
+                    cs_guard.clone(),
                     reth_service_actor.clone(),
                     db.clone(),
                     consensus_config.clone(),
-                );
+                )
+                .await;
 
                 let block_tree_service = Self {
                     shutdown,
@@ -152,8 +154,8 @@ impl BlockTreeService {
                         db,
                         cache: Arc::new(RwLock::new(cache)),
                         miner_address,
-                        block_index_guard,
-                        commitment_state_guard,
+                        block_index_guard: bi_guard,
+                        commitment_state_guard: cs_guard,
                         consensus_config,
                         service_senders,
                         reth_service_actor,
@@ -434,31 +436,42 @@ impl BlockTreeServiceInner {
                 return Ok(());
             }
 
-            // Get the commitment cache from the previous block in the chain
-            let prev_commitment_cache = cache
-                .blocks
-                .get(&block.previous_block_hash)
-                .expect("previous block to be in block tree")
-                .commitment_cache
-                .clone();
+            let is_epoch_block =
+                block.height % self.consensus_config.epoch.num_blocks_in_epoch == 0;
 
-            let commitment_cache = if commitment_txs.len() > 0 {
-                // Clone the previous block's commitment cache to build upon it
-                let mut new_commitment_cache = (*prev_commitment_cache).clone();
-
-                // Process each commitment transaction in this block
-                for commitment_tx in commitment_txs.iter() {
-                    // Check if the commitment signer address has already staked in the current epoch
-                    let is_staked_in_current_epoch =
-                        self.commitment_state_guard.is_staked(commitment_tx.signer);
-
-                    // Apply the commitment transaction to update the cache
-                    new_commitment_cache.add_commitment(commitment_tx, is_staked_in_current_epoch);
-                }
-                Arc::new(new_commitment_cache)
+            // Is this an epoch block or not?
+            let commitment_cache = if is_epoch_block {
+                // if so, reset to an empty cache
+                Arc::new(CommitmentCacheInner::new())
             } else {
-                // No commitment transactions in this block - reuse the previous cache
-                prev_commitment_cache.clone()
+                // if not, get the commitment cache from the previous block in the chain
+                let prev_commitment_cache = cache
+                    .blocks
+                    .get(&block.previous_block_hash)
+                    .expect("previous block to be in block tree")
+                    .commitment_cache
+                    .clone();
+
+                // Either use the old commitment cache reference, or create a new one including the new commitment tx
+                if commitment_txs.len() > 0 {
+                    // Clone the previous block's commitment cache to build upon it
+                    let mut new_commitment_cache = (*prev_commitment_cache).clone();
+
+                    // Process each commitment transaction in this block
+                    for commitment_tx in commitment_txs.iter() {
+                        // Check if the commitment signer address has already staked in the current epoch
+                        let is_staked_in_current_epoch =
+                            self.commitment_state_guard.is_staked(commitment_tx.signer);
+
+                        // Apply the commitment transaction to update the cache
+                        new_commitment_cache
+                            .add_commitment(commitment_tx, is_staked_in_current_epoch);
+                    }
+                    Arc::new(new_commitment_cache)
+                } else {
+                    // No commitment transactions in this block - reuse the previous cache
+                    prev_commitment_cache.clone()
+                }
             };
 
             // Handle block addition based on whether it's locally mined or received from a peer
@@ -906,37 +919,40 @@ impl BlockTreeCache {
         }
     }
 
-    /// Initializes the cache from a list of validated blocks.
-    /// The most recent block in the list is marked as the tip.
-    /// The input blocks must be sorted in descending order, from newest to oldest.
-    pub fn initialize(
+    pub async fn restore_from_db(
         block_index_guard: BlockIndexReadGuard,
         commitment_state_guard: CommitmentStateReadGuard,
         reth_service_actor: Addr<RethServiceActor>,
         db: DatabaseProvider,
         consensus_config: ConsensusConfig,
     ) -> Self {
-        let block_index = block_index_guard.read();
-        assert!(block_index.num_blocks() > 0, "Block list must not be empty");
+        // Scope the read guard to extract needed data
+        let (start, end, start_block_hash) = {
+            let block_index = block_index_guard.read();
+            assert!(block_index.num_blocks() > 0, "Block list must not be empty");
+
+            let start = block_index
+                .num_blocks()
+                .saturating_sub(BLOCK_CACHE_DEPTH - 1);
+            let end = block_index.num_blocks();
+            let start_block_hash = block_index.get_item(start).unwrap().block_hash;
+
+            (start, end, start_block_hash)
+        }; // block_index guard is dropped here
 
         let tx = db.tx().unwrap();
 
-        let start = block_index
-            .num_blocks()
-            .saturating_sub(BLOCK_CACHE_DEPTH - 1);
-        let end = block_index.num_blocks();
-
         // Initialize cache with the start block
-        let block_hash = block_index.get_item(start).unwrap().block_hash;
-        let start_block = block_header_by_hash(&tx, &block_hash, false)
+        let start_block = block_header_by_hash(&tx, &start_block_hash, false)
             .unwrap()
             .unwrap();
+
         debug!(
             "block tree start block - hash: {} height: {}",
-            block_hash, start_block.height
+            start_block_hash, start_block.height
         );
 
-        // Initialize the cache with the start block
+        // Rest of initialization logic...
         let cumulative_diff = start_block.cumulative_diff;
         let block_height = start_block.height;
         let solution_hash = start_block.solution_hash;
@@ -947,61 +963,111 @@ impl BlockTreeCache {
         let mut block_tree_cache = Self {
             blocks: HashMap::new(),
             solutions: HashMap::new(),
-            tip: block_hash,
-            max_cumulative_difficulty: (cumulative_diff, block_hash),
+            tip: start_block_hash,
+            max_cumulative_difficulty: (cumulative_diff, start_block_hash),
             height_index: BTreeMap::new(),
             longest_chain_cache,
         };
 
-        // Build a fully initialized commitment cache for all commitments since
-        // the last epoch block, otherwise known as the current epoch commitments
-        let commitment_cache = Arc::new(CommitmentCacheInner::current_epoch_commitments(
+        let mut commitment_cache = CommitmentCacheInner::current_epoch_commitments(
             block_index_guard.clone(),
             commitment_state_guard.clone(),
             db.clone(),
             &consensus_config,
-        ));
+        );
 
-        // Create a block entry for the start block
+        let arc_commitment_cache = Arc::new(commitment_cache.clone());
         let block_entry = BlockEntry {
             block: start_block.clone(),
             all_tx: Arc::new(vec![]),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
-            commitment_cache,
+            commitment_cache: arc_commitment_cache.clone(),
         };
 
-        block_tree_cache.blocks.insert(block_hash, block_entry);
+        block_tree_cache
+            .blocks
+            .insert(start_block_hash, block_entry);
         block_tree_cache
             .solutions
-            .insert(solution_hash, HashSet::from([block_hash]));
+            .insert(solution_hash, HashSet::from([start_block_hash]));
         block_tree_cache
             .height_index
-            .insert(block_height, HashSet::from([block_hash]));
+            .insert(block_height, HashSet::from([start_block_hash]));
+
+        let mut prev_commitment_cache = arc_commitment_cache.clone();
 
         // Add remaining blocks
         for block_height in (start + 1)..end {
-            let block_hash = block_index.get_item(block_height).unwrap().block_hash;
+            // Scope each block_index access
+            let block_hash = {
+                let block_index = block_index_guard.read();
+                block_index.get_item(block_height).unwrap().block_hash
+            };
+
             let block = block_header_by_hash(&tx, &block_hash, false)
                 .unwrap()
                 .unwrap();
 
-            // TODO: Retrieve the commitment tx
-            let commitment_txs: Vec<CommitmentTransaction>;
-            // build the next commitment cache with them
-            let commitment_cache = Arc::new(CommitmentCacheInner::new());
+            let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
+
+            // Is this an epoch block or not?
+            let arc_commitment_cache = if is_epoch_block {
+                // if so, reset to an empty cache
+                Arc::new(CommitmentCacheInner::new())
+            } else {
+                // if not, get the commitment cache from the previous block in the chain
+                // Retrieve commitment transactions for the block
+                let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+
+                if commitment_tx_ids.len() > 0 {
+                    let commitment_txs = {
+                        // We only query the db for commitment tx during initialize
+                        // because it is called at startup before the mempool is initialized
+                        let mut txs = Vec::new();
+                        let db_tx = db.tx().expect("to create a read only tx for the db");
+                        for tx_id in &commitment_tx_ids {
+                            if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)
+                                .expect("to retrieve tx header from db")
+                            {
+                                txs.push(header)
+                            }
+                        }
+                        txs
+                    };
+
+                    // Extend the commitment cache with them
+                    for commitment_tx in commitment_txs {
+                        let is_staked_in_current_epoch =
+                            commitment_state_guard.is_staked(commitment_tx.signer);
+                        let _status = commitment_cache
+                            .add_commitment(&commitment_tx, is_staked_in_current_epoch);
+                    }
+
+                    Arc::new(commitment_cache.clone())
+                } else {
+                    prev_commitment_cache
+                }
+            };
+
+            prev_commitment_cache = arc_commitment_cache.clone();
 
             block_tree_cache
                 .add_local_block(
                     &block,
                     ChainState::Validated(BlockState::ValidBlock),
-                    commitment_cache,
+                    arc_commitment_cache,
                 )
                 .unwrap();
         }
 
-        let tip_hash = block_index.get_latest_item().unwrap().block_hash;
+        // Get the tip hash with a scoped guard
+        let tip_hash = {
+            let block_index = block_index_guard.read();
+            block_index.get_latest_item().unwrap().block_hash
+        };
+
         block_tree_cache.mark_tip(&tip_hash).unwrap();
 
         reth_service_actor
@@ -1011,52 +1077,11 @@ impl BlockTreeCache {
                 finalized_hash: None,
             })
             .expect("could not send message to `RethServiceActor`");
+
         block_tree_cache
     }
 
-    fn get_all_txs_for_block(
-        block: &IrysBlockHeader,
-        db: DatabaseProvider,
-    ) -> Result<Vec<IrysTransactionHeader>, eyre::Report> {
-        // Collect submit transactions
-        let submit_txs = block.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                db.view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                error!("Failed to collect submit tx headers: {}", e);
-                e
-            })?;
-
-        // Collect publish transactions
-        let publish_txs = block.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                db.view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                error!("Failed to collect publish tx headers: {}", e);
-                e
-            })?;
-
-        // Combine transactions
-        let mut all_txs = submit_txs;
-        all_txs.extend(publish_txs);
-        Ok(all_txs)
-    }
-
-    fn add_common(
+    pub fn add_common(
         &mut self,
         hash: BlockHash,
         block: &IrysBlockHeader,
@@ -1460,6 +1485,30 @@ impl BlockTreeCache {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
+    pub fn canonical_commitment_cache(&self) -> Arc<CommitmentCacheInner> {
+        let head_entry = self
+            .longest_chain_cache
+            .0
+            .last()
+            .expect("at least one block in the longest chain");
+
+        self.blocks
+            .get(&head_entry.block_hash)
+            .expect("commitment cache for block")
+            .commitment_cache
+            .clone()
+    }
+
+    pub fn get_commitment_cache(
+        &self,
+        block_hash: &BlockHash,
+    ) -> eyre::Result<Arc<CommitmentCacheInner>> {
+        match self.blocks.get(block_hash) {
+            Some(entry) => Ok(entry.commitment_cache.clone()),
+            None => Err(eyre::eyre!("Block not found: {}", block_hash)),
+        }
+    }
+
     /// Returns the current possible set of candidate hashes for a given height.
     pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
         self.height_index.get(&height)
@@ -1500,7 +1549,7 @@ impl BlockTreeCache {
     /// Finds the earliest not validated block, walking back the chain
     /// until finding a validated block, reaching block height 0, or exceeding cache depth
     #[must_use]
-    pub fn get_earliest_not_onchain<'a>(
+    fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockEntry,
     ) -> Option<(&'a BlockEntry, Vec<&'a IrysBlockHeader>, SystemTime)> {

@@ -5,8 +5,7 @@ use crate::{
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
-    CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
-    GetCommitmentStateGuardMessage,
+    CommitmentCacheInner, CommitmentCacheStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -18,13 +17,16 @@ use irys_database::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
+    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{
+    sync::{mpsc::UnboundedSender, oneshot},
+    time::timeout,
+};
 use tracing::{debug, error, info, Instrument, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -205,7 +207,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let config = self.config.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
-        let commitment_cache_sender = self.service_senders.commitment_cache.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
@@ -213,11 +214,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
 
-        info!(height = ?new_block_header.height,
+        debug!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
             output = ?new_block_header.vdf_limiter_info.output,
             prev_output = ?new_block_header.vdf_limiter_info.prev_output,
-            "Validating block"
+            "\nPre Validating block"
         );
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
@@ -237,12 +238,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             // Validate commitments (if there are some)
             let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-            let mut commitment_tx_ids: H256List = H256List::new();
             if let Some(commitment_ledger) = commitment_ledger {
-                debug!("{:#?}", commitment_ledger);
-                commitment_tx_ids = commitment_ledger.tx_ids.clone();
+                debug!(
+                    "incoming block commitment txids, height {}\n{:#?}",
+                    new_block_header.height, commitment_ledger
+                );
                 match get_commitment_tx_in_parallel(
-                    commitment_tx_ids.0.clone(),
+                    commitment_ledger.tx_ids.0.clone(),
                     &mempool_sender,
                     &db,
                 )
@@ -255,7 +257,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
 
-            info!("Pre-validating block");
+            info!("Pre-validating block: {}", new_block_header.height);
 
             let validation_result = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
@@ -275,6 +277,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             match validation_result {
                 Ok(_) => {
                     // Attempt to validate / update the epoch commitment cache
+                    // TODO: check with the commitment cache of the parent block if these commitment txids have been seen in this fork
                     // for commitment_tx in commitments.iter() {
                     //     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     //     let _ =
@@ -363,14 +366,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             epoch_block: new_block_header.clone(),
                             commitments: arc_commitment_txs.clone(),
                         });
-
-                        // Clear the CommitmentCache for a new epoch
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        let _ = commitment_cache_sender
-                            .send(CommitmentCacheMessage::ClearCache { response: tx });
-                        let _ = rx
-                            .await
-                            .expect("to receive a response from ClearCache message");
                     }
 
                     // WARNING: All block pre-validation needs to be completed before
@@ -421,14 +416,25 @@ pub async fn get_commitment_tx_in_parallel(
         let tx_ids = tx_ids_clone.clone();
         async move {
             let (tx, rx) = oneshot::channel();
-            mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
+
+            match mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
                 commitment_tx_ids: tx_ids,
                 response: tx,
-            })?;
-            let x = rx
-                .await
-                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
-            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(x)
+            }) {
+                Ok(()) => {
+                    // Message was sent successfully, wait for response with timeout
+                    let result = timeout(Duration::from_secs(5), rx)
+                    .await
+                    .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
+                    .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
+
+                    Ok(result)
+                }
+                Err(_) => {
+                    // Channel is closed - either no receiver was ever created or it was dropped
+                    Err(eyre::eyre!("Mempool service is not available (channel closed - service may not be running)"))
+                }
+            }
         }
     };
 
