@@ -411,7 +411,7 @@ where
             api_client,
             version_request,
             peers_cache,
-            peer_service_address.clone(),
+            peer_service_address,
             self.reth_service_addr.clone(),
         )
         .into_actor(self);
@@ -1692,7 +1692,7 @@ mod tests {
         service.handle(
             AddPeer {
                 mining_addr,
-                peer: peer.clone(),
+                peer: peer,
             },
             ctx,
         );

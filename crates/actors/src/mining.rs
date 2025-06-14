@@ -424,7 +424,7 @@ mod tests {
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
     ) -> BlockProducerMockActor {
-        let closure_arc = closure_arc.clone();
+        let closure_arc = closure_arc;
         BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
             let solution_message: SolutionFoundMessage =
                 *msg.downcast::<SolutionFoundMessage>().unwrap();

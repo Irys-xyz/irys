@@ -170,7 +170,7 @@ impl P2PService {
         let block_pool_service = BlockPoolService::new_with_client(
             db,
             peer_list.clone(),
-            block_discovery.clone(),
+            block_discovery,
             self.sync_state.clone(),
             block_status_provider,
         );
@@ -181,12 +181,12 @@ impl P2PService {
         let server_data_handler = GossipServerDataHandler {
             mempool,
             block_pool: block_pool_addr,
-            api_client: api_client.clone(),
+            api_client,
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
             peer_list_service: peer_list.clone(),
             sync_state: self.sync_state.clone(),
-            span: Span::current().clone(),
+            span: Span::current(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
@@ -208,7 +208,7 @@ impl P2PService {
             mempool_data_receiver,
             self,
             task_executor,
-            peer_list.clone(),
+            peer_list,
         );
 
         let gossip_service_handle = spawn_watcher_task(

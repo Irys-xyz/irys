@@ -455,7 +455,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 current_timestamp.saturating_div(1000)
             )?;
 
-            let local_signer = LocalSigner::from(config.irys_signer().signer.clone());
+            let local_signer = LocalSigner::from(config.irys_signer().signer);
             // Generate expected system transactions using shared logic
             let system_txs = SystemTxGenerator::new(&block_height, &config.node_config.reward_address, &reward_amount.amount, &prev_block_header);
             let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx)
@@ -467,7 +467,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         .try_into_recovered()
                         .expect("system tx must always be signable");
 
-                    Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx.clone(), 300))
+                    Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx, 300))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 

@@ -48,6 +48,8 @@ enum Commands {
     LocalChecks {
         #[clap(short, long, default_value_t = false)]
         with_tests: bool,
+        #[clap(short, long, default_value_t = false)]
+        fix: bool,
     },
 }
 
@@ -160,10 +162,10 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             )
             .run()?;
         }
-        Commands::LocalChecks { with_tests } => {
+        Commands::LocalChecks { with_tests, fix } => {
             run_command(
                 Commands::Fmt {
-                    check_only: true,
+                    check_only: !fix,
                     args: vec![],
                 },
                 sh,

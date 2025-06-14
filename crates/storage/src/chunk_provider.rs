@@ -153,7 +153,7 @@ mod tests {
                 num_chunks_in_partition: 100,
                 ..ConsensusConfig::testnet()
             }),
-            base_directory: base_path.clone(),
+            base_directory: base_path,
             ..NodeConfig::testnet()
         };
         let config = Config::new(node_config);

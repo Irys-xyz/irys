@@ -101,7 +101,7 @@ fn get_block_by_hash(
     let cbh = CombinedBlockHeader {
         irys: irys_header,
         execution: ExecutionHeader {
-            header: reth_block.header.clone(),
+            header: reth_block.header,
             transactions: exec_txs,
         },
     };

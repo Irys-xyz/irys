@@ -1067,7 +1067,7 @@ impl IrysNode {
             db: irys_db.clone(),
             chunk_provider: chunk_provider.clone(),
             block_index_guard: block_index_guard.clone(),
-            vdf_steps_guard: vdf_state_readonly.clone(),
+            vdf_steps_guard: vdf_state_readonly,
             service_senders: service_senders.clone(),
             reth_shutdown_sender,
             reth_thread_handle: None,
@@ -1131,7 +1131,7 @@ impl IrysNode {
                 peer_list: peer_list_service,
                 db: irys_db,
                 reth_provider: reth_node.clone(),
-                block_tree: block_tree_guard.clone(),
+                block_tree: block_tree_guard,
                 block_index: block_index_guard.clone(),
                 config: config.clone(),
                 reth_http_url: reth_node
@@ -1149,7 +1149,7 @@ impl IrysNode {
             .write()
             .map_err(|_| eyre::eyre!("lock poisoned"))?;
         *w = Some(IrysRethProviderInner {
-            chunk_provider: chunk_provider.clone(),
+            chunk_provider,
         });
 
         Ok((
@@ -1165,7 +1165,7 @@ impl IrysNode {
         config: &Config,
         storage_modules_guard: StorageModulesReadGuard,
     ) -> Arc<ChunkProvider> {
-        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard.clone());
+        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard);
 
         Arc::new(chunk_provider)
     }
@@ -1290,7 +1290,7 @@ impl IrysNode {
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let packing_config = PackingConfig::new(config);
         let packing_actor_addr =
-            PackingActor::new(task_executor.clone(), sm_ids, packing_config.clone()).start();
+            PackingActor::new(task_executor.clone(), sm_ids, packing_config).start();
         (atomic_global_step_number, packing_actor_addr)
     }
 
@@ -1323,7 +1323,7 @@ impl IrysNode {
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
-                block_producer_actor.clone()
+                block_producer_actor
             });
         (block_producer_addr, block_producer_arbiter)
     }
@@ -1357,7 +1357,7 @@ impl IrysNode {
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
-            partition_assignments_guard: partition_assignments_guard.clone(),
+            partition_assignments_guard,
             db: irys_db.clone(),
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
@@ -1382,7 +1382,7 @@ impl IrysNode {
         storage_modules_guard: &StorageModulesReadGuard,
     ) {
         let chunk_migration_service = ChunkMigrationService::new(
-            block_index.clone(),
+            block_index,
             config.clone(),
             storage_modules_guard,
             irys_db.clone(),

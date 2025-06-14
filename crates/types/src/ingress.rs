@@ -163,7 +163,7 @@ mod tests {
             .map(Vec::from)
             .collect();
         let proof = generate_ingress_proof(
-            signer.clone(),
+            signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
         )?;
@@ -173,7 +173,7 @@ mod tests {
             proof.clone(),
             chunks.clone().into_iter().map(Ok)
         )?);
-        let mut reversed = chunks.clone();
+        let mut reversed = chunks;
         reversed.reverse();
         assert!(!verify_ingress_proof(proof, reversed.into_iter().map(Ok))?);
 

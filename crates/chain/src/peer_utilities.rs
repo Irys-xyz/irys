@@ -140,7 +140,7 @@ pub async fn fetch_block(
                 match response.json::<CombinedBlockHeader>().await {
                     Ok(block) => {
                         info!("Got block from {}", &url);
-                        let irys_block_header = block.irys.clone();
+                        let irys_block_header = block.irys;
                         Some(irys_block_header)
                     }
                     Err(e) => {

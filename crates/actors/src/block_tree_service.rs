@@ -125,7 +125,7 @@ impl BlockTreeService {
     ) -> JoinHandle<()> {
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
-        let consensus_config = config.node_config.consensus_config().clone();
+        let consensus_config = config.node_config.consensus_config();
         let service_senders = service_senders.clone();
         let system = System::current();
         exec.spawn_critical_with_graceful_shutdown_signal(
@@ -357,7 +357,7 @@ impl BlockTreeServiceInner {
                 let migrated_block = Arc::new(block);
                 // Broadcast BlockMigratedEvent event using the shared sender
                 let block_migrated_event = BlockMigratedEvent {
-                    block: migrated_block.clone(),
+                    block: migrated_block,
                 };
                 if let Err(e) = self
                     .service_senders

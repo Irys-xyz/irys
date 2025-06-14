@@ -39,7 +39,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         entropy_packing_iterations: 1,
         ..node_config.consensus_config()
     });
-    node_config.base_directory = base_path.clone();
+    node_config.base_directory = base_path;
     let config = Config::new(node_config);
 
     // Configure 3 storage modules that are assigned to the submit ledger in

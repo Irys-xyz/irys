@@ -560,7 +560,7 @@ impl FakeGossipServer {
         let server = HttpServer::new(move || {
             let handler = handler.clone();
             App::new()
-                .app_data(web::Data::new(handler.clone()))
+                .app_data(web::Data::new(handler))
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
                 .default_service(web::to(|| async {

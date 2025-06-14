@@ -2526,7 +2526,7 @@ pub mod test_utils {
             .try_into_recovered()
             .unwrap();
 
-        EthPooledTransaction::new(tx.clone(), 300)
+        EthPooledTransaction::new(tx, 300)
     }
 
     /// Returns a custom chain spec for testing.

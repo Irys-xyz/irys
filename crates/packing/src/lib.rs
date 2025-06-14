@@ -562,7 +562,7 @@ mod tests {
             data_root: H256::zero(),
             data_size: data_size as u64,
             data_path: Base64(vec![]),
-            bytes: Base64(packed_data.clone()),
+            bytes: Base64(packed_data),
             tx_offset: TxChunkOffset::from(0),
             packing_address: mining_address,
             partition_offset: PartitionChunkOffset::from(chunk_offset as u32),

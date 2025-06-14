@@ -421,7 +421,7 @@ doc-lazy-continuation = "allow"
 type-complexity = "allow"
 needless-range-loop = "allow"
 too-many-arguments = "allow"
-
+redundant-clone = "deny"
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]

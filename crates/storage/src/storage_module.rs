@@ -1535,7 +1535,7 @@ mod tests {
                 ),
                 (
                     PartitionChunkOffset::from(5),
-                    (data2_chunk.clone(), ChunkType::Data)
+                    (data2_chunk, ChunkType::Data)
                 )
             ]
         );
@@ -1549,7 +1549,7 @@ mod tests {
             chunks.into_iter().collect::<Vec<_>>(),
             [(
                 PartitionChunkOffset::from(4),
-                (data1_chunk.clone(), ChunkType::Data)
+                (data1_chunk, ChunkType::Data)
             ),]
         );
 
@@ -1607,7 +1607,7 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
             },
-            base_directory: base_path.clone(),
+            base_directory: base_path,
             ..NodeConfig::testnet()
         };
         let config = Config::new(node_config);
@@ -1687,7 +1687,7 @@ mod tests {
         // Test - write a data chunk that overwrites a stored entropy chunk
         let bytes = vec![20u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(2);
-        storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Data);
+        storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
 
         {
             // Verify the resulting intervals
@@ -1704,7 +1704,7 @@ mod tests {
         // Test - write an pending entropy chunk to an uninitialized offset on disk
         let bytes = vec![30u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(20);
-        storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Entropy);
+        storage_module.write_chunk(chunk_offset, bytes, ChunkType::Entropy);
 
         {
             // Verify the resulting intervals
@@ -1725,7 +1725,7 @@ mod tests {
         // Test - write a pending data chunk to an uninitialized offset on disk
         let bytes = vec![40u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(19);
-        storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Data);
+        storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
         {
             // Verify the resulting intervals
             let data = storage_module.get_intervals(ChunkType::Data);
@@ -1813,7 +1813,7 @@ mod tests {
                 num_chunks_in_partition: 5,
                 ..ConsensusConfig::testnet()
             }),
-            base_directory: base_path.clone(),
+            base_directory: base_path,
             ..NodeConfig::testnet()
         };
         let config = Config::new(node_config);

@@ -239,7 +239,7 @@ impl MempoolService {
         let mempool_state = create_state(mempool_config);
         let exec = exec.clone();
         let commitment_state_guard = commitment_state_guard.clone();
-        let storage_modules_guard = storage_modules_guard.clone();
+        let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();

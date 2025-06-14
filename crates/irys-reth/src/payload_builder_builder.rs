@@ -54,7 +54,7 @@ where
             pool,
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
-            self.system_tx_store.clone(),
+            self.system_tx_store,
         ))
     }
 }

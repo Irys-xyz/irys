@@ -398,7 +398,7 @@ mod tests {
             ..Default::default()
         };
 
-        let signed_tx = signer.sign_transaction(tx.clone()).unwrap();
+        let signed_tx = signer.sign_transaction(tx).unwrap();
 
         assert!(signed_tx.header.is_signature_valid());
     }
