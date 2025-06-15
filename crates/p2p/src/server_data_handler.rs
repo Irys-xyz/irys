@@ -9,7 +9,7 @@ use crate::{
     GossipClient, GossipError, GossipResult,
 };
 use actix::{Actor, Addr, Context, Handler};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
@@ -358,7 +358,7 @@ where
             })?;
 
         // Process each transaction
-        for tx_response in missing_txs.into_iter() {
+        for tx_response in missing_txs {
             let tx_id;
             let mempool_response = match tx_response {
                 IrysTransactionResponse::Commitment(commitment_tx) => {

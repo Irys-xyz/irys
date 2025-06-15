@@ -3,14 +3,14 @@ use crate::GossipClient;
 use actix::prelude::*;
 use irys_actors::reth_service::RethServiceActor;
 use irys_api_client::{ApiClient, IrysApiClient};
-use irys_database::reth_db::{Database, DatabaseError};
+use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{
     build_user_agent, Address, BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem,
     PeerResponse, RejectedResponse, RethPeerInfo, VersionRequest,
 };
-use rand::prelude::SliceRandom;
+use rand::prelude::SliceRandom as _;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -524,12 +524,12 @@ where
         let mining_address = self
             .gossip_addr_to_mining_addr_map
             .get(&address.ip())
-            .cloned()?;
+            .copied()?;
         self.peer_list_cache.get(&mining_address).cloned()
     }
 
     async fn trusted_peers_handshake_task(
-        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_service_address: Addr<Self>,
         trusted_peers_api_addresses: HashSet<SocketAddr>,
     ) {
         let peer_service_address = peer_service_address.clone();
@@ -651,7 +651,7 @@ where
         api_client: A,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_service_address: Addr<Self>,
     ) -> Result<(), PeerListServiceError> {
         let peer_response_result = api_client
             .post_version(api_address, version_request)
@@ -709,7 +709,7 @@ where
         api_client: A,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_list_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_list_service_address: Addr<Self>,
     ) {
         debug!(
             "Announcing yourself to address {} with version request: {:?}",
@@ -737,7 +737,7 @@ where
         api_client: A,
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
-        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_service_address: Addr<Self>,
         reth_service_address: Option<Addr<R>>,
     ) {
         for peer in known_peers_cache.iter() {
@@ -799,7 +799,7 @@ async fn check_health(
 
 impl From<eyre::Report> for PeerListServiceError {
     fn from(err: eyre::Report) -> Self {
-        PeerListServiceError::Database(DatabaseError::Other(err.to_string()))
+        Self::Database(DatabaseError::Other(err.to_string()))
     }
 }
 
@@ -1056,7 +1056,7 @@ where
     type Result = Vec<PeerAddress>;
 
     fn handle(&mut self, _msg: KnownPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
-        self.known_peers_cache.iter().cloned().collect()
+        self.known_peers_cache.iter().copied().collect()
     }
 }
 
@@ -1357,7 +1357,7 @@ mod tests {
     use irys_types::{NodeConfig, RethPeerInfo, VersionRequest};
     use std::collections::HashSet;
     use std::net::IpAddr;
-    use std::str::FromStr;
+    use std::str::FromStr as _;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 

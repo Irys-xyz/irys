@@ -16,9 +16,9 @@ pub enum ProxyError {
 impl std::fmt::Display for ProxyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProxyError::RequestError(e) => write!(f, "Request error: {}", e),
-            ProxyError::ParseError(e) => write!(f, "Parse error: {}", e),
-            ProxyError::MethodNotAllowed => write!(f, "Method not allowed"),
+            Self::RequestError(e) => write!(f, "Request error: {}", e),
+            Self::ParseError(e) => write!(f, "Parse error: {}", e),
+            Self::MethodNotAllowed => write!(f, "Method not allowed"),
         }
     }
 }
@@ -26,9 +26,9 @@ impl std::fmt::Display for ProxyError {
 impl actix_web::ResponseError for ProxyError {
     fn error_response(&self) -> HttpResponse {
         match self {
-            ProxyError::RequestError(_) => HttpResponse::BadGateway().finish(),
-            ProxyError::ParseError(_) => HttpResponse::BadRequest().finish(),
-            ProxyError::MethodNotAllowed => HttpResponse::MethodNotAllowed().finish(),
+            Self::RequestError(_) => HttpResponse::BadGateway().finish(),
+            Self::ParseError(_) => HttpResponse::BadRequest().finish(),
+            Self::MethodNotAllowed => HttpResponse::MethodNotAllowed().finish(),
         }
     }
 }

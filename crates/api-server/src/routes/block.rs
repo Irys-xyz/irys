@@ -7,7 +7,7 @@ use actix_web::{
 use base58::FromBase58 as _;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
-use reth::{providers::BlockReader, revm::primitives::alloy_primitives::TxHash};
+use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -30,11 +30,14 @@ pub async fn get_block(
                 .get_canonical_chain()
                 .0
                 .iter()
-                .find_map(|e| match e.height == height {
-                    true => Some(&e.block_hash),
-                    false => None,
+                .find_map(|e| {
+                    if e.height == height {
+                        Some(&e.block_hash)
+                    } else {
+                        None
+                    }
                 })
-                .cloned();
+                .copied();
             if let Some(hash) = in_block_tree {
                 break 'outer hash;
             }
@@ -123,15 +126,15 @@ impl FromStr for BlockParam {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "latest" => Ok(BlockParam::Latest),
-            "pending" => Ok(BlockParam::Pending),
-            "finalized" => Ok(BlockParam::Finalized),
+            "latest" => Ok(Self::Latest),
+            "pending" => Ok(Self::Pending),
+            "finalized" => Ok(Self::Finalized),
             _ => {
                 if let Ok(block_height) = s.parse::<u64>() {
-                    return Ok(BlockParam::BlockHeight(block_height));
+                    return Ok(Self::BlockHeight(block_height));
                 }
                 match s.from_base58() {
-                    Ok(v) => Ok(BlockParam::Hash(H256::from_slice(v.as_slice()))),
+                    Ok(v) => Ok(Self::Hash(H256::from_slice(v.as_slice()))),
                     Err(_) => Err("Invalid block tag parameter".to_string()),
                 }
             }

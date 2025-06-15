@@ -1,5 +1,5 @@
-use actix::{Actor, Context, Handler};
-use base58::ToBase58;
+use actix::{Actor as _, Context, Handler as _};
+use base58::ToBase58 as _;
 use irys_actors::epoch_service::{
     EpochReplayData, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
 };

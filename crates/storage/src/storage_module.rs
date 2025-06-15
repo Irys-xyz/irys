@@ -37,9 +37,9 @@
 //! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
 
 use atomic_write_file::AtomicWriteFile;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use derive_more::derive::{Deref, DerefMut};
-use eyre::{ensure, eyre, Context, OptionExt, Result};
+use eyre::{ensure, eyre, Context as _, OptionExt as _, Result};
 use irys_database::{
     db::IrysDatabaseExt as _,
     submodule::{
@@ -57,17 +57,17 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
     DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
-    PartitionChunkRange, ProofDeserialize, RelativeChunkOffset, TxChunkOffset, TxPath,
+    PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath,
     UnpackedChunk, H256,
 };
-use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
+use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
 use openssl::sha;
-use reth_db::Database;
+use reth_db::Database as _;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
@@ -350,7 +350,7 @@ impl StorageModule {
         // Attempt to load a global set of intervals from the submodules
         let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
 
-        Ok(StorageModule {
+        Ok(Self {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
@@ -667,7 +667,7 @@ impl StorageModule {
         // Calculate file offset and prepare buffer
         let chunk_size = self.config.consensus.chunk_size;
         let file_offset = *(chunk_offset - interval.start()) as u64 * chunk_size;
-        let mut buf = vec![0u8; chunk_size as usize];
+        let mut buf = vec![0_u8; chunk_size as usize];
 
         // Read chunk from file
         let mut file = submodule.file.lock().unwrap();
@@ -1157,7 +1157,7 @@ impl StorageModule {
 
     /// Test utility function to mark a StorageModule as packed
     pub fn pack_with_zeros(&self) {
-        let entropy_bytes = vec![0u8; self.config.consensus.chunk_size as usize];
+        let entropy_bytes = vec![0_u8; self.config.consensus.chunk_size as usize];
         for chunk_offset in 0..self.config.consensus.num_chunks_in_partition as u32 {
             self.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
@@ -1343,7 +1343,7 @@ pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<PartitionChunk
             }
         }
         if left != range.end() {
-            invalid_starts.push(left - PartitionChunkOffset::from(1u64))
+            invalid_starts.push(left - PartitionChunkOffset::from(1_u64))
         }
     }
     invalid_starts
@@ -1422,7 +1422,7 @@ mod tests {
         let entropy_chunk = vec![0xff; 32]; // All bytes set to 0xff
         storage_module.write_chunk(
             PartitionChunkOffset::from(1),
-            entropy_chunk.to_vec(),
+            entropy_chunk.clone(),
             ChunkType::Entropy,
         );
 
@@ -1463,12 +1463,12 @@ mod tests {
 
         storage_module.write_chunk(
             PartitionChunkOffset::from(4),
-            data1_chunk.to_vec(),
+            data1_chunk.clone(),
             ChunkType::Data,
         );
         storage_module.write_chunk(
             PartitionChunkOffset::from(5),
-            data2_chunk.to_vec(),
+            data2_chunk.clone(),
             ChunkType::Data,
         );
 
@@ -1618,7 +1618,7 @@ mod tests {
         let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         // Queue up some entropy chunks in the pending writes queue
-        let entropy_bytes = vec![0u8; chunk_size];
+        let entropy_bytes = vec![0_u8; chunk_size];
         for chunk_offset in 0..10_u32 {
             storage_module.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
@@ -1660,7 +1660,7 @@ mod tests {
         }
 
         // Test - write a data chunk that overwrites a pending entropy chunk
-        let bytes = vec![10u8; chunk_size];
+        let bytes = vec![10_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(11);
         storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Data);
 
@@ -1685,7 +1685,7 @@ mod tests {
         }
 
         // Test - write a data chunk that overwrites a stored entropy chunk
-        let bytes = vec![20u8; chunk_size];
+        let bytes = vec![20_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(2);
         storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
 
@@ -1702,7 +1702,7 @@ mod tests {
         }
 
         // Test - write an pending entropy chunk to an uninitialized offset on disk
-        let bytes = vec![30u8; chunk_size];
+        let bytes = vec![30_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(20);
         storage_module.write_chunk(chunk_offset, bytes, ChunkType::Entropy);
 
@@ -1723,7 +1723,7 @@ mod tests {
         }
 
         // Test - write a pending data chunk to an uninitialized offset on disk
-        let bytes = vec![40u8; chunk_size];
+        let bytes = vec![40_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(19);
         storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
         {

@@ -1,6 +1,6 @@
 use alloy_primitives::Address;
 use alloy_signer::Signature;
-use eyre::OptionExt;
+use eyre::OptionExt as _;
 use openssl::sha;
 use reth_codecs::Compact;
 use reth_db::DatabaseError;
@@ -27,7 +27,7 @@ impl Compress for IngressProof {
     }
 }
 impl Decompress for IngressProof {
-    fn decompress(value: &[u8]) -> Result<IngressProof, DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
     }
@@ -104,7 +104,7 @@ pub fn verify_ingress_proof(
 
 #[cfg(test)]
 mod tests {
-    use rand::Rng;
+    use rand::Rng as _;
 
     use crate::{
         generate_data_root, generate_leaves, hash_sha256, ingress::verify_ingress_proof,
@@ -117,7 +117,7 @@ mod tests {
     fn interleave_test() -> eyre::Result<()> {
         let testnet_config = ConsensusConfig::testnet();
         let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
-        let mut data_bytes = vec![0u8; data_size];
+        let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
         let signer = IrysSigner::random_signer(&testnet_config);
         let leaves = generate_leaves(
@@ -144,7 +144,7 @@ mod tests {
         // Create some random data
         let testnet_config = ConsensusConfig::testnet();
         let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
-        let mut data_bytes = vec![0u8; data_size];
+        let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Build a merkle tree and data_root from the chunks

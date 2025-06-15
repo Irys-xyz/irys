@@ -2,7 +2,7 @@ use crate::reth_db::DatabaseError;
 use reth_db::mdbx::cursor::Cursor;
 use reth_db::mdbx::TransactionKind;
 use reth_db::table::{Decode, Decompress, DupSort, Table, TableRow};
-use reth_db::transaction::DbTx;
+use reth_db::transaction::DbTx as _;
 use reth_db::{Database as _, DatabaseEnv};
 use reth_db_api::database_metrics::DatabaseMetrics;
 use std::borrow::Cow;
@@ -185,7 +185,7 @@ where
     ))
 }
 
-use reth_db::cursor::DbCursorRO;
+use reth_db::cursor::DbCursorRO as _;
 
 impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
     fn dup_count(&mut self, key: <T>::Key) -> Result<Option<u32>, DatabaseError> {

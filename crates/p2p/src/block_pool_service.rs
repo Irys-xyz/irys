@@ -2,10 +2,10 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::peer_list::{PeerListFacade, PeerListFacadeError};
 use crate::SyncState;
 use actix::{
-    Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
-    WrapFuture,
+    Actor, AsyncContext as _, Context, Handler, Message, ResponseActFuture, Supervised,
+    SystemService, WrapFuture as _,
 };
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
@@ -137,7 +137,7 @@ where
     fn process_block(
         &mut self,
         block_header: IrysBlockHeader,
-        ctx: &mut <BlockPoolService<A, R, B> as Actor>::Context,
+        ctx: &mut <Self as Actor>::Context,
     ) -> ResponseActFuture<Self, Result<(), BlockPoolError>> {
         let block_status = self
             .block_status_provider
@@ -408,7 +408,7 @@ where
                 .request_block_from_the_network(block_hash)
                 .await
             {
-                Ok(_) => {
+                Ok(()) => {
                     debug!(
                         "Block pool: Requested block {} from the network",
                         block_hash.0.to_base58()

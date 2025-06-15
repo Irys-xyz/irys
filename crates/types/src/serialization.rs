@@ -4,10 +4,10 @@ use crate::{Arbitrary, IrysSignature};
 use alloy_primitives::{bytes, Address, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
-use base58::{FromBase58, ToBase58};
+use base58::{FromBase58, ToBase58 as _};
 use eyre::Error;
 use openssl::sha;
-use rand::RngCore;
+use rand::RngCore as _;
 use reth_codecs::Compact;
 use reth_db::table::{Compress, Decompress};
 use reth_db_api::table::{Decode, Encode};
@@ -59,7 +59,7 @@ impl U256 {
     /// Convert to 32 little-endian bytes, independent of host endianness.
     #[inline]
     pub fn to_le_bytes(&self) -> [u8; 32] {
-        let mut out = [0u8; 32];
+        let mut out = [0_u8; 32];
         for (i, limb) in self.0.iter().enumerate() {
             out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
         }
@@ -69,7 +69,7 @@ impl U256 {
     /// Convert to 32 big-endian bytes, independent of host endianness.
     #[inline]
     pub fn to_be_bytes(&self) -> [u8; 32] {
-        let mut out = [0u8; 32];
+        let mut out = [0_u8; 32];
         for (i, limb) in self.0.iter().rev().enumerate() {
             out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_be_bytes());
         }
@@ -79,23 +79,23 @@ impl U256 {
     /// Recreate `U256` from 32 little-endian bytes.
     #[inline]
     pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
-        let mut limbs = [0u64; 4];
+        let mut limbs = [0_u64; 4];
         for i in 0..4 {
             let chunk: [u8; 8] = bytes[i * 8..(i + 1) * 8].try_into().unwrap();
             limbs[i] = u64::from_le_bytes(chunk);
         }
-        U256(limbs)
+        Self(limbs)
     }
 
     /// Recreate `U256` from 32 big-endian bytes.
     #[inline]
     pub fn from_be_bytes(bytes: [u8; 32]) -> Self {
-        let mut limbs = [0u64; 4];
+        let mut limbs = [0_u64; 4];
         for i in 0..4 {
             let chunk: [u8; 8] = bytes[i * 8..(i + 1) * 8].try_into().unwrap();
             limbs[3 - i] = u64::from_be_bytes(chunk);
         }
-        U256(limbs)
+        Self(limbs)
     }
 }
 
@@ -132,7 +132,7 @@ mod u256_le_be_to_from_tests {
     #[test]
     fn alloy_to_custom_and_back() {
         // Pick a value exercising all limbs: 0x010203…1F
-        let mut raw = [0u8; 32];
+        let mut raw = [0_u8; 32];
         for i in 0..32 {
             raw[i] = i as u8 + 1;
         }
@@ -151,7 +151,7 @@ mod u256_le_be_to_from_tests {
     #[test]
     fn custom_to_alloy_and_back() {
         // Same bytes but reverse order to ensure coverage.
-        let mut raw = [0u8; 32];
+        let mut raw = [0_u8; 32];
         for i in 0..32 {
             raw[i] = 255 - i as u8;
         }
@@ -172,10 +172,10 @@ mod u256_le_be_to_from_tests {
 impl<'a> Arbitrary<'a> for U256 {
     fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let mut rng = rand::thread_rng();
-        let mut bytes = [0u8; 32]; // 32 bytes for 256 bits
+        let mut bytes = [0_u8; 32]; // 32 bytes for 256 bits
         rng.fill_bytes(&mut bytes);
 
-        Ok(U256::from_big_endian(&bytes))
+        Ok(Self::from_big_endian(&bytes))
     }
 }
 
@@ -190,7 +190,7 @@ impl Encode for U256 {
 impl Decode for U256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         let res = bytemuck::try_from_bytes::<[u64; 4]>(value).map_err(|_| DatabaseError::Decode)?;
-        let res = U256(*res);
+        let res = Self(*res);
         Ok(res)
     }
 }
@@ -218,7 +218,7 @@ impl Compact for U256 {
         B: bytes::BufMut + AsMut<[u8]>,
     {
         // Create a temporary byte array for the big-endian representation of `self`
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0_u8; 32];
         self.to_big_endian(&mut bytes);
         bytes.to_compact(buf)
     }
@@ -228,7 +228,7 @@ impl Compact for U256 {
         // Disambiguate and call the correct H256::from method
         let (v, remaining_buf) = <[u8; 32]>::from_compact(buf, len);
         // Fully qualify this call to avoid calling DecodeHash::from
-        (<U256 as From<[u8; 32]>>::from(v), remaining_buf)
+        (<Self as From<[u8; 32]>>::from(v), remaining_buf)
     }
 }
 
@@ -245,14 +245,14 @@ impl H256 {
             .try_into()
             .expect("Decoded base58 string should have at least 32 bytes");
 
-        H256(array)
+        Self(array)
     }
 }
 
 // Manually implement Arbitrary for H256
 impl<'a> Arbitrary<'a> for H256 {
     fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(H256::random())
+        Ok(Self::random())
     }
 }
 
@@ -272,7 +272,7 @@ impl Decode for H256 {
 
 impl From<H256> for FixedBytes<32> {
     fn from(val: H256) -> Self {
-        FixedBytes(val.0)
+        Self(val.0)
     }
 }
 
@@ -355,7 +355,7 @@ impl From<Vec<TxIngressProof>> for IngressProofsList {
 //------------------------------------------------------------------------------
 pub mod address_base58_stringify {
     use alloy_primitives::Address;
-    use base58::{FromBase58, ToBase58};
+    use base58::{FromBase58, ToBase58 as _};
     use serde::{self, de, Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &Address, serializer: S) -> Result<S::Ok, S::Error>
@@ -389,7 +389,7 @@ pub mod address_base58_stringify {
 pub mod option_address_base58_stringify {
     use super::address_base58_stringify;
     use alloy_primitives::Address;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize as _, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &Option<Address>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -428,7 +428,7 @@ pub mod option_address_base58_stringify {
 //------------------------------------------------------------------------------
 /// where u64 is represented as a string in the json
 pub mod option_u64_stringify {
-    use serde::{self, Deserialize, Deserializer, Serializer};
+    use serde::{self, Deserialize as _, Deserializer, Serializer};
     use serde_json::Value;
 
     pub fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
@@ -471,12 +471,12 @@ impl Serialize for U256 {
 
 /// Implement Deserialize for U256
 impl<'de> Deserialize<'de> for U256 {
-    fn deserialize<D>(deserializer: D) -> Result<U256, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let s: String = Deserialize::deserialize(deserializer)?;
-        U256::from_dec_str(&s).map_err(serde::de::Error::custom)
+        Self::from_dec_str(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -526,11 +526,11 @@ impl DecodeHash for H256 {
     fn from(base58_string: &str) -> Result<Self, String> {
         FromBase58::from_base58(base58_string)
             .map_err(|e| format!("Failed to decode from base58 {:?}", e))
-            .map(|bytes| H256::from_slice(bytes.as_slice()))
+            .map(|bytes| Self::from_slice(bytes.as_slice()))
     }
 
     fn empty() -> Self {
-        H256::zero()
+        Self::zero()
     }
 }
 
@@ -548,7 +548,7 @@ impl Compact for H256 {
         // Disambiguate and call the correct H256::from method
         let (v, remaining_buf) = <[u8; 32]>::from_compact(buf, len);
         // Fully qualify this call to avoid calling DecodeHash::from
-        (<H256 as From<[u8; 32]>>::from(v), remaining_buf)
+        (<Self as From<[u8; 32]>>::from(v), remaining_buf)
     }
 }
 
@@ -561,7 +561,7 @@ impl Compress for H256 {
 }
 
 impl Decompress for H256 {
-    fn decompress(value: &[u8]) -> Result<H256, DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
     }
@@ -685,12 +685,12 @@ pub struct H256List(pub Vec<H256>);
 impl H256List {
     // Constructor for an empty H256List
     pub fn new() -> Self {
-        H256List(Vec::new())
+        Self(Vec::new())
     }
 
     // Constructor for an initialized H256List
     pub fn with_capacity(capacity: usize) -> Self {
-        H256List(Vec::with_capacity(capacity))
+        Self(Vec::with_capacity(capacity))
     }
 
     pub fn push(&mut self, value: H256) {
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn test_u256_to_compact() {
         // Create a U256 value to test
-        let original_value = U256::from(123456789u64);
+        let original_value = U256::from(123456789_u64);
 
         // Create a buffer to write the compact representation into
         let mut buf = BytesMut::with_capacity(32);
@@ -926,7 +926,7 @@ mod tests {
 
         // Check that the buffer now contains the correct big-endian representation
         let expected_bytes = {
-            let mut temp = [0u8; 32];
+            let mut temp = [0_u8; 32];
             original_value.to_big_endian(&mut temp);
             temp
         };
@@ -936,7 +936,7 @@ mod tests {
     #[test]
     fn test_u256_compact_round_trip() {
         // Create a U256 value and convert it to compact bytes
-        let original_value = U256::from(123456789u64);
+        let original_value = U256::from(123456789_u64);
         let mut buf = BytesMut::with_capacity(32);
         original_value.to_compact(&mut buf);
 

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     DataLedger, H256,

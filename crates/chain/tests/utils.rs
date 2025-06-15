@@ -9,7 +9,7 @@ use actix_web::{
 };
 use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use futures::future::select;
 use irys_actors::block_tree_service::ReorgEvent;
 use irys_actors::mempool_service::MempoolTxs;
@@ -48,8 +48,8 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
-use reth_db::{cursor::*, transaction::DbTx, Database};
-use sha2::{Digest, Sha256};
+use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
@@ -120,7 +120,7 @@ pub async fn capacity_chunk_solution(
     );
 
     let max: irys_types::serialization::U256 = irys_types::serialization::U256::MAX;
-    let mut le_bytes = [0u8; 32];
+    let mut le_bytes = [0_u8; 32];
     max.to_little_endian(&mut le_bytes);
     let solution_hash = H256(le_bytes);
 
@@ -289,10 +289,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn testnet_peer_with_assignments(
-        &self,
-        peer_signer: &IrysSigner,
-    ) -> IrysNodeTest<IrysNodeCtx> {
+    pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
         let seconds_to_wait = 20;
 
         // Create a new peer config using the provided signer
@@ -910,7 +907,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        let cfg = NodeConfig { ..self.cfg };
+        let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),
             cfg,
@@ -1135,7 +1132,7 @@ pub async fn post_chunk<T, B>(
     let chunk = UnpackedChunk {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
-        data_path: Base64(tx.proofs[chunk_index].proof.to_vec()),
+        data_path: Base64(tx.proofs[chunk_index].proof.clone()),
         bytes: Base64(chunks[chunk_index].to_vec()),
         tx_offset: TxChunkOffset::from(chunk_index as u32),
     };

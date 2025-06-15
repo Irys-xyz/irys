@@ -1,6 +1,6 @@
 use crate::block_pool_service::BlockPoolError;
 use crate::peer_list::PeerListFacadeError;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::mempool_service::TxIngressError;
 use irys_types::{BlockHash, H256};
 use serde::{Deserialize, Serialize};
@@ -44,29 +44,27 @@ impl From<TxIngressError> for GossipError {
             // ==== Not really errors
             TxIngressError::Skipped => {
                 // Not an invalid transaction - just skipped
-                GossipError::TransactionIsAlreadyHandled
+                Self::TransactionIsAlreadyHandled
             }
             // ==== External errors
             TxIngressError::InvalidSignature => {
                 // Invalid signature, decrease source reputation
-                GossipError::InvalidData(InvalidDataError::TransactionSignature)
+                Self::InvalidData(InvalidDataError::TransactionSignature)
             }
             TxIngressError::Unfunded => {
                 // Unfunded transaction, decrease source reputation
-                GossipError::InvalidData(InvalidDataError::TransactionUnfunded)
+                Self::InvalidData(InvalidDataError::TransactionUnfunded)
             }
             TxIngressError::InvalidAnchor => {
                 // Invalid anchor, decrease source reputation
-                GossipError::InvalidData(InvalidDataError::TransactionAnchor)
+                Self::InvalidData(InvalidDataError::TransactionAnchor)
             }
             // ==== Internal errors - shouldn't be communicated to outside
-            TxIngressError::DatabaseError => GossipError::Internal(InternalGossipError::Database),
+            TxIngressError::DatabaseError => Self::Internal(InternalGossipError::Database),
             TxIngressError::ServiceUninitialized => {
-                GossipError::Internal(InternalGossipError::ServiceUninitialized)
+                Self::Internal(InternalGossipError::ServiceUninitialized)
             }
-            TxIngressError::Other(error) => {
-                GossipError::Internal(InternalGossipError::Unknown(error))
-            }
+            TxIngressError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
         }
     }
 }
@@ -126,8 +124,8 @@ pub enum GossipDataRequest {
 impl Debug for GossipDataRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GossipDataRequest::Block(hash) => write!(f, "block {:?}", hash.0.to_base58()),
-            GossipDataRequest::Transaction(hash) => {
+            Self::Block(hash) => write!(f, "block {:?}", hash.0.to_base58()),
+            Self::Transaction(hash) => {
                 write!(f, "transaction {:?}", hash.0.to_base58())
             }
         }

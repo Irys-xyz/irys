@@ -4,7 +4,7 @@ use crate::chunked::ChunkedIterator;
 use crate::ChunkBytes;
 use crate::H256;
 use alloy_primitives::Address;
-use borsh::BorshDeserialize;
+use borsh::BorshDeserialize as _;
 use borsh_derive::BorshDeserialize;
 use eyre::eyre;
 use eyre::Error;
@@ -55,9 +55,9 @@ pub trait ProofDeserialize<T> {
     fn hash(&self) -> Option<[u8; HASH_SIZE]>;
 }
 
-impl ProofDeserialize<LeafProof> for LeafProof {
+impl ProofDeserialize<Self> for LeafProof {
     fn try_from_proof_slice(slice: &[u8]) -> Result<Self, Error> {
-        let proof = LeafProof::try_from_slice(slice)?;
+        let proof = Self::try_from_slice(slice)?;
         Ok(proof)
     }
     fn offset(&self) -> usize {
@@ -69,9 +69,9 @@ impl ProofDeserialize<LeafProof> for LeafProof {
     }
 }
 
-impl ProofDeserialize<BranchProof> for BranchProof {
+impl ProofDeserialize<Self> for BranchProof {
     fn try_from_proof_slice(slice: &[u8]) -> Result<Self, Error> {
-        let proof = BranchProof::try_from_slice(slice)?;
+        let proof = Self::try_from_slice(slice)?;
         Ok(proof)
     }
     fn offset(&self) -> usize {
@@ -92,7 +92,7 @@ pub trait Helpers<T> {
     fn to_note_vec(&self) -> Vec<u8>;
 }
 
-impl Helpers<usize> for usize {
+impl Helpers<Self> for usize {
     fn to_note_vec(&self) -> Vec<u8> {
         let mut note = vec![0; NOTE_SIZE - 8];
         note.extend((*self as u64).to_be_bytes());
@@ -151,9 +151,10 @@ pub fn validate_path(
 
         // Choose the next expected_path_hash based on weather the target_offset
         // byte is to the left or right of the branch_proof's "offset" value
-        expected_path_hash = match is_right_of_offset {
-            true => branch_proof.right_id,
-            false => branch_proof.left_id,
+        expected_path_hash = if is_right_of_offset {
+            branch_proof.right_id
+        } else {
+            branch_proof.left_id
         };
 
         // Keep track of left bound as we traverse down the branches
@@ -280,9 +281,10 @@ pub fn validate_chunk(
 
                 // If the offset from the proof is greater than the offset in the data chunk,
                 // then the next id to validate against is from the left.
-                root_id = match max_byte_range > &branch_proof.offset() {
-                    true => branch_proof.right_id,
-                    false => branch_proof.left_id,
+                root_id = if max_byte_range > &branch_proof.offset() {
+                    branch_proof.right_id
+                } else {
+                    branch_proof.left_id
                 }
             }
 

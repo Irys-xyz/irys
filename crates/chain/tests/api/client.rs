@@ -1,7 +1,7 @@
 //! api client tests
 
 use crate::utils::{mine_block, IrysNodeTest};
-use irys_api_client::{ApiClient, IrysApiClient};
+use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
@@ -11,7 +11,7 @@ use irys_types::{
 use semver::Version;
 use std::{
     net::{IpAddr, SocketAddr},
-    str::FromStr,
+    str::FromStr as _,
 };
 use tracing::debug;
 

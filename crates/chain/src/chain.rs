@@ -1,7 +1,7 @@
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
+use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::{
@@ -180,7 +180,7 @@ struct StopGuard(Arc<AtomicBool>);
 
 impl StopGuard {
     fn new() -> Self {
-        StopGuard(Arc::new(AtomicBool::new(false)))
+        Self(Arc::new(AtomicBool::new(false)))
     }
 
     fn mark_stopped(&self) {
@@ -205,7 +205,7 @@ impl Drop for StopGuard {
 
 impl Clone for StopGuard {
     fn clone(&self) -> Self {
-        StopGuard(Arc::clone(&self.0))
+        Self(Arc::clone(&self.0))
     }
 }
 
@@ -315,7 +315,7 @@ impl IrysNode {
         }
 
         let config = Config::new(node_config);
-        Ok(IrysNode {
+        Ok(Self {
             config,
             http_listener,
             gossip_listener,
@@ -688,7 +688,7 @@ impl IrysNode {
                         server_stop_handle.await.unwrap();
 
                         match gossip_service_handle.stop().await {
-                            Ok(_) => info!("Gossip service stopped"),
+                            Ok(()) => info!("Gossip service stopped"),
                             Err(e) => warn!("Gossip service is already stopped: {:?}", e),
                         }
 

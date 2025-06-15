@@ -14,7 +14,7 @@ use irys_database::{
 };
 use irys_database::{insert_commitment_tx, SystemLedger};
 use irys_primitives::CommitmentType;
-use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt, IrysRethNodeAdapter};
+use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
@@ -30,7 +30,7 @@ use reth_db::{
     DatabaseError,
 };
 use std::fs;
-use std::io::Write;
+use std::io::Write as _;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
@@ -1756,7 +1756,7 @@ impl Inner {
         let addresses_to_check: Vec<Address> = mempool_state_guard
             .valid_commitment_tx
             .keys()
-            .cloned()
+            .copied()
             .collect();
 
         for address in addresses_to_check {

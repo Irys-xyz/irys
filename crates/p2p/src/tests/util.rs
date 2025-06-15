@@ -5,7 +5,7 @@ use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::{

@@ -13,12 +13,12 @@ use crate::{
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_consensus::{
-    transaction::SignerRecoverable, EthereumTxEnvelope, SignableTransaction, TxEip4844,
+    transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
 };
-use alloy_network::TxSignerSync;
+use alloy_network::TxSignerSync as _;
 use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_signer_local::LocalSigner;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
@@ -40,7 +40,7 @@ use openssl::sha;
 use reth::rpc::types::BlockId;
 use reth::{payload::EthBuiltPayload, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
-use reth_db::Database;
+use reth_db::Database as _;
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
     collections::HashMap,
@@ -557,7 +557,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
-                Ok(Ok(_)) => Ok(()),
+                Ok(Ok(())) => Ok(()),
                 Ok(Err(res)) => {
                     error!("Newly produced block {} ({}) failed pre-validation: {:?}", &block.block_hash.0.to_base58(), &block.height, res);
                     Err(eyre!("Newly produced block {} ({}) failed pre-validation: {:?}", &block.block_hash.0.to_base58(), &block.height, res))

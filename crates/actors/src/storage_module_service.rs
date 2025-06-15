@@ -136,7 +136,7 @@ impl StorageModuleServiceInner {
             // Validate the module against on-disk packing parameters
             if info.partition_assignment.is_some() {
                 match self.validate_packing_params(existing, path, i) {
-                    Ok(_) => {}
+                    Ok(()) => {}
                     Err(err) => panic!("{}", err),
                 }
             }

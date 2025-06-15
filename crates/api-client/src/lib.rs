@@ -1,4 +1,4 @@
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionHeader,

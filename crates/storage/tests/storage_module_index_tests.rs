@@ -20,7 +20,7 @@ use irys_types::{
     UnpackedChunk, H256,
 };
 use openssl::sha;
-use reth_db::Database;
+use reth_db::Database as _;
 use tracing::info;
 
 #[test_log::test(test)]
@@ -239,10 +239,10 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_root = tx_headers[2].data_root;
     let offset = proofs[2].offset as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * config.consensus.chunk_size);
+        (offset + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
     let data_size = tx_headers[2].data_size;
     assert_eq!(bytes_in_tx, data_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1u64;
+    let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -291,9 +291,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_size = tx_headers[3].data_size;
     let offset = proofs[3].offset as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * config.consensus.chunk_size);
+        (offset + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1u64;
+    let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -350,7 +350,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let offset = proofs[4].offset as u64;
     let bytes_in_tx = (offset + 1) - ((*tx_ledger_range.end() + 1) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1u64;
+    let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_1_range,

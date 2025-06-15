@@ -4,7 +4,7 @@ use irys_actors::block_producer::SolutionFoundMessage;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
-use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
+use reth::{providers::BlockReader as _, transaction_pool::TransactionPool as _};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
