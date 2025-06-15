@@ -4,7 +4,7 @@ use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};

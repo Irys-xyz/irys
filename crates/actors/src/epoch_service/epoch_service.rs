@@ -1,6 +1,6 @@
-use actix::SystemService;
+use actix::SystemService as _;
 use actix::{Actor, Context};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
@@ -101,7 +101,7 @@ impl EpochServiceActor {
         Self::validate_commitments(&genesis_block, &commitments)?;
 
         match self.perform_epoch_tasks(&None, &genesis_block, commitments) {
-            Ok(_) => debug!("Initialized Epoch Service"),
+            Ok(()) => debug!("Initialized Epoch Service"),
             Err(e) => {
                 return Err(eyre::eyre!("Error performing genesis init tasks {:?}", e));
             }
@@ -127,7 +127,7 @@ impl EpochServiceActor {
             let commitments = replay_data.commitments;
 
             match self.perform_epoch_tasks(&previous_epoch_block, &block_header, commitments) {
-                Ok(_) => debug!("Processed replay epoch block"),
+                Ok(()) => debug!("Processed replay epoch block"),
                 Err(e) => {
                     return Err(eyre::eyre!("Error performing epoch tasks {:?}", e));
                 }

@@ -1,12 +1,12 @@
 use crate::BlockFinalizedMessage;
 use actix::prelude::*;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_database::{block_header_by_hash, BlockIndex};
 use irys_types::{
     BlockIndexItem, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
     H256, U256,
 };
-use reth_db::Database;
+use reth_db::Database as _;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};
 //==============================================================================
@@ -113,13 +113,13 @@ impl SystemService for BlockIndexService {
 
 #[derive(Debug)]
 struct BlockLogEntry {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub block_hash: H256,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub height: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub timestamp: u128,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub difficulty: U256,
 }
 

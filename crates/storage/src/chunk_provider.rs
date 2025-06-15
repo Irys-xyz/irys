@@ -1,6 +1,6 @@
 use crate::{checked_add_i32_u64, get_storage_module_at_offset, StorageModulesReadGuard};
-use base58::ToBase58;
-use eyre::OptionExt;
+use base58::ToBase58 as _;
+use eyre::OptionExt as _;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
 };
@@ -153,7 +153,7 @@ mod tests {
                 num_chunks_in_partition: 100,
                 ..ConsensusConfig::testnet()
             }),
-            base_directory: base_path.clone(),
+            base_directory: base_path,
             ..NodeConfig::testnet()
         };
         let config = Config::new(node_config);
@@ -171,7 +171,7 @@ mod tests {
         let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         let data_size = (config.consensus.chunk_size as f64 * 2.5).round() as usize;
-        let mut data_bytes = vec![0u8; data_size];
+        let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         let irys = IrysSigner::random_signer(&config.consensus);
@@ -233,7 +233,7 @@ mod tests {
 
             let unpacked_data = unpack_with_entropy(
                 &packed_chunk,
-                vec![0u8; config.consensus.chunk_size as usize],
+                vec![0_u8; config.consensus.chunk_size as usize],
                 config.consensus.chunk_size as usize,
             );
             let unpacked_chunk = UnpackedChunk {

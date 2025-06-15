@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tracing::{debug, info, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt, util::SubscriberInitExt as _, EnvFilter, Layer, Registry,
+    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
 };
 
 #[actix_web::main]

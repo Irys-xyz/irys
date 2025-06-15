@@ -8,7 +8,7 @@ use crate::broadcast_mining_service::{
 use crate::packing::PackingRequest;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
-use eyre::WrapErr;
+use eyre::WrapErr as _;
 use irys_efficient_sampling::Ranges;
 use irys_storage::{ie, ii, StorageModule};
 use irys_types::block_production::Seed;
@@ -296,7 +296,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
 
         match self.mine_partition_with_seed(seed.into_inner(), msg.global_step, msg.checkpoints) {
             Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
-                Ok(_) => {
+                Ok(()) => {
                     // debug!("Solution sent!");
                 }
                 Err(err) => error!("Error submitting solution to block producer {:?}", err),
@@ -401,7 +401,7 @@ mod tests {
         packing::PackingActor,
     };
     use actix::actors::mocker::Mocker;
-    use actix::{Actor, Addr, Recipient};
+    use actix::{Addr, Recipient};
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
@@ -424,7 +424,6 @@ mod tests {
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
     ) -> BlockProducerMockActor {
-        let closure_arc = closure_arc.clone();
         BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
             let solution_message: SolutionFoundMessage =
                 *msg.downcast::<SolutionFoundMessage>().unwrap();
@@ -441,7 +440,7 @@ mod tests {
     }
 
     #[test_log::test(actix_rt::test)]
-    #[allow(clippy::await_holding_lock, reason = "test")]
+    #[expect(clippy::await_holding_lock, reason = "test")]
 
     async fn test_solution() {
         let chunk_count = 4;

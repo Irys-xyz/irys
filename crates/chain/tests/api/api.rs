@@ -3,7 +3,7 @@ use actix_http::StatusCode;
 use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_testing_utils::initialize_tracing;
@@ -11,7 +11,7 @@ use irys_types::{
     irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
     UnpackedChunk,
 };
-use rand::Rng;
+use rand::Rng as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -62,7 +62,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
 
     // Create 2.5 chunks worth of data *  fill the data with random bytes
     let data_size = chunk_size * 2_usize;
-    let mut data_bytes = vec![0u8; data_size];
+    let mut data_bytes = vec![0_u8; data_size];
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
@@ -94,7 +94,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[index].proof.to_vec());
+        let data_path = Base64(tx.proofs[index].proof.clone());
 
         let chunk = UnpackedChunk {
             data_root,

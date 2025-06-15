@@ -4,7 +4,7 @@ use crate::block_index_service::BlockIndexReadGuard;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_storage::RecoveredMempoolState;
 use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
-use reth_db::Database;
+use reth_db::Database as _;
 
 #[derive(Debug)]
 /// Represents the epoch block and its associated commitment transactions
@@ -32,11 +32,7 @@ impl EpochReplayData {
         db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
         config: &Config,
-    ) -> eyre::Result<(
-        IrysBlockHeader,
-        Vec<CommitmentTransaction>,
-        Vec<EpochReplayData>,
-    )> {
+    ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Vec<Self>)> {
         // Recover any mempool commitment transactions that were persisted
         let recovered =
             RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir(), false).await;
@@ -47,7 +43,7 @@ impl EpochReplayData {
         let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
         let num_blocks = block_index.num_blocks();
         let num_epoch_blocks = (num_blocks / num_blocks_in_epoch).max(1);
-        let mut replay_data: VecDeque<EpochReplayData> = VecDeque::new();
+        let mut replay_data: VecDeque<Self> = VecDeque::new();
 
         // Process each epoch block from genesis to the latest
         for i in 0..num_epoch_blocks {
@@ -89,7 +85,7 @@ impl EpochReplayData {
                 Some(v) => v,
                 None => {
                     // skip the commitment specific logic
-                    replay_data.push_back(EpochReplayData {
+                    replay_data.push_back(Self {
                         epoch_block: block,
                         commitments: vec![],
                     });
@@ -106,14 +102,12 @@ impl EpochReplayData {
                 .iter()
                 .map(|txid| {
                     // First try to get the commitment tx from the DB
-                    commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
-                        // Then from the mempools recovered commitments
-                        opt.or_else(|| recovered.commitment_txs.get(txid).cloned())
-                            .ok_or_else(|| {
-                                // If we can't find it, there's no continuing
-                                eyre::eyre!("Commitment transaction not found: txid={}", txid)
-                            })
-                    })
+                    let opt = commitment_tx_by_txid(&read_tx, txid)?;
+                    opt.or_else(|| recovered.commitment_txs.get(txid).cloned())
+                        .ok_or_else(|| {
+                            // If we can't find it, there's no continuing
+                            eyre::eyre!("Commitment transaction not found: txid={}", txid)
+                        })
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .expect(
@@ -121,7 +115,7 @@ impl EpochReplayData {
                 );
 
             // Store the epoch block and its commitments
-            replay_data.push_back(EpochReplayData {
+            replay_data.push_back(Self {
                 epoch_block: block,
                 commitments: commitments_tx,
             });

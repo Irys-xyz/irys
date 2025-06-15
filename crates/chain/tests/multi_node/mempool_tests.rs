@@ -16,7 +16,7 @@ use irys_types::{
 };
 use k256::ecdsa::SigningKey;
 use reth::{
-    network::{PeerInfo, Peers},
+    network::{PeerInfo, Peers as _},
     primitives::{Receipt, Transaction},
     rpc::{
         api::EthApiClient,

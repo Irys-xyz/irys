@@ -1,5 +1,5 @@
-use actix::{Actor, Context, Handler};
-use base58::ToBase58;
+use actix::{Actor as _, Context, Handler as _};
+use base58::ToBase58 as _;
 use irys_actors::epoch_service::{
     EpochReplayData, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
 };
@@ -47,8 +47,8 @@ async fn genesis_test() {
         BlockIndex::new(&config.node_config).await.unwrap(),
     ));
 
-    let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
-    SystemRegistry::set(block_index_actor.clone());
+    let block_index_actor = BlockIndexService::new(block_index, &config.consensus).start();
+    SystemRegistry::set(block_index_actor);
 
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
@@ -908,8 +908,7 @@ async fn partitions_assignment_determinism_test() {
     let pledge_count = 20;
     let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load_for_test(base_path.clone(), 40).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
     let service_senders = ServiceSenders::new().0;
     let mut epoch_service =
         EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);

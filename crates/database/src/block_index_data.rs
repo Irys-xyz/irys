@@ -1,14 +1,14 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
 use actix::dev::MessageResponse;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem,
     NodeConfig, H256,
 };
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,7 +30,7 @@ impl Default for BlockIndex {
 impl BlockIndex {
     /// Initializes a block index from disk, if this was a multi node network
     /// it could also read the latest block information from the network.
-    pub async fn new(config: &NodeConfig) -> Result<BlockIndex> {
+    pub async fn new(config: &NodeConfig) -> Result<Self> {
         let block_index_dir = config.block_index_dir();
         tokio::fs::create_dir_all(&block_index_dir).await?;
         let block_index_file = block_index_dir.join(FILE_NAME);
@@ -39,7 +39,7 @@ impl BlockIndex {
         let index = load_index_from_file(&block_index_file)?;
 
         // Return the "Initialized" state of the BlockIndex type
-        Ok(BlockIndex {
+        Ok(Self {
             items: index.into(),
             block_index_file,
         })
@@ -252,7 +252,7 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
     let file_size = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
 
-    let mut buffer = vec![0u8; file_size as usize];
+    let mut buffer = vec![0_u8; file_size as usize];
     file.read_exact(&mut buffer)?;
 
     let mut block_index_items = Vec::new();

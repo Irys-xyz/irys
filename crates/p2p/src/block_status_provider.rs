@@ -23,10 +23,7 @@ pub enum BlockStatus {
 
 impl BlockStatus {
     pub fn is_processed(&self) -> bool {
-        matches!(
-            self,
-            BlockStatus::Finalized | BlockStatus::ProcessedButCanBeReorganized
-        )
+        matches!(self, Self::Finalized | Self::ProcessedButCanBeReorganized)
     }
 }
 

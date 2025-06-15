@@ -1,6 +1,6 @@
 use super::{CommitmentState, EpochServiceActor, EpochServiceError, PartitionAssignments};
 use crate::services::Stop;
-use actix::{ActorContext, Handler, Message, MessageResponse};
+use actix::{ActorContext as _, Handler, Message, MessageResponse};
 use irys_database::Ledgers;
 use irys_primitives::CommitmentStatus;
 use irys_types::{

@@ -362,6 +362,7 @@ panic = "unwind"
 # By reducing the debug level (though keeping enough to have meaningful
 # backtraces), we reduce incremental build time and binary size significantly.
 debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.dev.build-override]
 debug = "line-tables-only"
@@ -391,13 +392,12 @@ opt-level = 3
 # rust.missing_debug_implementations = "warn"
 # rust.missing_docs = "warn"
 # rust.rust_2018_idioms = { level = "deny", priority = -1 }
-
+# rustdoc.all = "warn"
+# rust.unnameable-types = "warn"
 
 rust.unreachable_pub = "warn"
 rust.unused_must_use = "deny"
-rust.unused_imports = "warn"
-# rustdoc.all = "warn"
-# rust.unnameable-types = "warn"
+rust.unused_imports = "deny"
 
 [workspace.lints.clippy]
 
@@ -421,6 +421,61 @@ doc-lazy-continuation = "allow"
 type-complexity = "allow"
 needless-range-loop = "allow"
 too-many-arguments = "allow"
+# map_unwrap_or = "deny"
+# missing_asserts_for_indexing = "deny"
+
+
+# need to update clippy for these two
+# doc_comment_double_space_linebreaks = "deny"
+# elidable_lifetime_names = "deny"
+
+redundant-clone = "deny"
+allow_attributes = "deny"
+bind_instead_of_map = "deny"
+bool_assert_comparison = "deny"
+cloned_instead_of_copied = "deny"
+explicit_into_iter_loop = "deny"
+ignored_unit_patterns = "deny"
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+manual_instant_elapsed = "deny"
+manual_is_variant_and = "deny"
+manual_string_new = "deny"
+match_bool = "deny"
+needless_for_each = "deny"
+needless_raw_string_hashes = "deny"
+needless_raw_strings = "deny"
+non_std_lazy_statics = "deny"
+option_as_ref_cloned = "deny"
+precedence_bits = "deny"
+redundant_clone = "deny"
+redundant_closure_for_method_calls = "deny"
+ref_binding_to_reference = "deny"
+return_and_then = "deny"
+unseparated_literal_suffix = "deny"
+single_char_pattern = "deny"
+string_to_string = "deny"
+suspicious_operation_groupings = "deny"
+trait_duplication_in_bounds = "deny"
+unchecked_duration_subtraction = "deny"
+unnecessary_join = "deny"
+unnecessary_literal_bound = "deny"
+unnecessary_struct_initialization = "deny"
+unnested_or_patterns = "deny"
+unused_trait_names = "deny"
+use_self = "deny"
+
+# disabled
+
+# unnecessary_semicolon = "deny" # caused issues
+# semicolon_if_nothing_returned = "deny" # caused issues
+# redundant_else = "deny" # clarity
+# redundant_pub_crate = "deny" # caused issues
+# missing_const_for_fn = "deny" # causes weird issues? maybe an update will fix
+# manual_assert = "deny" # reduces clarity
+# deref_by_slicing = "deny" # reduces clarity
+# assertions_on_result_states = "deny" # keeping the asserts helps to improve test clarity
+# needless_collect = "deny" # reduces clarity
 
 
 [workspace.metadata.cargo-machete]

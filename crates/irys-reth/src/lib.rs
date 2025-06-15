@@ -411,8 +411,8 @@ mod tests {
         advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance, pledge,
         sign_tx, stake, storage_fees, unpledge, unstake,
     };
-    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
-    use alloy_eips::Encodable2718;
+    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
+    use alloy_eips::Encodable2718 as _;
     use alloy_network::{EthereumWallet, TxSigner};
     use alloy_primitives::{Address, Uint, B256};
     use alloy_primitives::{FixedBytes, Signature};
@@ -420,12 +420,12 @@ mod tests {
     use alloy_signer_local::PrivateKeySigner;
     use reth::api::EngineApiMessageVersion;
     use reth::{
-        providers::{AccountReader, BlockHashReader, BlockNumReader},
+        providers::{AccountReader as _, BlockHashReader as _, BlockNumReader as _},
         rpc::server_types::eth::EthApiError,
     };
     use reth_e2e_test_utils::wallet::Wallet;
-    use reth_storage_api::BlockReaderIdExt;
-    use reth_transaction_pool::{PoolTransaction, TransactionPool};
+    use reth_storage_api::BlockReaderIdExt as _;
+    use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -481,7 +481,7 @@ mod tests {
             &mut node_a,
             0,
             U256::from(1000),
-            1_000_000_000u128,
+            1_000_000_000_u128,
             Address::random(),
             &ctx.normal_signer,
         )
@@ -552,7 +552,7 @@ mod tests {
 
         let initial_balance = get_balance(&node_a.inner, ctx.block_producer_a.address());
 
-        let amount = U256::from(7000000000000000000u64);
+        let amount = U256::from(7000000000000000000_u64);
         let system_tx = compose_system_tx(
             1,
             &SystemTransaction::new_v1(
@@ -728,7 +728,7 @@ mod tests {
             &mut node,
             3,
             0,
-            10_000_000_000u128, // High gas price
+            10_000_000_000_u128, // High gas price
             Address::random(),
             &ctx.normal_signer,
         )
@@ -790,7 +790,7 @@ mod tests {
             &mut node,
             0,
             U256::from(1000),
-            1_000_000_000u128,
+            1_000_000_000_u128,
             Address::random(),
             &ctx.normal_signer,
         )
@@ -902,8 +902,8 @@ mod tests {
             let normal_tx_hash = create_and_submit_normal_tx(
                 &mut node,
                 block_number - 1,
-                U256::from(1234u64),
-                2_000_000_000u128, // 2 Gwei
+                U256::from(1234_u64),
+                2_000_000_000_u128, // 2 Gwei
                 recipient,
                 &ctx.normal_signer,
             )
@@ -955,8 +955,8 @@ mod tests {
         let normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
-            U256::from(1234u64),
-            2_000_000_000u128, // 2 Gwei
+            U256::from(1234_u64),
+            2_000_000_000_u128, // 2 Gwei
             ctx.normal_signer.address(),
             &ctx.normal_signer,
         )
@@ -993,7 +993,7 @@ mod tests {
         let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         // Use invalid block number (should be 1 for first block, but using 2)
-        let invalid_block_number = 2u64;
+        let invalid_block_number = 2_u64;
 
         // Create a system tx with the valid parent blockhash but invalid block number
         let system_tx = block_reward(
@@ -1008,8 +1008,8 @@ mod tests {
         let normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
-            U256::from(1234u64),
-            2_000_000_000u128, // 2 Gwei
+            U256::from(1234_u64),
+            2_000_000_000_u128, // 2 Gwei
             ctx.normal_signer.address(),
             &ctx.normal_signer,
         )
@@ -1350,8 +1350,8 @@ mod tests {
             let normal_tx = create_and_submit_normal_tx(
                 &mut node,
                 block_number - 1,
-                U256::from(1234u64),
-                2_000_000_000u128, // 2 Gwei
+                U256::from(1234_u64),
+                2_000_000_000_u128, // 2 Gwei
                 ctx.target_account.address(),
                 &ctx.normal_signer,
             )
@@ -1587,7 +1587,7 @@ mod tests {
         let target_address = ctx.target_account.address();
 
         // First, give the account some initial balance to allow pledge
-        let initial_funding = U256::from(10_000_000_000_000_000_000u64); // 10 ETH
+        let initial_funding = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
         let block_reward_tx = SystemTransaction::new_v1(
             1,
             ctx.genesis_blockhash,
@@ -1602,7 +1602,7 @@ mod tests {
         let initial_balance = get_balance(&node.inner, target_address);
 
         // Create pledge transaction
-        let pledge_amount = U256::from(5_000_000_000_000_000_000u64); // 5 ETH
+        let pledge_amount = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
         let pledge_tx = SystemTransaction::new_v1(
             2,
             node.inner.provider.latest_header().unwrap().unwrap().hash(),
@@ -1642,7 +1642,7 @@ mod tests {
         let target_address = ctx.target_account.address();
 
         // First, give the account some balance with a block reward
-        let initial_balance_amount = U256::from(10_000_000_000_000_000_000u64); // 10 ETH
+        let initial_balance_amount = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
         let block_reward_tx = SystemTransaction::new_v1(
             1,
             ctx.genesis_blockhash,
@@ -1657,7 +1657,7 @@ mod tests {
         let balance_after_initial_funding = get_balance(&node.inner, target_address);
 
         // Now create unpledge transaction
-        let unpledge_amount = U256::from(3_000_000_000_000_000_000u64); // 3 ETH
+        let unpledge_amount = U256::from(3_000_000_000_000_000_000_u64); // 3 ETH
         let unpledge_tx = SystemTransaction::new_v1(
             2,
             node.inner.provider.latest_header().unwrap().unwrap().hash(),
@@ -1697,7 +1697,7 @@ mod tests {
         let target_address = ctx.target_account.address();
 
         // First, give the account some initial balance to allow pledge operations
-        let initial_funding = U256::from(5_000_000_000_000_000_000u64); // 5 ETH
+        let initial_funding = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
         let block_reward_tx = SystemTransaction::new_v1(
             1,
             ctx.genesis_blockhash,
@@ -1802,7 +1802,7 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create unpledge transaction for non-existent account
-        let unpledge_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ETH
+        let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 ETH
         let unpledge_tx = SystemTransaction::new_v1(
             1,
             ctx.genesis_blockhash,
@@ -1868,7 +1868,7 @@ mod tests {
             &mut node,
             0,
             U256::from(1000),
-            1_000_000_000u128,
+            1_000_000_000_u128,
             Address::random(),
             &ctx.normal_signer,
         )
@@ -1902,7 +1902,7 @@ pub mod test_utils {
     use crate::payload::DeterministicSystemTxKey;
     use crate::system_tx::{SystemTransaction, TransactionPacket};
     use alloy_consensus::EthereumTxEnvelope;
-    use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip4844, TxLegacy};
     use alloy_genesis::Genesis;
     use alloy_network::EthereumWallet;
     use alloy_network::TxSigner;
@@ -1915,14 +1915,14 @@ pub mod test_utils {
         api::{FullNodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
         builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
-        providers::{AccountReader, BlockHashReader},
+        providers::{AccountReader as _, BlockHashReader as _},
         rpc::api::eth::helpers::EthTransactions,
         tasks::TaskManager,
     };
     use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
     use reth_engine_local::LocalPayloadAttributesBuilder;
     use reth_primitives_traits::SignedTransaction as _;
-    use reth_transaction_pool::{PoolTransaction, TransactionPool};
+    use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::collections::HashSet;
     use std::sync::Arc;
     use tracing::{span, Level};
@@ -1935,7 +1935,6 @@ pub mod test_utils {
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub target_account: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub genesis_blockhash: FixedBytes<32>,
-        #[allow(dead_code)]
         pub tasks: TaskManager,
     }
 
@@ -2100,7 +2099,7 @@ pub mod test_utils {
             let tx_hash = create_and_submit_normal_tx(
                 node,
                 start_nonce + i,
-                U256::from(1234u64),
+                U256::from(1234_u64),
                 gas_price,
                 recipient,
                 signer,
@@ -2336,7 +2335,7 @@ pub mod test_utils {
     ) -> Result<Vec<EthBuiltPayload>, eyre::Error> {
         let mut block_payloads = Vec::new();
 
-        for system_txs_raw in system_txs.into_iter() {
+        for system_txs_raw in system_txs {
             let mut system_txs = Vec::new();
             for system_tx in system_txs_raw {
                 // Create updated system tx with new metadata
@@ -2526,7 +2525,7 @@ pub mod test_utils {
             .try_into_recovered()
             .unwrap();
 
-        EthPooledTransaction::new(tx.clone(), 300)
+        EthPooledTransaction::new(tx, 300)
     }
 
     /// Returns a custom chain spec for testing.

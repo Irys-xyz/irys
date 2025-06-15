@@ -135,7 +135,7 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
-    let storage_submodule_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
+    let storage_submodule_config = StorageSubmodulesConfig::load(base_dir).unwrap();
     let num_submodules = storage_submodule_config.submodule_paths.len();
 
     if num_submodules < 3 {

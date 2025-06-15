@@ -1,6 +1,6 @@
 use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use core::time::Duration;
-use irys_actors::mempool_service::MempoolFacade;
+use irys_actors::mempool_service::MempoolFacade as _;
 use irys_types::{
     BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
 };

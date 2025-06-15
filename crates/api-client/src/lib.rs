@@ -1,4 +1,4 @@
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionHeader,
@@ -8,7 +8,7 @@ use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 
-#[allow(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
+#[expect(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
 enum Method {
     GET,
     POST,

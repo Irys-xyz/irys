@@ -103,7 +103,7 @@ impl Handler<BroadcastMiningSeed> for BroadcastMiningService {
             msg.seed,
             &self.subscribers.len()
         );
-        self.subscribers.retain(|addr| addr.connected());
+        self.subscribers.retain(actix::Addr::connected);
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }
@@ -114,7 +114,7 @@ impl Handler<BroadcastDifficultyUpdate> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
-        self.subscribers.retain(|addr| addr.connected());
+        self.subscribers.retain(actix::Addr::connected);
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }
@@ -125,7 +125,7 @@ impl Handler<BroadcastPartitionsExpiration> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, _: &mut Context<Self>) {
-        self.subscribers.retain(|addr| addr.connected());
+        self.subscribers.retain(actix::Addr::connected);
         debug!(msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());

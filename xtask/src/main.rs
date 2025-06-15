@@ -48,6 +48,8 @@ enum Commands {
     LocalChecks {
         #[clap(short, long, default_value_t = false)]
         with_tests: bool,
+        #[clap(short, long, default_value_t = false)]
+        fix: bool,
     },
 }
 
@@ -160,10 +162,10 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             )
             .run()?;
         }
-        Commands::LocalChecks { with_tests } => {
+        Commands::LocalChecks { with_tests, fix } => {
             run_command(
                 Commands::Fmt {
-                    check_only: true,
+                    check_only: !fix,
                     args: vec![],
                 },
                 sh,
@@ -171,7 +173,12 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             {
                 // push -D warnings for just this command to mimic CI
                 let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
-                run_command(Commands::Check { args: vec![] }, sh)?;
+                run_command(
+                    Commands::Check {
+                        args: vec!["--tests".to_string()],
+                    },
+                    sh,
+                )?;
             }
             run_command(Commands::Clippy { args: vec![] }, sh)?;
             run_command(Commands::UnusedDeps, sh)?;

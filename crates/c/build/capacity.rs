@@ -34,6 +34,8 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
 pub(crate) fn bind_capacity(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity.h").to_string_lossy())
+        // .raw_line("#![allow(clippy::all)]")
+        // .raw_line_before_rustfmt("#![allow(clippy::all)]")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");
@@ -77,6 +79,8 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
 pub(crate) fn bind_capacity_cuda(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity_cuda.h").to_string_lossy())
+        // .raw_line("#![allow(clippy::all)]")
+        // .raw_line_before_rustfmt("#![allow(clippy::all)]")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");

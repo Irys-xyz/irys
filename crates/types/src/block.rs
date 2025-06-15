@@ -389,7 +389,7 @@ impl DataTransactionLedger {
             })
             .collect::<Vec<DataRootLeave>>();
         let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
-        let root = generate_data_root(data_root_leaves.clone()).unwrap();
+        let root = generate_data_root(data_root_leaves).unwrap();
         let root_id = root.id;
         let proofs = resolve_proofs(root, None).unwrap();
         (H256(root_id), proofs)
@@ -448,14 +448,14 @@ impl fmt::Display for IrysBlockHeader {
 
 impl IrysBlockHeader {
     pub fn new_mock_header() -> Self {
-        use std::str::FromStr;
+        use std::str::FromStr as _;
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let tx_ids = H256List::new();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         // Create a sample IrysBlockHeader object with mock data
-        IrysBlockHeader {
+        Self {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
             last_diff_timestamp: 1622543200,
@@ -622,7 +622,7 @@ pub struct LedgerIndexItem {
 impl LedgerIndexItem {
     fn to_bytes(&self) -> [u8; 40] {
         // Fixed size of 40 bytes
-        let mut bytes = [0u8; 40];
+        let mut bytes = [0_u8; 40];
         bytes[0..8].copy_from_slice(&self.max_chunk_offset.to_le_bytes()); // First 8 bytes
         bytes[8..40].copy_from_slice(self.tx_root.as_bytes()); // Next 32 bytes
         bytes
@@ -632,7 +632,7 @@ impl LedgerIndexItem {
         let mut item = Self::default();
 
         // Read ledger size (first 8 bytes)
-        let mut size_bytes = [0u8; 8];
+        let mut size_bytes = [0_u8; 8];
         size_bytes.copy_from_slice(&bytes[0..8]);
         item.max_chunk_offset = u64::from_le_bytes(size_bytes);
 
@@ -676,7 +676,7 @@ impl BlockIndexItem {
 
     // Deserialize bytes to BlockIndexItem
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = BlockIndexItem {
+        let mut item = Self {
             block_hash: H256::from_slice(&bytes[0..32]),
             num_ledgers: bytes[32],
             ..Default::default()
@@ -703,10 +703,10 @@ mod tests {
     use super::*;
     use alloy_primitives::Signature;
     use alloy_rlp::Decodable;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use rstest::rstest;
     use serde_json;
-    use zerocopy::IntoBytes;
+    use zerocopy::IntoBytes as _;
 
     #[test]
     fn test_poa_data_rlp_round_trip() {
@@ -930,14 +930,14 @@ mod tests {
     fn test_validate_tx_path() {
         let mut txs: Vec<IrysTransactionHeader> = vec![IrysTransactionHeader::default(); 10];
         for tx in txs.iter_mut() {
-            tx.data_root = H256::from([3u8; 32]);
+            tx.data_root = H256::from([3_u8; 32]);
             tx.data_size = 64
         }
 
         let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&txs);
 
         for proof in proofs {
-            let encoded_proof = Base64(proof.proof.to_vec());
+            let encoded_proof = Base64(proof.proof.clone());
             validate_path(tx_root.0, &encoded_proof, proof.offset as u128).unwrap();
         }
     }

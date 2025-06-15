@@ -8,9 +8,9 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use k256::ecdsa::SigningKey;
-use reth::rpc::eth::EthApiServer;
+use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -19,7 +19,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_primitives::range_specifier::ChunkRangeSpecifier;
-use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde, U18, U34};
+use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
 use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
@@ -28,7 +28,6 @@ use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(
-    #[allow(missing_docs)]
     #[sol(rpc)]
     IrysProgrammableDataBasic,
     "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"
@@ -193,7 +192,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
         let chunk = UnpackedChunk {
             data_root,

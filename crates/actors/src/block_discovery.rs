@@ -10,7 +10,7 @@ use crate::{
 };
 use actix::prelude::*;
 use async_trait::async_trait;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
@@ -22,10 +22,10 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
-use reth_db::Database;
+use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
-use tracing::{debug, error, info, Instrument, Span};
+use tracing::{debug, error, info, Instrument as _, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -133,13 +133,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .tx_ids
             .iter()
             .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| {
-                            eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
-                        })
-                    })
+                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
+                opt.ok_or_else(|| {
+                    eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
+                })
             })
             .collect::<Result<Vec<_>, _>>()
         {
@@ -163,11 +160,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .tx_ids
             .iter()
             .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
+                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
+                opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
             })
             .collect::<Result<Vec<_>, _>>()
         {
@@ -273,7 +267,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .await;
 
             match validation_result {
-                Ok(_) => {
+                Ok(()) => {
                     // Attempt to validate / update the epoch commitment cache
                     for commitment_tx in commitments.iter() {
                         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -488,7 +482,7 @@ pub async fn get_data_tx_in_parallel(
                 .await
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
                 .into_iter()
-                .filter(|v| v.is_some())
+                .filter(Option::is_some)
                 .map(|v| (v.clone().unwrap().id, v.unwrap()))
                 .collect::<HashMap<IrysTransactionId, IrysTransactionHeader>>();
             Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(x)

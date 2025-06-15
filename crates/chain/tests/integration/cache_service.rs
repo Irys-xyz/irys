@@ -2,7 +2,7 @@ use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::db::IrysDatabaseExt as _;
@@ -118,7 +118,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
         let chunk = UnpackedChunk {
             data_root,

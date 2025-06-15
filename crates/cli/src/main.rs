@@ -11,7 +11,7 @@ use std::{path::PathBuf, sync::Arc};
 use tracing::info;
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 
 #[derive(Debug, Parser, Clone)]

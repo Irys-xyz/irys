@@ -3,7 +3,7 @@ use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::{
     packing::wait_for_packing, CommitmentCacheMessage, CommitmentCacheStatus,

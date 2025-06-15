@@ -6,7 +6,7 @@ use crate::{
     },
     utils::{mine_block, IrysNodeTest},
 };
-use actix_web::{http::header::ContentType, HttpMessage};
+use actix_web::{http::header::ContentType, HttpMessage as _};
 use irys_api_server::routes::index::NodeInfo;
 use irys_testing_utils::initialize_tracing;
 use irys_types::BlockIndexItem;

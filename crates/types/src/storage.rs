@@ -72,19 +72,19 @@ impl Decode for PartitionChunkOffset {
                 .try_into()
                 .map_err(|_| reth_db::DatabaseError::Decode)?,
         );
-        Ok(PartitionChunkOffset(decoded_value))
+        Ok(Self(decoded_value))
     }
 }
 impl Encode for PartitionChunkOffset {
-    type Encoded = [u8; std::mem::size_of::<PartitionChunkOffset>()];
+    type Encoded = [u8; std::mem::size_of::<Self>()];
     fn encode(self) -> Self::Encoded {
         self.0.to_be_bytes()
     }
 }
 
 impl DiscreteFinite for PartitionChunkOffset {
-    const MIN: Self = PartitionChunkOffset(0);
-    const MAX: Self = PartitionChunkOffset(u32::MAX);
+    const MIN: Self = Self(0);
+    const MAX: Self = Self(u32::MAX);
     fn up(self) -> Option<Self> {
         self.0.checked_add(1).map(PartitionChunkOffset)
     }
@@ -94,7 +94,7 @@ impl DiscreteFinite for PartitionChunkOffset {
 }
 impl PartitionChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
-        PartitionChunkOffset(u32::from_be_bytes(bytes))
+        Self(u32::from_be_bytes(bytes))
     }
 }
 impl Deref for PartitionChunkOffset {
@@ -110,49 +110,49 @@ impl DerefMut for PartitionChunkOffset {
 }
 
 impl From<RelativeChunkOffset> for PartitionChunkOffset {
-    fn from(value: RelativeChunkOffset) -> PartitionChunkOffset {
-        PartitionChunkOffset::from(*value)
+    fn from(value: RelativeChunkOffset) -> Self {
+        Self::from(*value)
     }
 }
 impl From<LedgerChunkOffset> for PartitionChunkOffset {
-    fn from(value: LedgerChunkOffset) -> PartitionChunkOffset {
-        PartitionChunkOffset::from(*value)
+    fn from(value: LedgerChunkOffset) -> Self {
+        Self::from(*value)
     }
 }
 
 impl From<PartitionChunkOffset> for u64 {
     fn from(value: PartitionChunkOffset) -> Self {
-        value.0 as u64
+        value.0 as Self
     }
 }
 
 impl Add<u32> for PartitionChunkOffset {
     type Output = Self;
     fn add(self, rhs: u32) -> Self::Output {
-        PartitionChunkOffset(self.0 + rhs)
+        Self(self.0 + rhs)
     }
 }
 
 impl Rem<u32> for PartitionChunkOffset {
     type Output = Self;
     fn rem(self, rhs: u32) -> Self::Output {
-        PartitionChunkOffset(self.0 % rhs)
+        Self(self.0 % rhs)
     }
 }
 
 impl From<u8> for PartitionChunkOffset {
     fn from(value: u8) -> Self {
-        PartitionChunkOffset(value.into())
+        Self(value.into())
     }
 }
 impl From<u64> for PartitionChunkOffset {
     fn from(value: u64) -> Self {
-        PartitionChunkOffset(value as u32)
+        Self(value as u32)
     }
 }
 impl From<i32> for PartitionChunkOffset {
     fn from(value: i32) -> Self {
-        PartitionChunkOffset(value as u32)
+        Self(value as u32)
     }
 }
 impl fmt::Display for PartitionChunkOffset {
@@ -203,7 +203,7 @@ impl InclusiveInterval<u32> for PartitionChunkRange {
 }
 impl From<Interval<u32>> for PartitionChunkRange {
     fn from(interval: Interval<u32>) -> Self {
-        PartitionChunkRange(partition_chunk_offset_ii!(interval.start(), interval.end()))
+        Self(partition_chunk_offset_ii!(interval.start(), interval.end()))
     }
 }
 
@@ -231,8 +231,8 @@ impl From<Interval<u32>> for PartitionChunkRange {
 pub struct LedgerChunkOffset(u64);
 
 impl DiscreteFinite for LedgerChunkOffset {
-    const MIN: Self = LedgerChunkOffset(0);
-    const MAX: Self = LedgerChunkOffset(u64::MAX);
+    const MIN: Self = Self(0);
+    const MAX: Self = Self(u64::MAX);
     fn up(self) -> Option<Self> {
         self.0.checked_add(1).map(LedgerChunkOffset)
     }
@@ -249,7 +249,7 @@ impl Deref for LedgerChunkOffset {
 }
 impl LedgerChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 8]) -> Self {
-        LedgerChunkOffset(u64::from_be_bytes(bytes))
+        Self(u64::from_be_bytes(bytes))
     }
 }
 
@@ -257,21 +257,21 @@ impl Add<u32> for LedgerChunkOffset {
     type Output = Self;
 
     fn add(self, rhs: u32) -> Self::Output {
-        LedgerChunkOffset::from(*self + rhs as u64)
+        Self::from(*self + rhs as u64)
     }
 }
 impl Add<u64> for LedgerChunkOffset {
     type Output = Self;
 
     fn add(self, rhs: u64) -> Self::Output {
-        LedgerChunkOffset::from(*self + rhs)
+        Self::from(*self + rhs)
     }
 }
 
 impl Rem<u64> for LedgerChunkOffset {
     type Output = Self;
     fn rem(self, rhs: u64) -> Self::Output {
-        LedgerChunkOffset(self.0 % rhs)
+        Self(self.0 % rhs)
     }
 }
 
@@ -283,22 +283,22 @@ impl AddAssign<u64> for LedgerChunkOffset {
 
 impl From<u8> for LedgerChunkOffset {
     fn from(value: u8) -> Self {
-        LedgerChunkOffset(value.into())
+        Self(value.into())
     }
 }
 impl From<u32> for LedgerChunkOffset {
     fn from(value: u32) -> Self {
-        LedgerChunkOffset(value.into())
+        Self(value.into())
     }
 }
 impl From<i32> for LedgerChunkOffset {
     fn from(value: i32) -> Self {
-        LedgerChunkOffset(value.try_into().expect("Value must be non-negative"))
+        Self(value.try_into().expect("Value must be non-negative"))
     }
 }
 impl From<i64> for LedgerChunkOffset {
     fn from(value: i64) -> Self {
-        LedgerChunkOffset(value.try_into().expect("Value must be non-negative"))
+        Self(value.try_into().expect("Value must be non-negative"))
     }
 }
 
@@ -493,7 +493,7 @@ pub fn split_interval(
     let start = interval.start();
     let end = interval.end();
 
-    #[allow(
+    #[expect(
         clippy::comparison_chain,
         reason = "Proposed match chain is less readable"
     )]

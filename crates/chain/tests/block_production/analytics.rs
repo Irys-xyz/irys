@@ -1,15 +1,15 @@
 use actix_http::StatusCode;
 use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind};
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
-use alloy_provider::Provider;
+use alloy_provider::Provider as _;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use k256::ecdsa::SigningKey;
-use rand::Rng;
+use rand::Rng as _;
 use reth::rpc::types::TransactionRequest;
 use std::str::from_utf8;
 use std::time::Duration;
@@ -85,7 +85,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     let generate_tx = |a: &IrysSigner| -> (IrysTransaction, Vec<u8>) {
         let data_size = rand::thread_rng().gen_range(1..=100);
-        let mut data_bytes = vec![0u8; data_size];
+        let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         let tx = a.create_transaction(data_bytes.clone(), None).unwrap();
@@ -182,7 +182,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 let data_size = tx.header.data_size;
                 let min = chunk_node.min_byte_range;
                 let max = chunk_node.max_byte_range;
-                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
                 let chunk = UnpackedChunk {
                     data_root,
@@ -224,7 +224,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 let data_size = tx.header.data_size;
                 let min = chunk_node.min_byte_range;
                 let max = chunk_node.max_byte_range;
-                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
                 let chunk = UnpackedChunk {
                     data_root,

@@ -12,7 +12,7 @@ impl SimpleRNG {
     }
 
     /// Generates next pseudorandom number
-    #[allow(
+    #[expect(
         clippy::should_implement_trait,
         reason = "We do implement Iterator for SimpleRNG"
     )]

@@ -1,6 +1,6 @@
 use alloy_primitives::wrap_fixed_bytes;
 use alloy_rlp::{Decodable, Encodable, Error as RlpError};
-use bytes::Buf;
+use bytes::Buf as _;
 use reth_codecs::Compact;
 
 #[derive(
@@ -41,10 +41,10 @@ impl TryFrom<u8> for CommitmentStatus {
     type Error = CommitmentStatusDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            1 => Ok(CommitmentStatus::Pending),
-            2 => Ok(CommitmentStatus::Active),
-            3 => Ok(CommitmentStatus::Inactive),
-            4 => Ok(CommitmentStatus::Slashed),
+            1 => Ok(Self::Pending),
+            2 => Ok(Self::Active),
+            3 => Ok(Self::Inactive),
+            4 => Ok(Self::Slashed),
             _ => Err(CommitmentStatusDecodeError::UnknownCommitmentStatus(id)),
         }
     }
@@ -53,10 +53,10 @@ impl TryFrom<u8> for CommitmentStatus {
 impl Encodable for CommitmentStatus {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
-            CommitmentStatus::Pending => out.put_u8(CommitmentStatus::Pending as u8),
-            CommitmentStatus::Active => out.put_u8(CommitmentStatus::Active as u8),
-            CommitmentStatus::Inactive => out.put_u8(CommitmentStatus::Inactive as u8),
-            CommitmentStatus::Slashed => out.put_u8(CommitmentStatus::Slashed as u8),
+            Self::Pending => out.put_u8(Self::Pending as u8),
+            Self::Active => out.put_u8(Self::Active as u8),
+            Self::Inactive => out.put_u8(Self::Inactive as u8),
+            Self::Slashed => out.put_u8(Self::Slashed as u8),
         };
     }
     fn length(&self) -> usize {
@@ -69,7 +69,7 @@ impl Decodable for CommitmentStatus {
         let _v = buf.to_vec();
         let enc_stake_status = u8::decode(&mut &buf[..])?;
         buf.advance(1);
-        let id = CommitmentStatus::try_from(enc_stake_status)
+        let id = Self::try_from(enc_stake_status)
             .or(Err(RlpError::Custom("unknown stake status id")))?;
         let _v2 = buf.to_vec();
         Ok(id)
@@ -112,10 +112,10 @@ impl TryFrom<u8> for CommitmentType {
     type Error = CommitmentTypeDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            1 => Ok(CommitmentType::Stake),
-            2 => Ok(CommitmentType::Pledge),
-            3 => Ok(CommitmentType::Unpledge),
-            4 => Ok(CommitmentType::Unstake),
+            1 => Ok(Self::Stake),
+            2 => Ok(Self::Pledge),
+            3 => Ok(Self::Unpledge),
+            4 => Ok(Self::Unstake),
             _ => Err(CommitmentTypeDecodeError::UnknownCommitmentType(id)),
         }
     }
@@ -124,10 +124,10 @@ impl TryFrom<u8> for CommitmentType {
 impl Encodable for CommitmentType {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
-            CommitmentType::Stake => out.put_u8(CommitmentType::Stake as u8),
-            CommitmentType::Pledge => out.put_u8(CommitmentType::Pledge as u8),
-            CommitmentType::Unpledge => out.put_u8(CommitmentType::Unpledge as u8),
-            CommitmentType::Unstake => out.put_u8(CommitmentType::Unstake as u8),
+            Self::Stake => out.put_u8(Self::Stake as u8),
+            Self::Pledge => out.put_u8(Self::Pledge as u8),
+            Self::Unpledge => out.put_u8(Self::Unpledge as u8),
+            Self::Unstake => out.put_u8(Self::Unstake as u8),
         };
     }
     fn length(&self) -> usize {
@@ -139,7 +139,7 @@ impl Decodable for CommitmentType {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let _v = buf.to_vec();
         let enc_commitment_type = u8::decode(&mut &buf[..])?;
-        let commitment_type = CommitmentType::try_from(enc_commitment_type)
+        let commitment_type = Self::try_from(enc_commitment_type)
             .or(Err(RlpError::Custom("unknown commitment status")))?;
 
         buf.advance(1);
@@ -165,7 +165,7 @@ impl Compact for IrysTxId {
 
     #[inline]
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (v, buf) = <[u8; core::mem::size_of::<IrysTxId>()]>::from_compact(buf, len);
+        let (v, buf) = <[u8; core::mem::size_of::<Self>()]>::from_compact(buf, len);
         (Self::from(v), buf)
     }
 }

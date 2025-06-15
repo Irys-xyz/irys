@@ -1,13 +1,13 @@
 use actix::{
     Actor, ActorTryFutureExt as _, AtomicResponse, Context, Handler, Message, Supervised,
-    SystemService, WrapFuture,
+    SystemService, WrapFuture as _,
 };
 use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{DatabaseProvider, RethPeerInfo, H256};
 use reth::{
-    network::{NetworkInfo as _, Peers},
+    network::{NetworkInfo as _, Peers as _},
     revm::primitives::B256,
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
 };

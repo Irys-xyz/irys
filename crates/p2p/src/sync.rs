@@ -1,9 +1,9 @@
 use crate::{GossipError, GossipResult, PeerListFacade};
 use actix::{Actor, Context, Handler};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_api_client::ApiClient;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode, RethPeerInfo};
-use rand::prelude::SliceRandom;
+use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;

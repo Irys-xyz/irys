@@ -463,7 +463,7 @@ fn bound_in_min_max_range(
 mod price_cache_context {
     use std::{marker::PhantomData, sync::Arc};
 
-    use eyre::{ensure, OptionExt};
+    use eyre::{ensure, OptionExt as _};
     use futures::try_join;
     use irys_types::{block_height_to_use_for_price, H256};
 
@@ -678,9 +678,12 @@ mod price_cache_context {
             height, *new_height,
             "height mismatch in the canonical chain data"
         );
-        get_block(block_tree_read_guard, *hash)
-                .await
-                .and_then(|block| block.ok_or_else(|| eyre::eyre!("block hash {hash:?} from canonical chain cannot be retrieved from the block index")))
+        let block = get_block(block_tree_read_guard, *hash).await?;
+        block.ok_or_else(|| {
+            eyre::eyre!(
+                "block hash {hash:?} from canonical chain cannot be retrieved from the block index"
+            )
+        })
     }
 
     #[cfg(test)]
