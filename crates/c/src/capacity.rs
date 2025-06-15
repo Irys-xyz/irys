@@ -8,6 +8,7 @@
     clippy::nursery,
     clippy::unused_trait_names,
     clippy::needless_raw_strings,
-    clippy::unseparated_literal_suffix
+    clippy::unseparated_literal_suffix,
+    clippy::allow_attributes
 )]
 include!(concat!(env!("OUT_DIR"), "/capacity_bindings.rs"));
