@@ -397,7 +397,7 @@ opt-level = 3
 
 rust.unreachable_pub = "warn"
 rust.unused_must_use = "deny"
-rust.unused_imports = "warn"
+rust.unused_imports = "deny"
 
 [workspace.lints.clippy]
 
@@ -442,7 +442,6 @@ manual_instant_elapsed = "deny"
 manual_is_variant_and = "deny"
 manual_string_new = "deny"
 match_bool = "deny"
-needless_collect = "deny"
 needless_for_each = "deny"
 needless_raw_string_hashes = "deny"
 needless_raw_strings = "deny"
@@ -476,6 +475,7 @@ use_self = "deny"
 # manual_assert = "deny" # reduces clarity
 # deref_by_slicing = "deny" # reduces clarity
 # assertions_on_result_states = "deny" # keeping the asserts helps to improve test clarity
+# needless_collect = "deny" # reduces clarity
 
 
 [workspace.metadata.cargo-machete]
