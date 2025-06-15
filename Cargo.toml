@@ -362,6 +362,7 @@ panic = "unwind"
 # By reducing the debug level (though keeping enough to have meaningful
 # backtraces), we reduce incremental build time and binary size significantly.
 debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.dev.build-override]
 debug = "line-tables-only"
@@ -423,7 +424,56 @@ needless-range-loop = "allow"
 too-many-arguments = "allow"
 redundant-clone = "deny"
 allow_attributes = "deny"
+# check
 
+# assertions_on_result_states = "deny" # keeping the asserts helps to improve test clarity
+bind_instead_of_map = "deny"
+bool_assert_comparison = "deny"
+
+cloned_instead_of_copied = "deny"
+# deref_by_slicing = "deny"
+doc_comment_double_space_linebreaks = "deny"
+elidable_lifetime_names = "deny"
+explicit_into_iter_loop = "deny"
+
+ignored_unit_patterns = "deny"
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+# manual_assert = "deny" # reduces clarity
+manual_instant_elapsed = "deny"
+manual_is_variant_and = "deny"
+manual_string_new = "deny"
+map_unwrap_or = "deny"
+match_bool = "deny"
+missing_asserts_for_indexing = "deny"
+missing_const_for_fn = "deny"
+needless_collect = "deny"
+needless_for_each = "deny"
+needless_raw_string_hashes = "deny"
+needless_raw_strings = "deny"
+non_std_lazy_statics = "deny"
+option_as_ref_cloned = "deny"
+precedence_bits = "deny"
+redundant_clone = "deny"
+redundant_closure_for_method_calls = "deny"
+# redundant_else = "deny"
+# redundant_pub_crate = "deny"
+ref_binding_to_reference = "deny"
+return_and_then = "deny"
+# semicolon_if_nothing_returned = "deny"
+unseparated_literal_suffix = "deny"
+single_char_pattern = "deny"
+string_to_string = "deny"
+suspicious_operation_groupings = "deny"
+trait_duplication_in_bounds = "deny"
+unchecked_duration_subtraction = "deny"
+unnecessary_join = "deny"
+unnecessary_literal_bound = "deny"
+# unnecessary_semicolon = "deny"
+unnecessary_struct_initialization = "deny"
+unnested_or_patterns = "deny"
+unused_trait_names = "deny"
+use_self = "deny"
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]
