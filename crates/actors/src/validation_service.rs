@@ -288,54 +288,30 @@ impl ValidationServiceInner {
         );
 
         // Spawn VDF validation task
-        tokio::task::spawn_blocking(move || {
-            vdf_steps_are_valid(
-                &self.pool,
-                &vdf_info,
-                &self.config.consensus.vdf,
-                &self.vdf_state,
-            )
-        })
-        .await??;
+        let vdf_ff = self.service_senders.vdf_fast_forward.clone();
+        let vdf_state = self.vdf_state.clone();
+        {
+            let vdf_info = vdf_info.clone();
+            tokio::task::spawn_blocking(move || {
+                vdf_steps_are_valid(
+                    &self.pool,
+                    &vdf_info,
+                    &self.config.consensus.vdf,
+                    &self.vdf_state,
+                )
+            })
+            .await??;
+        }
+
+        // Fast forward VDF steps
+        fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
+        vdf_state.wait_for_step(vdf_info.global_step_number).await;
         Ok(())
     }
 
     /// Perform block validation
     #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
     async fn validate_block(&self, block: Arc<IrysBlockHeader>) -> eyre::Result<ValidationResult> {
-        let vdf_info = block.vdf_limiter_info.clone();
-
-        // First, wait for the previous VDF step to be available
-        let first_step_number = vdf_info.first_step_number();
-        let prev_output_step_number = first_step_number.saturating_sub(1);
-
-        self.vdf_state.wait_for_step(prev_output_step_number).await;
-        let stored_previous_step = self
-            .vdf_state
-            .get_step(prev_output_step_number)
-            .expect("to get the step, since we've just waited for it");
-
-        ensure!(
-            stored_previous_step == vdf_info.prev_output,
-            "vdf output is not equal to the saved step with the same index {:?}, got {:?}",
-            stored_previous_step,
-            vdf_info.prev_output,
-        );
-
-        // Spawn VDF validation task
-        vdf_steps_are_valid(
-            &self.pool,
-            &vdf_info,
-            &self.config.consensus.vdf,
-            &self.vdf_state,
-        )?;
-
-        // Fast forward VDF steps
-        fast_forward_vdf_steps_from_block(&vdf_info, &self.service_senders.vdf_fast_forward);
-        self.vdf_state
-            .wait_for_step(vdf_info.global_step_number)
-            .await;
-
         let poa = block.poa.clone();
         let miner_address = block.miner_address;
         let block = &block;
