@@ -22,11 +22,7 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc::UnboundedSender, oneshot},
     time::timeout,
@@ -227,7 +223,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
-        let mempool_config = self.config.consensus.mempool.clone();
+        // let mempool_config = self.config.consensus.mempool.clone();
+
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
@@ -267,6 +264,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
             // have already been included in a recent parent.
             let block_height = new_block_header.height;
+
+            /*(
             let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
             let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
             let mut parent_block = previous_block_header.clone();
@@ -318,6 +317,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                 parent_block = previous_block_header; // Move instead of borrow
             }
+            */
 
             let validation_result = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
