@@ -9,6 +9,7 @@
 //!
 //! The service supports concurrent validation tasks for improved performance.
 
+use crate::block_tree_service::{BlockTreeReadGuard, ChainState};
 use crate::block_validation::{recall_recall_range_is_valid, system_transactions_are_valid};
 use crate::{
     block_index_service::BlockIndexReadGuard,
@@ -21,14 +22,16 @@ use eyre::ensure;
 use futures::future::poll_immediate;
 use futures::{FutureExt, Stream, StreamExt};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
+use irys_types::{app_state::DatabaseProvider, BlockHash, Config, IrysBlockHeader};
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
+use priority_queue::PriorityQueue;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
-use std::future::{poll_fn, Future};
+use std::future::Future;
 use std::{
-    pin::pin,
+    cmp::Reverse,
+    pin::{pin, Pin},
     sync::Arc,
     task::{Context, Poll},
 };
@@ -36,17 +39,23 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 use tracing::{debug, error, info, instrument, warn, Instrument};
 
-/// Wrapper around active validations with capacity management
+/// Wrapper around active validations with capacity management and priority ordering
 struct ActiveValidations {
-    validations: Vec<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>>,
+    /// Priority queue of (block_hash, future) with priority based on canonical chain distance
+    validations: PriorityQueue<BlockHash, Reverse<u64>>,
+    /// Map from block hash to the actual future
+    futures: std::collections::HashMap<BlockHash, Pin<Box<dyn Future<Output = ()> + Send>>>,
     max_capacity: usize,
+    block_tree_guard: BlockTreeReadGuard,
 }
 
 impl ActiveValidations {
-    fn new(max_capacity: usize) -> Self {
+    fn new(max_capacity: usize, block_tree_guard: BlockTreeReadGuard) -> Self {
         Self {
-            validations: Vec::new(),
+            validations: PriorityQueue::new(),
+            futures: std::collections::HashMap::new(),
             max_capacity,
+            block_tree_guard,
         }
     }
 
@@ -54,8 +63,39 @@ impl ActiveValidations {
         self.validations.len() < self.max_capacity
     }
 
-    fn push(&mut self, future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>) {
-        self.validations.push(future);
+    /// Calculate the priority for a block based on its nearest canonical chain ancestor
+    fn calculate_priority(&self, block_hash: &BlockHash) -> Reverse<u64> {
+        let block_tree = self.block_tree_guard.read();
+
+        let mut current_hash = *block_hash;
+        let mut current_height = 0u64;
+
+        // Walk up the chain to find the nearest canonical (Onchain) ancestor
+        while let Some((block, chain_state)) = block_tree.get_block_and_status(&current_hash) {
+            current_height = block.height;
+
+            // Check if this block is on the canonical chain
+            if matches!(chain_state, ChainState::Onchain) {
+                break;
+            }
+
+            // Move to parent block
+            current_hash = block.previous_block_hash;
+
+            // Safety check to prevent infinite loops
+            if block.height == 0 {
+                break;
+            }
+        }
+
+        // Lower heights get higher priority (processed first)
+        Reverse(current_height)
+    }
+
+    fn push(&mut self, block_hash: BlockHash, future: Pin<Box<dyn Future<Output = ()> + Send>>) {
+        let priority = self.calculate_priority(&block_hash);
+        self.futures.insert(block_hash, future);
+        self.validations.push(block_hash, priority);
     }
 
     fn len(&self) -> usize {
@@ -70,28 +110,34 @@ impl ActiveValidations {
 impl Stream for ActiveValidations {
     type Item = ();
 
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        let mut completed_count = 0;
-        let mut tasks_completed = Vec::new();
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut completed_blocks = Vec::new();
 
-        for (idx, validation) in self.validations.iter_mut().enumerate() {
-            // try polling each validatoin task - if finishes, add it to the `completed` list for removal
-            if let Poll::Ready(()) = validation.as_mut().poll(cx) {
-                tasks_completed.push(idx);
-                completed_count += 1;
+        assert_eq!(
+            self.validations.len(),
+            self.futures.len(),
+            "validations and futures ouf of sync"
+        );
+        if self.validations.is_empty() {
+            return Poll::Pending;
+        }
+
+        // Poll futures in priority order
+        for (block_hash, _priority) in self.validations.clone().iter() {
+            if let Some(future) = self.futures.get_mut(block_hash) {
+                if let Poll::Ready(()) = future.poll_unpin(cx) {
+                    completed_blocks.push(*block_hash);
+                }
             }
         }
 
-        // Remove completed validations in reverse order to maintain indices
-        for idx_to_remove in tasks_completed.into_iter().rev() {
-            let validation_task = self.validations.remove(idx_to_remove);
-            drop(validation_task);
+        // Remove completed validations
+        for block_hash in &completed_blocks {
+            self.validations.remove(block_hash);
+            self.futures.remove(block_hash);
         }
 
-        if completed_count > 0 {
+        if !completed_blocks.is_empty() {
             // Signal that validations have completed
             Poll::Ready(Some(()))
         } else {
@@ -136,6 +182,7 @@ struct ValidationServiceInner {
     reth_node_adapter: IrysRethNodeAdapter,
     /// Database provider for transaction lookups
     db: DatabaseProvider,
+    block_tree_guard: BlockTreeReadGuard,
     /// Rayon thread pool that executes vdf steps   
     pool: rayon::ThreadPool,
 }
@@ -145,6 +192,7 @@ impl ValidationService {
     pub fn spawn_service(
         exec: &TaskExecutor,
         block_index_guard: BlockIndexReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         vdf_state_readonly: VdfStateReadonly,
         config: &Config,
@@ -172,6 +220,7 @@ impl ValidationService {
                         vdf_state: vdf_state_readonly,
                         config,
                         service_senders,
+                        block_tree_guard,
                         reth_node_adapter,
                         db,
                     }),
@@ -190,7 +239,10 @@ impl ValidationService {
         info!("starting validation service");
 
         let mut shutdown_future = pin!(&mut self.shutdown);
-        let mut active_validations = pin!(ActiveValidations::new(10));
+        let mut active_validations = pin!(ActiveValidations::new(
+            10,
+            self.inner.block_tree_guard.clone()
+        ));
 
         'shutdown: loop {
             'outer: {
@@ -206,22 +258,27 @@ impl ValidationService {
                     let msg = match self.msg_rx.try_recv() {
                         Ok(msg) => msg,
                         Err(TryRecvError::Empty) => {
-                            warn!("receiver channel closed");
                             // no messages in the queue
                             break 'outer;
                         }
                         Err(TryRecvError::Disconnected) => {
+                            warn!("receiver channel closed");
                             // receiver channel closed
                             break 'shutdown;
                         }
                     };
 
                     // Transform message to validation future
-                    let Some(fut) = self.inner.clone().create_validation_future(msg).await else {
-                        // validation future was not created. Most likely the task failed during vdf validation
+                    let Some((block_hash, fut)) =
+                        self.inner.clone().create_validation_future(msg).await
+                    else {
+                        // validation future was not created. The task failed during vdf validation
                         break 'outer;
                     };
-                    active_validations.push(fut.boxed());
+                    active_validations.push(block_hash, fut.boxed());
+
+                    // we keep reading new block entries until there are no entries or we cannot add any more
+                    continue 'shutdown;
                 }
             }
 
@@ -262,7 +319,7 @@ impl ValidationServiceInner {
     async fn create_validation_future(
         self: Arc<Self>,
         msg: ValidationServiceMessage,
-    ) -> Option<impl Future<Output = ()>> {
+    ) -> Option<(BlockHash, impl Future<Output = ()>)> {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
                 let block_hash = block.block_hash;
@@ -283,11 +340,48 @@ impl ValidationServiceInner {
                     return None;
                 }
 
+                let block_tree_guard = self.block_tree_guard.clone();
                 let concurrent_task = async move {
                     let validation_result = self
-                        .validate_block(block)
+                        .validate_block(block.clone())
                         .await
                         .unwrap_or(ValidationResult::Invalid);
+
+                    // If validation is successful, wait for parent to be validated before reporting
+                    if matches!(validation_result, ValidationResult::Valid) {
+                        let parent_hash = block.previous_block_hash;
+                        loop {
+                            let parent_chain_state = {
+                                let block_tree = block_tree_guard.read();
+                                block_tree
+                                    .get_block_and_status(&parent_hash)
+                                    .map(|(_header, state)| state.clone())
+                                    .clone()
+                            };
+                            let Some(parent_chain_state) = parent_chain_state else {
+                                tracing::warn!(
+                                    "validated a valid block that is not inside the block tree"
+                                );
+                                break;
+                            };
+                            match parent_chain_state {
+                                ChainState::Onchain | ChainState::Validated(_) => {
+                                    // Parent is ready, we can proceed
+                                    break;
+                                }
+                                ChainState::NotOnchain(status) => {
+                                    tracing::warn!(
+                                        ?status,
+                                        ?parent_hash,
+                                        "parent block not on chain nor validated"
+                                    );
+                                    // Parent not ready, yield and try again when polled later
+                                    tokio::task::yield_now().await;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
 
                     // Notify the block tree service
                     if let Err(e) = self.service_senders.block_tree.send(
@@ -299,7 +393,7 @@ impl ValidationServiceInner {
                         error!(?e, "Failed to send validation result to block tree service");
                     }
                 };
-                Some(concurrent_task)
+                Some((block_hash, concurrent_task))
             }
         }
     }

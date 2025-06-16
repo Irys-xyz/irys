@@ -18,7 +18,7 @@ irys-vdf.workspace = true
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
-
+priority-queue.workspace = true
 tokio.workspace = true
 lru.workspace = true
 reth-db.workspace = true

@@ -103,12 +103,7 @@ semver = { version = "1.0", features = ["serde"] }
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"
-tracing-subscriber = { version = "0.3", default-features = false, features = [
-  "env-filter",
-  "fmt",
-  "json",
-  "ansi",
-] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"] }
 tempfile = "3"
 csv = "1"
 jsonrpsee = "0.24"
@@ -120,7 +115,7 @@ lru = "0.14"
 paste = "1.0.15"
 async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
-
+priority-queue = "2.5"
 
 # Reth & Alloy deps
 # These should be kept in lockstep with the Reth dependencies - for compatability and built times
@@ -128,15 +123,8 @@ revm = { version = "24.0.1", default-features = false }
 
 alloy-dyn-abi = "1.1.0"
 alloy-evm = { version = "0.10", default-features = false }
-alloy-primitives = { version = "1.1.0", default-features = false, features = [
-  "map-foldhash",
-  "arbitrary",
-  "rlp",
-  "getrandom",
-] }
-alloy-rlp = { version = "0.3.10", default-features = false, features = [
-  "core-net",
-] }
+alloy-primitives = { version = "1.1.0", default-features = false, features = ["map-foldhash", "arbitrary", "rlp", "getrandom"] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
 alloy-sol-macro = { version = "1.1.0", default-features = false }
 alloy-sol-types = { version = "1.1.0", default-features = false }
 alloy-consensus = { version = "1.0.9", default-features = false }
@@ -148,9 +136,7 @@ revm-primitives = "19"
 revm-interpreter = "19"
 alloy-network = { version = "1.0.9", default-features = false }
 alloy-provider = { version = "1.0.9", default-features = false }
-alloy-rpc-types = { version = "1.0.9", features = [
-  "eth",
-], default-features = false }
+alloy-rpc-types = { version = "1.0.9", features = ["eth"], default-features = false }
 alloy-rpc-types-eth = { version = "1.0.9", default-features = false }
 alloy-rpc-types-engine = { version = "1.0.9", default-features = false }
 alloy-signer = { version = "1.0.9", default-features = false }
@@ -194,7 +180,6 @@ reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85
 reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 # just used (for local testing)
-
 
 # reth = { path = "./ext/reth/bin/reth" }
 # reth-chainspec = { path = "./ext/reth/crates/chainspec" }
@@ -356,7 +341,7 @@ reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev 
 [profile.dev]
 panic = "unwind"
 
-# below inspired from https://github.com/oxidecomputer/omicron/blob/main/Cargo.toml 
+# below inspired from https://github.com/oxidecomputer/omicron/blob/main/Cargo.toml
 
 # See https://github.com/oxidecomputer/omicron/issues/4009 for some background context here.
 # By reducing the debug level (though keeping enough to have meaningful
@@ -392,7 +377,6 @@ opt-level = 3
 # rust.missing_docs = "warn"
 # rust.rust_2018_idioms = { level = "deny", priority = -1 }
 
-
 rust.unreachable_pub = "warn"
 rust.unused_must_use = "deny"
 rust.unused_imports = "warn"
@@ -400,7 +384,6 @@ rust.unused_imports = "warn"
 # rust.unnameable-types = "warn"
 
 [workspace.lints.clippy]
-
 # cargo = { priority = -1, level = "deny" } # for some reason enabling this cargo lint category causes clippy fix to hang
 complexity = { priority = -2, level = "deny" }
 perf = { priority = -3, level = "deny" }
@@ -408,9 +391,8 @@ correctness = { priority = -4, level = "deny" }
 restriction = { priority = -5, level = "allow" } # cherry pick
 style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
-pedantic = { priority = -8, level = "allow" }    # cherry pick
-nursery = { priority = -9, level = "allow" }     # cherry pick
-
+pedantic = { priority = -8, level = "allow" } # cherry pick
+nursery = { priority = -9, level = "allow" } # cherry pick
 
 module_inception = "allow"
 doc-overindented-list-items = "allow"
@@ -422,14 +404,13 @@ type-complexity = "allow"
 needless-range-loop = "allow"
 too-many-arguments = "allow"
 
-
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]
 
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
 [workspace.metadata.typos]
 default.extend-ignore-re = [
-  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$", # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
 files.extend-exclude = ["ext/*", "fixtures/*"]
