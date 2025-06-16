@@ -9,7 +9,7 @@
 //!
 //! The service supports concurrent validation tasks for improved performance.
 
-use crate::block_tree_service::{BlockState, BlockTreeReadGuard, ChainState};
+use crate::block_tree_service::BlockTreeReadGuard;
 use crate::block_validation::{recall_recall_range_is_valid, system_transactions_are_valid};
 use crate::{
     block_index_service::BlockIndexReadGuard,
@@ -18,21 +18,18 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard,
     services::ServiceSenders,
 };
+use active_validations::ActiveValidations;
+use block_validation_task::BlockValidationTask;
 use eyre::ensure;
-use futures::{future::poll_immediate, FutureExt};
+use futures::FutureExt;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, BlockHash, Config, IrysBlockHeader};
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
-use priority_queue::PriorityQueue;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::future::Future;
-use std::{
-    cmp::Reverse,
-    pin::{pin, Pin},
-    sync::Arc,
-};
+use std::{pin::pin, sync::Arc};
 use tokio::{
     sync::mpsc::UnboundedReceiver,
     task::JoinHandle,
@@ -40,98 +37,8 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
-/// Wrapper around active validations with capacity management and priority ordering
-struct ActiveValidations {
-    /// Priority queue of (block_hash, future) with priority based on canonical chain distance
-    validations: PriorityQueue<BlockHash, Reverse<u64>>,
-    /// Map from block hash to the actual future
-    futures: std::collections::HashMap<BlockHash, Pin<Box<dyn Future<Output = ()> + Send>>>,
-    block_tree_guard: BlockTreeReadGuard,
-}
-
-impl ActiveValidations {
-    fn new(block_tree_guard: BlockTreeReadGuard) -> Self {
-        Self {
-            validations: PriorityQueue::new(),
-            futures: std::collections::HashMap::new(),
-            block_tree_guard,
-        }
-    }
-
-    /// Calculate the priority for a block based on its nearest canonical chain ancestor
-    fn calculate_priority(&self, block_hash: &BlockHash) -> Reverse<u64> {
-        let block_tree = self.block_tree_guard.read();
-
-        let mut current_hash = *block_hash;
-        let mut current_height = 0u64;
-
-        // Walk up the chain to find the nearest canonical (Onchain) ancestor
-        while let Some((block, chain_state)) = block_tree.get_block_and_status(&current_hash) {
-            current_height = block.height;
-
-            // Check if this block is on the canonical chain
-            if matches!(chain_state, ChainState::Onchain) {
-                break;
-            }
-
-            // Move to parent block
-            current_hash = block.previous_block_hash;
-
-            // Safety check to prevent infinite loops
-            if block.height == 0 {
-                break;
-            }
-        }
-
-        // Lower heights get higher priority (processed first)
-        Reverse(current_height)
-    }
-
-    fn push(&mut self, block_hash: BlockHash, future: Pin<Box<dyn Future<Output = ()> + Send>>) {
-        let priority = self.calculate_priority(&block_hash);
-        self.futures.insert(block_hash, future);
-        self.validations.push(block_hash, priority);
-    }
-
-    fn len(&self) -> usize {
-        self.validations.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.validations.is_empty()
-    }
-
-    /// Process completed validations and remove them from the active set
-    async fn process_completed(&mut self) {
-        let mut completed_blocks = Vec::new();
-
-        assert_eq!(
-            self.validations.len(),
-            self.futures.len(),
-            "validations and futures out of sync"
-        );
-
-        if self.validations.is_empty() {
-            return;
-        }
-
-        // Check futures in priority order using poll_immediate for non-blocking check
-        for (block_hash, _priority) in self.validations.clone().iter() {
-            if let Some(future) = self.futures.get_mut(block_hash) {
-                // Use poll_immediate to check if future is ready without blocking
-                if poll_immediate(future).await.is_some() {
-                    completed_blocks.push(*block_hash);
-                }
-            }
-        }
-
-        // Remove completed validations
-        for block_hash in &completed_blocks {
-            self.validations.remove(block_hash);
-            self.futures.remove(block_hash);
-        }
-    }
-}
+mod active_validations;
+mod block_validation_task;
 
 /// Messages that the validation service supports
 #[derive(Debug)]
@@ -153,24 +60,24 @@ pub struct ValidationService {
 
 /// Inner service structure containing business logic
 #[derive(Debug)]
-struct ValidationServiceInner {
+pub(crate) struct ValidationServiceInner {
     /// Read only view of the block index
-    block_index_guard: BlockIndexReadGuard,
+    pub(crate) block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
-    partition_assignments_guard: PartitionAssignmentsReadGuard,
+    pub(crate) partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// VDF steps read guard
-    vdf_state: VdfStateReadonly,
+    pub(crate) vdf_state: VdfStateReadonly,
     /// Reference to global config for node
-    config: Config,
+    pub(crate) config: Config,
     /// Service channels
-    service_senders: ServiceSenders,
+    pub(crate) service_senders: ServiceSenders,
     /// Reth node adapter for RPC calls
-    reth_node_adapter: IrysRethNodeAdapter,
+    pub(crate) reth_node_adapter: IrysRethNodeAdapter,
     /// Database provider for transaction lookups
-    db: DatabaseProvider,
-    block_tree_guard: BlockTreeReadGuard,
+    pub(crate) db: DatabaseProvider,
+    pub(crate) block_tree_guard: BlockTreeReadGuard,
     /// Rayon thread pool that executes vdf steps   
-    pool: rayon::ThreadPool,
+    pub(crate) pool: rayon::ThreadPool,
 }
 
 impl ValidationService {
@@ -315,79 +222,9 @@ impl ValidationServiceInner {
                 }
 
                 let block_tree_guard = self.block_tree_guard.clone();
-                let concurrent_task = async move {
-                    let validation_result = self
-                        .validate_block(block.clone())
-                        .await
-                        .unwrap_or(ValidationResult::Invalid);
-
-                    // If validation is successful, wait for parent to be validated before reporting
-                    if matches!(validation_result, ValidationResult::Valid) {
-                        let parent_hash = block.previous_block_hash;
-                        loop {
-                            // Check if block height is too far behind canonical tip
-                            let should_exit = {
-                                let block_tree = block_tree_guard.read();
-                                let tip_hash = block_tree.tip;
-                                if let Some(tip_block) = block_tree.get_block(&tip_hash) {
-                                    let height_diff = tip_block.height.saturating_sub(block.height);
-                                    height_diff
-                                        > self.config.consensus.validation_height_diff_threshold
-                                } else {
-                                    false
-                                }
-                            };
-
-                            if should_exit {
-                                debug!(
-                                    ?block_hash,
-                                    block_height = ?block.height,
-                                    "exiting validation task - block too far behind canonical tip"
-                                );
-                                return;
-                            }
-
-                            let parent_chain_state = {
-                                let block_tree = block_tree_guard.read();
-                                block_tree
-                                    .get_block_and_status(&parent_hash)
-                                    .map(|(_header, state)| state.clone())
-                                    .clone()
-                            };
-                            let Some(parent_chain_state) = parent_chain_state else {
-                                tracing::warn!(
-                                    "validated a valid block that is not inside the block tree"
-                                );
-                                break;
-                            };
-                            match parent_chain_state {
-                                ChainState::Onchain
-                                | ChainState::Validated(_)
-                                | ChainState::NotOnchain(BlockState::ValidBlock) => {
-                                    // Parent is ready, we can proceed
-                                    break;
-                                }
-                                ChainState::NotOnchain(BlockState::Unknown)
-                                | ChainState::NotOnchain(BlockState::ValidationScheduled) => {
-                                    // Parent not ready, yield and try again when polled later
-                                    tokio::task::yield_now().await;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    // Notify the block tree service
-                    if let Err(e) = self.service_senders.block_tree.send(
-                        BlockTreeServiceMessage::BlockValidationFinished {
-                            block_hash,
-                            validation_result,
-                        },
-                    ) {
-                        error!(?e, "Failed to send validation result to block tree service");
-                    }
-                };
-                Some((block_hash, concurrent_task))
+                let task =
+                    BlockValidationTask::new(block, block_hash, self.clone(), block_tree_guard);
+                Some((block_hash, task.execute()))
             }
         }
     }
@@ -435,81 +272,5 @@ impl ValidationServiceInner {
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
         vdf_state.wait_for_step(vdf_info.global_step_number).await;
         Ok(())
-    }
-
-    /// Perform block validation
-    #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
-    async fn validate_block(&self, block: Arc<IrysBlockHeader>) -> eyre::Result<ValidationResult> {
-        let poa = block.poa.clone();
-        let miner_address = block.miner_address;
-        let block = &block;
-        // Recall range validation
-        let recall_task = async move {
-            recall_recall_range_is_valid(block, &self.config.consensus, &self.vdf_state)
-                .await
-                .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
-                .map(|()| ValidationResult::Valid)
-                .unwrap_or(ValidationResult::Invalid)
-        }
-        .instrument(tracing::info_span!("recall range validation"));
-
-        // POA validation
-        let poa_task = {
-            let consensus_config = self.config.consensus.clone();
-            let block_index_guard = self.block_index_guard.clone();
-            let partitions_guard = self.partition_assignments_guard.clone();
-            tokio::task::spawn_blocking(move || {
-                poa_is_valid(
-                    &poa,
-                    &block_index_guard,
-                    &partitions_guard,
-                    &consensus_config,
-                    &miner_address,
-                )
-                .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
-                .map(|()| ValidationResult::Valid)
-            })
-            .instrument(tracing::info_span!("poa task validation"))
-        };
-        let poa_task = async move {
-            let res = poa_task.await;
-
-            match res {
-                Ok(res) => res.unwrap_or(ValidationResult::Invalid),
-                Err(err) => {
-                    tracing::error!(?err, "poa task panicked");
-                    ValidationResult::Invalid
-                }
-            }
-        };
-
-        // System transaction validation
-        let config = &self.config;
-        let service_senders = &self.service_senders;
-        let system_tx_task = async move {
-            system_transactions_are_valid(
-                config,
-                service_senders,
-                block,
-                &self.reth_node_adapter,
-                &self.db,
-            )
-            .instrument(tracing::info_span!("system transaction validation"))
-            .await
-            .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
-            .map(|()| ValidationResult::Valid)
-            .unwrap_or(ValidationResult::Valid)
-        };
-
-        // Wait for all three tasks to complete
-        let (recall_result, poa_result, system_tx_result) =
-            tokio::join!(recall_task, poa_task, system_tx_task);
-
-        match (recall_result, poa_result, system_tx_result) {
-            (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
-                Ok(ValidationResult::Valid)
-            }
-            _ => Ok(ValidationResult::Invalid),
-        }
     }
 }
