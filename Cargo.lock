@@ -4902,10 +4902,13 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
+ "irys-chain",
+ "irys-config",
  "irys-database",
+ "irys-reth-node-bridge",
  "irys-types",
  "reth-node-core",
- "serde_json",
+ "tokio",
  "toml",
  "tracing",
  "tracing-error",
@@ -5105,6 +5108,7 @@ name = "irys-reth-node-bridge"
 version = "0.1.0"
 dependencies = [
  "alloy-eips",
+ "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "base58",
@@ -5125,6 +5129,8 @@ dependencies = [
  "reth-payload-builder",
  "reth-provider",
  "reth-rpc-eth-api",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
