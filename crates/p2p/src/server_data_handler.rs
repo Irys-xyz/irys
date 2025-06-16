@@ -1,4 +1,5 @@
 use crate::peer_list::{PeerList, ScoreDecreaseReason};
+use alloy_core::primitives::keccak256;
 use crate::{
     block_pool::BlockPool,
     cache::{GossipCache, GossipCacheKey},
@@ -291,7 +292,9 @@ where
             return Ok(());
         }
 
-        if !block_header.is_signature_valid() {
+        let expected_block_hash: [u8; 32] = keccak256(block_header.signature.as_bytes()).into();
+        let is_block_hash_is_valid = block_header.block_hash.0 == expected_block_hash;
+        if !is_block_hash_is_valid || !block_header.is_signature_valid() {
             warn!(
                 "Node: {}: Block {} has an invalid signature",
                 self.gossip_client.mining_address,
