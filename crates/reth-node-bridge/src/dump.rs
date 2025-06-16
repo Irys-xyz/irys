@@ -5,7 +5,6 @@ use irys_database::reth_db::{
     StageCheckpoints,
 };
 use irys_types::Address;
-use reth::revm::state::Bytecode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
