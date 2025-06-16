@@ -18,7 +18,7 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::ensure;
-use futures::future::{poll_immediate, select, Either};
+use futures::future::poll_immediate;
 use futures::FutureExt;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
@@ -27,10 +27,8 @@ use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::future::{poll_fn, Future};
-use std::ops::ControlFlow;
-use std::pin::Pin;
-use std::task::Poll;
 use std::{pin::pin, sync::Arc};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 use tracing::{debug, error, info, instrument, warn, Instrument};
 
@@ -140,22 +138,24 @@ impl ValidationService {
 
             'outer: {
                 if should_receive_new {
-                    // Try to receive a new message
-                    let msg_rx = pin!(self.msg_rx.recv());
-
+                    // check if we received a shutdown signal
                     if let Some(shutdwon) = poll_immediate(&mut shutdown_future).await {
                         drop(shutdwon);
                         break 'shutdown;
                     }
 
-                    let Some(msg) = poll_immediate(msg_rx).await else {
-                        // no messages in the queue
-                        break 'outer;
-                    };
-
-                    let Some(msg) = msg else {
-                        warn!("receiver channel closed");
-                        break 'shutdown;
+                    // Try to receive a new message
+                    let msg = match self.msg_rx.try_recv() {
+                        Ok(msg) => msg,
+                        Err(TryRecvError::Empty) => {
+                            warn!("receiver channel closed");
+                            // no messages in the queue
+                            break 'outer;
+                        }
+                        Err(TryRecvError::Disconnected) => {
+                            // receiver channel closed
+                            break 'shutdown;
+                        }
                     };
 
                     // Transform message to validation future
