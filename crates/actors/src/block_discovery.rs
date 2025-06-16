@@ -22,7 +22,11 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     sync::{mpsc::UnboundedSender, oneshot},
     time::timeout,
@@ -223,6 +227,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
+        let mempool_config = self.config.consensus.mempool.clone();
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
@@ -259,6 +264,61 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             info!("Pre-validating block: {}", new_block_header.height);
 
+            // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
+            // have already been included in a recent parent.
+            let block_height = new_block_header.height;
+            let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
+            let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+            let mut parent_block = previous_block_header.clone();
+
+            // Get the transaction IDs from the current block to check against
+            let _current_commitment_tx_ids: HashSet<_> = new_block_header
+                .get_commitment_ledger_tx_ids()
+                .into_iter()
+                .collect();
+            let current_data_tx_ids = new_block_header.get_data_ledger_tx_ids();
+
+            while parent_block.height >= min_anchor_height {
+                // Check to see if any commitment txids appeared in prior blocks
+                // let parent_commitment_tx_ids = parent_block.get_commitment_ledger_tx_ids();
+                // for txid in &parent_commitment_tx_ids {
+                //     if current_commitment_tx_ids.contains(txid) {
+                //         return Err(eyre!("Duplicate commitment transaction id {}", txid));
+                //     }
+                // }
+
+                // Check to see if any data txids appeared in prior blocks
+                let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+
+                // Compare each ledger type between current and parent blocks
+                for (ledger_type, current_txids) in &current_data_tx_ids {
+                    if let Some(parent_txids) = parent_data_tx_ids.get(ledger_type) {
+                        // Check for intersection between current and parent txids for this ledger
+                        for txid in current_txids {
+                            if parent_txids.contains(txid) {
+                                return Err(eyre!("Duplicate data transaction id {}", txid));
+                            }
+                        }
+                    }
+                }
+
+                if parent_block.height == 0 {
+                    break;
+                }
+
+                // Continue the loop - get the next parent block
+                // Get the next parent block and own it
+                let previous_block_header = match db.view_eyre(|tx| {
+                    block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                }) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
+                };
+
+                parent_block = previous_block_header; // Move instead of borrow
+            }
+
             let validation_result = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
@@ -276,37 +336,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             match validation_result {
                 Ok(_) => {
-                    // Attempt to validate / update the epoch commitment cache
-                    // TODO: check with the commitment cache of the parent block if these commitment txids have been seen in this fork
-                    // for commitment_tx in commitments.iter() {
-                    //     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    //     let _ =
-                    //         commitment_cache_sender.send(CommitmentCacheMessage::AddCommitment {
-                    //             commitment_tx: commitment_tx.clone(),
-                    //             response: oneshot_tx,
-                    //         });
-                    //     let status = oneshot_rx
-                    //         .await
-                    //         .expect("to receive CommitmentStatus from AddCommitment message");
-
-                    //     if !matches!(status, CommitmentCacheStatus::Accepted) {
-                    //         // Something went wrong with the commitments validation, it's time to roll back
-                    //         let (tx, rx) = tokio::sync::oneshot::channel();
-                    //         let _ = commitment_cache_sender.send(
-                    //             CommitmentCacheMessage::RollbackCommitments {
-                    //                 commitment_txs: commitment_tx_ids,
-                    //                 response: tx,
-                    //             },
-                    //         );
-                    //         let _ = rx
-                    //             .await
-                    //             .expect("to receive a response from RollbackCommitments message");
-
-                    //         // These commitments do not result in valid commitment state
-                    //         return Err(eyre::eyre!("Invalid commitments"));
-                    //     }
-                    // }
-
+                    // TODO: we shouldn't insert the block just yet, let it live in the mempool until it migrates
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
 
@@ -314,7 +344,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     all_txs.extend_from_slice(&publish_txs);
 
                     // Check if we've reached the end of an epoch and should finalize commitments
-                    let block_height = new_block_header.height;
+
                     let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
                     let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
 
