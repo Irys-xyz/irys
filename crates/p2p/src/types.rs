@@ -1,4 +1,4 @@
-use crate::block_pool_service::BlockPoolError;
+use crate::block_pool::BlockPoolError;
 use crate::peer_list::PeerListFacadeError;
 use base58::ToBase58 as _;
 use irys_actors::mempool_service::TxIngressError;

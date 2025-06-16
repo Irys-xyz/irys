@@ -1,8 +1,8 @@
-use crate::block_pool_service::{BlockPoolError, BlockPoolService, ProcessBlock};
-use crate::peer_list::{AddPeer, PeerListServiceWithClient};
+use crate::block_pool::{BlockPool, BlockPoolError};
+use crate::peer_list::PeerListServiceWithClient;
 use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
-use crate::{BlockStatusProvider, SyncState};
-use actix::Actor as _;
+use crate::{BlockStatusProvider, PeerList, SyncState};
+use actix::{Actor, Addr};
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
@@ -112,8 +112,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 struct MockedServices {
     block_status_provider_mock: BlockStatusProvider,
     block_discovery_stub: BlockDiscoveryStub,
-    peer_list_service_addr:
-        actix::Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
+    peer_list_service_addr: Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
     db: DatabaseProvider,
 }
 
@@ -165,14 +164,13 @@ async fn should_process_block() {
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false);
-    let service = BlockPoolService::new_with_client(
+    let service = BlockPool::new(
         db.clone(),
-        peer_addr.into(),
+        peer_addr,
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
     );
-    let addr = service.start();
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
     let parent_block_header = mock_chain[0].clone();
@@ -187,12 +185,10 @@ async fn should_process_block() {
         test_header.previous_block_hash.0.to_base58()
     );
 
-    addr.send(ProcessBlock {
-        header: test_header.clone(),
-    })
-    .await
-    .expect("can't send block")
-    .expect("can't process block");
+    service
+        .process_block(test_header.clone())
+        .await
+        .expect("can't process block");
 
     let block_header_in_discovery = block_discovery_stub
         .get_blocks()
@@ -254,9 +250,9 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Set the mock client to return block2 when requested
     // Adding a peer so we can send a request to the mock client
     peer_addr
-        .send(AddPeer {
-            mining_addr: Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
-            peer: PeerListItem {
+        .add_peer(
+            Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
+            PeerListItem {
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
                 address: PeerAddress {
@@ -266,36 +262,32 @@ async fn should_process_block_with_intermediate_block_in_api() {
                 last_seen: 0,
                 is_online: true,
             },
-        })
+        )
         .await
         .expect("can't send message to peer list");
 
     let sync_state = SyncState::new(false);
 
-    let service = BlockPoolService::new_with_client(
+    let block_pool = BlockPool::new(
         db.clone(),
-        peer_addr.into(),
+        peer_addr,
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
     );
-    let addr = service.start();
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
     let block_for_server = block2.clone();
-    let addr_for_server = addr.clone();
+    let pool_for_server = block_pool.clone();
     gossip_server.set_on_block_data_request(move |block_hash| {
         let block = block_for_server.clone();
-        let addr = addr_for_server.clone();
+        let pool = pool_for_server.clone();
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
         tokio::spawn(async move {
             debug!("Send block to block pool");
-            addr.send(ProcessBlock {
-                header: block.clone(),
-            })
-            .await
-            .expect("to send message")
-            .expect("to process block");
+            pool.process_block(block.clone())
+                .await
+                .expect("to process block");
         });
         true
     });
@@ -304,12 +296,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
-    addr.send(ProcessBlock {
-        header: block3.clone(),
-    })
-    .await
-    .expect("can't send block")
-    .expect("can't process block");
+    block_pool
+        .process_block(block3.clone())
+        .await
+        .expect("can't process block");
 
     // Wait for the block to be processed
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -338,14 +328,13 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false);
-    let service = BlockPoolService::new_with_client(
+    let block_pool = BlockPool::new(
         db.clone(),
-        peer_addr.into(),
+        peer_addr,
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
     );
-    let addr = service.start();
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
 
@@ -380,12 +369,9 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         header_building_on_very_old_block.block_hash
     );
 
-    let res = addr
-        .send(ProcessBlock {
-            header: header_building_on_very_old_block.clone(),
-        })
-        .await
-        .expect("can't send block");
+    let res = block_pool
+        .process_block(header_building_on_very_old_block.clone())
+        .await;
 
     assert!(res.is_err());
     assert!(matches!(
@@ -416,9 +402,9 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     // Adding a peer so we can send a request to the mock client
     peer_addr
-        .send(AddPeer {
-            mining_addr: Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
-            peer: PeerListItem {
+        .add_peer(
+            Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
+            PeerListItem {
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
                 address: PeerAddress {
@@ -428,19 +414,18 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
                 last_seen: 0,
                 is_online: true,
             },
-        })
+        )
         .await
         .expect("can't send message to peer list");
 
     let sync_state = SyncState::new(false);
-    let service = BlockPoolService::new_with_client(
+    let block_pool = BlockPool::new(
         db.clone(),
-        peer_addr.into(),
+        peer_addr,
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
     );
-    let addr = service.start();
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
 
@@ -479,7 +464,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     assert_eq!(oldest_block, 5);
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
-    let addr_for_server = addr.clone();
+    let block_pool_for_server = block_pool.clone();
     let blocks = mock_chain.clone();
     let (errors_sender, error_receiver) = channel::<BlockPoolError>();
     gossip_server.set_on_block_data_request(move |block_hash| {
@@ -487,18 +472,13 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             .iter()
             .find(|block| block.block_hash == block_hash)
             .cloned();
-        let addr = addr_for_server.clone();
+        let pool = block_pool_for_server.clone();
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
         let errors_sender = errors_sender.clone();
         if let Some(block) = block {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                let res = addr
-                    .send(ProcessBlock {
-                        header: block.clone(),
-                    })
-                    .await
-                    .expect("to send message");
+                let res = pool.process_block(block.clone()).await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
                     errors_sender.send(err).unwrap();
@@ -514,12 +494,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     });
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
-    let res = addr
-        .send(ProcessBlock {
-            header: bogus_block.clone(),
-        })
-        .await
-        .expect("can't send block");
+    let res = block_pool.process_block(bogus_block).await;
 
     assert!(res.is_ok());
     let processing_error = error_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
