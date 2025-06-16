@@ -699,20 +699,10 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
-        // Loop though the promoted transactions and remove their ingress proofs
-        // from the mempool. In the future on a multi node network we may keep
-        // ingress proofs around longer to account for re-orgs, but for now
-        // we just remove them.
-        // FIXME: Note above about re-orgs!
+        // FIXME: Loop though the promoted transactions and insert their ingress proofs
+        // into the mempool. In the future on a multi node network we may keep
+        // ingress proofs around longer
         if !published_txids.is_empty() {
-            let mut_tx = self
-                .irys_db
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .expect("expected to read/write to database");
-
             for (i, txid) in block.data_ledgers[DataLedger::Publish]
                 .tx_ids
                 .0
@@ -720,14 +710,15 @@ impl Inner {
                 .enumerate()
             {
                 // Retrieve the promoted transactions header
-                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => {
+                let tx_headers_result = self.handle_get_data_tx_message(vec![*txid]).await;
+                let mut tx_header = match tx_headers_result.as_slice() {
+                    [Some(header)] => header.clone(),
+                    [None] => {
                         error!("No transaction header found for txid: {}", txid);
                         continue;
                     }
-                    Err(e) => {
-                        error!("Error fetching transaction header for txid {}: {}", txid, e);
+                    _ => {
+                        error!("Unexpected number of txids. Error fetching transaction header for txid: {}", txid);
                         continue;
                     }
                 };
@@ -741,19 +732,20 @@ impl Inner {
                 let proof = proofs.0[i].clone();
                 tx_header.ingress_proofs = Some(proof);
 
-                // Update the header record in the database to include the ingress
-                // proof, indicating it is promoted
-                if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
-                    error!(
-                        "Could not update transactions with ingress proofs - txid: {} err: {}",
-                        txid, err
-                    );
-                }
+                // Update the header record in the mempool to include the ingress
+                // proof, indicating it is promoted.
+                let mempool_state = &self.mempool_state.clone();
+                let mut mempool_state_write_guard = mempool_state.write().await;
+                mempool_state_write_guard
+                    .valid_tx
+                    .insert(tx_header.id, tx_header.clone());
+                mempool_state_write_guard
+                    .recent_valid_tx
+                    .insert(tx_header.id);
+                drop(mempool_state_write_guard);
 
                 info!("Promoted tx:\n{:?}", tx_header);
             }
-
-            mut_tx.commit().expect("expect to commit to database");
         }
 
         info!("Removing confirmed tx - Block height: {}", block.height,);
