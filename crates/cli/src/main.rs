@@ -20,10 +20,10 @@ pub struct IrysCli {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
-    #[command(name = "backup-accounts")]
-    BackupAccounts {},
-    #[command(name = "initialize-genesis")]
-    InitializeGenesis { state_path: PathBuf },
+    #[command(name = "dump-state")]
+    DumpState {},
+    #[command(name = "init-state")]
+    InitState { state_path: PathBuf },
 }
 
 #[tokio::main]
@@ -53,11 +53,11 @@ async fn main() -> eyre::Result<()> {
     let node_config: NodeConfig = load_config()?;
 
     match args.command {
-        Commands::BackupAccounts { .. } => {
+        Commands::DumpState { .. } => {
             dump_state(cli_init_db()?, "./".into())?;
             Ok(())
         }
-        Commands::InitializeGenesis { state_path } => {
+        Commands::InitState { state_path } => {
             let (chain_spec, _) =
                 IrysChainSpecBuilder::from_config(&Config::new(node_config.clone())).build();
 
