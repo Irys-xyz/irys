@@ -40,6 +40,16 @@ impl CommitmentCache {
         cache
     }
 
+    /// Reconstructs the commitment cache for the current epoch by loading all commitment
+    /// transactions from blocks since the last epoch boundary.
+    ///
+    /// Iterates through all blocks from the first block after the most recent epoch block
+    /// up to the latest block, collecting and applying all commitment transactions to build
+    /// the current epoch's commitment state. This is typically used during startup or when
+    /// the commitment cache needs to be rebuilt from persistent storage.
+    ///
+    /// # Returns
+    /// Initialized commitment cache containing all commitments from the current epoch
     pub fn current_epoch_commitments(
         block_index_guard: BlockIndexReadGuard,
         commitment_state_guard: CommitmentStateReadGuard,

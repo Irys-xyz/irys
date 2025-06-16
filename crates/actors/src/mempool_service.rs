@@ -1199,6 +1199,8 @@ impl Inner {
             canonical.last().unwrap().height
         );
 
+        // TODO: This approach should be applied to storage TX and commitment TX should instead
+        // be checked for prior inclusion using the Commitment State and current Commitment Cache
         for entry in canonical {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
