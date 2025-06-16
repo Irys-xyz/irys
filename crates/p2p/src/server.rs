@@ -2,45 +2,44 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list::{PeerListFacade, ScoreDecreaseReason};
+use crate::peer_list::{PeerList, ScoreDecreaseReason};
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
-use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{
     middleware,
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
     Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
-    PeerListItem, RethPeerInfo, UnpackedChunk,
+    PeerListItem, UnpackedChunk,
 };
 use std::net::TcpListener;
 use tracing::{debug, error, info};
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B, A, R>
+pub(crate) struct GossipServer<M, B, A, P>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    P: PeerList,
 {
-    data_handler: GossipServerDataHandler<M, B, A, R>,
-    peer_list: PeerListFacade<A, R>,
+    data_handler: GossipServerDataHandler<M, B, A, P>,
+    peer_list: P,
 }
 
-impl<M, B, A, R> Clone for GossipServer<M, B, A, R>
+impl<M, B, A, P> Clone for GossipServer<M, B, A, P>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    P: PeerList,
 {
     fn clone(&self) -> Self {
         Self {
@@ -50,16 +49,16 @@ where
     }
 }
 
-impl<M, B, A, R> GossipServer<M, B, A, R>
+impl<M, B, A, P> GossipServer<M, B, A, P>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    P: PeerList,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, B, A, R>,
-        peer_list: PeerListFacade<A, R>,
+        gossip_server_data_handler: GossipServerDataHandler<M, B, A, P>,
+        peer_list: P,
     ) -> Self {
         Self {
             data_handler: gossip_server_data_handler,
@@ -90,7 +89,7 @@ where
     }
 
     async fn check_peer(
-        peer_list: &PeerListFacade<A, R>,
+        peer_list: &P,
         req: &actix_web::HttpRequest,
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
@@ -231,13 +230,9 @@ where
         }
     }
 
-    async fn handle_invalid_data(
-        peer_miner_address: &Address,
-        error: &GossipError,
-        peer_list_service: &PeerListFacade<A, R>,
-    ) {
+    async fn handle_invalid_data(peer_miner_address: &Address, error: &GossipError, peer_list: &P) {
         if let GossipError::InvalidData(_) = error {
-            if let Err(error) = peer_list_service
+            if let Err(error) = peer_list
                 .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData)
                 .await
             {

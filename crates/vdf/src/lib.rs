@@ -1,13 +1,13 @@
 //! This crate provides functions and utilities for VDF (Verifiable Delay Function) operations,
 //! including checkpoint validation and seed application.
 
-use eyre::Context;
+use eyre::Context as _;
 use irys_types::block_production::Seed;
 use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use openssl::sha;
 pub use rayon;
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use std::time::Duration;
 
 pub mod state;
@@ -334,7 +334,7 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base58::{FromBase58, ToBase58};
+    use base58::{FromBase58 as _, ToBase58 as _};
     use irys_types::ConsensusConfig;
     use tracing::debug;
 

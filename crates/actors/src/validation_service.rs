@@ -37,7 +37,7 @@ use std::{
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
-use tracing::{debug, error, info, instrument, warn, Instrument};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 /// Wrapper around active validations with capacity management and priority ordering
 struct ActiveValidations {
@@ -454,7 +454,7 @@ impl ValidationServiceInner {
             recall_recall_range_is_valid(block, &self.config.consensus, &self.vdf_state)
                 .await
                 .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
-                .map(|_| ValidationResult::Valid)
+                .map(|()| ValidationResult::Valid)
                 .unwrap_or(ValidationResult::Invalid)
         }
         .instrument(tracing::info_span!("recall range validation"));
@@ -473,7 +473,7 @@ impl ValidationServiceInner {
                     &miner_address,
                 )
                 .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
-                .map(|_| ValidationResult::Valid)
+                .map(|()| ValidationResult::Valid)
             })
             .instrument(tracing::info_span!("poa task validation"))
         };

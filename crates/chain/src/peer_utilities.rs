@@ -1,5 +1,5 @@
-use base58::ToBase58;
-use irys_api_client::{ApiClient, IrysApiClient};
+use base58::ToBase58 as _;
+use irys_api_client::{ApiClient as _, IrysApiClient};
 pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
 use irys_types::block::CombinedBlockHeader;
 use irys_types::{
@@ -140,7 +140,7 @@ pub async fn fetch_block(
                 match response.json::<CombinedBlockHeader>().await {
                     Ok(block) => {
                         info!("Got block from {}", &url);
-                        let irys_block_header = block.irys.clone();
+                        let irys_block_header = block.irys;
                         Some(irys_block_header)
                     }
                     Err(e) => {

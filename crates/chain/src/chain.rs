@@ -1,7 +1,7 @@
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
+use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::{
@@ -180,7 +180,7 @@ struct StopGuard(Arc<AtomicBool>);
 
 impl StopGuard {
     fn new() -> Self {
-        StopGuard(Arc::new(AtomicBool::new(false)))
+        Self(Arc::new(AtomicBool::new(false)))
     }
 
     fn mark_stopped(&self) {
@@ -205,7 +205,7 @@ impl Drop for StopGuard {
 
 impl Clone for StopGuard {
     fn clone(&self) -> Self {
-        StopGuard(Arc::clone(&self.0))
+        Self(Arc::clone(&self.0))
     }
 }
 
@@ -315,7 +315,7 @@ impl IrysNode {
         }
 
         let config = Config::new(node_config);
-        Ok(IrysNode {
+        Ok(Self {
             config,
             http_listener,
             gossip_listener,
@@ -688,7 +688,7 @@ impl IrysNode {
                         server_stop_handle.await.unwrap();
 
                         match gossip_service_handle.stop().await {
-                            Ok(_) => info!("Gossip service stopped"),
+                            Ok(()) => info!("Gossip service stopped"),
                             Err(e) => warn!("Gossip service is already stopped: {:?}", e),
                         }
 
@@ -1068,7 +1068,7 @@ impl IrysNode {
             db: irys_db.clone(),
             chunk_provider: chunk_provider.clone(),
             block_index_guard: block_index_guard.clone(),
-            vdf_steps_guard: vdf_state_readonly.clone(),
+            vdf_steps_guard: vdf_state_readonly,
             service_senders: service_senders.clone(),
             reth_shutdown_sender,
             reth_thread_handle: None,
@@ -1132,7 +1132,7 @@ impl IrysNode {
                 peer_list: peer_list_service,
                 db: irys_db,
                 reth_provider: reth_node.clone(),
-                block_tree: block_tree_guard.clone(),
+                block_tree: block_tree_guard,
                 block_index: block_index_guard.clone(),
                 config: config.clone(),
                 reth_http_url: reth_node
@@ -1149,9 +1149,7 @@ impl IrysNode {
         let mut w = irys_provider
             .write()
             .map_err(|_| eyre::eyre!("lock poisoned"))?;
-        *w = Some(IrysRethProviderInner {
-            chunk_provider: chunk_provider.clone(),
-        });
+        *w = Some(IrysRethProviderInner { chunk_provider });
 
         Ok((
             irys_node_ctx,
@@ -1166,12 +1164,12 @@ impl IrysNode {
         config: &Config,
         storage_modules_guard: StorageModulesReadGuard,
     ) -> Arc<ChunkProvider> {
-        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard.clone());
+        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard);
 
         Arc::new(chunk_provider)
     }
 
-    #[allow(clippy::path_ends_with_ext, reason = "Core pinning logic")]
+    #[expect(clippy::path_ends_with_ext, reason = "Core pinning logic")]
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
@@ -1291,7 +1289,7 @@ impl IrysNode {
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let packing_config = PackingConfig::new(config);
         let packing_actor_addr =
-            PackingActor::new(task_executor.clone(), sm_ids, packing_config.clone()).start();
+            PackingActor::new(task_executor.clone(), sm_ids, packing_config).start();
         (atomic_global_step_number, packing_actor_addr)
     }
 
@@ -1324,7 +1322,7 @@ impl IrysNode {
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
-                block_producer_actor.clone()
+                block_producer_actor
             });
         (block_producer_addr, block_producer_arbiter)
     }
@@ -1358,7 +1356,7 @@ impl IrysNode {
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
-            partition_assignments_guard: partition_assignments_guard.clone(),
+            partition_assignments_guard,
             db: irys_db.clone(),
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
@@ -1383,7 +1381,7 @@ impl IrysNode {
         storage_modules_guard: &StorageModulesReadGuard,
     ) {
         let chunk_migration_service = ChunkMigrationService::new(
-            block_index.clone(),
+            block_index,
             config.clone(),
             storage_modules_guard,
             irys_db.clone(),
@@ -1473,7 +1471,7 @@ fn init_peer_list_service(
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     SystemRegistry::set(peer_list_service.clone());
-    (peer_list_service.into(), peer_list_arbiter)
+    (peer_list_service, peer_list_arbiter)
 }
 
 fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>, Arbiter) {

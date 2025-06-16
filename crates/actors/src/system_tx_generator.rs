@@ -3,8 +3,8 @@ use irys_reth::system_tx::{
     BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket,
 };
 use irys_types::{
-    Address, CommitmentTransaction, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader,
-    H256,
+    Address, CommitmentTransaction, IrysBlockHeader, IrysTransactionCommon as _,
+    IrysTransactionHeader, H256,
 };
 use reth::revm::primitives::ruint::Uint;
 

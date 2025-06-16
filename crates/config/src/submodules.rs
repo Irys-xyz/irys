@@ -68,7 +68,7 @@ impl StorageSubmodulesConfig {
                 .push(Path::new(&instance_dir).join(format!("storage_modules/submodule_{}", i)));
         }
 
-        let config = StorageSubmodulesConfig {
+        let config = Self {
             is_using_hardcoded_paths: true,
             submodule_paths,
         };
@@ -86,7 +86,7 @@ impl StorageSubmodulesConfig {
         }
 
         // Load the config to verify it parses
-        StorageSubmodulesConfig::from_toml(config_path_local)
+        Self::from_toml(config_path_local)
     }
 
     pub fn load(instance_dir: PathBuf) -> eyre::Result<Self> {
@@ -99,7 +99,7 @@ impl StorageSubmodulesConfig {
         // Start by removing all symlinks from the `storage_modules` dir
         fs::read_dir(base_path.clone())
             .expect("to read storage_modules dir")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().map(|t| t.is_symlink()).unwrap_or(false))
             .for_each(|e| {
                 debug!("removing symlink {:?}", e.path());
@@ -108,8 +108,7 @@ impl StorageSubmodulesConfig {
 
         // Try to read the config
         if config_path_local.exists() {
-            let config = StorageSubmodulesConfig::from_toml(config_path_local)
-                .expect("To load the submodule config");
+            let config = Self::from_toml(config_path_local).expect("To load the submodule config");
             if config.is_using_hardcoded_paths {
                 return Ok(config); // don't create symlinks
             };
@@ -142,7 +141,7 @@ impl StorageSubmodulesConfig {
         } else {
             // Create default config with hardcoded paths in dev if none exists
             tracing::info!("Creating default config at {:?}", config_path_local);
-            let config = StorageSubmodulesConfig {
+            let config = Self {
                 is_using_hardcoded_paths: true,
                 submodule_paths: vec![
                     Path::new(&instance_dir).join("storage_modules/submodule_0"),
@@ -164,7 +163,7 @@ impl StorageSubmodulesConfig {
             }
 
             // Load the config to verify it parses
-            StorageSubmodulesConfig::from_toml(config_path_local)
+            Self::from_toml(config_path_local)
         }
     }
 }

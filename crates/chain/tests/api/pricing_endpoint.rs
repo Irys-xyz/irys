@@ -1,7 +1,7 @@
 //! endpoint tests
 
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
-use actix_web::{http::header::ContentType, HttpMessage};
+use actix_web::{http::header::ContentType, HttpMessage as _};
 use irys_api_server::routes::price::PriceInfo;
 use irys_types::{DataLedger, U256};
 
