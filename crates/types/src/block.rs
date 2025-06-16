@@ -15,6 +15,7 @@ use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::{Index, IndexMut};
 
@@ -239,6 +240,17 @@ impl IrysBlockHeader {
         }
 
         commitment_txids
+    }
+
+    pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, HashSet<H256>> {
+        let mut data_txids = HashMap::new();
+        for data_ledger in self.data_ledgers.iter() {
+            data_txids.insert(
+                DataLedger::from_u32(data_ledger.ledger_id).unwrap(),
+                data_ledger.tx_ids.0.clone().into_iter().collect(),
+            );
+        }
+        data_txids
     }
 }
 
@@ -510,7 +522,9 @@ pub struct CombinedBlockHeader {
 }
 
 /// Names for each of the ledgers as well as their `ledger_id` discriminant
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
+)]
 #[repr(u32)]
 pub enum DataLedger {
     /// The permanent publish ledger
