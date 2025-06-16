@@ -18,7 +18,7 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
-use reth_db::{transaction::DbTx, Database as _};
+use reth_db::Database as _;
 use std::pin::pin;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -238,10 +238,10 @@ impl BlockTreeServiceInner {
         // TODO: Eventually abstract this for support of `n` ledgers
         // FIXME this errors saying Failed to collect tx headers for Submit ledger: No tx header found for txid m1v5aJU1Sd1wt4ZLgmKX1HeUMYNB97BL9FGrXKXeTmx
         let submit_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&tx, &block_header, DataLedger::Submit)
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
             .await;
         let publish_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&tx, &block_header, DataLedger::Publish)
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
             .await;
 
         let mut all_txs = vec![];
@@ -632,9 +632,8 @@ impl BlockTreeServiceInner {
 
     /// Fetches full transaction headers from a ledger in a block.
     /// Returns None if any headers are missing or on DB errors.
-    async fn get_data_ledger_tx_headers_from_mempool<T: DbTx>(
+    async fn get_data_ledger_tx_headers_from_mempool(
         &self,
-        _tx: &T,
         block_header: &IrysBlockHeader,
         ledger: DataLedger,
     ) -> eyre::Result<Vec<IrysTransactionHeader>> {
