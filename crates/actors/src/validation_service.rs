@@ -9,7 +9,7 @@
 //!
 //! The service supports concurrent validation tasks for improved performance.
 
-use crate::block_tree_service::{BlockTreeReadGuard, ChainState};
+use crate::block_tree_service::{BlockState, BlockTreeReadGuard, ChainState};
 use crate::block_validation::{recall_recall_range_is_valid, system_transactions_are_valid};
 use crate::{
     block_index_service::BlockIndexReadGuard,
@@ -365,16 +365,14 @@ impl ValidationServiceInner {
                                 break;
                             };
                             match parent_chain_state {
-                                ChainState::Onchain | ChainState::Validated(_) => {
+                                ChainState::Onchain
+                                | ChainState::Validated(_)
+                                | ChainState::NotOnchain(BlockState::ValidBlock) => {
                                     // Parent is ready, we can proceed
                                     break;
                                 }
-                                ChainState::NotOnchain(status) => {
-                                    tracing::warn!(
-                                        ?status,
-                                        ?parent_hash,
-                                        "parent block not on chain nor validated"
-                                    );
+                                ChainState::NotOnchain(BlockState::Unknown)
+                                | ChainState::NotOnchain(BlockState::ValidationScheduled) => {
                                     // Parent not ready, yield and try again when polled later
                                     tokio::task::yield_now().await;
                                     continue;
