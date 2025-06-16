@@ -5,7 +5,7 @@ use actix_web::{
     HttpResponse,
 };
 use irys_actors::block_tree_service::get_canonical_chain;
-use irys_p2p::PeerList;
+use irys_p2p::PeerList as _;
 use irys_types::H256;
 use serde::{Deserialize, Serialize};
 

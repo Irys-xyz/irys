@@ -1,9 +1,9 @@
 use crate::peer_list::PeerList;
 use crate::{GossipError, GossipResult};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_api_client::ApiClient;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
-use rand::prelude::SliceRandom;
+use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -329,7 +329,7 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_list::PeerListServiceWithClient;
-        use actix::Actor;
+        use actix::Actor as _;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{

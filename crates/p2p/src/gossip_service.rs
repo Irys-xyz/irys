@@ -177,7 +177,7 @@ impl P2PService {
         let server_data_handler = GossipServerDataHandler {
             mempool,
             block_pool,
-            api_client: api_client.clone(),
+            api_client,
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
             peer_list: peer_list.clone(),

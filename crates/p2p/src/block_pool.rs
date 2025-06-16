@@ -84,7 +84,7 @@ impl BlockCache {
             .await
             .block_hash_to_parent_hash
             .get(block_hash)
-            .cloned()
+            .copied()
     }
 
     async fn block_hash_to_parent_hash_contains(&self, block_hash: &BlockHash) -> bool {
