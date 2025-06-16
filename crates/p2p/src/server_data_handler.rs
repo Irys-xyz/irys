@@ -1,5 +1,4 @@
 use crate::peer_list::{PeerList, ScoreDecreaseReason};
-use alloy_core::primitives::keccak256;
 use crate::{
     block_pool::BlockPool,
     cache::{GossipCache, GossipCacheKey},
@@ -7,6 +6,7 @@ use crate::{
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
+use alloy_core::primitives::keccak256;
 use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{
