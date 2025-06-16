@@ -147,7 +147,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
-    BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
+    BlockConfirmedMessage(Arc<IrysBlockHeader>),
     /// Get IrysTransactionHeader
     GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -656,7 +656,6 @@ impl Inner {
     async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
-        all_txs: Arc<Vec<IrysTransactionHeader>>,
     ) -> Result<(), TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
@@ -725,12 +724,6 @@ impl Inner {
 
             mut_tx.commit().expect("expect to commit to database");
         }
-
-        info!(
-            "Removing confirmed tx - Block height: {} num tx: {}",
-            block.height,
-            all_txs.len()
-        );
 
         Ok(())
     }
@@ -1459,9 +1452,8 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
-                    let _unused_response_message =
-                        self.handle_block_confirmed_message(block, all_txs).await;
+                MempoolServiceMessage::BlockConfirmedMessage(block) => {
+                    let _unused_response_message = self.handle_block_confirmed_message(block).await;
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
                     let response_message = self

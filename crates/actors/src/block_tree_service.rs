@@ -284,7 +284,6 @@ impl BlockTreeServiceInner {
         &self,
         tip_hash: BlockHash,
         confirmed_block: &Arc<IrysBlockHeader>,
-        all_tx: Arc<Vec<IrysTransactionHeader>>,
     ) {
         debug!(
             "JESSEDEBUG confirming irys block evm_block_hash: {} ({})",
@@ -304,7 +303,6 @@ impl BlockTreeServiceInner {
             .mempool
             .send(MempoolServiceMessage::BlockConfirmedMessage(
                 confirmed_block.clone(),
-                all_tx,
             ))
             .expect("mempool service has unexpectedly become unreachable");
         self.service_senders
@@ -563,7 +561,6 @@ impl BlockTreeServiceInner {
                 // Get block info before mutable operations
                 let block_entry = cache.blocks.get(&block_hash).unwrap();
                 let arc_block = Arc::new(block_entry.block.clone());
-                let all_tx = block_entry.all_tx.clone();
 
                 // Now do mutable operations
                 if cache.mark_tip(&block_hash).is_ok() {
@@ -632,7 +629,7 @@ impl BlockTreeServiceInner {
                         );
                     }
 
-                    self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
+                    self.notify_services_of_block_confirmation(block_hash, &arc_block);
                 }
 
                 // Handle block finalization (move chunks to disk and add to block_index)
@@ -784,7 +781,6 @@ pub struct BlockTreeCache {
 #[derive(Debug)]
 pub struct BlockEntry {
     block: IrysBlockHeader,
-    all_tx: Arc<Vec<IrysTransactionHeader>>,
     chain_state: ChainState,
     timestamp: SystemTime,
     children: HashSet<H256>,
@@ -841,10 +837,6 @@ impl BlockTreeCache {
         let mut solutions = HashMap::new();
         let mut height_index = BTreeMap::new();
 
-        // No transactions to cache for genesis block - transaction data
-        // has already been confirmed and stored in the permanent chain state
-        let all_tx = Arc::new(vec![]);
-
         // Create a dummy commitment cache
         let commitment_cache = Arc::new(CommitmentCache::new());
 
@@ -852,7 +844,6 @@ impl BlockTreeCache {
         // and part of the canonical chain
         let block_entry = BlockEntry {
             block: genesis_block.clone(),
-            all_tx,
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -949,7 +940,6 @@ impl BlockTreeCache {
         let arc_commitment_cache = Arc::new(commitment_cache.clone());
         let block_entry = BlockEntry {
             block: start_block.clone(),
-            all_tx: Arc::new(vec![]),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -1072,7 +1062,6 @@ impl BlockTreeCache {
             hash,
             BlockEntry {
                 block: block.clone(),
-                all_tx: Arc::new(vec![]),
                 chain_state,
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
