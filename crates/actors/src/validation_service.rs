@@ -19,7 +19,7 @@ use crate::{
 };
 use eyre::ensure;
 use futures::future::poll_immediate;
-use futures::FutureExt;
+use futures::{FutureExt, Stream, StreamExt};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::rayon;
@@ -27,7 +27,11 @@ use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::future::{poll_fn, Future};
-use std::{pin::pin, sync::Arc};
+use std::{
+    pin::pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 use tracing::{debug, error, info, instrument, warn, Instrument};
@@ -54,38 +58,46 @@ impl ActiveValidations {
         self.validations.push(future);
     }
 
-    async fn poll(&mut self) {
-        let mut to_remove = Vec::with_capacity(self.validations.len());
-        {
-            let validations = &mut self.validations;
-            let to_remove = &mut to_remove;
-            poll_fn(move |cx| {
-                use std::task::Poll::*;
-                for (idx, item) in validations.iter_mut().enumerate() {
-                    let Ready(()) = item.as_mut().poll(cx) else {
-                        continue;
-                    };
-                    to_remove.push(idx);
-                }
-                Ready(())
-            })
-            .await;
-        }
-
-        // iterate from the other end to prevent idx mismatches
-        for idx_to_remove in to_remove.into_iter().rev() {
-            // safe to drop the validation_task because the future is completed
-            let validation_task = self.validations.remove(idx_to_remove);
-            drop(validation_task);
-        }
-    }
-
     fn len(&self) -> usize {
         self.validations.len()
     }
 
     fn is_empty(&self) -> bool {
         self.validations.is_empty()
+    }
+}
+
+impl Stream for ActiveValidations {
+    type Item = ();
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let mut completed_count = 0;
+        let mut tasks_completed = Vec::new();
+
+        for (idx, validation) in self.validations.iter_mut().enumerate() {
+            // try polling each validatoin task - if finishes, add it to the `completed` list for removal
+            if let Poll::Ready(()) = validation.as_mut().poll(cx) {
+                tasks_completed.push(idx);
+                completed_count += 1;
+            }
+        }
+
+        // Remove completed validations in reverse order to maintain indices
+        for idx_to_remove in tasks_completed.into_iter().rev() {
+            let validation_task = self.validations.remove(idx_to_remove);
+            drop(validation_task);
+        }
+
+        if completed_count > 0 {
+            // Signal that validations have completed
+            Poll::Ready(Some(()))
+        } else {
+            // No completions, wait for more work
+            Poll::Pending
+        }
     }
 }
 
@@ -178,7 +190,7 @@ impl ValidationService {
         info!("starting validation service");
 
         let mut shutdown_future = pin!(&mut self.shutdown);
-        let mut active_validations = ActiveValidations::new(10);
+        let mut active_validations = pin!(ActiveValidations::new(10));
 
         'shutdown: loop {
             'outer: {
@@ -213,11 +225,14 @@ impl ValidationService {
                 }
             }
 
-            active_validations.poll().await;
+            // Process any completed validations (non-blocking)
+            while let Some(_) = poll_immediate(active_validations.next()).await {
+                // One or more validations completed - continue processing
+            }
 
             // If no active validations and channel closed, exit
             if active_validations.is_empty() && self.msg_rx.is_closed() {
-                break;
+                break 'shutdown;
             }
 
             // Yield to prevent busy loop
@@ -230,8 +245,10 @@ impl ValidationService {
             active_validations.len()
         );
         while !active_validations.is_empty() {
-            active_validations.poll().await;
-            tokio::task::yield_now().await;
+            // Drain remaining validations
+            if active_validations.next().await.is_some() {
+                // Validation completed during shutdown
+            }
         }
 
         info!("shutting down validation service");
