@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    block_discovery::get_commitment_tx_in_parallel,
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_index_service::BlockIndexReadGuard,
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
@@ -23,7 +23,7 @@ use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -563,8 +563,9 @@ async fn generate_expected_system_transactions_from_db<'a>(
         .iter()
         .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
         .ok_or_eyre("Submit ledger not found")?;
-    // todo: read the data txs from db and mempool
-    let submit_txs = [];
+
+    // Lookup storage/data txs
+    let submit_txs = extract_storage_txs(config, service_senders, block, db).await?;
 
     let system_txs = SystemTxGenerator::new(
         &block.height,
@@ -609,6 +610,35 @@ async fn extract_commitment_txs(
         }
     };
     Ok(commitment_txs)
+}
+
+async fn extract_storage_txs(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
+    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let storage_txs = if is_epoch_block {
+        // IMPORTANT: on epoch blocks we don't generate system txs for commitment txs
+        vec![]
+    } else {
+        match &block.data_ledgers[..] {
+            [publish_ledger, submit_ledger] => {
+                // ledger
+                let mut tx_ids = publish_ledger.tx_ids.0.clone();
+                tx_ids.extend(submit_ledger.tx_ids.0.clone());
+                get_data_tx_in_parallel(tx_ids, &service_senders.mempool, db).await?
+            }
+            [] => eyre::bail!(
+                "Currently we support exactly 1 submit and 1 publish data ledger per block"
+            ),
+            [..] => eyre::bail!(
+                "Currently we support exactly 1 submit and 1 publish data ledger per block"
+            ),
+        }
+    };
+    Ok(storage_txs)
 }
 
 /// Validates that the actual system transactions match the expected ones
