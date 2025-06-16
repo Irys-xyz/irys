@@ -351,6 +351,28 @@ impl ValidationServiceInner {
                     if matches!(validation_result, ValidationResult::Valid) {
                         let parent_hash = block.previous_block_hash;
                         loop {
+                            // Check if block height is too far behind canonical tip
+                            let should_exit = {
+                                let block_tree = block_tree_guard.read();
+                                let tip_hash = block_tree.tip;
+                                if let Some(tip_block) = block_tree.get_block(&tip_hash) {
+                                    let height_diff = tip_block.height.saturating_sub(block.height);
+                                    height_diff
+                                        > self.config.consensus.validation_height_diff_threshold
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if should_exit {
+                                debug!(
+                                    ?block_hash,
+                                    block_height = ?block.height,
+                                    "exiting validation task - block too far behind canonical tip"
+                                );
+                                return;
+                            }
+
                             let parent_chain_state = {
                                 let block_tree = block_tree_guard.read();
                                 block_tree
