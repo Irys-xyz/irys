@@ -144,7 +144,8 @@ async fn check_get_block_endpoint(
 #[test_log::test]
 async fn heavy_api_client_all_endpoints_should_work() {
     initialize_tracing();
-    let config = NodeConfig::testnet();
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_migration_depth = 1000; // prevent anything moving to the index during this test
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 
     let api_address = SocketAddr::new(
