@@ -6,7 +6,8 @@ use crate::{
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
-    services::ServiceSenders, system_tx_generator::SystemTxGenerator,
+    services::ServiceSenders,
+    system_tx_generator::SystemTxGenerator,
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
@@ -330,7 +331,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     }
 
                     debug!("Producing epoch block at height {} with commitments rollup tx {:#?}",block_height, txids);
-    
+
                     commitment_ledger = SystemTransactionLedger {
                         ledger_id: SystemLedger::Commitment.into(),
                         tx_ids: txids
