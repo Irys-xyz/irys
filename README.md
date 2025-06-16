@@ -1,18 +1,20 @@
 # irys
 
 ## Development setup
+Clone the repository, install Rust
+rust-toolchain.toml contains the version you should be using.\
+Or, use the development container configuration contained in .devcontainer
 
-```cli
-git submodule update --init --recursive --remote
-```
-
-other deps (for cuda):
+Other dependencies (for the OpenSSL build):
 
 ```
 clang & a C/C++ build toolchain
 gmp
 pkg-config
 ```
+The NVIDIA feature flag/CUDA accelerated matrix packing requires the latest CUDA toolkit (12.6+)\
+and GCC-13 (as well as g++ 13).\
+See .devcontainer/setup.sh for more information.
 
 Local development commands:
 
@@ -23,9 +25,16 @@ cargo xtask check
 cargo xtask test
 cargo xtask unused-deps
 cargo xtask typos
+
+cargo xtask local-checks # runs 99% of the tasks CI does
 ```
 
 ## Testing
+
+General:
+```cli
+cargo xtask test
+```
 
 Testing code examples in comments
 
@@ -33,11 +42,11 @@ Testing code examples in comments
 cargo test --doc
 ```
 
-Testing Block Serialization
+## Debugging
+If you're debugging and noticing any issues (i.e unable to inspect local variables)\
+comment out all instances of the  `debug = "line-tables-only"` and `split-debuginfo = "unpacked"` lines in the root Cargo.toml\
+these options accelerate debug build times at the cost of interfering with debugging.
 
-```cli
-cargo test -p irys-types  -- --nocapture
-```
 
 ## Common env issues
 MacOS has a soft limit of 256 open file limit per process.

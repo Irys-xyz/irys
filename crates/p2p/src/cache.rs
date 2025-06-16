@@ -32,10 +32,10 @@ pub(crate) enum GossipCacheKey {
 impl From<&GossipData> for GossipCacheKey {
     fn from(data: &GossipData) -> Self {
         match data {
-            GossipData::Chunk(chunk) => GossipCacheKey::Chunk(chunk.chunk_path_hash()),
-            GossipData::Transaction(transaction) => GossipCacheKey::Transaction(transaction.id),
-            GossipData::CommitmentTransaction(comm_tx) => GossipCacheKey::Transaction(comm_tx.id),
-            GossipData::Block(block) => GossipCacheKey::Block(block.block_hash),
+            GossipData::Chunk(chunk) => Self::Chunk(chunk.chunk_path_hash()),
+            GossipData::Transaction(transaction) => Self::Transaction(transaction.id),
+            GossipData::CommitmentTransaction(comm_tx) => Self::Transaction(comm_tx.id),
+            GossipData::Block(block) => Self::Block(block.block_hash),
         }
     }
 }

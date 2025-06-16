@@ -1,15 +1,12 @@
+use crate::peer_list::PeerList;
 use crate::{
-    block_pool_service::{
-        BlockDataRequest, BlockPoolService, BlockProcessedOrProcessing, ProcessBlock,
-    },
+    block_pool::BlockPool,
     cache::{GossipCache, GossipCacheKey},
-    peer_list::PeerListFacade,
     sync::SyncState,
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
-use actix::{Actor, Addr, Context, Handler};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
@@ -18,37 +15,37 @@ use irys_actors::{
 use irys_api_client::ApiClient;
 use irys_types::{
     CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionResponse, RethPeerInfo, UnpackedChunk, H256,
+    IrysTransactionResponse, UnpackedChunk, H256,
 };
 use std::sync::Arc;
 use tracing::{debug, error, Span};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R>
+pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, TPeerList>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
     TApiClient: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    TPeerList: PeerList,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: Addr<BlockPoolService<TApiClient, R, TBlockDiscovery>>,
+    pub block_pool: BlockPool<TPeerList, TBlockDiscovery>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
-    pub peer_list_service: PeerListFacade<TApiClient, R>,
+    pub peer_list: TPeerList,
     pub sync_state: SyncState,
     /// Tracing span
     pub span: Span,
 }
 
-impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
+impl<M, B, A, P> Clone for GossipServerDataHandler<M, B, A, P>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    P: PeerList,
 {
     fn clone(&self) -> Self {
         Self {
@@ -57,19 +54,19 @@ where
             cache: Arc::clone(&self.cache),
             api_client: self.api_client.clone(),
             gossip_client: self.gossip_client.clone(),
-            peer_list_service: self.peer_list_service.clone(),
+            peer_list: self.peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: self.span.clone(),
         }
     }
 }
 
-impl<M, B, A, R> GossipServerDataHandler<M, B, A, R>
+impl<M, B, A, P> GossipServerDataHandler<M, B, A, P>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    P: PeerList,
 {
     pub(crate) async fn handle_chunk(
         &self,
@@ -78,7 +75,7 @@ where
         let source_miner_address = chunk_request.miner_address;
         let chunk = chunk_request.data;
         let chunk_path_hash = chunk.chunk_path_hash();
-        match self.mempool.handle_chunk(chunk).await {
+        match self.mempool.handle_chunk_ingress(chunk).await {
             Ok(()) => {
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
@@ -148,7 +145,17 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_tx(tx_id).await? {
+        if self
+            .mempool
+            .is_known_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })?
+        {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -158,7 +165,7 @@ where
 
         match self
             .mempool
-            .handle_data_transaction(tx)
+            .handle_data_transaction_ingress(tx)
             .await
             .map_err(GossipError::from)
         {
@@ -200,7 +207,17 @@ where
             return Ok(());
         }
 
-        if self.mempool.is_known_tx(tx_id).await? {
+        if self
+            .mempool
+            .is_known_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })?
+        {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
                 self.gossip_client.mining_address
@@ -210,7 +227,7 @@ where
 
         match self
             .mempool
-            .handle_commitment_transaction(tx)
+            .handle_commitment_transaction_ingress(tx)
             .await
             .map_err(GossipError::from)
         {
@@ -275,13 +292,8 @@ where
 
         let has_block_already_been_processed = self
             .block_pool
-            .send(BlockProcessedOrProcessing {
-                block_hash: block_header.block_hash,
-                block_height: block_header.height,
-            })
-            .await
-            .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
-            .map_err(GossipError::BlockPool)?;
+            .is_block_processing_or_processed(&block_header.block_hash, block_header.height)
+            .await;
 
         if has_block_already_been_processed {
             debug!(
@@ -338,18 +350,18 @@ where
             })?;
 
         // Process each transaction
-        for tx_response in missing_txs.into_iter() {
+        for tx_response in missing_txs {
             let tx_id;
             let mempool_response = match tx_response {
                 IrysTransactionResponse::Commitment(commitment_tx) => {
                     tx_id = commitment_tx.id;
                     self.mempool
-                        .handle_commitment_transaction(commitment_tx)
+                        .handle_commitment_transaction_ingress(commitment_tx)
                         .await
                 }
                 IrysTransactionResponse::Storage(tx) => {
                     tx_id = tx.id;
-                    self.mempool.handle_data_transaction(tx).await
+                    self.mempool.handle_data_transaction_ingress(tx).await
                 }
             };
 
@@ -367,17 +379,19 @@ where
         }
 
         self.block_pool
-            .send(ProcessBlock {
-                header: block_header,
-            })
+            .process_block(block_header)
             .await
-            .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
             .map_err(GossipError::BlockPool)?;
         Ok(())
     }
 
     async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        Ok(self.mempool.is_known_tx(tx_id).await?)
+        self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "is_known_transaction() errored: {:?}",
+                e
+            )))
+        })
     }
 
     pub(crate) async fn handle_get_data(
@@ -386,7 +400,7 @@ where
         request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<bool> {
         let peer_list_item = self
-            .peer_list_service
+            .peer_list
             .peer_by_mining_address(request.miner_address)
             .await?;
         let Some(peer_info) = peer_list_item else {
@@ -400,11 +414,7 @@ where
 
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let block_result = self
-                    .block_pool
-                    .send(BlockDataRequest { block_hash })
-                    .await
-                    .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?;
+                let block_result = self.block_pool.get_block_data(&block_hash).await;
 
                 let maybe_block = block_result.map_err(GossipError::BlockPool)?;
 
@@ -415,7 +425,7 @@ where
                             .send_data_and_update_score(
                                 (&request.miner_address, &peer_info),
                                 &GossipData::Block(block),
-                                &self.peer_list_service,
+                                &self.peer_list,
                             )
                             .await
                         {

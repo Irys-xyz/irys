@@ -17,7 +17,7 @@ use irys_types::{
 };
 use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer as _;
-use reth_db::Database;
+use reth_db::Database as _;
 use std::{collections::HashMap, net::TcpListener};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, span, Level};

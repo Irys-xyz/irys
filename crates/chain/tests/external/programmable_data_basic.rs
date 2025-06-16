@@ -5,7 +5,7 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
@@ -13,7 +13,7 @@ use irys_database::tables::IngressProofs;
 use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
-use reth_db::transaction::DbTx;
+use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -24,7 +24,6 @@ use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(
-    #[allow(missing_docs)]
     #[sol(rpc)]
     IrysProgrammableDataBasic,
     "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"

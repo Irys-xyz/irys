@@ -16,7 +16,7 @@ use irys_types::{
 };
 use k256::ecdsa::SigningKey;
 use reth::{
-    network::{PeerInfo, Peers},
+    network::{PeerInfo, Peers as _},
     primitives::{Receipt, Transaction},
     rpc::{
         api::EthApiClient,
@@ -118,6 +118,89 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     );
 
     genesis_node.stop().await;
+
+    Ok(())
+}
+
+#[actix::test]
+/// Test mempool persists to disk during shutdown
+///
+/// FIXME: This test will not be effective until mempool tree/index separation work is complete
+///
+/// post stake, post pledge, restart node
+/// confirm pledge is present in mempool
+/// post storage tx, restart node
+/// confirm storage tx is present in mempool
+async fn mempool_persistence_test() -> eyre::Result<()> {
+    // Turn on tracing even before the node starts
+    initialize_tracing();
+
+    // Configure a test network
+    let mut genesis_config = NodeConfig::testnet();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    // Create a signer (keypair) for transactions and fund it
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Start the genesis node
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let _ = genesis_node.start_public_api().await;
+
+    // Create and post stake commitment for the signer
+    let stake_tx = new_stake_tx(&H256::zero(), &signer);
+    genesis_node.post_commitment_tx(&stake_tx).await;
+    genesis_node.mine_block().await.unwrap();
+
+    let expected_txs = vec![stake_tx.id];
+    let result = genesis_node
+        .wait_for_mempool_commitment_txs(expected_txs, 20)
+        .await;
+    assert!(result.is_ok());
+
+    //create and post pledge commitment for the signer
+    let pledge_tx = new_pledge_tx(&H256::zero(), &signer);
+    genesis_node.post_commitment_tx(&pledge_tx).await;
+
+    // test storage data
+    let chunks = [[10; 32], [20; 32], [30; 32]];
+    let data: Vec<u8> = chunks.concat();
+
+    // post storage tx
+    let storage_tx = genesis_node
+        .post_storage_tx_without_gossip(H256::zero(), data, &signer)
+        .await;
+
+    let expected_txs = vec![storage_tx.header.clone()];
+    let result = genesis_node.wait_for_confirmed_txs(expected_txs, 20).await;
+    assert!(result.is_ok());
+
+    // Restart the node
+    tracing::info!("Restarting node");
+    let restarted_node = genesis_node.stop().await.start().await;
+
+    // confirm the mempool tx have appeared back in the mempool after a restart
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let get_tx_msg = MempoolServiceMessage::GetDataTxs(vec![storage_tx.header.id], oneshot_tx);
+    if let Err(err) = restarted_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(get_tx_msg)
+    {
+        tracing::error!("error sending message to mempool: {:?}", err);
+    }
+    let tx_from_mempool = oneshot_rx.await.expect("expected result");
+    assert!(tx_from_mempool
+        .first()
+        .expect("expected a data tx")
+        .is_some());
+
+    // TODO: once mempool does not write directly to db, confirm commitment txs appear back in mempool after restart
+
+    restarted_node.stop().await;
 
     Ok(())
 }

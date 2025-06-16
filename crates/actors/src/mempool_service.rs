@@ -14,7 +14,7 @@ use irys_database::{
 };
 use irys_database::{insert_commitment_tx, SystemLedger};
 use irys_primitives::CommitmentType;
-use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt, IrysRethNodeAdapter};
+use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
@@ -30,7 +30,7 @@ use reth_db::{
     DatabaseError,
 };
 use std::fs;
-use std::io::Write;
+use std::io::Write as _;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
@@ -46,16 +46,16 @@ use tracing::{debug, error, info, warn};
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
-    async fn handle_data_transaction(
+    async fn handle_data_transaction_ingress(
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError>;
-    async fn handle_commitment_transaction(
+    async fn handle_commitment_transaction_ingress(
         &self,
         tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
-    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+    async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
+    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
 }
 
 #[derive(Clone, Debug)]
@@ -71,27 +71,25 @@ impl From<UnboundedSender<MempoolServiceMessage>> for MempoolServiceFacadeImpl {
 
 #[async_trait::async_trait]
 impl MempoolFacade for MempoolServiceFacadeImpl {
-    async fn handle_data_transaction(
+    async fn handle_data_transaction_ingress(
         &self,
         tx_header: IrysTransactionHeader,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::TxIngressMessage(
-                tx_header, oneshot_tx,
-            ))
+            .send(MempoolServiceMessage::IngestDataTx(tx_header, oneshot_tx))
             .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxIngressMessage")
     }
 
-    async fn handle_commitment_transaction(
+    async fn handle_commitment_transaction_ingress(
         &self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::CommitmentTxIngressMessage(
+            .send(MempoolServiceMessage::IngestCommitmentTx(
                 commitment_tx,
                 oneshot_tx,
             ))
@@ -104,12 +102,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .expect("to process CommitmentTxIngressMessage")
     }
 
-    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
+    async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::ChunkIngressMessage(
-                chunk, oneshot_tx,
-            ))
+            .send(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
             .map_err(|_| {
                 ChunkIngressError::Other("Error sending ChunkIngressMessage ".to_owned())
             })?;
@@ -117,11 +113,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process ChunkIngressMessage")
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))
-            .map_err(|_| TxIngressError::Other("Error sending TxExistenceQuery ".to_owned()))?;
+            .send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))
+            .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
     }
@@ -147,14 +143,14 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
-    BlockConfirmedMessage(Arc<IrysBlockHeader>),
-    /// Get IrysTransactionHeader
-    GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
+    BlockConfirmed(Arc<IrysBlockHeader>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
-    ChunkIngressMessage(
+    IngestChunk(
         UnpackedChunk,
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
+    /// Confirm commitment tx exists in mempool
+    CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// Ingress CommitmentTransaction into the mempool
     ///
     /// This function performs a series of checks and validations:
@@ -164,8 +160,15 @@ pub enum MempoolServiceMessage {
     /// - Processes any pending pledge transactions that depended on this commitment
     /// - Gossips the transaction to peers if accepted
     /// - Caches the transaction for unstaked signers to be reprocessed later
-    CommitmentTxIngressMessage(
+    IngestCommitmentTx(
         CommitmentTransaction,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// Confirm data/storage tx exists in mempool or database
+    DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
+    /// validate and process an incoming IrysTransactionHeader
+    IngestDataTx(
+        IrysTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
@@ -177,12 +180,10 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-    /// Confirm if tx exists in database
-    TxExistenceQuery(H256, oneshot::Sender<Result<bool, TxIngressError>>),
-    /// validate and process an incoming IrysTransactionHeader
-    TxIngressMessage(
-        IrysTransactionHeader,
-        oneshot::Sender<Result<(), TxIngressError>>,
+    /// Get IrysTransactionHeader
+    GetDataTxs(
+        Vec<IrysTransactionId>,
+        oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
     ),
 }
 
@@ -238,7 +239,7 @@ impl MempoolService {
         let mempool_state = create_state(mempool_config);
         let exec = exec.clone();
         let commitment_state_guard = commitment_state_guard.clone();
-        let storage_modules_guard = storage_modules_guard.clone();
+        let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
@@ -412,6 +413,32 @@ impl ChunkIngressError {
     }
 }
 
+/// Reasons why reading a transaction might fail
+#[derive(Debug, Clone)]
+pub enum TxReadError {
+    /// Some database error occurred when reading
+    DatabaseError,
+    /// The service is uninitialized
+    ServiceUninitialized,
+    /// The commitment transaction is not found in the mempool
+    CommitmentTxNotInMempool,
+    /// The transaction is not found in the mempool
+    DataTxNotInMempool,
+    /// Catch-all variant for other errors.
+    Other(String),
+}
+
+impl TxReadError {
+    /// Returns an other error with the given message.
+    pub fn other(err: impl Into<String>) -> Self {
+        Self::Other(err.into())
+    }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display) -> Self {
+        Self::Other(err.to_string())
+    }
+}
+
 #[derive(Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
@@ -499,24 +526,37 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
-    async fn handle_transaction_message(&self, tx: H256) -> Option<IrysTransactionHeader> {
+    /// check the mempool and mdbx for data transaction
+    async fn handle_get_data_tx_message(
+        &self,
+        txs: Vec<H256>,
+    ) -> Vec<Option<IrysTransactionHeader>> {
+        let mut found_txs = Vec::with_capacity(txs.len());
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
-        // if tx exists
-        if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
-            return Some(tx_header.clone());
+
+        for tx in txs {
+            // if data tx exists in mempool
+            if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+                found_txs.push(Some(tx_header.clone()));
+                continue;
+            }
+            // if data tx exists in mdbx
+            if let Ok(read_tx) = self.read_tx() {
+                if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
+                    found_txs.push(Some(tx_header.clone()));
+                    continue;
+                }
+            }
+            // not found anywhere
+            found_txs.push(None);
         }
+
         drop(mempool_state_guard);
-
-        if let Ok(read_tx) = self.read_tx() {
-            let tx_header = tx_header_by_txid(&read_tx, &tx).unwrap_or(None);
-            return tx_header.clone();
-        }
-
-        None
+        found_txs
     }
 
-    async fn handle_commitment_tx_ingress_message(
+    async fn handle_ingress_commitment_tx_message(
         &mut self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
@@ -603,7 +643,7 @@ impl Inner {
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     // todo switch _ to actually handle the result
                     let _ = self
-                        .handle_message(MempoolServiceMessage::CommitmentTxIngressMessage(
+                        .handle_message(MempoolServiceMessage::IngestCommitmentTx(
                             pledge_tx, oneshot_tx,
                         ))
                         .await;
@@ -725,6 +765,8 @@ impl Inner {
             mut_tx.commit().expect("expect to commit to database");
         }
 
+        info!("Removing confirmed tx - Block height: {}", block.height,);
+
         Ok(())
     }
 
@@ -761,7 +803,9 @@ impl Inner {
 
         let migrated_block = event.block;
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
-        let commitments = self.handle_get_commitment_txs(commitment_tx_ids).await;
+        let commitments = self
+            .handle_get_commitment_tx_message(commitment_tx_ids)
+            .await;
 
         let tx = self
             .irys_db
@@ -776,7 +820,45 @@ impl Inner {
         }
         tx.inner.commit()?;
 
-        // TODO: Also migrate publish and submit ledger tx
+        // move data transactions to index
+        let storage_tx_ids = migrated_block.get_storage_ledger_tx_ids();
+        {
+            let mut_tx = self
+                .irys_db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            let data_tx_headers = self.handle_get_data_tx_message(storage_tx_ids).await;
+            for maybe_storage_tx_header in data_tx_headers {
+                if let Some(storage_tx_header) = maybe_storage_tx_header {
+                    if let Err(err) = insert_tx_header(&mut_tx, &storage_tx_header) {
+                        error!(
+                            "Could not insert transaction header - txid: {} err: {}",
+                            storage_tx_header.id, err
+                        );
+                    }
+                } else {
+                    error!("Could not find transaction header in mempool");
+                }
+            }
+
+            mut_tx.commit().expect("expect to commit to database");
+        }
+
+        let mempool_state = &self.mempool_state.clone();
+        let mut mempool_state_write_guard = mempool_state.write().await;
+        for txid in migrated_block.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .iter()
+        {
+            // Remove the submit tx from the pending valid_tx pool
+            mempool_state_write_guard.valid_tx.remove(txid);
+            mempool_state_write_guard.recent_valid_tx.remove(txid);
+        }
+        drop(mempool_state_write_guard);
 
         Ok(())
     }
@@ -1210,7 +1292,7 @@ impl Inner {
         }
     }
 
-    async fn handle_tx_ingress_message(
+    async fn handle_data_tx_ingress_message(
         &mut self,
         tx: IrysTransactionHeader,
     ) -> Result<(), TxIngressError> {
@@ -1340,9 +1422,7 @@ impl Inner {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 //todo check the value rather than _
                 let _ = self
-                    .handle_message(MempoolServiceMessage::ChunkIngressMessage(
-                        chunk, oneshot_tx,
-                    ))
+                    .handle_message(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
                     .await;
 
                 let msg_result = oneshot_rx
@@ -1365,11 +1445,27 @@ impl Inner {
         Ok(())
     }
 
-    async fn handle_tx_existence_query(&self, txid: H256) -> Result<bool, TxIngressError> {
+    /// checks only the mempool
+    async fn handle_commitment_tx_exists_message(
+        &self,
+        commitment_tx_id: H256,
+    ) -> Result<bool, TxReadError> {
+        let mempool_state = &self.mempool_state.clone();
+        let mempool_state_guard = mempool_state.read().await;
+
+        Ok(mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flatten()
+            .any(|tx| tx.id == commitment_tx_id))
+    }
+
+    /// checks mempool and mdbx
+    async fn handle_data_tx_exists_message(&self, txid: H256) -> Result<bool, TxReadError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
-        #[allow(clippy::if_same_then_else, reason = "readability")]
+        #[expect(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard.valid_tx.contains_key(&txid) {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
@@ -1382,18 +1478,18 @@ impl Inner {
             let read_tx = self.read_tx();
 
             if read_tx.is_err() {
-                Err(TxIngressError::DatabaseError)
+                Err(TxReadError::DatabaseError)
             } else {
                 Ok(
                     tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
-                        .map_err(|_| TxIngressError::DatabaseError)?
+                        .map_err(|_| TxReadError::DatabaseError)?
                         .is_some(),
                 )
             }
         }
     }
 
-    async fn handle_get_commitment_txs(
+    async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
     ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
@@ -1422,7 +1518,7 @@ impl Inner {
             });
 
         debug!(
-            "handle_get_commitment_tsx: {:?}",
+            "handle_get_commitment_transactions_message: {:?}",
             hash_map.iter().map(|x| x.0).collect::<Vec<_>>()
         );
 
@@ -1446,26 +1542,25 @@ impl Inner {
     ) -> BoxFuture<'a, eyre::Result<()>> {
         Box::pin(async move {
             match msg {
-                MempoolServiceMessage::GetTransaction(tx, response) => {
-                    let response_message = self.handle_transaction_message(tx).await;
+                MempoolServiceMessage::GetDataTxs(txs, response) => {
+                    let response_message = self.handle_get_data_tx_message(txs).await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::BlockConfirmedMessage(block) => {
+                MempoolServiceMessage::BlockConfirmed(block) => {
                     let _unused_response_message = self.handle_block_confirmed_message(block).await;
                 }
-                MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
+                MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
                     let response_message = self
-                        .handle_commitment_tx_ingress_message(commitment_tx)
+                        .handle_ingress_commitment_tx_message(commitment_tx)
                         .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::ChunkIngressMessage(chunk, response) => {
-                    let response_value: Result<(), ChunkIngressError> =
-                        self.handle_chunk_ingress_message(chunk).await;
+                MempoolServiceMessage::IngestChunk(chunk, response) => {
+                    let response_value = self.handle_chunk_ingress_message(chunk).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1481,19 +1576,27 @@ impl Inner {
                     commitment_tx_ids,
                     response,
                 } => {
-                    let response_value = self.handle_get_commitment_txs(commitment_tx_ids).await;
+                    let response_value = self
+                        .handle_get_commitment_tx_message(commitment_tx_ids)
+                        .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::TxExistenceQuery(txid, response) => {
-                    let response_value = self.handle_tx_existence_query(txid).await;
+                MempoolServiceMessage::DataTxExists(txid, response) => {
+                    let response_value = self.handle_data_tx_exists_message(txid).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::TxIngressMessage(tx, response) => {
-                    let response_value = self.handle_tx_ingress_message(tx).await;
+                MempoolServiceMessage::CommitmentTxExists(txid, response) => {
+                    let response_value = self.handle_commitment_tx_exists_message(txid).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::IngestDataTx(tx, response) => {
+                    let response_value = self.handle_data_tx_ingress_message(tx).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1541,8 +1644,25 @@ impl Inner {
             file.commit()?;
         }
 
-        // TODO: Do the same for all the pending storage tx
-        let _storage_tx_path = base_path.join("storage_tx");
+        let storage_tx_path = base_path.join("storage_tx");
+        fs::create_dir_all(storage_tx_path.clone()).expect("to create the mempool/storage_tx dir");
+        let storage_hash_map = self.get_all_storage_tx().await;
+        for tx in storage_hash_map.values() {
+            // Create a filepath for this transaction
+            let tx_path = storage_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+
+            // Check to see if the file exists
+            if tx_path.exists() {
+                continue;
+            }
+
+            // If not, write it to  {mempool_dir}/storage_tx/{txid}.json
+            let json = serde_json::to_string(tx).unwrap();
+
+            let mut file = get_atomic_file(tx_path).unwrap();
+            file.write_all(json.as_bytes())?;
+            file.commit()?;
+        }
 
         Ok(())
     }
@@ -1577,22 +1697,47 @@ impl Inner {
         hash_map
     }
 
+    async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, IrysTransactionHeader> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the storage transactions
+        let mempool_state = &self.mempool_state;
+        let mempool_state_guard = mempool_state.read().await;
+
+        // Get any IrysTransaction from the valid storage txs
+        mempool_state_guard.valid_tx.values().for_each(|tx| {
+            hash_map.insert(tx.id, tx.clone());
+        });
+
+        hash_map
+    }
+
     async fn restore_mempool_from_disk(&mut self) {
         let recovered =
-            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir()).await;
+            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
+                .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            self.handle_commitment_tx_ingress_message(commitment_tx)
+            let _ = self
+                .handle_ingress_commitment_tx_message(commitment_tx)
                 .await
-                .unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
+                .inspect_err(|_| {
+                    tracing::warn!("Commitment tx ingress error during mempool restore from disk")
+                });
         }
 
-        // TODO: Similar logic for storage_tx
+        for (_txid, storage_tx) in recovered.storage_txs {
+            let _ = self
+                .handle_data_tx_ingress_message(storage_tx)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!("Storage tx ingress error during mempool restore from disk")
+                });
+        }
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
-    #[allow(dead_code)]
     async fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
 
@@ -1605,7 +1750,7 @@ impl Inner {
         let addresses_to_check: Vec<Address> = mempool_state_guard
             .valid_commitment_tx
             .keys()
-            .cloned()
+            .copied()
             .collect();
 
         for address in addresses_to_check {

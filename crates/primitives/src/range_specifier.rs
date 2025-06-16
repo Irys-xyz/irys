@@ -1,9 +1,9 @@
 //! Range offsets are used by PD to figure out what chunks/bytes are required to fulfill a precompile call.
 
-use std::ops::Div;
+use std::ops::Div as _;
 
 use alloy_primitives::{aliases::U200, B256};
-use eyre::{eyre, OptionExt};
+use eyre::{eyre, OptionExt as _};
 use ruint::Uint;
 use serde::{Deserialize, Serialize};
 
@@ -24,8 +24,8 @@ impl TryFrom<u8> for PdAccessListArgsTypeId {
     type Error = PdAccessListArgsTypeIdDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            0 => Ok(PdAccessListArgsTypeId::ChunkRead),
-            1 => Ok(PdAccessListArgsTypeId::ByteRead),
+            0 => Ok(Self::ChunkRead),
+            1 => Ok(Self::ByteRead),
             _ => Err(PdAccessListArgsTypeIdDecodeError::UnknownPdAccessListArgsTypeId(id)),
         }
     }
@@ -39,15 +39,15 @@ pub enum PdAccessListArg {
 impl PdAccessListArg {
     pub fn type_id(&self) -> PdAccessListArgsTypeId {
         match *self {
-            PdAccessListArg::ChunkRead(_) => PdAccessListArgsTypeId::ChunkRead,
-            PdAccessListArg::ByteRead(_) => PdAccessListArgsTypeId::ByteRead,
+            Self::ChunkRead(_) => PdAccessListArgsTypeId::ChunkRead,
+            Self::ByteRead(_) => PdAccessListArgsTypeId::ByteRead,
         }
     }
 
     pub fn encode(&self) -> [u8; 32] {
         match self {
-            PdAccessListArg::ChunkRead(range_specifier) => range_specifier.encode(),
-            PdAccessListArg::ByteRead(bytes_range_specifier) => bytes_range_specifier.encode(),
+            Self::ChunkRead(range_specifier) => range_specifier.encode(),
+            Self::ByteRead(bytes_range_specifier) => bytes_range_specifier.encode(),
         }
     }
 
@@ -56,12 +56,12 @@ impl PdAccessListArg {
             .map_err(|e| eyre!("failed to decode type ID: {}", e))?;
 
         match type_id {
-            PdAccessListArgsTypeId::ChunkRead => Ok(PdAccessListArg::ChunkRead(
-                ChunkRangeSpecifier::decode(bytes)?,
-            )),
-            PdAccessListArgsTypeId::ByteRead => Ok(PdAccessListArg::ByteRead(
-                ByteRangeSpecifier::decode(bytes)?,
-            )),
+            PdAccessListArgsTypeId::ChunkRead => {
+                Ok(Self::ChunkRead(ChunkRangeSpecifier::decode(bytes)?))
+            }
+            PdAccessListArgsTypeId::ByteRead => {
+                Ok(Self::ByteRead(ByteRangeSpecifier::decode(bytes)?))
+            }
         }
     }
 }
@@ -74,7 +74,7 @@ impl From<PdAccessListArg> for PdAccessListArgsTypeId {
 
 pub trait PdAccessListArgSerde {
     fn encode(&self) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0_u8; 32];
         bytes[0] = Self::get_type() as u8;
         bytes[1..].copy_from_slice(&self.encode_inner());
         bytes
@@ -124,7 +124,7 @@ impl PdAccessListArgSerde for ChunkRangeSpecifier {
     where
         Self: Sized,
     {
-        Ok(ChunkRangeSpecifier {
+        Ok(Self {
             partition_index: U200::try_from_le_slice(bytes[0..=24].try_into()?)
                 .ok_or_eyre("U200 out of bounds")?,
             offset: u32::from_le_bytes(bytes[25..=28].try_into()?),
@@ -143,7 +143,7 @@ impl<T> PdArgsEncWrapper<T> {
 
 impl<T: PdAccessListArgSerde> From<&[u8; 32]> for PdArgsEncWrapper<T> {
     fn from(bytes: &[u8; 32]) -> Self {
-        PdArgsEncWrapper(T::decode(bytes).expect("Invalid byte encoding"))
+        Self(T::decode(bytes).expect("Invalid byte encoding"))
     }
 }
 
@@ -154,14 +154,14 @@ impl<T: PdAccessListArgSerde> From<PdArgsEncWrapper<T>> for [u8; 32] {
 }
 
 impl<T: PdAccessListArgSerde> From<PdArgsEncWrapper<T>> for B256 {
-    fn from(wrapper: PdArgsEncWrapper<T>) -> B256 {
-        B256::from(wrapper.0.encode())
+    fn from(wrapper: PdArgsEncWrapper<T>) -> Self {
+        Self::from(wrapper.0.encode())
     }
 }
 
 impl<T: PdAccessListArgSerde> From<&B256> for PdArgsEncWrapper<T> {
     fn from(bytes: &B256) -> Self {
-        PdArgsEncWrapper(T::decode(&bytes.0).expect("Invalid byte encoding"))
+        Self(T::decode(&bytes.0).expect("Invalid byte encoding"))
     }
 }
 
@@ -233,7 +233,7 @@ impl PdAccessListArgSerde for ByteRangeSpecifier {
     where
         Self: Sized,
     {
-        Ok(ByteRangeSpecifier {
+        Ok(Self {
             index: bytes[0],
             chunk_offset: u16::from_le_bytes(bytes[1..=2].try_into()?),
             byte_offset: U18::try_from_le_slice(bytes[3..=5].try_into()?)

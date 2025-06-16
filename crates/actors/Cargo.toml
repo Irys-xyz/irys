@@ -43,6 +43,7 @@ alloy-network.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 reth-transaction-pool.workspace = true
+itertools.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

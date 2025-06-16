@@ -1,4 +1,4 @@
-mod block_pool_service;
+mod block_pool;
 mod block_status_provider;
 mod cache;
 mod gossip_client;
@@ -16,7 +16,7 @@ pub use gossip_client::GossipClient;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
-pub use peer_list::{PeerListFacade, PeerListFacadeError, PeerListServiceFacade};
+pub use peer_list::{PeerList, PeerListFacadeError, PeerListServiceFacade};
 pub use peer_list::{PeerListService, PeerListServiceError};
 pub use sync::{sync_chain, SyncState};
 pub use types::{GossipError, GossipResult};

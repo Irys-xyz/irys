@@ -6,10 +6,10 @@
     clippy::module_name_repetitions,
     reason = "I don't know how to name it"
 )]
-use crate::block_pool_service::BlockPoolService;
+use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
 use crate::cache::GossipCacheKey;
-use crate::peer_list::PeerListFacade;
+use crate::peer_list::PeerList;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -19,12 +19,11 @@ use crate::{
     types::{GossipError, GossipResult},
     SyncState,
 };
-use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
+use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
@@ -150,43 +149,40 @@ impl P2PService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<A, R>(
+    pub fn run<A, P>(
         mut self,
         mempool: impl MempoolFacade,
         block_discovery: impl BlockDiscoveryFacade,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: PeerListFacade<A, R>,
+        peer_list: P,
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
-        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+        P: PeerList,
     {
         debug!("Staring gossip service");
 
-        let block_pool_service = BlockPoolService::new_with_client(
+        let block_pool = BlockPool::new(
             db,
             peer_list.clone(),
-            block_discovery.clone(),
+            block_discovery,
             self.sync_state.clone(),
             block_status_provider,
         );
-        let arbiter = actix::Arbiter::new();
-        let block_pool_addr =
-            BlockPoolService::start_in_arbiter(&arbiter.handle(), |_| block_pool_service);
 
         let server_data_handler = GossipServerDataHandler {
             mempool,
-            block_pool: block_pool_addr,
-            api_client: api_client.clone(),
+            block_pool,
+            api_client,
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
-            peer_list_service: peer_list.clone(),
+            peer_list: peer_list.clone(),
             sync_state: self.sync_state.clone(),
-            span: Span::current().clone(),
+            span: Span::current(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
@@ -204,12 +200,8 @@ impl P2PService {
 
         let cache_pruning_task_handle = spawn_cache_pruning_task(cache, task_executor);
 
-        let broadcast_task_handle = spawn_broadcast_task(
-            mempool_data_receiver,
-            self,
-            task_executor,
-            peer_list.clone(),
-        );
+        let broadcast_task_handle =
+            spawn_broadcast_task(mempool_data_receiver, self, task_executor, peer_list);
 
         let gossip_service_handle = spawn_watcher_task(
             server,
@@ -217,20 +209,14 @@ impl P2PService {
             cache_pruning_task_handle,
             broadcast_task_handle,
             task_executor,
-            arbiter,
         );
 
         Ok(gossip_service_handle)
     }
 
-    async fn broadcast_data<A, R>(
-        &self,
-        data: &GossipData,
-        peer_list_service: &PeerListFacade<A, R>,
-    ) -> GossipResult<()>
+    async fn broadcast_data<P>(&self, data: &GossipData, peer_list: &P) -> GossipResult<()>
     where
-        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-        A: ApiClient,
+        P: PeerList,
     {
         if self.is_syncing() {
             // If we are syncing, we don't want to broadcast data
@@ -240,7 +226,7 @@ impl P2PService {
         debug!("Broadcasting data to peers: {}", data.data_type_and_id());
 
         // Get all active peers except the source
-        let mut peers: Vec<(Address, PeerListItem)> = peer_list_service
+        let mut peers: Vec<(Address, PeerListItem)> = peer_list
             .top_active_peers(None, None)
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
@@ -282,7 +268,7 @@ impl P2PService {
                         .send_data_and_update_score(
                             (peer_miner_address, peer_entry),
                             data,
-                            peer_list_service,
+                            peer_list,
                         )
                         .await
                     {
@@ -349,26 +335,25 @@ fn spawn_cache_pruning_task(
     )
 }
 
-fn spawn_broadcast_task<R, A>(
+fn spawn_broadcast_task<P>(
     mut mempool_data_receiver: UnboundedReceiver<GossipData>,
     service: P2PService,
     task_executor: &TaskExecutor,
-    peer_list_service: PeerListFacade<A, R>,
+    peer_list: P,
 ) -> ServiceHandleWithShutdownSignal
 where
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-    A: ApiClient,
+    P: PeerList,
 {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
         move |mut shutdown_rx| async move {
-            let peer_list_service = peer_list_service.clone();
+            let peer_list = peer_list.clone();
             loop {
                 tokio::select! {
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
                             Some(data) => {
-                                if let Err(error) = service.broadcast_data(&data, &peer_list_service).await {
+                                if let Err(error) = service.broadcast_data(&data, &peer_list).await {
                                     warn!("Failed to broadcast data: {}", error);
                                 };
                             },
@@ -393,7 +378,6 @@ fn spawn_watcher_task(
     mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
     task_executor: &TaskExecutor,
-    block_pool_arbiter: actix::Arbiter,
 ) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip main",
@@ -460,7 +444,6 @@ fn spawn_watcher_task(
                     warn!("Gossip service shutdown error: {}", error);
                 }
             };
-            block_pool_arbiter.stop();
         },
         task_executor,
     )

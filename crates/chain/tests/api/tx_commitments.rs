@@ -3,7 +3,7 @@ use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::{
     packing::wait_for_packing, CommitmentCacheStatus, CommitmentStateReadGuard,
@@ -349,6 +349,8 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
+    // tracing
+    initialize_tracing();
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
     let mut config = NodeConfig::testnet();

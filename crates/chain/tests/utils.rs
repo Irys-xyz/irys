@@ -9,7 +9,7 @@ use actix_web::{
 };
 use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use futures::future::select;
 use irys_actors::block_tree_service::ReorgEvent;
 use irys_actors::mempool_service::MempoolTxs;
@@ -48,8 +48,8 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::payload::EthBuiltPayload;
-use reth_db::{cursor::*, transaction::DbTx, Database};
-use sha2::{Digest, Sha256};
+use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
@@ -120,7 +120,7 @@ pub async fn capacity_chunk_solution(
     );
 
     let max: irys_types::serialization::U256 = irys_types::serialization::U256::MAX;
-    let mut le_bytes = [0u8; 32];
+    let mut le_bytes = [0_u8; 32];
     max.to_little_endian(&mut le_bytes);
     let solution_hash = H256(le_bytes);
 
@@ -287,6 +287,84 @@ impl IrysNodeTest<IrysNodeCtx> {
         ];
         peer_config
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
+        let seconds_to_wait = 20;
+
+        // Create a new peer config using the provided signer
+        let peer_config = self.testnet_peer_with_signer(peer_signer);
+
+        // Start the peer node
+        let peer_node = IrysNodeTest::new(peer_config)
+            .start_with_name("PEER_WITH_ASSIGNMENTS")
+            .await;
+
+        // Get the latest block hash to use as anchor
+        let current_height = self.get_height().await;
+        let latest_block = self
+            .get_block_by_height(current_height)
+            .await
+            .expect("to get latest block");
+        let anchor = latest_block.block_hash;
+
+        // Post stake + pledge commitments to establish validator status
+        let stake_tx = peer_node.post_stake_commitment(anchor).await;
+        let pledge_tx = peer_node.post_pledge_commitment(anchor).await;
+
+        // Wait for commitment transactions to show up in this node's mempool
+        self.wait_for_mempool(stake_tx.id, seconds_to_wait)
+            .await
+            .expect("stake tx to be in mempool");
+        self.wait_for_mempool(pledge_tx.id, seconds_to_wait)
+            .await
+            .expect("pledge tx to be in mempool");
+
+        // Mine a block to get the commitments included
+        self.mine_block()
+            .await
+            .expect("to mine block with commitments");
+
+        // Get epoch configuration to calculate when next epoch round occurs
+        let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+        let current_height_after_commitment = self.get_height().await;
+
+        // Calculate how many blocks we need to mine to reach the next epoch
+        let blocks_until_next_epoch =
+            num_blocks_in_epoch - (current_height_after_commitment % num_blocks_in_epoch);
+
+        // Mine blocks until we reach the next epoch round
+        for _ in 0..blocks_until_next_epoch {
+            self.mine_block()
+                .await
+                .expect("to mine block towards next epoch");
+        }
+
+        let final_height = self.get_height().await;
+
+        // Wait for the peer to receive & process the epoch block
+        peer_node
+            .wait_until_height(final_height, seconds_to_wait)
+            .await
+            .expect("peer to sync to epoch height");
+
+        // Wait for packing to complete on the peer (this indicates partition assignments are active)
+        peer_node.wait_for_packing(seconds_to_wait).await;
+
+        // Verify that partition assignments were created
+        let peer_assignments = peer_node
+            .get_partition_assignments(peer_signer.address())
+            .await;
+
+        // Ensure at least one partition has been assigned
+        assert!(
+            !peer_assignments.is_empty(),
+            "Peer should have at least one partition assignment"
+        );
+
+        peer_node
+    }
+
     pub async fn wait_until_height_on_chain(
         &self,
         target_height: u64,
@@ -414,6 +492,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    // FIXME: This fn does not guarantee the tx is "confirmed"
+    //        Essentially there is nothing in the fn that confirms the tx is in a block, simply that it is in the mdbx
     pub async fn wait_for_confirmed_txs(
         &self,
         mut unconfirmed_txs: Vec<IrysTransactionHeader>,
@@ -578,7 +658,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
-        self.node_ctx.set_partition_mining(false)
+        self.node_ctx.stop_mining().await
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -613,7 +693,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         for _ in 0..max_retries {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            mempool_service.send(MempoolServiceMessage::TxExistenceQuery(tx_id, oneshot_tx))?;
+            mempool_service.send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))?;
 
             //if transaction exists
             if oneshot_rx
@@ -635,6 +715,52 @@ impl IrysNodeTest<IrysNodeCtx> {
             ))
         } else {
             info!("transaction found in mempool after {} retries", &retries);
+            Ok(())
+        }
+    }
+
+    pub async fn wait_for_mempool_commitment_txs(
+        &self,
+        mut tx_ids: Vec<H256>,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait * 5; // 200ms per retry
+
+        while let Some(tx_id) = tx_ids.pop() {
+            'inner: while retries < max_retries {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
+                    commitment_tx_ids: vec![tx_id],
+                    response: oneshot_tx,
+                })?;
+
+                //if transaction exists in mempool
+                if oneshot_rx
+                    .await
+                    .expect("to process GetCommitmentTxs")
+                    .contains_key(&tx_id)
+                {
+                    break 'inner;
+                }
+
+                sleep(Duration::from_millis(200)).await;
+                retries += 1;
+            }
+        }
+
+        if retries == max_retries {
+            tracing::error!(
+                "transaction not found in mempool after {} retries",
+                &retries
+            );
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transactions found in mempool after {} retries", &retries);
             Ok(())
         }
     }
@@ -684,7 +810,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             self.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::TxIngressMessage(
+                .send(MempoolServiceMessage::IngestDataTx(
                     tx.header.clone(),
                     oneshot_tx,
                 ));
@@ -794,7 +920,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        let cfg = NodeConfig { ..self.cfg };
+        let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),
             cfg,
@@ -1019,7 +1145,7 @@ pub async fn post_chunk<T, B>(
     let chunk = UnpackedChunk {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
-        data_path: Base64(tx.proofs[chunk_index].proof.to_vec()),
+        data_path: Base64(tx.proofs[chunk_index].proof.clone()),
         bytes: Base64(chunks[chunk_index].to_vec()),
         tx_offset: TxChunkOffset::from(chunk_index as u32),
     };

@@ -6,10 +6,10 @@ use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
     U256,
 };
-use nodit::{interval::ii, InclusiveInterval, Interval};
+use nodit::{interval::ii, InclusiveInterval as _, Interval};
 use rayon::prelude::*;
-use reth_db::Database;
-use sha2::{Digest, Sha256};
+use reth_db::Database as _;
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -151,7 +151,7 @@ impl VdfStateReadonly {
         self.get_steps(ii(step_number, step_number))?
             .0
             .first()
-            .cloned()
+            .copied()
             .ok_or(eyre!("Step not found"))
     }
 

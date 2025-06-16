@@ -316,8 +316,9 @@ where
 
         match system_tx {
             system_tx::SystemTransaction::V1 { packet, .. } => match packet {
-                system_tx::TransactionPacket::ReleaseStake(balance_increment)
-                | system_tx::TransactionPacket::BlockReward(balance_increment) => {
+                system_tx::TransactionPacket::Unstake(balance_increment)
+                | system_tx::TransactionPacket::BlockReward(balance_increment)
+                | system_tx::TransactionPacket::Unpledge(balance_increment) => {
                     let log = Self::create_system_log(
                         balance_increment.target,
                         vec![topic],
@@ -335,7 +336,8 @@ where
                     ))
                 }
                 system_tx::TransactionPacket::Stake(balance_decrement)
-                | system_tx::TransactionPacket::StorageFees(balance_decrement) => {
+                | system_tx::TransactionPacket::StorageFees(balance_decrement)
+                | system_tx::TransactionPacket::Pledge(balance_decrement) => {
                     let log = Self::create_system_log(
                         balance_decrement.target,
                         vec![topic],

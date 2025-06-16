@@ -1,6 +1,6 @@
 use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use core::time::Duration;
-use irys_actors::mempool_service::MempoolFacade;
+use irys_actors::mempool_service::MempoolFacade as _;
 use irys_types::{
     BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
 };
@@ -93,7 +93,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
         .first()
         .expect("to have a fixture")
         .mempool_stub
-        .handle_data_transaction(generate_test_tx().header)
+        .handle_data_transaction_ingress(generate_test_tx().header)
         .await
         .expect("To handle tx");
 

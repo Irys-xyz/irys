@@ -2,7 +2,7 @@ use crate::db::{IrysDatabaseExt as _, RethDbWrapper};
 use crate::reth_db::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
-    Database, DatabaseEnv, DatabaseError,
+    Database as _, DatabaseEnv, DatabaseError,
 };
 use std::fmt::Debug;
 use tracing::debug;
@@ -24,7 +24,7 @@ mod v0_to_v1 {
         IrysBlockHeaders, IrysTxHeaders,
     };
     use reth_db::table::Table;
-    use reth_db_api::cursor::DbCursorRO;
+    use reth_db_api::cursor::DbCursorRO as _;
 
     pub(crate) fn migrate<TXOld, TXNew>(tx_old: &TXOld, tx_new: &TXNew) -> Result<(), DatabaseError>
     where
@@ -110,8 +110,8 @@ mod tests {
     };
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::H256;
-    use reth_db_api::transaction::{DbTx, DbTxMut};
-    use reth_db_api::Database;
+    use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
+    use reth_db_api::Database as _;
 
     #[test]
     fn should_migrate_from_v0_to_v1() -> Result<(), Box<dyn std::error::Error>> {

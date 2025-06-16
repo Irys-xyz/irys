@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::Parser as _;
 use irys_reth::IrysEthereumNode;
 use irys_types::NodeConfig;
 use reth::{beacon_consensus::EthBeaconConsensus, chainspec::EthereumChainSpecParser};

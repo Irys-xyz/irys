@@ -1,15 +1,18 @@
 //! api client tests
 
 use crate::utils::{mine_block, IrysNodeTest};
-use irys_api_client::{ApiClient, IrysApiClient};
+use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{
     AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
     ProtocolVersion, VersionRequest,
 };
 use semver::Version;
-use std::net::{IpAddr, SocketAddr};
-use std::str::FromStr;
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr as _,
+};
 use tracing::debug;
 
 async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: SocketAddr) {
@@ -140,6 +143,7 @@ async fn check_get_block_endpoint(
 #[actix_rt::test]
 #[test_log::test]
 async fn heavy_api_client_all_endpoints_should_work() {
+    initialize_tracing();
     let config = NodeConfig::testnet();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 

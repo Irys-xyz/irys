@@ -3,7 +3,7 @@ use reth_db::{
     table::TableInfo,
     DatabaseEnv, TableSet,
 };
-use strum::{EnumCount, IntoEnumIterator};
+use strum::{EnumCount as _, IntoEnumIterator as _};
 
 pub trait IrysRethDatabaseEnvMetricsExt {
     fn with_metrics_and_tables<T: TableSet + TableInfo>(self, tables: &[T]) -> Self;

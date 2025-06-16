@@ -404,15 +404,15 @@ mod tests {
 
     use crate::system_tx::{
         BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID,
-        RELEASE_STAKE_ID,
+        UNSTAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
-        advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance,
-        release_stake, sign_tx, stake, storage_fees,
+        advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance, pledge,
+        sign_tx, stake, storage_fees, unpledge, unstake,
     };
-    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
-    use alloy_eips::Encodable2718;
+    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
+    use alloy_eips::Encodable2718 as _;
     use alloy_network::{EthereumWallet, TxSigner};
     use alloy_primitives::{Address, Uint, B256};
     use alloy_primitives::{FixedBytes, Signature};
@@ -420,11 +420,12 @@ mod tests {
     use alloy_signer_local::PrivateKeySigner;
     use reth::api::EngineApiMessageVersion;
     use reth::{
-        providers::{AccountReader, BlockHashReader, BlockNumReader},
+        providers::{AccountReader as _, BlockHashReader as _, BlockNumReader as _},
         rpc::server_types::eth::EthApiError,
     };
     use reth_e2e_test_utils::wallet::Wallet;
-    use reth_transaction_pool::{PoolTransaction, TransactionPool};
+    use reth_storage_api::BlockReaderIdExt as _;
+    use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -480,7 +481,7 @@ mod tests {
             &mut node_a,
             0,
             U256::from(1000),
-            1_000_000_000u128,
+            1_000_000_000_u128,
             Address::random(),
             &ctx.normal_signer,
         )
@@ -551,7 +552,7 @@ mod tests {
 
         let initial_balance = get_balance(&node_a.inner, ctx.block_producer_a.address());
 
-        let amount = U256::from(7000000000000000000u64);
+        let amount = U256::from(7000000000000000000_u64);
         let system_tx = compose_system_tx(
             1,
             &SystemTransaction::new_v1(
@@ -601,8 +602,8 @@ mod tests {
     // assert that "incrementing" system txs update account state
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
-    #[case::release_stake(release_stake, signer_b())]
-    #[case::release_stake_init_no_balance(release_stake, signer_random())]
+    #[case::unstake(unstake, signer_b())]
+    #[case::unstake_init_no_balance(unstake, signer_random())]
     #[case::block_reward(block_reward, signer_b())]
     #[case::block_reward_init_no_balance(block_reward, signer_random())]
     async fn incr_system_txs(
@@ -727,7 +728,7 @@ mod tests {
             &mut node,
             3,
             0,
-            10_000_000_000u128, // High gas price
+            10_000_000_000_u128, // High gas price
             Address::random(),
             &ctx.normal_signer,
         )
@@ -735,7 +736,7 @@ mod tests {
 
         // Create system transactions with lower effective priority
         let system_tx = create_system_tx(
-            RELEASE_STAKE_ID,
+            UNSTAKE_ID,
             ctx.target_account.address(),
             1,
             ctx.genesis_blockhash,
@@ -789,7 +790,7 @@ mod tests {
             &mut node,
             0,
             U256::from(1000),
-            1_000_000_000u128,
+            1_000_000_000_u128,
             Address::random(),
             &ctx.normal_signer,
         )
@@ -901,8 +902,8 @@ mod tests {
             let normal_tx_hash = create_and_submit_normal_tx(
                 &mut node,
                 block_number - 1,
-                U256::from(1234u64),
-                2_000_000_000u128, // 2 Gwei
+                U256::from(1234_u64),
+                2_000_000_000_u128, // 2 Gwei
                 recipient,
                 &ctx.normal_signer,
             )
@@ -954,8 +955,8 @@ mod tests {
         let normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
-            U256::from(1234u64),
-            2_000_000_000u128, // 2 Gwei
+            U256::from(1234_u64),
+            2_000_000_000_u128, // 2 Gwei
             ctx.normal_signer.address(),
             &ctx.normal_signer,
         )
@@ -992,7 +993,7 @@ mod tests {
         let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
 
         // Use invalid block number (should be 1 for first block, but using 2)
-        let invalid_block_number = 2u64;
+        let invalid_block_number = 2_u64;
 
         // Create a system tx with the valid parent blockhash but invalid block number
         let system_tx = block_reward(
@@ -1007,8 +1008,8 @@ mod tests {
         let normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
-            U256::from(1234u64),
-            2_000_000_000u128, // 2 Gwei
+            U256::from(1234_u64),
+            2_000_000_000_u128, // 2 Gwei
             ctx.normal_signer.address(),
             &ctx.normal_signer,
         )
@@ -1349,8 +1350,8 @@ mod tests {
             let normal_tx = create_and_submit_normal_tx(
                 &mut node,
                 block_number - 1,
-                U256::from(1234u64),
-                2_000_000_000u128, // 2 Gwei
+                U256::from(1234_u64),
+                2_000_000_000_u128, // 2 Gwei
                 ctx.target_account.address(),
                 &ctx.normal_signer,
             )
@@ -1492,11 +1493,11 @@ mod tests {
         expected_tx_hashes.push(*block_reward_tx.hash());
         system_txs.push(block_reward_tx);
 
-        // 2. Release stake
-        let release_stake_tx = release_stake(address_b, 1, ctx.genesis_blockhash);
-        let release_stake_tx = sign_system_tx(release_stake_tx, &ctx.block_producer_a).await?;
-        expected_tx_hashes.push(*release_stake_tx.hash());
-        system_txs.push(release_stake_tx);
+        // 2. Unstake
+        let unstake_tx = unstake(address_b, 1, ctx.genesis_blockhash);
+        let unstake_tx = sign_system_tx(unstake_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*unstake_tx.hash());
+        system_txs.push(unstake_tx);
 
         // 3. Storage fees
         let storage_fees_tx = storage_fees(address_c, 1, ctx.genesis_blockhash);
@@ -1576,6 +1577,322 @@ mod tests {
 
         Ok(())
     }
+
+    /// Test pledge transaction (balance decrement)
+    #[test_log::test(tokio::test)]
+    async fn test_pledge_balance_decrement() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        let target_address = ctx.target_account.address();
+
+        // First, give the account some initial balance to allow pledge
+        let initial_funding = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
+        let block_reward_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::BlockReward(BalanceIncrement {
+                amount: initial_funding,
+                target: target_address,
+            }),
+        );
+        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        mine_block(&mut node, &system_tx_store, vec![block_reward_tx]).await?;
+
+        let initial_balance = get_balance(&node.inner, target_address);
+
+        // Create pledge transaction
+        let pledge_amount = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
+        let pledge_tx = SystemTransaction::new_v1(
+            2,
+            node.inner.provider.latest_header().unwrap().unwrap().hash(),
+            TransactionPacket::Pledge(BalanceDecrement {
+                amount: pledge_amount,
+                target: target_address,
+            }),
+        );
+        let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx_hash = *pledge_tx.hash();
+
+        // Mine block with pledge transaction
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![pledge_tx]).await?;
+
+        // Verify transaction is included in block
+        assert_txs_in_block(&block_payload, &[pledge_tx_hash], "Pledge transaction");
+
+        // Verify balance decreased
+        assert_balance_change(
+            &node,
+            target_address,
+            initial_balance,
+            pledge_amount,
+            false,
+            "Target balance should decrease after pledge",
+        );
+
+        Ok(())
+    }
+
+    /// Test unpledge transaction (balance increment)
+    #[test_log::test(tokio::test)]
+    async fn test_unpledge_balance_increment() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        let target_address = ctx.target_account.address();
+
+        // First, give the account some balance with a block reward
+        let initial_balance_amount = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
+        let block_reward_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::BlockReward(BalanceIncrement {
+                amount: initial_balance_amount,
+                target: target_address,
+            }),
+        );
+        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        mine_block(&mut node, &system_tx_store, vec![block_reward_tx]).await?;
+
+        let balance_after_initial_funding = get_balance(&node.inner, target_address);
+
+        // Now create unpledge transaction
+        let unpledge_amount = U256::from(3_000_000_000_000_000_000_u64); // 3 ETH
+        let unpledge_tx = SystemTransaction::new_v1(
+            2,
+            node.inner.provider.latest_header().unwrap().unwrap().hash(),
+            TransactionPacket::Unpledge(BalanceIncrement {
+                amount: unpledge_amount,
+                target: target_address,
+            }),
+        );
+        let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx_hash = *unpledge_tx.hash();
+
+        // Mine block with unpledge transaction
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![unpledge_tx]).await?;
+
+        // Verify transaction is included in block
+        assert_txs_in_block(&block_payload, &[unpledge_tx_hash], "Unpledge transaction");
+
+        // Verify balance increased
+        assert_balance_change(
+            &node,
+            target_address,
+            balance_after_initial_funding,
+            unpledge_amount,
+            true,
+            "Target balance should increase after unpledge",
+        );
+
+        Ok(())
+    }
+
+    /// Test pledge and unpledge transaction ordering
+    #[test_log::test(tokio::test)]
+    async fn test_pledge_unpledge_ordering() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        let target_address = ctx.target_account.address();
+
+        // First, give the account some initial balance to allow pledge operations
+        let initial_funding = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
+        let block_reward_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::BlockReward(BalanceIncrement {
+                amount: initial_funding,
+                target: target_address,
+            }),
+        );
+        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        mine_block(&mut node, &system_tx_store, vec![block_reward_tx]).await?;
+
+        let initial_balance = get_balance(&node.inner, target_address);
+
+        // Create multiple pledge and unpledge transactions
+        let mut system_txs = Vec::new();
+        let mut expected_tx_hashes = Vec::new();
+
+        // 1. Pledge transaction
+        let pledge_tx = pledge(
+            target_address,
+            2,
+            node.inner.provider.latest_header().unwrap().unwrap().hash(),
+        );
+        let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*pledge_tx.hash());
+        system_txs.push(pledge_tx);
+
+        // 2. Another pledge transaction
+        let pledge_tx2 = pledge(
+            target_address,
+            2,
+            node.inner.provider.latest_header().unwrap().unwrap().hash(),
+        );
+        let pledge_tx2 = sign_system_tx(pledge_tx2, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*pledge_tx2.hash());
+        system_txs.push(pledge_tx2);
+
+        // 3. Unpledge transaction
+        let unpledge_tx = unpledge(
+            target_address,
+            2,
+            node.inner.provider.latest_header().unwrap().unwrap().hash(),
+        );
+        let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        expected_tx_hashes.push(*unpledge_tx.hash());
+        system_txs.push(unpledge_tx);
+
+        // Mine block with all transactions
+        let block_payload = mine_block(&mut node, &system_tx_store, system_txs).await?;
+
+        // Verify all transactions are included in block in correct order
+        assert_txs_in_block(
+            &block_payload,
+            &expected_tx_hashes,
+            "Pledge/Unpledge transactions",
+        );
+
+        // Get the transaction hashes from the block in order
+        let block_tx_hashes: Vec<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+
+        // Verify the transactions appear in the block in the same order as submitted
+        for (i, expected_hash) in expected_tx_hashes.iter().enumerate() {
+            assert_eq!(
+                block_tx_hashes[i], *expected_hash,
+                "Transaction at position {} should match submitted order",
+                i
+            );
+        }
+
+        // Verify final balance (2 pledge decrements - 1 unpledge increment = net -1)
+        let final_balance = get_balance(&node.inner, target_address);
+        let expected_final_balance = initial_balance - U256::ONE; // 2 decrements - 1 increment = -1
+        assert_eq!(
+            final_balance, expected_final_balance,
+            "Final balance should reflect net effect of pledge/unpledge operations"
+        );
+
+        Ok(())
+    }
+
+    /// Test unpledge on non-existent account creates the account
+    #[test_log::test(tokio::test)]
+    async fn test_unpledge_nonexistent_account() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Create a random address that has never existed on chain
+        let nonexistent_address = Address::random();
+
+        // Verify the account doesn't exist
+        let account = node
+            .inner
+            .provider
+            .basic_account(&nonexistent_address)
+            .unwrap();
+        assert!(account.is_none(), "Test account should not exist");
+
+        // Create unpledge transaction for non-existent account
+        let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 ETH
+        let unpledge_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::Unpledge(BalanceIncrement {
+                amount: unpledge_amount,
+                target: nonexistent_address,
+            }),
+        );
+        let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx_hash = *unpledge_tx.hash();
+
+        // Produce a new block
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![unpledge_tx]).await?;
+
+        // Verify the unpledge transaction IS included (balance increments can create accounts)
+        assert_txs_in_block(
+            &block_payload,
+            &[unpledge_tx_hash],
+            "Unpledge transaction should be included and create account",
+        );
+
+        // Verify the account now exists with the unpledged balance
+        let final_balance = get_balance(&node.inner, nonexistent_address);
+        assert_eq!(
+            final_balance, unpledge_amount,
+            "Account should have been created with unpledged amount"
+        );
+
+        Ok(())
+    }
+
+    /// Test pledge on non-existent account fails
+    #[test_log::test(tokio::test)]
+    async fn test_pledge_nonexistent_account() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Create a random address that has never existed on chain
+        let nonexistent_address = Address::random();
+
+        // Verify the account doesn't exist
+        let account = node
+            .inner
+            .provider
+            .basic_account(&nonexistent_address)
+            .unwrap();
+        assert!(account.is_none(), "Test account should not exist");
+
+        // Create pledge transaction for non-existent account
+        let pledge_tx = SystemTransaction::new_v1(
+            1,
+            ctx.genesis_blockhash,
+            TransactionPacket::Pledge(BalanceDecrement {
+                amount: U256::ONE,
+                target: nonexistent_address,
+            }),
+        );
+        let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx_hash = *pledge_tx.hash();
+
+        // Submit a normal transaction to ensure block is produced
+        let normal_tx_hash = create_and_submit_normal_tx(
+            &mut node,
+            0,
+            U256::from(1000),
+            1_000_000_000_u128,
+            Address::random(),
+            &ctx.normal_signer,
+        )
+        .await?;
+
+        // Produce a new block
+        let block_payload = mine_block(&mut node, &system_tx_store, vec![pledge_tx]).await?;
+
+        // Verify the pledge transaction is NOT included
+        assert_txs_not_in_block(
+            &block_payload,
+            &[pledge_tx_hash],
+            "Pledge transaction for non-existent account should not be included in block",
+        );
+
+        // Verify the normal transaction IS included
+        assert_txs_in_block(
+            &block_payload,
+            &[normal_tx_hash],
+            "Normal transaction should be included in block",
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "test-utils", test))]
@@ -1585,7 +1902,7 @@ pub mod test_utils {
     use crate::payload::DeterministicSystemTxKey;
     use crate::system_tx::{SystemTransaction, TransactionPacket};
     use alloy_consensus::EthereumTxEnvelope;
-    use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip4844, TxLegacy};
     use alloy_genesis::Genesis;
     use alloy_network::EthereumWallet;
     use alloy_network::TxSigner;
@@ -1598,14 +1915,14 @@ pub mod test_utils {
         api::{FullNodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
         builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
-        providers::{AccountReader, BlockHashReader},
+        providers::{AccountReader as _, BlockHashReader as _},
         rpc::api::eth::helpers::EthTransactions,
         tasks::TaskManager,
     };
     use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
     use reth_engine_local::LocalPayloadAttributesBuilder;
     use reth_primitives_traits::SignedTransaction as _;
-    use reth_transaction_pool::{PoolTransaction, TransactionPool};
+    use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::collections::HashSet;
     use std::sync::Arc;
     use tracing::{span, Level};
@@ -1618,7 +1935,6 @@ pub mod test_utils {
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub target_account: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub genesis_blockhash: FixedBytes<32>,
-        #[allow(dead_code)]
         pub tasks: TaskManager,
     }
 
@@ -1783,7 +2099,7 @@ pub mod test_utils {
             let tx_hash = create_and_submit_normal_tx(
                 node,
                 start_nonce + i,
-                U256::from(1234u64),
+                U256::from(1234_u64),
                 gas_price,
                 recipient,
                 signer,
@@ -1962,9 +2278,11 @@ pub mod test_utils {
         use crate::system_tx::*;
         match tx_type {
             BLOCK_REWARD_ID => block_reward(address, valid_for_block_height, parent_blockhash),
-            RELEASE_STAKE_ID => release_stake(address, valid_for_block_height, parent_blockhash),
+            UNSTAKE_ID => unstake(address, valid_for_block_height, parent_blockhash),
             STAKE_ID => stake(address, valid_for_block_height, parent_blockhash),
             STORAGE_FEES_ID => storage_fees(address, valid_for_block_height, parent_blockhash),
+            PLEDGE_ID => pledge(address, valid_for_block_height, parent_blockhash),
+            UNPLEDGE_ID => unpledge(address, valid_for_block_height, parent_blockhash),
             _ => panic!("Unknown system transaction type: {}", tx_type),
         }
     }
@@ -2017,7 +2335,7 @@ pub mod test_utils {
     ) -> Result<Vec<EthBuiltPayload>, eyre::Error> {
         let mut block_payloads = Vec::new();
 
-        for system_txs_raw in system_txs.into_iter() {
+        for system_txs_raw in system_txs {
             let mut system_txs = Vec::new();
             for system_tx in system_txs_raw {
                 // Create updated system tx with new metadata
@@ -2040,8 +2358,8 @@ pub mod test_utils {
         Ok(block_payloads)
     }
 
-    /// Compose a system tx for releasing stake.
-    pub fn release_stake(
+    /// Compose a system tx for unstaking.
+    pub fn unstake(
         address: Address,
         valid_for_block_height: u64,
         parent_blockhash: FixedBytes<32>,
@@ -2049,7 +2367,7 @@ pub mod test_utils {
         SystemTransaction::new_v1(
             valid_for_block_height,
             parent_blockhash,
-            TransactionPacket::ReleaseStake(system_tx::BalanceIncrement {
+            TransactionPacket::Unstake(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
@@ -2098,6 +2416,38 @@ pub mod test_utils {
             valid_for_block_height,
             parent_blockhash,
             TransactionPacket::StorageFees(system_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+        )
+    }
+
+    /// Compose a system tx for pledge.
+    pub fn pledge(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::Pledge(system_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+            }),
+        )
+    }
+
+    /// Compose a system tx for unpledge.
+    pub fn unpledge(
+        address: Address,
+        valid_for_block_height: u64,
+        parent_blockhash: FixedBytes<32>,
+    ) -> SystemTransaction {
+        SystemTransaction::new_v1(
+            valid_for_block_height,
+            parent_blockhash,
+            TransactionPacket::Unpledge(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
@@ -2175,7 +2525,7 @@ pub mod test_utils {
             .try_into_recovered()
             .unwrap();
 
-        EthPooledTransaction::new(tx.clone(), 300)
+        EthPooledTransaction::new(tx, 300)
     }
 
     /// Returns a custom chain spec for testing.

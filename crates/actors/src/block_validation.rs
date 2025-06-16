@@ -1,33 +1,35 @@
 use std::sync::Arc;
 
 use crate::{
+    block_discovery::get_commitment_tx_in_parallel,
     block_index_service::BlockIndexReadGuard,
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
+    services::ServiceSenders,
+    system_tx_generator::SystemTxGenerator,
 };
-use alloy_consensus::Transaction;
+use alloy_consensus::Transaction as _;
 use alloy_eips::HashOrNumber;
-use base58::ToBase58;
-use eyre::{ensure, OptionExt};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt};
+use base58::ToBase58 as _;
+use eyre::{ensure, OptionExt as _};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_reth::alloy_rlp::Decodable;
-use irys_reth::system_tx::{
-    BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket,
-};
+use irys_reth::alloy_rlp::Decodable as _;
+use irys_reth::system_tx::SystemTransaction;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
-    Address, Config, ConsensusConfig, DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
-    IrysTransactionCommon, IrysTransactionHeader, PoaData, H256,
+    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
+use itertools::*;
 use openssl::sha;
-use reth::{providers::TransactionsProvider, revm::primitives::ruint::Uint};
+use reth::providers::TransactionsProvider as _;
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
@@ -347,6 +349,13 @@ pub fn get_recall_range(
 }
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
+#[tracing::instrument(skip_all, fields(
+    ?miner_address,
+    chunk_offset = ?poa.partition_chunk_offset,
+    partition_hash = ?poa.partition_hash,
+    entropy_packing_iterations = ?config.entropy_packing_iterations,
+    chunk_size = ?config.chunk_size
+), err)]
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
@@ -354,7 +363,7 @@ pub fn poa_is_valid(
     config: &ConsensusConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
-    debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
+    debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
         Some(chunk) => chunk.clone().into(),
         None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
@@ -475,15 +484,36 @@ pub fn poa_is_valid(
 /// Validates that the system transactions in the EVM block match the expected system transactions
 /// generated from the Irys block data.
 pub async fn system_transactions_are_valid(
+    config: &Config,
+    service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
 ) -> eyre::Result<()> {
+    // pending work:
+    // the local reth node does not have access to the incoming evm block.
+    // the responsibility for providing this evm block data is on the CL (irys)
+    // we need to propagate ExecutioinPayload in Irys gossip, and provide it here.
+    // The interactoin with the reth node then becomes:
+    //
+    // todo: we need to validate the executeion paylad (check that no `withdrawls` are present)
+    // let engine_api = reth_adapter.inner.engine_http_client();
+    // let result = engine_api
+    //     .new_payload_v3(
+    //         execution_payload_v3,
+    //         vec![], // blob version hashes are empty
+    //         parent_irys_block_hash,
+    //     )
+    //     .await?;
+    // // todo if result.is_syncing() we need to postpone the validation and attempt later
+    // ensure!(result.is_valid());
+
     // 1. Fetch EVM block transactions
     let block_txs = reth_adapter
         .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(block.evm_block_hash))?
+        // todo add a test what happens with an invalid evm block
         .ok_or_eyre("Block not found in reth")?;
 
     // 2. Extract system transactions from the beginning of the block
@@ -504,57 +534,19 @@ pub async fn system_transactions_are_valid(
     }
 
     // 3. Generate expected system transactions
-    let expected_txs = generate_expected_system_transactions_from_db(block, db).await?;
+    let expected_txs =
+        generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
 
     // 4. Validate they match
-    validate_system_transactions_match(&system_txs, &expected_txs)
-}
-
-/// Generates the expected system transactions for a given block
-///
-/// Safety: block rewards are already validated in block prevalidation thus we trust them at face-value
-pub fn generate_expected_system_transactions(
-    block_height: u64,
-    reward_address: Address,
-    reward_amount: reth::revm::primitives::U256,
-    parent_evm_block_hash: H256,
-    submit_txs: &[IrysTransactionHeader],
-) -> eyre::Result<Vec<SystemTransaction>> {
-    let mut expected_txs = Vec::new();
-
-    // 1. Block reward transaction (always first)
-    let block_reward_tx = SystemTransaction::new_v1(
-        block_height,
-        parent_evm_block_hash.into(),
-        TransactionPacket::BlockReward(BalanceIncrement {
-            amount: reward_amount,
-            target: reward_address,
-        }),
-    );
-    expected_txs.push(block_reward_tx);
-
-    // create a storage fee system txs
-    for submit_tx in submit_txs {
-        let storage_fee_tx = SystemTransaction::new_v1(
-            block_height,
-            parent_evm_block_hash.into(),
-            TransactionPacket::StorageFees(BalanceDecrement {
-                amount: Uint::from(submit_tx.total_fee()),
-                target: submit_tx.signer,
-            }),
-        );
-        expected_txs.push(storage_fee_tx);
-    }
-
-    // TODO: create staking system txs
-
-    Ok(expected_txs)
+    validate_system_transactions_match(system_txs.into_iter(), expected_txs.into_iter())
 }
 
 /// Generates expected system transactions by looking up required data from the database
 #[tracing::instrument(skip_all, err)]
-async fn generate_expected_system_transactions_from_db(
-    block: &IrysBlockHeader,
+async fn generate_expected_system_transactions_from_db<'a>(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<SystemTransaction>> {
     // Look up previous block to get EVM hash
@@ -562,55 +554,83 @@ async fn generate_expected_system_transactions_from_db(
         .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
         .ok_or_eyre("Previous block not found")?;
 
+    // Look up commitment txs
+    let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
+
     // Look up submit transaction headers
-    let submit_ledger = block
+    let _submit_ledger = block
         .data_ledgers
         .iter()
         .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
         .ok_or_eyre("Submit ledger not found")?;
+    // todo: read the data txs from db and mempool
+    let submit_txs = [];
 
-    let submit_txs = Vec::new();
-    for _tx_id in &submit_ledger.tx_ids.0 {
-        // todo: we need to query the db and mempool at the same time because
-        // there's no guarantee where the tx will be located
-        //
-        // if let Some(tx_header) = db.view_eyre(|tx| tx_header_by_txid(tx, tx_id))? {
-        //     submit_txs.push(tx_header);
-        // }
-    }
+    let system_txs = SystemTxGenerator::new(
+        &block.height,
+        &block.reward_address,
+        &block.reward_amount,
+        &prev_block,
+    );
+    let system_txs = system_txs
+        .generate_all(&commitment_txs, &submit_txs)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(system_txs)
+}
 
-    generate_expected_system_transactions(
-        block.height,
-        block.reward_address,
-        block.reward_amount.into(),
-        H256(prev_block.evm_block_hash.0),
-        &submit_txs,
-    )
+async fn extract_commitment_txs(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
+    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let commitment_txs = if is_epoch_block {
+        // IMPORTANT: on epoch blocks we don't genertae system txs for commitment txs
+        vec![]
+    } else {
+        match &block.system_ledgers[..] {
+            [ledger] => {
+                ensure!(
+                    ledger.ledger_id == SystemLedger::Commitment,
+                    "only commitment ledger supported"
+                );
+                // ledger
+
+                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                    .await?
+            }
+            [] => {
+                // this is valid as we can have a block that contains 0 system ledgers
+                vec![]
+            }
+            // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
+            [..] => eyre::bail!("Currently we support at most 1 system ledger per block"),
+        }
+    };
+    Ok(commitment_txs)
 }
 
 /// Validates that the actual system transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
 fn validate_system_transactions_match(
-    actual: &[SystemTransaction],
-    expected: &[SystemTransaction],
+    actual: impl Iterator<Item = SystemTransaction>,
+    expected: impl Iterator<Item = SystemTransaction>,
 ) -> eyre::Result<()> {
-    // Check that we have at least the expected number of system transactions
-    ensure!(
-        actual.len() >= expected.len(),
-        "Insufficient system transactions: expected at least {}, got {}",
-        expected.len(),
-        actual.len()
-    );
-
     // Validate each expected system transaction
-    for (i, (actual_tx, expected_tx)) in actual.iter().zip(expected.iter()).enumerate() {
-        // Check block height using getter method
+    for (idx, data) in actual.zip_longest(expected).enumerate() {
+        let EitherOrBoth::Both(actual, expected) = data else {
+            // If either of the systxs is not present, it means it was not generated as `expected`
+            // or it was not it was not included in the block. either way - an error
+            tracing::warn!(?data, "system tx len mismatch");
+            eyre::bail!("actual and expected system txs lens differ");
+        };
         ensure!(
-            actual_tx == expected_tx,
+            actual == expected,
             "System transaction mismatch at idx {}. expected {:?}, got {:?}",
-            i,
-            expected_tx,
-            actual_tx
+            idx,
+            expected,
+            actual
         );
     }
 
@@ -651,7 +671,7 @@ mod tests {
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
         pub consensus_config: ConsensusConfig,
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         pub node_config: NodeConfig,
     }
 
@@ -841,7 +861,7 @@ mod tests {
     async fn poa_test(
         context: &TestContext,
         txs: &[IrysTransaction],
-        #[allow(
+        #[expect(
             clippy::ptr_arg,
             reason = "we need to clone this so it needs to be a Vec"
         )]

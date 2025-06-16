@@ -10,7 +10,6 @@ pub struct CommitmentStateEntry {
     pub partition_hash: Option<H256>,
     pub signer: Address,
     /// Irys token amount in atomic units
-    #[allow(dead_code)]
     pub amount: u64,
 }
 

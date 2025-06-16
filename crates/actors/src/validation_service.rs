@@ -27,7 +27,7 @@ use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
-use tracing::{debug, error, info, instrument, warn, Instrument};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 /// Messages that the validation service supports
 #[derive(Debug)]
@@ -226,7 +226,7 @@ impl ValidationServiceInner {
             recall_recall_range_is_valid(block, &self.config.consensus, &self.vdf_state)
                 .await
                 .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
-                .map(|_| ValidationResult::Valid)
+                .map(|()| ValidationResult::Valid)
                 .unwrap_or(ValidationResult::Invalid)
         }
         .instrument(tracing::info_span!("recall range validation"));
@@ -245,7 +245,7 @@ impl ValidationServiceInner {
                     &miner_address,
                 )
                 .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
-                .map(|_| ValidationResult::Valid)
+                .map(|()| ValidationResult::Valid)
             })
             .instrument(tracing::info_span!("poa task validation"))
         };
@@ -262,14 +262,21 @@ impl ValidationServiceInner {
         };
 
         // System transaction validation
+        let config = &self.config;
+        let service_senders = &self.service_senders;
         let system_tx_task = async move {
-            system_transactions_are_valid(block, &self.reth_node_adapter, &self.db)
-                .instrument(tracing::info_span!("system transaction validation"))
-                .await
-                .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
-                .map(|_| ValidationResult::Valid)
-                // TODO: we just assume all system txs are valid until we fix the validator
-                .unwrap_or(ValidationResult::Valid)
+            system_transactions_are_valid(
+                config,
+                service_senders,
+                block,
+                &self.reth_node_adapter,
+                &self.db,
+            )
+            .instrument(tracing::info_span!("system transaction validation"))
+            .await
+            .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
+            .map(|()| ValidationResult::Valid)
+            .unwrap_or(ValidationResult::Valid)
         };
 
         // Wait for all three tasks to complete

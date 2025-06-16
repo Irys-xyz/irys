@@ -1,9 +1,9 @@
 use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
 };
 use alloy_primitives::keccak256;
-use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
@@ -144,7 +144,7 @@ impl IrysTransaction {
 
 impl IrysTransactionHeader {
     pub fn new(config: &ConsensusConfig) -> Self {
-        IrysTransactionHeader {
+        Self {
             id: H256::zero(),
             anchor: H256::zero(),
             signer: Address::default(),
@@ -231,6 +231,17 @@ impl CommitmentTransaction {
         keccak256(&bytes).0
     }
 
+    /// TODO: assume that staking, pledging, etc just work with +/1 IRYS increments
+    /// This should be a proper implementation in the future
+    pub fn commitment_value(&self) -> U256 {
+        match self.commitment_type {
+            CommitmentType::Stake => U256::one(),
+            CommitmentType::Pledge => U256::one(),
+            CommitmentType::Unpledge => U256::one(),
+            CommitmentType::Unstake => U256::one(),
+        }
+    }
+
     /// Validates the transaction signature by:
     /// 1.) generating the prehash (signature_hash)
     /// 2.) recovering the sender address, and comparing it to the tx's sender (sender MUST be part of the prehash)
@@ -288,7 +299,7 @@ mod tests {
     use super::*;
     use crate::irys::IrysSigner;
 
-    use alloy_rlp::Decodable;
+    use alloy_rlp::Decodable as _;
 
     use k256::ecdsa::SigningKey;
     use serde_json;
@@ -387,7 +398,7 @@ mod tests {
             ..Default::default()
         };
 
-        let signed_tx = signer.sign_transaction(tx.clone()).unwrap();
+        let signed_tx = signer.sign_transaction(tx).unwrap();
 
         assert!(signed_tx.header.is_signature_valid());
     }
@@ -420,10 +431,10 @@ mod tests {
 
     fn mock_header(config: &ConsensusConfig) -> IrysTransactionHeader {
         IrysTransactionHeader {
-            id: H256::from([255u8; 32]),
-            anchor: H256::from([1u8; 32]),
+            id: H256::from([255_u8; 32]),
+            anchor: H256::from([1_u8; 32]),
             signer: Address::default(),
-            data_root: H256::from([3u8; 32]),
+            data_root: H256::from([3_u8; 32]),
             data_size: 1024,
             term_fee: 100,
             perm_fee: Some(200),
@@ -438,8 +449,8 @@ mod tests {
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
         CommitmentTransaction {
-            id: H256::from([255u8; 32]),
-            anchor: H256::from([1u8; 32]),
+            id: H256::from([255_u8; 32]),
+            anchor: H256::from([1_u8; 32]),
             signer: Address::default(),
             commitment_type: CommitmentType::Stake,
             version: 0,
@@ -462,12 +473,12 @@ pub enum IrysTransactionResponse {
 
 impl From<CommitmentTransaction> for IrysTransactionResponse {
     fn from(tx: CommitmentTransaction) -> Self {
-        IrysTransactionResponse::Commitment(tx)
+        Self::Commitment(tx)
     }
 }
 
 impl From<IrysTransactionHeader> for IrysTransactionResponse {
     fn from(tx: IrysTransactionHeader) -> Self {
-        IrysTransactionResponse::Storage(tx)
+        Self::Storage(tx)
     }
 }

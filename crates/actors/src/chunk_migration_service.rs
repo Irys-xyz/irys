@@ -7,7 +7,7 @@ use irys_database::{
     BlockIndex,
 };
 use irys_storage::{
-    get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule,
+    get_overlapped_storage_modules, ie, ii, InclusiveInterval as _, StorageModule,
     StorageModulesReadGuard,
 };
 use irys_types::{
@@ -119,7 +119,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
                 &db,
             )
             // TODO: fix this & child functions so they forward errors?
-            .map_err(|_| eyre!("Unexpected error processing submit ledger transactions"))?;
+            .map_err(|()| eyre!("Unexpected error processing submit ledger transactions"))?;
 
             // Process Publish ledger transactions
             process_ledger_transactions(
@@ -131,7 +131,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
                 &storage_modules,
                 &db,
             )
-            .map_err(|_| eyre!("Unexpected error processing publish ledger transactions"))?;
+            .map_err(|()| eyre!("Unexpected error processing publish ledger transactions"))?;
 
             // forward the finalization message to the cache service for cleanup
             let _ = service_senders
