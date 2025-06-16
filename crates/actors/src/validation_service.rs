@@ -19,8 +19,7 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::ensure;
-use futures::future::poll_immediate;
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{future::poll_immediate, FutureExt};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, BlockHash, Config, IrysBlockHeader};
 use irys_vdf::rayon;
@@ -33,10 +32,12 @@ use std::{
     cmp::Reverse,
     pin::{pin, Pin},
     sync::Arc,
-    task::{Context, Poll},
 };
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
+use tokio::{
+    sync::mpsc::UnboundedReceiver,
+    task::JoinHandle,
+    time::{interval, Duration},
+};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 /// Wrapper around active validations with capacity management and priority ordering
@@ -45,22 +46,16 @@ struct ActiveValidations {
     validations: PriorityQueue<BlockHash, Reverse<u64>>,
     /// Map from block hash to the actual future
     futures: std::collections::HashMap<BlockHash, Pin<Box<dyn Future<Output = ()> + Send>>>,
-    max_capacity: usize,
     block_tree_guard: BlockTreeReadGuard,
 }
 
 impl ActiveValidations {
-    fn new(max_capacity: usize, block_tree_guard: BlockTreeReadGuard) -> Self {
+    fn new(block_tree_guard: BlockTreeReadGuard) -> Self {
         Self {
             validations: PriorityQueue::new(),
             futures: std::collections::HashMap::new(),
-            max_capacity,
             block_tree_guard,
         }
-    }
-
-    fn can_add_more(&self) -> bool {
-        self.validations.len() < self.max_capacity
     }
 
     /// Calculate the priority for a block based on its nearest canonical chain ancestor
@@ -105,27 +100,26 @@ impl ActiveValidations {
     fn is_empty(&self) -> bool {
         self.validations.is_empty()
     }
-}
 
-impl Stream for ActiveValidations {
-    type Item = ();
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    /// Process completed validations and remove them from the active set
+    async fn process_completed(&mut self) {
         let mut completed_blocks = Vec::new();
 
         assert_eq!(
             self.validations.len(),
             self.futures.len(),
-            "validations and futures ouf of sync"
+            "validations and futures out of sync"
         );
+
         if self.validations.is_empty() {
-            return Poll::Pending;
+            return;
         }
 
-        // Poll futures in priority order
+        // Check futures in priority order using poll_immediate for non-blocking check
         for (block_hash, _priority) in self.validations.clone().iter() {
             if let Some(future) = self.futures.get_mut(block_hash) {
-                if let Poll::Ready(()) = future.poll_unpin(cx) {
+                // Use poll_immediate to check if future is ready without blocking
+                if poll_immediate(future).await.is_some() {
                     completed_blocks.push(*block_hash);
                 }
             }
@@ -135,14 +129,6 @@ impl Stream for ActiveValidations {
         for block_hash in &completed_blocks {
             self.validations.remove(block_hash);
             self.futures.remove(block_hash);
-        }
-
-        if !completed_blocks.is_empty() {
-            // Signal that validations have completed
-            Poll::Ready(Some(()))
-        } else {
-            // No completions, wait for more work
-            Poll::Pending
         }
     }
 }
@@ -238,75 +224,63 @@ impl ValidationService {
     async fn start(mut self) -> eyre::Result<()> {
         info!("starting validation service");
 
-        let mut shutdown_future = pin!(&mut self.shutdown);
-        let mut active_validations = pin!(ActiveValidations::new(
-            10,
-            self.inner.block_tree_guard.clone()
-        ));
+        let mut active_validations =
+            pin!(ActiveValidations::new(self.inner.block_tree_guard.clone()));
 
-        'shutdown: loop {
-            'outer: {
-                // Check if we should try to receive new messages
-                if active_validations.can_add_more() {
-                    // check if we received a shutdown signal
-                    if let Some(shutdwon) = poll_immediate(&mut shutdown_future).await {
-                        drop(shutdwon);
-                        break 'shutdown;
-                    }
+        // todo: add a notification system to the block tree service that'd
+        // allow us to subscribe to each block status being updated. That could
+        // act as a trigger point for re-evaluation. Rather than relying on a timer.
+        let mut validation_timer = interval(Duration::from_millis(100));
 
-                    // Try to receive a new message
-                    let msg = match self.msg_rx.try_recv() {
-                        Ok(msg) => msg,
-                        Err(TryRecvError::Empty) => {
-                            // no messages in the queue
-                            break 'outer;
+        loop {
+            tokio::select! {
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    break;
+                }
+
+                // Receive new validation messages
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            // Transform message to validation future
+                            let Some((block_hash, fut)) =
+                                self.inner.clone().create_validation_future(msg).await
+                            else {
+                                // validation future was not created. The task failed during vdf validation
+                                continue;
+                            };
+                            active_validations.push(block_hash, fut.boxed());
                         }
-                        Err(TryRecvError::Disconnected) => {
+                        None => {
+                            // Channel closed
                             warn!("receiver channel closed");
-                            // receiver channel closed
-                            break 'shutdown;
+                            break;
                         }
-                    };
+                    }
+                }
 
-                    // Transform message to validation future
-                    let Some((block_hash, fut)) =
-                        self.inner.clone().create_validation_future(msg).await
-                    else {
-                        // validation future was not created. The task failed during vdf validation
-                        break 'outer;
-                    };
-                    active_validations.push(block_hash, fut.boxed());
+                // Process active validations every 100ms (only if not empty)
+                _ = validation_timer.tick(), if !active_validations.is_empty() => {
+                    // Process any completed validations (non-blocking)
+                    active_validations.process_completed().await;
 
-                    // we keep reading new block entries until there are no entries or we cannot add any more
-                    continue 'shutdown;
+                    // If no active validations and channel closed, exit
+                    if active_validations.is_empty() && self.msg_rx.is_closed() {
+                        break;
+                    }
                 }
             }
-
-            // Process any completed validations (non-blocking)
-            while let Some(_) = poll_immediate(active_validations.next()).await {
-                // One or more validations completed - continue processing
-            }
-
-            // If no active validations and channel closed, exit
-            if active_validations.is_empty() && self.msg_rx.is_closed() {
-                break 'shutdown;
-            }
-
-            // Yield to prevent busy loop
-            tokio::task::yield_now().await;
         }
 
         // Drain remaining validations
+        // This will only process the ones that are instantly ready to be validated.
+        // If a task is awaiting on something and is not yet ready, it will be discarded.
         info!(
             "draining {} active validations before shutdown",
             active_validations.len()
         );
-        while !active_validations.is_empty() {
-            // Drain remaining validations
-            if active_validations.next().await.is_some() {
-                // Validation completed during shutdown
-            }
-        }
+        active_validations.process_completed().await;
 
         info!("shutting down validation service");
         Ok(())
