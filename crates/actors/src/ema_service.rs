@@ -917,7 +917,7 @@ mod tests {
                 .add_common(
                     block.block_hash,
                     block,
-                    Arc::new(CommitmentCache::new()),
+                    Arc::new(CommitmentCache::default()),
                     state.clone(),
                 )
                 .unwrap();
@@ -1152,7 +1152,7 @@ mod tests {
                 tree.add_common(
                     header.block_hash,
                     &header,
-                    Arc::new(CommitmentCache::new()),
+                    Arc::new(CommitmentCache::default()),
                     ChainState::Validated(crate::block_tree_service::BlockState::ValidBlock),
                 )
                 .unwrap();
@@ -1581,7 +1581,7 @@ mod tests {
                 tree.add_common(
                     block.block_hash,
                     &block,
-                    Arc::new(CommitmentCache::new()),
+                    Arc::new(CommitmentCache::default()),
                     ChainState::Onchain,
                 )
                 .unwrap();

@@ -132,8 +132,8 @@ impl BlockTreeService {
         let consensus_config = config.node_config.consensus_config();
         let service_senders = service_senders.clone();
         let system = System::current();
-        let bi_guard = block_index_guard.clone();
-        let cs_guard = commitment_state_guard.clone();
+        let bi_guard = block_index_guard;
+        let cs_guard = commitment_state_guard;
 
         exec.spawn_critical_with_graceful_shutdown_signal(
             "BlockTree Service",
@@ -144,8 +144,7 @@ impl BlockTreeService {
                     reth_service_actor.clone(),
                     db.clone(),
                     consensus_config.clone(),
-                )
-                .await;
+                );
 
                 let block_tree_service = Self {
                     shutdown,
@@ -836,7 +835,7 @@ impl BlockTreeCache {
         let mut height_index = BTreeMap::new();
 
         // Create a dummy commitment cache
-        let commitment_cache = Arc::new(CommitmentCache::new());
+        let commitment_cache = Arc::new(CommitmentCache::default());
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
@@ -886,7 +885,7 @@ impl BlockTreeCache {
     ///
     /// ## Panics
     /// Panics if the block index is empty or if database queries fail unexpectedly
-    pub async fn restore_from_db(
+    pub fn restore_from_db(
         block_index_guard: BlockIndexReadGuard,
         commitment_state_guard: CommitmentStateReadGuard,
         reth_service_actor: Addr<RethServiceActor>,
@@ -968,9 +967,8 @@ impl BlockTreeCache {
                 .unwrap();
 
             // Load commitment transactions (from DB during startup)
-            let commitment_txs = load_commitment_transactions(&block, &db)
-                .await
-                .expect("to load transactions from db");
+            let commitment_txs =
+                load_commitment_transactions(&block, &db).expect("to load transactions from db");
 
             // Create commitment cache for this block
             let arc_commitment_cache = create_commitment_cache_for_block(
@@ -1760,7 +1758,7 @@ fn create_commitment_cache_for_block(
     let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
-        return Arc::new(CommitmentCache::new());
+        return Arc::new(CommitmentCache::default());
     }
 
     if commitment_txs.is_empty() {
@@ -1776,7 +1774,7 @@ fn create_commitment_cache_for_block(
 }
 
 /// Loads commitment transactions from the database for the given block's commitment ledger transaction IDs.
-async fn load_commitment_transactions(
+fn load_commitment_transactions(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
@@ -1809,7 +1807,7 @@ mod tests {
         let b1 = random_block(U256::from(0));
 
         // For the purposes of these tests, the block cache will not track transaction headers
-        let comm_cache = Arc::new(CommitmentCache::new());
+        let comm_cache = Arc::new(CommitmentCache::default());
 
         // Initialize block tree cache from `b1`
         let mut cache = BlockTreeCache::new(&b1);

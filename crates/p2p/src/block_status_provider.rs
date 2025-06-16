@@ -226,7 +226,7 @@ impl BlockStatusProvider {
 
         self.block_tree_read_guard
             .write()
-            .add_peer_block(block, Arc::new(CommitmentCache::new()))
+            .add_peer_block(block, Arc::new(CommitmentCache::default()))
             .expect("to add block to the tree");
     }
 

@@ -4,7 +4,7 @@ use irys_primitives::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, ConsensusConfig, DatabaseProvider, H256List, H256,
 };
-use reth_db::Database;
+use reth_db::Database as _;
 use std::collections::{BTreeMap, HashSet};
 use tracing::debug;
 
@@ -16,7 +16,7 @@ pub enum CommitmentCacheStatus {
     Unstaked,    // The pledge commitment doesn't have a corresponding stake
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct CommitmentCache {
     cache: BTreeMap<Address, MinerCommitments>,
 }
@@ -28,15 +28,8 @@ struct MinerCommitments {
 }
 
 impl CommitmentCache {
-    /// Create a new CommitmentCacheInner instance
-    pub fn new() -> Self {
-        Self {
-            cache: BTreeMap::new(),
-        }
-    }
-
     pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
-        let mut cache = Self::new();
+        let mut cache = Self::default();
 
         if let Some(commitment_txs) = commitment_txs {
             for commitment_tx in commitment_txs {
@@ -57,7 +50,7 @@ impl CommitmentCache {
         let block_index = block_index_guard.read();
         let latest_item = block_index.get_latest_item();
 
-        let mut commitment_cache = Self::new();
+        let mut commitment_cache = Self::default();
 
         if let Some(latest_item) = latest_item {
             let tx = db.tx().unwrap();
@@ -78,7 +71,7 @@ impl CommitmentCache {
                     .expect("block_index block to be in database");
 
                 let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
-                if commitment_tx_ids.len() > 0 {
+                if !commitment_tx_ids.is_empty() {
                     // If so, retrieve the full commitment transactions
                     for txid in commitment_tx_ids {
                         let commitment_tx = database::commitment_tx_by_txid(&tx, &txid)

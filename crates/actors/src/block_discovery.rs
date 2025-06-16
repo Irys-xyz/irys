@@ -21,13 +21,13 @@ use irys_types::{
     IrysTransactionHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
-use reth_db::Database;
+use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc::UnboundedSender, oneshot},
     time::timeout,
 };
-use tracing::{debug, error, info, Instrument, Span};
+use tracing::{debug, error, info, Instrument as _, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -333,7 +333,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .await;
 
             match validation_result {
-                Ok(_) => {
+                Ok(()) => {
                     // TODO: we shouldn't insert the block just yet, let it live in the mempool until it migrates
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
@@ -359,7 +359,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         // Create a temporary local commitment validation environment
                         // This avoids async overhead while checking commitment validity and creates
                         // an independent cache we can populate and discard
-                        let mut local_commitment_cache = CommitmentCache::new();
+                        let mut local_commitment_cache = CommitmentCache::default();
 
                         // Validate each commitment transaction before accepting the epoch block
                         for commitment_tx in arc_commitment_txs.iter() {
@@ -367,7 +367,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                                 commitment_state_guard.is_staked(commitment_tx.signer);
 
                             let status = local_commitment_cache
-                                .add_commitment(&commitment_tx, is_staked_in_current_epoch);
+                                .add_commitment(commitment_tx, is_staked_in_current_epoch);
 
                             // Reject the entire epoch block if any commitment is invalid
                             // This ensures only verified commitments are finalized at epoch boundaries
