@@ -266,6 +266,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
+    pub config: Config,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +346,7 @@ impl GossipServiceTestFixture {
             task_manager,
             task_executor,
             block_status_provider: block_status_provider_mock,
+            config,
         }
     }
 

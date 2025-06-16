@@ -17,9 +17,11 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
-serde_json.workspace = true
 clap = { workspace = true, features = ["derive"] }
 reth-node-core.workspace = true
-
+irys-reth-node-bridge.workspace = true
+irys-chain.workspace = true
+irys-config.workspace = true
+tokio.workspace = true
 [lints]
 workspace = true

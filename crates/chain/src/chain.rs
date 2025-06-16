@@ -31,6 +31,7 @@ use irys_actors::{
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_database::db::RethDbWrapper;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
@@ -87,6 +88,7 @@ pub struct IrysNodeCtx {
     // todo replace this with `IrysRethNodeAdapter` but that requires quite a bit of refactoring
     pub reth_handle: RethNodeProvider,
     pub reth_node_adapter: IrysRethNodeAdapter,
+    pub reth_db: RethDbWrapper,
     pub actor_addresses: ActorAddresses,
     pub arbiters: Arc<RwLock<Vec<ArbiterHandle>>>,
     pub db: DatabaseProvider,
@@ -806,7 +808,7 @@ impl IrysNode {
         ServiceHandleWithShutdownSignal,
     )> {
         // initialize the databases
-        let (reth_node, _) = init_reth_db(reth_handle_receiver).await?;
+        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), system_tx_store.clone()).await?;
@@ -1057,6 +1059,7 @@ impl IrysNode {
             arbiters: Arc::new(RwLock::new(Vec::new())),
             reward_curve,
             reth_handle: reth_node.clone(),
+            reth_db,
             db: irys_db.clone(),
             chunk_provider: chunk_provider.clone(),
             block_index_guard: block_index_guard.clone(),

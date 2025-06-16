@@ -1,14 +1,12 @@
 use clap::{command, Parser, Subcommand};
-use irys_database::reth_db::{
-    cursor::*, transaction::*, Database as _, DatabaseEnv, DatabaseEnvKind, PlainAccountState,
-    StageCheckpoints,
-};
-use irys_types::NodeConfig;
+use irys_chain::utils::load_config;
+use irys_config::chain::chainspec::IrysChainSpecBuilder;
+use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
+use irys_reth_node_bridge::dump::dump_state;
+use irys_reth_node_bridge::genesis::init_state;
+use irys_types::{Config, NodeConfig};
 use reth_node_core::version::default_client_version;
-use std::fs::File;
-use std::io::{BufWriter, Write as _};
 use std::{path::PathBuf, sync::Arc};
-use tracing::info;
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -22,11 +20,14 @@ pub struct IrysCli {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
-    #[command(name = "backup-accounts")]
-    BackupAccounts {},
+    #[command(name = "dump-state")]
+    DumpState {},
+    #[command(name = "init-state")]
+    InitState { state_path: PathBuf },
 }
 
-fn main() -> eyre::Result<()> {
+#[tokio::main]
+async fn main() -> eyre::Result<()> {
     let subscriber = Registry::default();
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
@@ -49,13 +50,23 @@ fn main() -> eyre::Result<()> {
 
     let args = IrysCli::parse();
 
+    let node_config: NodeConfig = load_config()?;
+
     match args.command {
-        Commands::BackupAccounts { .. } => backup_accounts()?,
+        Commands::DumpState { .. } => {
+            dump_state(cli_init_db()?, "./".into())?;
+            Ok(())
+        }
+        Commands::InitState { state_path } => {
+            let (chain_spec, _) =
+                IrysChainSpecBuilder::from_config(&Config::new(node_config.clone())).build();
+
+            init_state(node_config, chain_spec.into(), state_path).await
+        }
     }
-    Ok(())
 }
 
-fn backup_accounts() -> eyre::Result<()> {
+pub fn cli_init_db() -> eyre::Result<Arc<DatabaseEnv>> {
     // load the config
     let config = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
@@ -71,7 +82,7 @@ fn backup_accounts() -> eyre::Result<()> {
             NodeConfig::testnet()
         });
 
-    // open the database, read the current account state
+    // open the Reth database
     let db_path = config.reth_data_dir().join("db");
 
     let reth_db = Arc::new(DatabaseEnv::open(
@@ -82,53 +93,5 @@ fn backup_accounts() -> eyre::Result<()> {
             .with_exclusive(Some(false)),
     )?);
 
-    let read_tx = reth_db.tx()?;
-    // read the latest block
-    let latest_reth_block = read_tx
-        .get::<StageCheckpoints>("Finish".to_owned())?
-        .map(|ch| ch.block_number)
-        .expect("unable to get latest reth block");
-
-    let row_count = read_tx.entries::<PlainAccountState>()?;
-
-    info!(
-        "Saving {} accounts @ block {}",
-        &row_count, &latest_reth_block
-    );
-    let mut read_cursor = read_tx.cursor_read::<PlainAccountState>()?;
-
-    let mut walker = read_cursor.walk(None)?;
-    let file_name = format!("accounts-{}.json", &latest_reth_block);
-    let file = File::create(&file_name)?;
-    let mut writer = BufWriter::new(file);
-
-    writer.write_all(b"[\n")?;
-
-    let mut accounts_saved = 0;
-    let log_batch = 100;
-
-    while let Some(account) = walker.next().transpose()? {
-        serde_json::to_writer(&mut writer, &account)?;
-
-        accounts_saved += 1;
-
-        // omit the trailing comma
-        writer.write_all(if accounts_saved == row_count {
-            b"\n"
-        } else {
-            b",\n"
-        })?;
-        if accounts_saved % log_batch == 0 {
-            info!("Saved {}/{} accounts", &accounts_saved, &row_count);
-        }
-    }
-
-    writer.write_all(b"]")?;
-    writer.flush()?;
-
-    read_tx.commit()?;
-
-    info!("Accounts saved to {}", &file_name);
-
-    Ok(())
+    Ok(reth_db)
 }
