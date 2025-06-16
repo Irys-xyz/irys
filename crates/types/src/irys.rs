@@ -23,7 +23,7 @@ impl IrysSigner {
     pub fn random_signer(config: &crate::ConsensusConfig) -> Self {
         use rand::rngs::OsRng;
 
-        IrysSigner {
+        Self {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
@@ -51,7 +51,7 @@ impl IrysSigner {
         transaction.header.term_fee = 1;
 
         // Fetch and set last_tx if not provided (primarily for testing).
-        #[allow(clippy::manual_unwrap_or_default, reason = "TODO")]
+        #[expect(clippy::manual_unwrap_or_default, reason = "TODO")]
         let anchor = if let Some(anchor) = anchor {
             anchor
         } else {
@@ -145,14 +145,14 @@ impl IrysSigner {
 
 impl From<IrysSigner> for LocalSigner<SigningKey> {
     fn from(val: IrysSigner) -> Self {
-        LocalSigner::from_signing_key(val.signer)
+        Self::from_signing_key(val.signer)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{hash_sha256, validate_chunk};
-    use rand::Rng;
+    use rand::Rng as _;
     use reth_primitives::transaction::recover_signer;
 
     use super::IrysSigner;
@@ -162,7 +162,7 @@ mod tests {
         // Create 2.5 chunks worth of data *  fill the data with random bytes
         let config = crate::ConsensusConfig::testnet();
         let data_size = (config.chunk_size as f64 * 2.5).round() as usize;
-        let mut data_bytes = vec![0u8; data_size];
+        let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Create a new Irys API instance

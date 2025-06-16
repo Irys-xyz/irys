@@ -57,7 +57,7 @@ where
         let eth_api = self.inner.eth_api();
         eth_api
             .balance(address, block_id)
-            .map(|v| v.into())
+            .map(std::convert::Into::into)
             .inspect_err(|e| {
                 warn!(
                     "Error getting balance for {}@{:?} - {:?}",

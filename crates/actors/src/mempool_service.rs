@@ -14,7 +14,7 @@ use irys_database::{
 };
 use irys_database::{insert_commitment_tx, SystemLedger};
 use irys_primitives::CommitmentType;
-use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt, IrysRethNodeAdapter};
+use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
@@ -30,7 +30,7 @@ use reth_db::{
     DatabaseError,
 };
 use std::fs;
-use std::io::Write;
+use std::io::Write as _;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
@@ -239,7 +239,7 @@ impl MempoolService {
         let mempool_state = create_state(mempool_config);
         let exec = exec.clone();
         let commitment_state_guard = commitment_state_guard.clone();
-        let storage_modules_guard = storage_modules_guard.clone();
+        let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
@@ -1429,7 +1429,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
-        #[allow(clippy::if_same_then_else, reason = "readability")]
+        #[expect(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard.valid_tx.contains_key(&txid) {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
@@ -1702,7 +1702,6 @@ impl Inner {
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
-    #[allow(dead_code)]
     async fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
 
@@ -1715,7 +1714,7 @@ impl Inner {
         let addresses_to_check: Vec<Address> = mempool_state_guard
             .valid_commitment_tx
             .keys()
-            .cloned()
+            .copied()
             .collect();
 
         for address in addresses_to_check {

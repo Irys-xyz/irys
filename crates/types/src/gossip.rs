@@ -1,6 +1,6 @@
 use crate::{CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
 use alloy_primitives::Address;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,16 +14,16 @@ pub enum GossipData {
 impl GossipData {
     pub fn data_type_and_id(&self) -> String {
         match self {
-            GossipData::Chunk(chunk) => {
+            Self::Chunk(chunk) => {
                 format!("chunk data root {}", chunk.data_root)
             }
-            GossipData::Transaction(tx) => {
+            Self::Transaction(tx) => {
                 format!("transaction {}", tx.id.0.to_base58())
             }
-            GossipData::CommitmentTransaction(commitment_tx) => {
+            Self::CommitmentTransaction(commitment_tx) => {
                 format!("commitment transaction {}", commitment_tx.id.0.to_base58())
             }
-            GossipData::Block(block) => {
+            Self::Block(block) => {
                 format!("block {} height: {}", block.block_hash, block.height)
             }
         }

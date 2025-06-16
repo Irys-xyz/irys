@@ -3,14 +3,14 @@ use crate::GossipClient;
 use actix::prelude::*;
 use irys_actors::reth_service::RethServiceActor;
 use irys_api_client::{ApiClient, IrysApiClient};
-use irys_database::reth_db::{Database, DatabaseError};
+use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{
     build_user_agent, Address, BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem,
     PeerResponse, RejectedResponse, RethPeerInfo, VersionRequest,
 };
-use rand::prelude::SliceRandom;
+use rand::prelude::SliceRandom as _;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -40,75 +40,99 @@ const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub type PeerListService = PeerListServiceWithClient<IrysApiClient, RethServiceActor>;
-pub type PeerListServiceFacade = PeerListFacade<IrysApiClient, RethServiceActor>;
+pub type PeerListServiceFacade = Addr<PeerListServiceWithClient<IrysApiClient, RethServiceActor>>;
 
-#[derive(Debug)]
-pub struct PeerListFacade<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    addr: Addr<PeerListServiceWithClient<A, R>>,
+#[async_trait::async_trait]
+pub trait PeerList: Send + Sync + Clone + Unpin + 'static {
+    async fn peer_by_mining_address(
+        &self,
+        mining_address: Address,
+    ) -> Result<Option<PeerListItem>, PeerListFacadeError>;
+
+    async fn peer_by_gossip_address(
+        &self,
+        gossip_address: SocketAddr,
+    ) -> Result<Option<PeerListItem>, PeerListFacadeError>;
+
+    async fn increase_peer_score(
+        &self,
+        peer_mining_address: &Address,
+        reason: ScoreIncreaseReason,
+    ) -> Result<(), PeerListFacadeError>;
+
+    async fn decrease_peer_score(
+        &self,
+        peer_miner_address: &Address,
+        reason: ScoreDecreaseReason,
+    ) -> Result<(), PeerListFacadeError>;
+
+    /// Returns n most active peers
+    async fn top_active_peers(
+        &self,
+        limit: Option<usize>,
+        exclude_peers: Option<HashSet<Address>>,
+    ) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError>;
+
+    /// Gets the top trusted peer
+    async fn top_trusted_peer(&self) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError>;
+
+    /// Waits for at least one active connection to appear
+    async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError>;
+
+    async fn all_known_peers(&self) -> Result<Vec<PeerAddress>, PeerListFacadeError>;
+
+    async fn peer_count(&self) -> Result<usize, PeerListFacadeError>;
+
+    /// IMPORTANT! DO NOT USE THIS METHOD DIRECTLY; IT'S MEANT TO BE USED ONLY BY THE API SERVER.
+    async fn add_peer(
+        &self,
+        mining_address: Address,
+        peer: PeerListItem,
+    ) -> Result<(), PeerListFacadeError>;
+
+    /// Requests the data to be gossiped over the network. Returns when the data is successfully
+    /// requested, not when it is received.
+    async fn request_data_from_the_network(
+        &self,
+        gossip_data_request: GossipDataRequest,
+    ) -> Result<(), PeerListFacadeError>;
+
+    /// Requests the block to be gossiped over the network. Returns when the block is successfully
+    /// requested, not when it is received.
+    async fn request_block_from_the_network(
+        &self,
+        block_hash: BlockHash,
+    ) -> Result<(), PeerListFacadeError>;
 }
 
-impl<A, R> Clone for PeerListFacade<A, R>
+#[async_trait::async_trait]
+impl<A, R> PeerList for Addr<PeerListServiceWithClient<A, R>>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
-    fn clone(&self) -> Self {
-        Self {
-            addr: self.addr.clone(),
-        }
-    }
-}
-
-impl<A, R> From<Addr<PeerListServiceWithClient<A, R>>> for PeerListFacade<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    fn from(value: Addr<PeerListServiceWithClient<A, R>>) -> Self {
-        Self::new(value)
-    }
-}
-
-impl<A, R> PeerListFacade<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    pub fn new(addr: Addr<PeerListServiceWithClient<A, R>>) -> Self {
-        Self { addr }
-    }
-
-    pub async fn peer_by_mining_address(
+    async fn peer_by_mining_address(
         &self,
         mining_address: Address,
     ) -> Result<Option<PeerListItem>, PeerListFacadeError> {
-        Ok(self
-            .addr
-            .send(GetPeerByMiningAddress { mining_address })
-            .await?)
+        Ok(self.send(GetPeerByMiningAddress { mining_address }).await?)
     }
 
-    pub async fn peer_by_gossip_address(
+    async fn peer_by_gossip_address(
         &self,
         gossip_address: SocketAddr,
     ) -> Result<Option<PeerListItem>, PeerListFacadeError> {
         Ok(self
-            .addr
             .send(PeerListEntryRequest::GossipSocketAddress(gossip_address))
             .await?)
     }
 
-    pub async fn increase_peer_score(
+    async fn increase_peer_score(
         &self,
         peer_mining_address: &Address,
         reason: ScoreIncreaseReason,
     ) -> Result<(), PeerListFacadeError> {
         Ok(self
-            .addr
             .send(IncreasePeerScore {
                 peer_miner_address: *peer_mining_address,
                 reason,
@@ -116,13 +140,12 @@ where
             .await?)
     }
 
-    pub async fn decrease_peer_score(
+    async fn decrease_peer_score(
         &self,
         peer_miner_address: &Address,
         reason: ScoreDecreaseReason,
     ) -> Result<(), PeerListFacadeError> {
         Ok(self
-            .addr
             .send(DecreasePeerScore {
                 peer_miner_address: *peer_miner_address,
                 reason,
@@ -131,13 +154,12 @@ where
     }
 
     /// Returns n most active peers
-    pub async fn top_active_peers(
+    async fn top_active_peers(
         &self,
         limit: Option<usize>,
         exclude_peers: Option<HashSet<Address>>,
     ) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError> {
         Ok(self
-            .addr
             .send(TopActivePeersRequest {
                 truncate: limit,
                 exclude_peers,
@@ -146,33 +168,30 @@ where
     }
 
     /// Gets the top trusted peer
-    pub async fn top_trusted_peer(
-        &self,
-    ) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError> {
-        Ok(self.addr.send(TrustedPeersRequest).await?)
+    async fn top_trusted_peer(&self) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError> {
+        Ok(self.send(TrustedPeersRequest).await?)
     }
 
     /// Waits for at least one active connection to appear
-    pub async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError> {
-        Ok(self.addr.send(WaitForActivePeer).await?)
+    async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError> {
+        Ok(self.send(WaitForActivePeer).await?)
     }
 
-    pub async fn all_known_peers(&self) -> Result<Vec<PeerAddress>, PeerListFacadeError> {
-        Ok(self.addr.send(KnownPeersRequest).await?)
+    async fn all_known_peers(&self) -> Result<Vec<PeerAddress>, PeerListFacadeError> {
+        Ok(self.send(KnownPeersRequest).await?)
     }
 
-    pub async fn peer_count(&self) -> Result<usize, PeerListFacadeError> {
-        Ok(self.addr.send(ActivePeersCountRequest).await?)
+    async fn peer_count(&self) -> Result<usize, PeerListFacadeError> {
+        Ok(self.send(ActivePeersCountRequest).await?)
     }
 
     /// IMPORTANT! DO NOT USE THIS METHOD DIRECTLY; IT'S MEANT TO BE USED ONLY BY THE API SERVER.
-    pub async fn add_peer(
+    async fn add_peer(
         &self,
         mining_address: Address,
         peer: PeerListItem,
     ) -> Result<(), PeerListFacadeError> {
         Ok(self
-            .addr
             .send(AddPeer {
                 mining_addr: mining_address,
                 peer,
@@ -182,12 +201,11 @@ where
 
     /// Requests the data to be gossiped over the network. Returns when the data is successfully
     /// requested, not when it is received.
-    pub async fn request_data_from_the_network(
+    async fn request_data_from_the_network(
         &self,
         gossip_data_request: GossipDataRequest,
     ) -> Result<(), PeerListFacadeError> {
         Ok(self
-            .addr
             .send(RequestDataFromTheNetwork {
                 data_request: gossip_data_request,
             })
@@ -196,7 +214,7 @@ where
 
     /// Requests the block to be gossiped over the network. Returns when the block is successfully
     /// requested, not when it is received.
-    pub async fn request_block_from_the_network(
+    async fn request_block_from_the_network(
         &self,
         block_hash: BlockHash,
     ) -> Result<(), PeerListFacadeError> {
@@ -411,7 +429,7 @@ where
             api_client,
             version_request,
             peers_cache,
-            peer_service_address.clone(),
+            peer_service_address,
             self.reth_service_addr.clone(),
         )
         .into_actor(self);
@@ -524,12 +542,12 @@ where
         let mining_address = self
             .gossip_addr_to_mining_addr_map
             .get(&address.ip())
-            .cloned()?;
+            .copied()?;
         self.peer_list_cache.get(&mining_address).cloned()
     }
 
     async fn trusted_peers_handshake_task(
-        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_service_address: Addr<Self>,
         trusted_peers_api_addresses: HashSet<SocketAddr>,
     ) {
         let peer_service_address = peer_service_address.clone();
@@ -651,7 +669,7 @@ where
         api_client: A,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_service_address: Addr<Self>,
     ) -> Result<(), PeerListServiceError> {
         let peer_response_result = api_client
             .post_version(api_address, version_request)
@@ -709,7 +727,7 @@ where
         api_client: A,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_list_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_list_service_address: Addr<Self>,
     ) {
         debug!(
             "Announcing yourself to address {} with version request: {:?}",
@@ -737,7 +755,7 @@ where
         api_client: A,
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
-        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        peer_service_address: Addr<Self>,
         reth_service_address: Option<Addr<R>>,
     ) {
         for peer in known_peers_cache.iter() {
@@ -799,7 +817,7 @@ async fn check_health(
 
 impl From<eyre::Report> for PeerListServiceError {
     fn from(err: eyre::Report) -> Self {
-        PeerListServiceError::Database(DatabaseError::Other(err.to_string()))
+        Self::Database(DatabaseError::Other(err.to_string()))
     }
 }
 
@@ -1056,7 +1074,7 @@ where
     type Result = Vec<PeerAddress>;
 
     fn handle(&mut self, _msg: KnownPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
-        self.known_peers_cache.iter().cloned().collect()
+        self.known_peers_cache.iter().copied().collect()
     }
 }
 
@@ -1357,7 +1375,7 @@ mod tests {
     use irys_types::{NodeConfig, RethPeerInfo, VersionRequest};
     use std::collections::HashSet;
     use std::net::IpAddr;
-    use std::str::FromStr;
+    use std::str::FromStr as _;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -1689,13 +1707,7 @@ mod tests {
             },
             ctx,
         );
-        service.handle(
-            AddPeer {
-                mining_addr,
-                peer: peer.clone(),
-            },
-            ctx,
-        );
+        service.handle(AddPeer { mining_addr, peer }, ctx);
 
         // Verify only one entry exists using KnownPeersRequest
         let known_peers = service.handle(KnownPeersRequest, ctx);

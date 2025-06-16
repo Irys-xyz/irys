@@ -5,7 +5,7 @@ use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::{
@@ -262,7 +262,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub api_client_stub: ApiClientStub,
     // Tets need the task manager to be stored somewhere
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
@@ -376,6 +376,8 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
+        let peer_list = self.peer_list.clone();
+
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
@@ -383,7 +385,7 @@ impl GossipServiceTestFixture {
                 block_discovery_stub,
                 self.api_client_stub.clone(),
                 &self.task_executor,
-                self.peer_list.clone().into(),
+                peer_list,
                 self.db.clone(),
                 gossip_listener,
                 self.block_status_provider.clone(),
@@ -560,7 +562,7 @@ impl FakeGossipServer {
         let server = HttpServer::new(move || {
             let handler = handler.clone();
             App::new()
-                .app_data(web::Data::new(handler.clone()))
+                .app_data(web::Data::new(handler))
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
                 .default_service(web::to(|| async {

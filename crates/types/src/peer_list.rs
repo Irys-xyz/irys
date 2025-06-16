@@ -1,7 +1,7 @@
 use crate::{Compact, PeerAddress};
 use actix::Message;
 use arbitrary::Arbitrary;
-use bytes::Buf;
+use bytes::Buf as _;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -161,7 +161,7 @@ fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
             if buf.len() < 23 {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
             } else {
-                let mut ip_octets = [0u8; 16];
+                let mut ip_octets = [0_u8; 16];
                 ip_octets.copy_from_slice(&buf[1..17]);
                 let port = u16::from_be_bytes(buf[17..19].try_into().unwrap());
                 SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_octets), port, 0, 0))

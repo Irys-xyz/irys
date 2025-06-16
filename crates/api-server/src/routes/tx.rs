@@ -93,18 +93,16 @@ pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
 ) -> Result<IrysTransactionHeader, ApiError> {
-    state
+    let opt = state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
         .map_err(|_| ApiError::Internal {
             err: String::from("db error while looking up Irys transaction"),
-        })
-        .and_then(|opt| {
-            opt.ok_or(ApiError::ErrNoId {
-                id: tx_id.to_string(),
-                err: String::from("storage tx not found"),
-            })
-        })
+        })?;
+    opt.ok_or(ApiError::ErrNoId {
+        id: tx_id.to_string(),
+        err: String::from("storage tx not found"),
+    })
 }
 
 // Helper function to retrieve CommitmentTransaction from mdbx
@@ -112,18 +110,16 @@ pub fn get_commitment_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
 ) -> Result<CommitmentTransaction, ApiError> {
-    state
+    let opt = state
         .db
         .view_eyre(|tx| database::commitment_tx_by_txid(tx, &tx_id))
         .map_err(|_| ApiError::Internal {
             err: String::from("db error while looking up commitment transaction"),
-        })
-        .and_then(|opt| {
-            opt.ok_or(ApiError::ErrNoId {
-                id: tx_id.to_string(),
-                err: String::from("commitment tx not found"),
-            })
-        })
+        })?;
+    opt.ok_or(ApiError::ErrNoId {
+        id: tx_id.to_string(),
+        err: String::from("commitment tx not found"),
+    })
 }
 
 // Combined function to get either type of transaction

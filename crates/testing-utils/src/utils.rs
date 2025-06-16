@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use tracing::debug;
 use tracing_subscriber::{
     fmt::{self, SubscriberBuilder},
-    util::SubscriberInitExt,
+    util::SubscriberInitExt as _,
     EnvFilter,
 };
 

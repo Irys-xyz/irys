@@ -14,7 +14,7 @@ use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
 };
-use reth_db::cursor::DbDupCursorRO;
+use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
 use reth_db::table::{Table, TableInfo};
 use reth_db::transaction::DbTx;
@@ -308,7 +308,7 @@ pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseE
 #[cfg(test)]
 mod tests {
     use irys_types::{CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader, H256};
-    use reth_db::Database;
+    use reth_db::Database as _;
 
     use crate::{
         block_header_by_hash, commitment_tx_by_txid, config::get_data_dir,
@@ -335,7 +335,7 @@ mod tests {
         // Write a commitment tx
         let commitment_tx = CommitmentTransaction {
             // Override some defaults to insure deserialization is working
-            id: H256::from([10u8; 32]),
+            id: H256::from([10_u8; 32]),
             version: 1,
             ..Default::default()
         };

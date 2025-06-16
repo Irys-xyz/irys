@@ -221,7 +221,7 @@ pub struct NodeConfig {
 
 impl From<NodeConfig> for Config {
     fn from(val: NodeConfig) -> Self {
-        Config::new(val)
+        Self::new(val)
     }
 }
 
@@ -548,7 +548,7 @@ impl ConsensusConfig {
             entropy_packing_iterations: 1000,
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: DEFAULT_BLOCK_TIME,
-                difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000)
+                difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000)
                     .div_ceil(DEFAULT_BLOCK_TIME)
                     * 14,
                 max_difficulty_adjustment_factor: dec!(4),

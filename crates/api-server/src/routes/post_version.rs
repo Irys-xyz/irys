@@ -7,6 +7,7 @@ use actix_web::{
     HttpResponse,
 };
 
+use irys_p2p::PeerList as _;
 use irys_types::{
     parse_user_agent, AcceptedResponse, PeerListItem, PeerResponse, ProtocolVersion,
     RejectedResponse, RejectionReason, VersionRequest,

@@ -21,10 +21,10 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
-use reth_db::Database;
+use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
-use tracing::{debug, error, info, Instrument, Span};
+use tracing::{debug, error, info, Instrument as _, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -131,11 +131,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .tx_ids
             .iter()
             .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
+                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
+                opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
             })
             .collect::<Result<Vec<_>, _>>()
         {
@@ -274,7 +271,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .await;
 
             match validation_result {
-                Ok(_) => {
+                Ok(()) => {
                     // Attempt to validate / update the epoch commitment cache
                     for commitment_tx in commitments.iter() {
                         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -489,7 +486,7 @@ pub async fn get_data_tx_in_parallel(
                 .await
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
                 .into_iter()
-                .filter(|v| v.is_some())
+                .filter(Option::is_some)
                 .map(|v| (v.clone().unwrap().id, v.unwrap()))
                 .collect::<HashMap<IrysTransactionId, IrysTransactionHeader>>();
             Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(x)

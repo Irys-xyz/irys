@@ -1,4 +1,4 @@
-use std::ops::BitXor;
+use std::ops::BitXor as _;
 
 pub use irys_c::{capacity, capacity_single};
 
@@ -178,7 +178,6 @@ pub enum PackingType {
     CPU,
     #[cfg(feature = "nvidia")]
     CUDA,
-    #[allow(unused)]
     AMD,
 }
 
@@ -266,7 +265,7 @@ mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
     use crate::*;
     use irys_types::{ConsensusConfig, PartitionChunkOffset, TxChunkOffset, H256};
-    use rand::{Rng, RngCore};
+    use rand::{Rng as _, RngCore as _};
     use std::time::*;
 
     // Enable with CUDA hardware
@@ -393,7 +392,7 @@ mod tests {
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; ConsensusConfig::CHUNK_SIZE as usize]; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
+            let mut chunk = [0_u8; ConsensusConfig::CHUNK_SIZE as usize]; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
             rng.fill_bytes(&mut chunk);
             chunks.push(chunk.to_vec());
             chunks_rust.push(chunk.to_vec());
@@ -532,7 +531,7 @@ mod tests {
         let testnet_config = ConsensusConfig::testnet();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
-        let mut partition_hash = [0u8; SHA_HASH_SIZE];
+        let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
 
         let chunk_size = 32;
@@ -552,7 +551,7 @@ mod tests {
 
         // simulate a smaller end chunk
         let data_size = chunk_size - rng.gen_range(0..chunk_size);
-        let mut data_bytes = vec![0u8; data_size];
+        let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // pack the data
@@ -562,7 +561,7 @@ mod tests {
             data_root: H256::zero(),
             data_size: data_size as u64,
             data_path: Base64(vec![]),
-            bytes: Base64(packed_data.clone()),
+            bytes: Base64(packed_data),
             tx_offset: TxChunkOffset::from(0),
             packing_address: mining_address,
             partition_offset: PartitionChunkOffset::from(chunk_offset as u32),

@@ -23,15 +23,15 @@ pub enum ChunkFormat {
 impl ChunkFormat {
     pub fn as_packed(self) -> Option<PackedChunk> {
         match self {
-            ChunkFormat::Unpacked(_) => None,
-            ChunkFormat::Packed(packed_chunk) => Some(packed_chunk),
+            Self::Unpacked(_) => None,
+            Self::Packed(packed_chunk) => Some(packed_chunk),
         }
     }
 
     pub fn as_unpacked(self) -> Option<UnpackedChunk> {
         match self {
-            ChunkFormat::Unpacked(unpacked_chunk) => Some(unpacked_chunk),
-            ChunkFormat::Packed(_) => None,
+            Self::Unpacked(unpacked_chunk) => Some(unpacked_chunk),
+            Self::Packed(_) => None,
         }
     }
 }
@@ -60,7 +60,7 @@ pub struct UnpackedChunk {
 
 impl UnpackedChunk {
     pub fn chunk_path_hash(&self) -> ChunkPathHash {
-        UnpackedChunk::hash_data_path(&self.data_path.0)
+        Self::hash_data_path(&self.data_path.0)
     }
 
     pub fn hash_data_path(data_path: &ChunkDataPath) -> ChunkPathHash {
@@ -242,7 +242,7 @@ pub type DataRoot = H256;
 pub struct TxChunkOffset(pub u32);
 impl TxChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
-        TxChunkOffset(u32::from_be_bytes(bytes))
+        Self(u32::from_be_bytes(bytes))
     }
 }
 
@@ -266,23 +266,23 @@ impl DerefMut for TxChunkOffset {
 
 impl From<LedgerChunkOffset> for TxChunkOffset {
     fn from(ledger: LedgerChunkOffset) -> Self {
-        TxChunkOffset::from(*ledger)
+        Self::from(*ledger)
     }
 }
 
 impl From<u64> for TxChunkOffset {
     fn from(value: u64) -> Self {
-        TxChunkOffset(value as u32)
+        Self(value as u32)
     }
 }
 impl From<i32> for TxChunkOffset {
     fn from(value: i32) -> Self {
-        TxChunkOffset(value.try_into().unwrap())
+        Self(value.try_into().unwrap())
     }
 }
 impl From<RelativeChunkOffset> for TxChunkOffset {
-    fn from(value: RelativeChunkOffset) -> TxChunkOffset {
-        TxChunkOffset::from(*value)
+    fn from(value: RelativeChunkOffset) -> Self {
+        Self::from(*value)
     }
 }
 
@@ -332,7 +332,7 @@ impl DerefMut for RelativeChunkOffset {
 
 impl RelativeChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
-        RelativeChunkOffset(i32::from_be_bytes(bytes))
+        Self(i32::from_be_bytes(bytes))
     }
 }
 
@@ -340,7 +340,7 @@ impl Add<i32> for RelativeChunkOffset {
     type Output = Self;
 
     fn add(self, rhs: i32) -> Self::Output {
-        RelativeChunkOffset(self.0 + rhs)
+        Self(self.0 + rhs)
     }
 }
 
@@ -354,7 +354,7 @@ impl TryFrom<RelativeChunkOffset> for u32 {
 
     fn try_from(offset: RelativeChunkOffset) -> Result<Self, Self::Error> {
         if offset.0 >= 0 {
-            Ok(offset.0 as u32)
+            Ok(offset.0 as Self)
         } else {
             Err("Cannot convert negative RelativeChunkOffset to u32")
         }

@@ -16,8 +16,8 @@ pub struct IrysSignature(Signature);
 // TODO: eventually implement ERC-2098 to save a byte
 
 impl IrysSignature {
-    pub fn new(signature: Signature) -> IrysSignature {
-        IrysSignature(signature)
+    pub fn new(signature: Signature) -> Self {
+        Self(signature)
     }
 
     /// Passthrough to the inner signature.as_bytes()
@@ -40,13 +40,13 @@ impl IrysSignature {
 
 impl Default for IrysSignature {
     fn default() -> Self {
-        IrysSignature::new(Signature::new(RethU256::ZERO, RethU256::ZERO, false))
+        Self::new(Signature::new(RethU256::ZERO, RethU256::ZERO, false))
     }
 }
 
 impl From<Signature> for IrysSignature {
     fn from(signature: Signature) -> Self {
-        IrysSignature::new(signature)
+        Self::new(signature)
     }
 }
 
@@ -88,7 +88,7 @@ impl Compact for IrysSignature {
         let s = U256::from_le_slice(&buf[32..64]);
         let signature = Signature::new(r, s, buf[64] == 1);
         buf.advance(65);
-        (IrysSignature::new(signature), buf)
+        (Self::new(signature), buf)
     }
 }
 
@@ -129,7 +129,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
         let sig = Signature::try_from(bytes.as_slice()).map_err(de::Error::custom)?;
 
         // Return the IrysSignature by wrapping the Signature
-        Ok(IrysSignature::new(sig))
+        Ok(Self::new(sig))
     }
 }
 
@@ -163,7 +163,7 @@ impl alloy_rlp::Decodable for IrysSignature {
             ));
         }
 
-        Ok(IrysSignature(decoded))
+        Ok(Self(decoded))
     }
 }
 
@@ -174,7 +174,7 @@ mod tests {
     use crate::{irys::IrysSigner, ConsensusConfig, IrysTransaction, IrysTransactionHeader, H256};
     use alloy_core::hex;
     use alloy_primitives::Address;
-    use alloy_rlp::{Decodable, Encodable};
+    use alloy_rlp::{Decodable as _, Encodable as _};
     use k256::ecdsa::SigningKey;
 
     // spellchecker:off
@@ -203,9 +203,9 @@ mod tests {
 
         let original_header = IrysTransactionHeader {
             id: Default::default(),
-            anchor: H256::from([1u8; 32]),
+            anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,
-            data_root: H256::from([3u8; 32]),
+            data_root: H256::from([3_u8; 32]),
             data_size: 1024,
             term_fee: 100,
             perm_fee: Some(1),

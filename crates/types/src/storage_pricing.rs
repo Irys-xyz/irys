@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// 1.0 in 18-decimal fixed point. little endian encoded.
 /// Used by token price representations.
 pub const TOKEN_SCALE: U256 = U256([TOKEN_SCALE_NATIVE, 0, 0, 0]);
-const TOKEN_SCALE_NATIVE: u64 = 1_000_000_000_000_000_000u64;
+const TOKEN_SCALE_NATIVE: u64 = 1_000_000_000_000_000_000_u64;
 
 /// Basis points scale representation.
 /// 100% - 1_000_000 as little endian number.
@@ -53,7 +53,7 @@ impl<T: std::fmt::Debug> Decodable for Amount<T> {
     #[tracing::instrument(err)]
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let res = U256::decode(buf)?;
-        Ok(Amount::new(res))
+        Ok(Self::new(res))
     }
 }
 
@@ -68,7 +68,7 @@ impl<T> Compact for Amount<T> {
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         let (instance, buf) = U256::from_compact(buf, len);
         (
-            Amount {
+            Self {
                 amount: instance,
                 _t: PhantomData,
             },
@@ -111,13 +111,13 @@ impl<T: std::fmt::Debug> Amount<T> {
 
         // divisor = 10^(dec.scale())
         let divisor = U256::from(
-            10u128
+            10_u128
                 .checked_pow(dec_scale)
                 .ok_or_else(|| eyre::eyre!("decimal scale too large 10^{dec_scale}"))?,
         );
 
         // For rounding, add half the divisor.
-        let half_divisor = safe_div(divisor, U256::from(2u8))?;
+        let half_divisor = safe_div(divisor, U256::from(2_u8))?;
 
         // Multiply the unscaled value by the target scale in U256 arithmetic.
         let numerator = safe_mul(U256::from(unscaled), U256::from(scale))?;
@@ -255,7 +255,7 @@ impl Amount<(CostPerGb, Usd)> {
     pub fn replica_count(self, count: u64) -> Result<Self> {
         let count_u256 = U256::from(count);
         let total = safe_mul(self.amount, count_u256)?;
-        Ok(Amount {
+        Ok(Self {
             amount: total,
             _t: PhantomData,
         })
@@ -291,7 +291,7 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
         irys_token_price: Amount<(IrysPrice, Usd)>,
     ) -> Result<Amount<(NetworkFee, Irys)>> {
         // We treat bytes_to_store as a pure integer.
-        let bytes_in_gb = U256::from(1_073_741_824u64); // 1024 * 1024 * 1024
+        let bytes_in_gb = U256::from(1_073_741_824_u64); // 1024 * 1024 * 1024
         let ratio = mul_div(bytes_to_store, TOKEN_SCALE, bytes_in_gb)?;
 
         // usd_fee = self.amount * ratio / SCALE
@@ -343,11 +343,7 @@ impl Amount<(IrysPrice, Usd)> {
     ///
     /// Whenever any of the math operations fail due to bounds checks.
     #[tracing::instrument(err)]
-    pub fn calculate_ema(
-        self,
-        total_past_blocks: u64,
-        previous_ema: Amount<(IrysPrice, Usd)>,
-    ) -> Result<Amount<(IrysPrice, Usd)>> {
+    pub fn calculate_ema(self, total_past_blocks: u64, previous_ema: Self) -> Result<Self> {
         // denominator = n+1
         let denom = U256::from(total_past_blocks)
             .checked_add(U256::one())
@@ -355,7 +351,7 @@ impl Amount<(IrysPrice, Usd)> {
 
         // alpha = 2e18 / (denom*1e18) => we do alpha = mul_div(2*SCALE, SCALE, denom*SCALE)
         // simpler: alpha = (2*SCALE) / (denom), then we consider dividing by SCALE afterwards
-        let two_scale = safe_mul(U256::from(2u64), TOKEN_SCALE)?;
+        let two_scale = safe_mul(U256::from(2_u64), TOKEN_SCALE)?;
         let alpha = safe_div(two_scale, denom)?; // alpha is scaled 1e18
 
         // Check alpha in (0,1e18]
@@ -376,7 +372,7 @@ impl Amount<(IrysPrice, Usd)> {
         // sum
         let ema_value = safe_add(scaled_current, scaled_last)?;
 
-        Ok(Amount::new(ema_value))
+        Ok(Self::new(ema_value))
     }
 
     /// Add extra percentage on top of the existing price.
@@ -706,7 +702,7 @@ mod tests {
             // Setup:
             let cost_per_gb_10_replicas_200_years = Amount::token(dec!(8.65)).unwrap();
             let price_irys = Amount::token(dec!(1.09)).unwrap();
-            let bytes_to_store = 1024u64 * 1024u64 * 200u64; // 200 MB
+            let bytes_to_store = 1024_u64 * 1024_u64 * 200_u64; // 200 MB
             let fee_percentage = Amount::percentage(dec!(0.05)).unwrap(); // 5%
 
             // Action

@@ -3,7 +3,7 @@ use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadca
 use irys_types::{
     block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
 };
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tracing::{debug, info};
@@ -222,7 +222,7 @@ mod tests {
     };
     use tokio::sync::mpsc;
     use tracing::{debug, level_filters::LevelFilter};
-    use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
+    use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt as _};
 
     struct MockMining;
 
