@@ -36,12 +36,12 @@ where
     B: BlockDiscoveryFacade,
 {
     /// Database provider for accessing transaction headers and related data.
-    pub(crate) db: DatabaseProvider,
+    db: DatabaseProvider,
 
     blocks_cache: BlockCache,
 
-    pub(crate) block_discovery: B,
-    pub(crate) peer_list: P,
+    block_discovery: B,
+    peer_list: P,
 
     sync_state: SyncState,
 
@@ -56,35 +56,29 @@ struct BlockCacheInner {
 
 #[derive(Clone, Debug)]
 struct BlockCache {
-    pub(crate) inner: Arc<RwLock<BlockCacheInner>>,
+    inner: Arc<RwLock<BlockCacheInner>>,
 }
 
 impl BlockCache {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(BlockCacheInner::new())),
         }
     }
 
-    pub(crate) async fn add_block(&self, block_header: IrysBlockHeader) {
+    async fn add_block(&self, block_header: IrysBlockHeader) {
         self.inner.write().await.add_block(block_header);
     }
 
-    pub(crate) async fn remove_block(&self, block_hash: &BlockHash) {
+    async fn remove_block(&self, block_hash: &BlockHash) {
         self.inner.write().await.remove_block(block_hash);
     }
 
-    pub(crate) async fn get_block_header_cloned(
-        &self,
-        block_hash: &BlockHash,
-    ) -> Option<IrysBlockHeader> {
+    async fn get_block_header_cloned(&self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
-    pub(crate) async fn block_hash_to_parent_hash(
-        &self,
-        block_hash: &BlockHash,
-    ) -> Option<BlockHash> {
+    async fn block_hash_to_parent_hash(&self, block_hash: &BlockHash) -> Option<BlockHash> {
         self.inner
             .write()
             .await
@@ -93,7 +87,7 @@ impl BlockCache {
             .cloned()
     }
 
-    pub(crate) async fn block_hash_to_parent_hash_contains(&self, block_hash: &BlockHash) -> bool {
+    async fn block_hash_to_parent_hash_contains(&self, block_hash: &BlockHash) -> bool {
         self.inner
             .write()
             .await
@@ -101,7 +95,7 @@ impl BlockCache {
             .contains(block_hash)
     }
 
-    pub(crate) async fn orphaned_blocks_by_parent_contains(&self, block_hash: &BlockHash) -> bool {
+    async fn orphaned_blocks_by_parent_contains(&self, block_hash: &BlockHash) -> bool {
         self.inner
             .write()
             .await
@@ -109,7 +103,7 @@ impl BlockCache {
             .contains(block_hash)
     }
 
-    pub(crate) async fn orphaned_blocks_by_parent_cloned(
+    async fn orphaned_blocks_by_parent_cloned(
         &self,
         block_hash: &BlockHash,
     ) -> Option<IrysBlockHeader> {
@@ -123,7 +117,7 @@ impl BlockCache {
 }
 
 impl BlockCacheInner {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self {
             orphaned_blocks_by_parent: LruCache::new(
                 NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
@@ -134,23 +128,20 @@ impl BlockCacheInner {
         }
     }
 
-    pub(crate) fn add_block(&mut self, block_header: IrysBlockHeader) {
+    fn add_block(&mut self, block_header: IrysBlockHeader) {
         self.orphaned_blocks_by_parent
             .put(block_header.previous_block_hash, block_header.clone());
         self.block_hash_to_parent_hash
             .put(block_header.block_hash, block_header.previous_block_hash);
     }
 
-    pub(crate) fn remove_block(&mut self, block_hash: &BlockHash) {
+    fn remove_block(&mut self, block_hash: &BlockHash) {
         if let Some(parent_hash) = self.block_hash_to_parent_hash.pop(block_hash) {
             self.orphaned_blocks_by_parent.pop(&parent_hash);
         }
     }
 
-    pub(crate) fn get_block_header_cloned(
-        &mut self,
-        block_hash: &BlockHash,
-    ) -> Option<IrysBlockHeader> {
+    fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
             if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
                 return Some(header.clone());
@@ -198,8 +189,7 @@ where
         self.blocks_cache.add_block(block_header.clone()).await;
         debug!(
             "Block pool: Processing block {:?} (height {})",
-            block_header.block_hash,
-            block_header.height,
+            block_header.block_hash, block_header.height,
         );
 
         let current_block_height = block_header.height;
@@ -212,16 +202,12 @@ where
 
         debug!(
             "Previous block status for block {:?}: {:?}",
-            current_block_hash,
-            previous_block_status
+            current_block_hash, previous_block_status
         );
 
         // If the parent block is in the db, process it
         if previous_block_status.is_processed() {
-            info!(
-                "Found parent block for block {:?}",
-                current_block_hash
-            );
+            info!("Found parent block for block {:?}", current_block_hash);
 
             if let Err(block_discovery_error) = self
                 .block_discovery
@@ -254,8 +240,7 @@ where
                 //  but it still is important to log the error
                 error!(
                     "Error processing orphaned ancestor for block {:?}: {:?}",
-                    block_header.block_hash,
-                    err
+                    block_header.block_hash, err
                 );
             }
 
