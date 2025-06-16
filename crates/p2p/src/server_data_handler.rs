@@ -1,4 +1,4 @@
-use crate::peer_list::PeerList;
+use crate::peer_list::{PeerList, ScoreDecreaseReason};
 use crate::{
     block_pool::BlockPool,
     cache::{GossipCache, GossipCacheKey},
@@ -18,6 +18,7 @@ use irys_types::{
     IrysTransactionResponse, UnpackedChunk, H256,
 };
 use std::sync::Arc;
+use tracing::log::warn;
 use tracing::{debug, error, Span};
 
 /// Handles data received by the `GossipServer`
@@ -288,6 +289,24 @@ where
                 block_header.block_hash.0.to_base58()
             );
             return Ok(());
+        }
+
+        if !block_header.is_signature_valid() {
+            warn!(
+                "Node: {}: Block {} has an invalid signature",
+                self.gossip_client.mining_address,
+                block_header.block_hash.0.to_base58()
+            );
+            if let Err(peer_list_err) = self
+                .peer_list
+                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData)
+                .await
+            {
+                error!("Failed to decrease peer score: {:?}", peer_list_err);
+            }
+            return Err(GossipError::InvalidData(
+                InvalidDataError::InvalidBlockSignature,
+            ));
         }
 
         let has_block_already_been_processed = self
