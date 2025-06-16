@@ -32,6 +32,63 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 use tracing::{debug, error, info, instrument, warn, Instrument};
 
+/// Wrapper around active validations with capacity management
+struct ActiveValidations {
+    validations: Vec<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>>,
+    max_capacity: usize,
+}
+
+impl ActiveValidations {
+    fn new(max_capacity: usize) -> Self {
+        Self {
+            validations: Vec::new(),
+            max_capacity,
+        }
+    }
+
+    fn can_add_more(&self) -> bool {
+        self.validations.len() < self.max_capacity
+    }
+
+    fn push(&mut self, future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>) {
+        self.validations.push(future);
+    }
+
+    async fn poll(&mut self) {
+        let mut to_remove = Vec::with_capacity(self.validations.len());
+        {
+            let validations = &mut self.validations;
+            let to_remove = &mut to_remove;
+            poll_fn(move |cx| {
+                use std::task::Poll::*;
+                for (idx, item) in validations.iter_mut().enumerate() {
+                    let Ready(()) = item.as_mut().poll(cx) else {
+                        continue;
+                    };
+                    to_remove.push(idx);
+                }
+                Ready(())
+            })
+            .await;
+        }
+
+        // iterate from the other end to prevent idx mismatches
+        for idx_to_remove in to_remove.into_iter().rev() {
+            // safe to drop the validation_task because the future is completed
+            let validation_task = self.validations.remove(idx_to_remove);
+            drop(validation_task);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.validations.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.validations.is_empty()
+    }
+}
+
 /// Messages that the validation service supports
 #[derive(Debug)]
 pub enum ValidationServiceMessage {
@@ -40,6 +97,7 @@ pub enum ValidationServiceMessage {
 }
 
 /// Main validation service structure
+#[derive(Debug)]
 pub struct ValidationService {
     /// Graceful shutdown handle
     shutdown: GracefulShutdown,
@@ -50,6 +108,7 @@ pub struct ValidationService {
 }
 
 /// Inner service structure containing business logic
+#[derive(Debug)]
 struct ValidationServiceInner {
     /// Read only view of the block index
     block_index_guard: BlockIndexReadGuard,
@@ -67,17 +126,6 @@ struct ValidationServiceInner {
     db: DatabaseProvider,
     /// Rayon thread pool that executes vdf steps   
     pool: rayon::ThreadPool,
-}
-
-impl std::fmt::Debug for ValidationService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-}
-impl std::fmt::Debug for ValidationServiceInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
 }
 
 impl ValidationService {
@@ -130,14 +178,12 @@ impl ValidationService {
         info!("starting validation service");
 
         let mut shutdown_future = pin!(&mut self.shutdown);
-        let mut active_validations = Vec::new();
+        let mut active_validations = ActiveValidations::new(10);
 
         'shutdown: loop {
-            // Check if we should try to receive new messages (max 10 concurrent validations)
-            let should_receive_new = active_validations.len() < 10;
-
             'outer: {
-                if should_receive_new {
+                // Check if we should try to receive new messages
+                if active_validations.can_add_more() {
                     // check if we received a shutdown signal
                     if let Some(shutdwon) = poll_immediate(&mut shutdown_future).await {
                         drop(shutdwon);
@@ -167,30 +213,7 @@ impl ValidationService {
                 }
             }
 
-            // Poll active validations
-            let mut to_remove = Vec::with_capacity(active_validations.len());
-            {
-                let active_validations = &mut active_validations;
-                let to_remove = &mut to_remove;
-                poll_fn(move |cx| {
-                    use std::task::Poll::*;
-                    for (idx, item) in active_validations.iter_mut().enumerate() {
-                        let Ready(()) = item.poll_unpin(cx) else {
-                            continue;
-                        };
-                        to_remove.push(idx);
-                    }
-                    Ready(())
-                })
-                .await;
-            }
-
-            // iterate from the other end to prevent idx mismatches
-            for idx_to_remove in to_remove.into_iter().rev() {
-                // safe to drop the validation_task because the future is completed
-                let validation_task = active_validations.remove(idx_to_remove);
-                drop(validation_task);
-            }
+            active_validations.poll().await;
 
             // If no active validations and channel closed, exit
             if active_validations.is_empty() && self.msg_rx.is_closed() {
@@ -207,7 +230,7 @@ impl ValidationService {
             active_validations.len()
         );
         while !active_validations.is_empty() {
-            // self.inner.poll_active_validations().await;
+            active_validations.poll().await;
             tokio::task::yield_now().await;
         }
 
