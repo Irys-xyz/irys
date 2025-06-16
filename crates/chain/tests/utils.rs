@@ -414,6 +414,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    // FIXME: This fn does not guarantee the tx is "confirmed"
+    //        Essentially there is nothing in the fn that confirms the tx is in a block, simply that it is in the mdbx
     pub async fn wait_for_confirmed_txs(
         &self,
         mut unconfirmed_txs: Vec<IrysTransactionHeader>,
@@ -578,7 +580,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
-        self.node_ctx.set_partition_mining(false)
+        self.node_ctx.stop_mining().await
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -622,6 +624,53 @@ impl IrysNodeTest<IrysNodeCtx> {
             ))
         } else {
             info!("transaction found in mempool after {} retries", &retries);
+            Ok(())
+        }
+    }
+
+    pub async fn wait_for_mempool_commitment_txs(
+        &self,
+        mut tx_ids: Vec<H256>,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait * 5; // 200ms per retry
+
+        while let Some(tx_id) = tx_ids.pop() {
+            'inner: while retries < max_retries {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
+                    commitment_tx_ids: vec![tx_id.clone()],
+                    response: oneshot_tx,
+                })?;
+
+                //if transaction exists in mempool
+                if oneshot_rx
+                    .await
+                    .expect("to process GetCommitmentTxs")
+                    .get(&tx_id)
+                    .is_some()
+                {
+                    break 'inner;
+                }
+
+                sleep(Duration::from_millis(200)).await;
+                retries += 1;
+            }
+        }
+
+        if retries == max_retries {
+            tracing::error!(
+                "transaction not found in mempool after {} retries",
+                &retries
+            );
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transactions found in mempool after {} retries", &retries);
             Ok(())
         }
     }

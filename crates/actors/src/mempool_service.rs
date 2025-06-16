@@ -147,7 +147,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, remove confirmed txns from mempool
-    BlockConfirmedMessage(Arc<IrysBlockHeader>, Arc<Vec<IrysTransactionHeader>>),
+    BlockConfirmedMessage(Arc<IrysBlockHeader>),
     /// Get IrysTransactionHeader
     GetTransaction(H256, oneshot::Sender<Option<IrysTransactionHeader>>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
@@ -680,7 +680,6 @@ impl Inner {
     async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
-        all_txs: Arc<Vec<IrysTransactionHeader>>,
     ) -> Result<(), TxIngressError> {
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
@@ -750,11 +749,7 @@ impl Inner {
             mut_tx.commit().expect("expect to commit to database");
         }
 
-        info!(
-            "Removing confirmed tx - Block height: {} num tx: {}",
-            block.height,
-            all_txs.len()
-        );
+        info!("Removing confirmed tx - Block height: {}", block.height,);
 
         Ok(())
     }
@@ -1465,9 +1460,8 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::BlockConfirmedMessage(block, all_txs) => {
-                    let _unused_response_message =
-                        self.handle_block_confirmed_message(block, all_txs).await;
+                MempoolServiceMessage::BlockConfirmedMessage(block) => {
+                    let _unused_response_message = self.handle_block_confirmed_message(block).await;
                 }
                 MempoolServiceMessage::CommitmentTxIngressMessage(commitment_tx, response) => {
                     let response_message = self
@@ -1554,8 +1548,25 @@ impl Inner {
             file.commit()?;
         }
 
-        // TODO: Do the same for all the pending storage tx
-        let _storage_tx_path = base_path.join("storage_tx");
+        let storage_tx_path = base_path.join("storage_tx");
+        fs::create_dir_all(storage_tx_path.clone()).expect("to create the mempool/storage_tx dir");
+        let storage_hash_map = self.get_all_storage_tx().await;
+        for tx in storage_hash_map.values() {
+            // Create a filepath for this transaction
+            let tx_path = storage_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+
+            // Check to see if the file exists
+            if tx_path.exists() {
+                continue;
+            }
+
+            // If not, write it to  {mempool_dir}/storage_tx/{txid}.json
+            let json = serde_json::to_string(tx).unwrap();
+
+            let mut file = get_atomic_file(tx_path).unwrap();
+            file.write_all(json.as_bytes())?;
+            file.commit()?;
+        }
 
         Ok(())
     }
@@ -1590,17 +1601,43 @@ impl Inner {
         hash_map
     }
 
+    async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, IrysTransactionHeader> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the storage transactions
+        let mempool_state = &self.mempool_state;
+        let mempool_state_guard = mempool_state.read().await;
+
+        // Get any IrysTransaction from the valid storage txs
+        mempool_state_guard.valid_tx.values().for_each(|tx| {
+            hash_map.insert(tx.id, tx.clone());
+        });
+
+        hash_map
+    }
+
     async fn restore_mempool_from_disk(&mut self) {
         let recovered =
-            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir()).await;
+            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
+                .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            self.handle_commitment_tx_ingress_message(commitment_tx)
+            let _ = self
+                .handle_commitment_tx_ingress_message(commitment_tx)
                 .await
-                .unwrap(); // We don't care about the outcome, just giving the mempool a crack at validating it
+                .inspect_err(|_| {
+                    tracing::warn!("Commitment tx ingress error during mempool restore from disk")
+                });
         }
 
-        // TODO: Similar logic for storage_tx
+        for (_txid, storage_tx) in recovered.storage_txs {
+            let _ = self
+                .handle_tx_ingress_message(storage_tx)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!("Storage tx ingress error during mempool restore from disk")
+                });
+        }
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
