@@ -159,8 +159,11 @@ impl ValidationService {
                     };
 
                     // Transform message to validation future
-                    let fut = self.inner.clone().create_validation_future(msg).boxed();
-                    active_validations.push(fut);
+                    let Some(fut) = self.inner.clone().create_validation_future(msg).await else {
+                        // validation future was not created. Most likely the task failed during vdf validation
+                        break 'outer;
+                    };
+                    active_validations.push(fut.boxed());
                 }
             }
 
@@ -216,7 +219,10 @@ impl ValidationService {
 impl ValidationServiceInner {
     /// Handle incoming messages
     #[instrument(skip_all)]
-    async fn create_validation_future(self: Arc<Self>, msg: ValidationServiceMessage) {
+    async fn create_validation_future(
+        self: Arc<Self>,
+        msg: ValidationServiceMessage,
+    ) -> Option<impl Future<Output = ()>> {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
                 let block_hash = block.block_hash;
@@ -224,22 +230,74 @@ impl ValidationServiceInner {
 
                 debug!(?block_hash, ?block_height, "validating block");
 
-                let validation_result = self
-                    .validate_block(block)
-                    .await
-                    .unwrap_or(ValidationResult::Invalid);
-
-                // Notify the block tree service
-                if let Err(e) = self.service_senders.block_tree.send(
-                    BlockTreeServiceMessage::BlockValidationFinished {
-                        block_hash,
-                        validation_result,
-                    },
-                ) {
-                    error!(?e, "Failed to send validation result to block tree service");
+                if let Err(_err) = self.clone().ensure_vdf_is_valid(&block).await {
+                    // Notify the block tree service
+                    if let Err(e) = self.service_senders.block_tree.send(
+                        BlockTreeServiceMessage::BlockValidationFinished {
+                            block_hash,
+                            validation_result: ValidationResult::Invalid,
+                        },
+                    ) {
+                        error!(?e, "Failed to send validation result to block tree service");
+                    }
+                    return None;
                 }
+
+                let concurrent_task = async move {
+                    let validation_result = self
+                        .validate_block(block)
+                        .await
+                        .unwrap_or(ValidationResult::Invalid);
+
+                    // Notify the block tree service
+                    if let Err(e) = self.service_senders.block_tree.send(
+                        BlockTreeServiceMessage::BlockValidationFinished {
+                            block_hash,
+                            validation_result,
+                        },
+                    ) {
+                        error!(?e, "Failed to send validation result to block tree service");
+                    }
+                };
+                Some(concurrent_task)
             }
         }
+    }
+
+    /// Perform vdf fast forwarding and validation.
+    /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
+    #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
+    async fn ensure_vdf_is_valid(self: Arc<Self>, block: &IrysBlockHeader) -> eyre::Result<()> {
+        let vdf_info = block.vdf_limiter_info.clone();
+
+        // First, wait for the previous VDF step to be available
+        let first_step_number = vdf_info.first_step_number();
+        let prev_output_step_number = first_step_number.saturating_sub(1);
+
+        self.vdf_state.wait_for_step(prev_output_step_number).await;
+        let stored_previous_step = self
+            .vdf_state
+            .get_step(prev_output_step_number)
+            .expect("to get the step, since we've just waited for it");
+
+        ensure!(
+            stored_previous_step == vdf_info.prev_output,
+            "vdf output is not equal to the saved step with the same index {:?}, got {:?}",
+            stored_previous_step,
+            vdf_info.prev_output,
+        );
+
+        // Spawn VDF validation task
+        tokio::task::spawn_blocking(move || {
+            vdf_steps_are_valid(
+                &self.pool,
+                &vdf_info,
+                &self.config.consensus.vdf,
+                &self.vdf_state,
+            )
+        })
+        .await??;
+        Ok(())
     }
 
     /// Perform block validation
