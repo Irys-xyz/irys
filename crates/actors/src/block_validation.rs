@@ -586,7 +586,7 @@ async fn extract_commitment_txs(
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
     let commitment_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't genertae system txs for commitment txs
+        // IMPORTANT: on epoch blocks we don't generate system txs for commitment txs
         vec![]
     } else {
         match &block.system_ledgers[..] {
@@ -621,7 +621,7 @@ fn validate_system_transactions_match(
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
             // If either of the systxs is not present, it means it was not generated as `expected`
-            // or it was not it was not included in the block. either way - an error
+            // or it was not included in the block. either way - an error
             tracing::warn!(?data, "system tx len mismatch");
             eyre::bail!("actual and expected system txs lens differ");
         };
