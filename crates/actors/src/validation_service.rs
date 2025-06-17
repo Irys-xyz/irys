@@ -14,7 +14,7 @@
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::{
     block_index_service::BlockIndexReadGuard,
-    block_tree_service::{BlockTreeServiceMessage, ValidationResult},
+    block_tree_service::{BlockTreeServiceMessage, ReorgEvent, ValidationResult},
     epoch_service::PartitionAssignmentsReadGuard,
     services::ServiceSenders,
 };
@@ -30,7 +30,7 @@ use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
 use tokio::{
-    sync::mpsc::UnboundedReceiver,
+    sync::{broadcast, mpsc::UnboundedReceiver},
     task::JoinHandle,
     time::{interval, Duration},
 };
@@ -53,6 +53,8 @@ pub struct ValidationService {
     shutdown: GracefulShutdown,
     /// Message receiver
     msg_rx: UnboundedReceiver<ValidationServiceMessage>,
+    /// Reorg event receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,
     /// Inner service logic
     inner: Arc<ValidationServiceInner>,
 }
@@ -96,6 +98,7 @@ impl ValidationService {
     ) -> JoinHandle<()> {
         let config = config.clone();
         let service_senders = service_senders.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
 
         exec.spawn_critical_with_graceful_shutdown_signal(
             "Validation Service",
@@ -103,6 +106,7 @@ impl ValidationService {
                 let validation_service = Self {
                     shutdown,
                     msg_rx: rx,
+                    reorg_rx,
                     inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
@@ -177,6 +181,16 @@ impl ValidationService {
                     // If no active validations and channel closed, exit
                     if active_validations.is_empty() && self.msg_rx.is_closed() {
                         break;
+                    }
+                }
+
+                // Handle reorg events
+                result = self.reorg_rx.recv() => {
+                    match handle_broadcast_recv(result) {
+                        Ok(Some(event)) => self.inner.handle_reorg(event, &mut active_validations).await,
+                        // lagged, skipping messages
+                        Ok(None) => { },
+                        Err(_) => break,
                     }
                 }
             }
@@ -279,5 +293,44 @@ impl ValidationServiceInner {
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
         vdf_state.wait_for_step(vdf_info.global_step_number).await;
         Ok(())
+    }
+
+    /// Handle reorg events
+    #[instrument(skip_all)]
+    async fn handle_reorg(
+        &self,
+        event: ReorgEvent,
+        active_validations: &mut std::pin::Pin<&mut ActiveValidations>,
+    ) {
+        info!(
+            new_tip = ?event.new_tip,
+            new_height = ?event.fork_parent.height,
+            "Processing reorg in validation service"
+        );
+
+        // Reevaluate all block priorities based on the new canonical chain
+        active_validations.reevaluate_priorities();
+
+        info!("Validation service priorities updated after reorg");
+    }
+}
+
+/// Handle broadcast channel receive results
+#[instrument(skip_all, err)]
+fn handle_broadcast_recv<T>(
+    result: Result<T, broadcast::error::RecvError>,
+) -> eyre::Result<Option<T>> {
+    match result {
+        Ok(event) => Ok(Some(event)),
+        Err(broadcast::error::RecvError::Closed) => {
+            eyre::bail!("broadcast channel closed")
+        }
+        Err(broadcast::error::RecvError::Lagged(n)) => {
+            warn!(skipped_messages = ?n, "reorg lagged");
+            if n > 5 {
+                error!("reorg channel significantly lagged");
+            }
+            Ok(None)
+        }
     }
 }

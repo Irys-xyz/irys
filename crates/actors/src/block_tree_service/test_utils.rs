@@ -321,7 +321,7 @@ pub fn create_and_apply_fork(
         // todo: write data here
         old_fork: Arc::new(vec![]),
         // todo: write data here
-        new_fork: Arc::new(vec![]),
+        new_fork: Arc::new(new_fork_blocks),
         fork_parent,
         new_tip,
         timestamp: SystemTime::now(),

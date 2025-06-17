@@ -1848,7 +1848,7 @@ mod tests {
         b1_test.data_ledgers[DataLedger::Submit]
             .tx_ids
             .push(H256::random());
-        assert_matches!(cache.add_peer_block(&b1_test, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b1_test, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
@@ -1873,7 +1873,7 @@ mod tests {
 
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1889,7 +1889,7 @@ mod tests {
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -1921,10 +1921,10 @@ mod tests {
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
 
         println!(
             "b1:   {} cdiff: {} solution_hash: {}",
@@ -2056,15 +2056,15 @@ mod tests {
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
         let mut cache = BlockTreeCache::new(&b1);
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(_));
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2_2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2081,7 +2081,7 @@ mod tests {
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_3, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2_3, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2101,7 +2101,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_eq!(
             cache.get_block_and_status(&b2_2.block_hash).unwrap(),
@@ -2124,14 +2124,14 @@ mod tests {
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b3, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b3, comm_cache.clone()), Ok(()));
         assert_matches!(
             cache.add_local_block(
                 &b3,
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(cache.mark_tip(&b3.block_hash), Ok(_));
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
@@ -2156,7 +2156,7 @@ mod tests {
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b4, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b4, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2290,7 +2290,7 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11);
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
@@ -2314,7 +2314,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
 
@@ -2357,7 +2357,7 @@ mod tests {
 
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
-        assert_matches!(cache.add_peer_block(&b14, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b14, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2439,7 +2439,7 @@ mod tests {
 
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
-        assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(()));
         assert_matches!(
             check_earliest_not_onchian(
                 &b14.block_hash,
@@ -2457,7 +2457,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(
             check_earliest_not_onchian(
@@ -2476,7 +2476,7 @@ mod tests {
 
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
-        assert_matches!(cache.add_peer_block(&b16, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b16, comm_cache.clone()), Ok(()));
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
             Ok(())
@@ -2528,7 +2528,7 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11);
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
@@ -2570,7 +2570,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
@@ -2586,7 +2586,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(
             cache.add_local_block(
@@ -2594,7 +2594,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
 
         assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 1, &cache), Ok(()));
@@ -2608,9 +2608,9 @@ mod tests {
             cache.add_local_block(
                 &b14b,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache
             ),
-            Ok(_)
+            Ok(())
         );
 
         assert_matches!(

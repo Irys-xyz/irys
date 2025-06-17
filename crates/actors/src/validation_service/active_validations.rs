@@ -162,6 +162,30 @@ impl ActiveValidations {
         }
         tasks_completed
     }
+
+    /// Reevaluate priorities for all active validations after a reorg
+    /// This recalculates priorities based on the new canonical chain state
+    #[instrument(skip_all, fields(validation_count = self.len()))]
+    pub(crate) fn reevaluate_priorities(&mut self) {
+        debug!("reevaluating priorities after reorg");
+
+        // Create a new priority queue with updated priorities
+        let mut new_validations = PriorityQueue::new();
+
+        // Recalculate priority for each block hash and update the queue
+        for (block_hash, _old_priority) in self.validations.iter() {
+            let new_priority = self.calculate_priority(block_hash);
+            new_validations.push(*block_hash, new_priority);
+        }
+
+        // Replace the old priority queue with the updated one
+        self.validations = new_validations;
+
+        debug!(
+            validation_count = self.len(),
+            "completed priority reevaluation after reorg"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -202,10 +226,19 @@ mod tests {
             .map(|height| {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
+                header.cumulative_diff = height.into();
                 (header, ChainState::Onchain)
             })
             .collect::<Vec<_>>();
-        genesis_tree(&mut blocks)
+        let guard = genesis_tree(&mut blocks);
+
+        // Mark the last block as the canonical tip
+        if max_height > 0 {
+            let last_block_hash = blocks.last().unwrap().0.block_hash;
+            guard.write().mark_tip(&last_block_hash).unwrap();
+        }
+
+        guard
     }
 
     /// Tests priority ordering with blocks added in sequential height order.
@@ -642,5 +675,158 @@ mod tests {
         );
         assert!(Reverse(BlockPriority::Canonical(10)) > Reverse(BlockPriority::Canonical(11)));
         assert!(Reverse(BlockPriority::Fork(10)) > Reverse(BlockPriority::Fork(11)));
+    }
+
+    /// Tests priority reevaluation when a fork becomes the canonical chain.
+    /// Setup: Canonical chain (0-3), canonical extensions (4-5), and fork chain (3-10) from height 2.
+    /// Action: Make fork chain canonical by marking blocks 3-5 as canonical tip sequentially.
+    /// Expected: Extension blocks (4-5) become Fork, fork blocks (3-5) become Canonical,
+    ///          remaining fork blocks (6-10) become CanonicalExtension.
+    /// Verifies: reevaluate_priorities() correctly recalculates all block priorities after reorg.
+    #[test(tokio::test)]
+    async fn test_reevaluate_priorities_after_fork_becomes_canonical() {
+        // Setup: Create initial canonical chain (height 0-3)
+        let block_tree_guard = setup_canonical_chain_scenario(3);
+        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
+
+        // Create canonical extension blocks (extending from canonical tip at height 3)
+        let extension_blocks = {
+            let mut tree = block_tree_guard.write();
+            let (canonical_chain, _) = tree.get_canonical_chain();
+            let tip = canonical_chain.last().unwrap();
+
+            let mut blocks = Vec::new();
+            let mut last_hash = tip.block_hash;
+
+            for height in 4..=5 {
+                let mut header = IrysBlockHeader::new_mock_header();
+                header.height = height;
+                header.previous_block_hash = last_hash;
+                header.block_hash = H256::random();
+                header.cumulative_diff = height.into();
+                last_hash = header.block_hash;
+
+                tree.add_common(
+                    header.block_hash,
+                    &header,
+                    Arc::new(CommitmentCache::default()),
+                    ChainState::NotOnchain(BlockState::ValidationScheduled),
+                )
+                .unwrap();
+
+                blocks.push(header);
+            }
+            blocks
+        };
+
+        // Add extension blocks to active validations
+        for block in &extension_blocks {
+            active_validations.push(block.block_hash, create_pending_future());
+        }
+
+        // Verify initial priorities - extension blocks should be CanonicalExtension
+        for block in &extension_blocks {
+            let priority = active_validations.calculate_priority(&block.block_hash);
+            assert_eq!(
+                priority,
+                Reverse(BlockPriority::CanonicalExtension(block.height))
+            );
+        }
+
+        // Create fork blocks (extending from height 2, creating alternative chain)
+        let fork_blocks = {
+            let mut tree = block_tree_guard.write();
+            let (canonical_chain, _) = tree.get_canonical_chain();
+            let fork_parent = canonical_chain.iter().find(|e| e.height == 2).unwrap();
+
+            let mut blocks = Vec::new();
+            let mut last_hash = fork_parent.block_hash;
+
+            for height in 3..=10 {
+                let mut header = IrysBlockHeader::new_mock_header();
+                header.height = height;
+                header.previous_block_hash = last_hash;
+                header.block_hash = H256::random();
+                header.cumulative_diff = height.into();
+                last_hash = header.block_hash;
+
+                tree.add_common(
+                    header.block_hash,
+                    &header,
+                    Arc::new(CommitmentCache::default()),
+                    ChainState::NotOnchain(BlockState::ValidationScheduled),
+                )
+                .unwrap();
+
+                blocks.push(header);
+            }
+            blocks
+        };
+
+        // Add fork blocks to active validations
+        for block in &fork_blocks {
+            active_validations.push(block.block_hash, create_pending_future());
+        }
+
+        // Action: Make the fork chain canonical by marking blocks as valid and advancing tip
+        // This simulates a reorganization where the fork becomes the canonical chain
+        {
+            let mut tree = block_tree_guard.write();
+
+            // Mark one of the later fork blocks as valid to enable tip advancement
+            tree.mark_block_as_valid(&fork_blocks[6].block_hash)
+                .unwrap();
+
+            // Advance the canonical tip through the fork chain (blocks 3-5)
+            // This makes the fork chain canonical up to height 5
+            for i in 0..=5 {
+                tree.mark_tip(&fork_blocks[i].block_hash).unwrap();
+            }
+        }
+
+        // Action: Reevaluate priorities after the reorganization
+        active_validations.reevaluate_priorities();
+
+        // Verify: Extension blocks (4-5) are now Fork priority (no longer extend canonical tip)
+        for block in &extension_blocks {
+            let priority = active_validations
+                .validations
+                .get_priority(&block.block_hash)
+                .unwrap();
+            assert_eq!(
+                priority,
+                &Reverse(BlockPriority::Fork(block.height)),
+                "Extension block at height {} should now be Fork priority",
+                block.height
+            );
+        }
+
+        // Verify: Fork blocks 3-5 are now Canonical priority (part of canonical chain)
+        for block in &fork_blocks[..6] {
+            let priority = active_validations
+                .validations
+                .get_priority(&block.block_hash)
+                .unwrap();
+            assert_eq!(
+                priority,
+                &Reverse(BlockPriority::Canonical(block.height)),
+                "Fork block at height {} should now be Canonical priority",
+                block.height
+            );
+        }
+
+        // Verify: Remaining fork blocks (6-10) are now CanonicalExtension priority
+        for block in &fork_blocks[6..] {
+            let priority = active_validations
+                .validations
+                .get_priority(&block.block_hash)
+                .unwrap();
+            assert_eq!(
+                priority,
+                &Reverse(BlockPriority::CanonicalExtension(block.height)),
+                "Fork block at height {} should now be CanonicalExtension priority",
+                block.height
+            );
+        }
     }
 }
