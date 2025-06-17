@@ -107,7 +107,7 @@ impl BlockStatusProvider {
     pub async fn mock(node_config: &NodeConfig) -> Self {
         Self {
             block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
-                BlockTreeCache::new(&IrysBlockHeader::new_mock_header()),
+                BlockTreeCache::new(&IrysBlockHeader::new_mock_header(), node_config.consensus_config()),
             ))),
             block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
                 BlockIndex::new(node_config)

@@ -65,7 +65,7 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
     genesis_block.block_hash = block_hash;
     genesis_block.cumulative_diff = 0.into();
 
-    let mut block_tree_cache = BlockTreeCache::new(genesis_block);
+    let mut block_tree_cache = BlockTreeCache::new(genesis_block, irys_types::ConsensusConfig::testnet());
     block_tree_cache.mark_tip(&block_hash).unwrap();
     for (block, state) in iter {
         block.previous_block_hash = block_hash;

@@ -746,8 +746,6 @@ fn get_ledger_tx_headers<T: DbTx>(
     }
 }
 
-/// Number of blocks to retain in cache from chain head
-const BLOCK_CACHE_DEPTH: u64 = 50;
 
 #[derive(Debug, Clone)]
 pub struct BlockTreeEntry {
@@ -776,6 +774,9 @@ pub struct BlockTreeCache {
 
     // Cache of longest chain: (block/tx pairs, count of non-onchain blocks)
     longest_chain_cache: (Vec<BlockTreeEntry>, usize),
+
+    // Consensus configuration containing cache depth
+    consensus_config: ConsensusConfig,
 }
 
 #[derive(Debug)]
@@ -827,7 +828,7 @@ impl BlockTreeCache {
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment_cache so it stubs one out
     // #[cfg(feature = "test-utils")]
-    pub fn new(genesis_block: &IrysBlockHeader) -> Self {
+    pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         let block_hash = genesis_block.block_hash;
         let solution_hash = genesis_block.solution_hash;
         let height = genesis_block.height;
@@ -866,13 +867,14 @@ impl BlockTreeCache {
             max_cumulative_difficulty: (cumulative_diff, block_hash),
             height_index,
             longest_chain_cache,
+            consensus_config,
         }
     }
 
     /// Restores the block tree cache from the database and `block_index` during startup.
     ///
     /// Rebuilds the block tree by iterating the `block_index` and loading the most recent blocks from
-    /// the database (up to `BLOCK_CACHE_DEPTH` blocks). For each block, it loads associated commitment
+    /// the database (up to `block_cache_depth` blocks). For each block, it loads associated commitment
     /// transactions and reconstructs the commitment cache state for that block. The function also notifies
     /// the Reth service of the current chain tip.
     ///
@@ -902,7 +904,7 @@ impl BlockTreeCache {
 
             let start = block_index
                 .num_blocks()
-                .saturating_sub(BLOCK_CACHE_DEPTH - 1);
+                .saturating_sub(consensus_config.block_cache_depth - 1);
             let end = block_index.num_blocks();
             let start_block_hash = block_index.get_item(start).unwrap().block_hash;
             (start, end, start_block_hash)
@@ -927,6 +929,7 @@ impl BlockTreeCache {
             max_cumulative_difficulty: (start_block.cumulative_diff, start_block_hash),
             height_index: BTreeMap::new(),
             longest_chain_cache: (vec![entry], 0),
+            consensus_config: consensus_config.clone(),
         };
 
         // Initialize commitment cache and add start block
@@ -1240,7 +1243,7 @@ impl BlockTreeCache {
         let mut not_onchain_count = 0;
 
         let mut current = self.max_cumulative_difficulty.1;
-        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut blocks_to_collect = self.consensus_config.block_cache_depth;
         debug!(
             "updating canonical chain cache latest_cache_tip: {}",
             current
@@ -1254,7 +1257,7 @@ impl BlockTreeCache {
                     pairs.clear();
                     not_onchain_count = 0;
                     current = entry.block.previous_block_hash;
-                    blocks_to_collect = BLOCK_CACHE_DEPTH;
+                    blocks_to_collect = self.consensus_config.block_cache_depth;
                     continue;
                 }
 
@@ -1494,7 +1497,7 @@ impl BlockTreeCache {
         let mut prev_block = &current_entry.block;
         let mut depth_count = 0;
 
-        while prev_block.height > 0 && depth_count < BLOCK_CACHE_DEPTH {
+        while prev_block.height > 0 && depth_count < self.consensus_config.block_cache_depth {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
@@ -1672,7 +1675,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
     let canonical_chain = tokio::task::spawn_blocking(move || {
         let cache = tree.read();
 
-        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut blocks_to_collect = cache.consensus_config.block_cache_depth;
         let mut chain_cache = Vec::with_capacity(
             blocks_to_collect
                 .try_into()
@@ -1813,7 +1816,7 @@ mod tests {
         let comm_cache = Arc::new(CommitmentCache::default());
 
         // Initialize block tree cache from `b1`
-        let mut cache = BlockTreeCache::new(&b1);
+        let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
 
         // Verify cache returns `None` for unknown hashes
         assert_eq!(cache.get_block(&H256::random()), None);
@@ -2055,7 +2058,7 @@ mod tests {
         // <Reset the cache>
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
-        let mut cache = BlockTreeCache::new(&b1);
+        let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
         assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
         assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
@@ -2288,7 +2291,7 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let b13 = extend_chain(random_block(U256::one()), &b11);
@@ -2526,7 +2529,7 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let _b13 = extend_chain(random_block(U256::one()), &b11);
@@ -2560,7 +2563,7 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
         let b12 = extend_chain(random_block(U256::one()), &b11);
