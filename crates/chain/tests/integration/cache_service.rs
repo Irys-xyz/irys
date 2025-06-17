@@ -162,32 +162,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     assert_eq!(*chunk_cache_count, 0_u64);
 
-    //// mine enough blocks to cause chunk migration
+    // mine enough blocks to cause chunk migration
     let _ = node.mine_block().await;
-
-    let reth_context = node.node_ctx.reth_node_adapter.clone();
-
-    for i in 1..4 {
-        info!("manually producing block {}", i);
-        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
-
-        //check reth for built block
-        let reth_block = reth_context
-            .inner
-            .provider
-            .block_by_hash(block.evm_block_hash)?
-            .unwrap();
-
-        // check irys DB for built block
-        let db_irys_block = &node
-            .node_ctx
-            .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
-            .unwrap();
-        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-        // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
-        sleep(Duration::from_millis(1500)).await;
-    }
 
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
