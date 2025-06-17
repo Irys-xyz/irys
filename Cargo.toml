@@ -55,6 +55,7 @@ irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
 irys-p2p = { path = "./crates/p2p" }
 irys-reth = { path = "./crates/irys-reth" }
+irys-cli = { path = "./crates/cli" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -179,6 +180,7 @@ reth-revm = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4
 reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+
 # just used (for local testing)
 
 # reth = { path = "./ext/reth/bin/reth" }
@@ -207,8 +209,15 @@ reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev 
 # reth-tracing = { path = "./ext/reth/crates/tracing" }
 # reth-transaction-pool = { path = "./ext/reth/crates/transaction-pool" }
 # reth-trie-db = { path = "./ext/reth/crates/trie/db" }
-
 # reth-cli-commands = { path = "./ext/reth/crates/cli/commands" }
+# reth-storage-api = { path = "./ext/reth/crates/storage/storage-api" }
+# reth-basic-payload-builder = { path = "./ext/reth/crates/payload/basic" }
+# reth-payload-builder-primitives = { path = "./ext/reth/crates/payload/builder-primitives" }
+# reth-payload-primitives = { path = "./ext/reth/crates/payload/primitives" }
+# reth-revm = { path = "./ext/reth/crates/revm" }
+# reth-chain-state = { path = "./ext/reth/crates/chain-state" }
+# reth-errors = { path = "./ext/reth/crates/errors" }
+# reth-ethereum-payload-builder = { path = "./ext/reth/crates/ethereum/payload" }
 
 # all deps + used
 
