@@ -13,7 +13,6 @@ use base58::ToBase58 as _;
 use futures::future::select;
 use irys_actors::block_tree_service::ReorgEvent;
 use irys_actors::mempool_service::MempoolTxs;
-use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
@@ -22,6 +21,7 @@ use irys_actors::{
     packing::wait_for_packing,
     SetTestBlocksRemainingMessage,
 };
+use irys_actors::{CommitmentCacheStatus, GetMinerPartitionAssignmentsMessage};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::{
@@ -667,6 +667,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.mine_blocks(num_blocks).await?;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         Ok(())
+    }
+
+    pub fn get_commitment_cache_status(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> CommitmentCacheStatus {
+        let commitment_cache = self
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_commitment_cache();
+
+        commitment_cache.get_commitment_status(commitment_tx)
     }
 
     pub async fn wait_for_mempool(

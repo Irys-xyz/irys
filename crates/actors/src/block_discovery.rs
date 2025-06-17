@@ -5,8 +5,7 @@ use crate::{
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
-    CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
-    GetCommitmentStateGuardMessage,
+    CommitmentCache, CommitmentCacheStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -18,13 +17,16 @@ use irys_database::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
+    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database as _;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{
+    sync::{mpsc::UnboundedSender, oneshot},
+    time::timeout,
+};
 use tracing::{debug, error, info, Instrument as _, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -199,7 +201,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let config = self.config.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
-        let commitment_cache_sender = self.service_senders.commitment_cache.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
@@ -207,15 +208,17 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
 
-        info!(height = ?new_block_header.height,
+        debug!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
             output = ?new_block_header.vdf_limiter_info.output,
             prev_output = ?new_block_header.vdf_limiter_info.prev_output,
-            "Validating block"
+            "\nPre Validating block"
         );
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
+        // let mempool_config = self.config.consensus.mempool.clone();
+
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
@@ -231,12 +234,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             // Validate commitments (if there are some)
             let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-            let mut commitment_tx_ids: H256List = H256List::new();
             if let Some(commitment_ledger) = commitment_ledger {
-                debug!("{:#?}", commitment_ledger);
-                commitment_tx_ids = commitment_ledger.tx_ids.clone();
+                debug!(
+                    "incoming block commitment txids, height {}\n{:#?}",
+                    new_block_header.height, commitment_ledger
+                );
                 match get_commitment_tx_in_parallel(
-                    commitment_tx_ids.0.clone(),
+                    commitment_ledger.tx_ids.0.clone(),
                     &mempool_sender,
                     &db,
                 )
@@ -249,7 +253,69 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
 
-            info!("Pre-validating block");
+            info!("Pre-validating block: {}", new_block_header.height);
+
+            // TODO: This first pass a validating transactions are not duplicates causes a bunch
+            // of tests to fail that seem to rely on or not expect this validation check.
+            // Disabling the code for now as this is already a difficult to marge PR.
+
+            // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
+            // have already been included in a recent parent.
+            let block_height = new_block_header.height;
+
+            /*(
+            let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
+            let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+            let mut parent_block = previous_block_header.clone();
+
+            // Get the transaction IDs from the current block to check against
+            let _current_commitment_tx_ids: HashSet<_> = new_block_header
+                .get_commitment_ledger_tx_ids()
+                .into_iter()
+                .collect();
+            let current_data_tx_ids = new_block_header.get_data_ledger_tx_ids();
+
+            while parent_block.height >= min_anchor_height {
+                // Check to see if any commitment txids appeared in prior blocks
+                // let parent_commitment_tx_ids = parent_block.get_commitment_ledger_tx_ids();
+                // for txid in &parent_commitment_tx_ids {
+                //     if current_commitment_tx_ids.contains(txid) {
+                //         return Err(eyre!("Duplicate commitment transaction id {}", txid));
+                //     }
+                // }
+
+                // Check to see if any data txids appeared in prior blocks
+                let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+
+                // Compare each ledger type between current and parent blocks
+                for (ledger_type, current_txids) in &current_data_tx_ids {
+                    if let Some(parent_txids) = parent_data_tx_ids.get(ledger_type) {
+                        // Check for intersection between current and parent txids for this ledger
+                        for txid in current_txids {
+                            if parent_txids.contains(txid) {
+                                return Err(eyre!("Duplicate data transaction id {}", txid));
+                            }
+                        }
+                    }
+                }
+
+                if parent_block.height == 0 {
+                    break;
+                }
+
+                // Continue the loop - get the next parent block
+                // Get the next parent block and own it
+                let previous_block_header = match db.view_eyre(|tx| {
+                    block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                }) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
+                };
+
+                parent_block = previous_block_header; // Move instead of borrow
+            }
+            */
 
             let validation_result = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
@@ -268,36 +334,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             match validation_result {
                 Ok(()) => {
-                    // Attempt to validate / update the epoch commitment cache
-                    for commitment_tx in commitments.iter() {
-                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                        let _ =
-                            commitment_cache_sender.send(CommitmentCacheMessage::AddCommitment {
-                                commitment_tx: commitment_tx.clone(),
-                                response: oneshot_tx,
-                            });
-                        let status = oneshot_rx
-                            .await
-                            .expect("to receive CommitmentStatus from AddCommitment message");
-
-                        if !matches!(status, CommitmentCacheStatus::Accepted) {
-                            // Something went wrong with the commitments validation, it's time to roll back
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            let _ = commitment_cache_sender.send(
-                                CommitmentCacheMessage::RollbackCommitments {
-                                    commitment_txs: commitment_tx_ids,
-                                    response: tx,
-                                },
-                            );
-                            let _ = rx
-                                .await
-                                .expect("to receive a response from RollbackCommitments message");
-
-                            // These commitments do not result in valid commitment state
-                            return Err(eyre::eyre!("Invalid commitments"));
-                        }
-                    }
-
+                    // TODO: we shouldn't insert the block just yet, let it live in the mempool until it migrates
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
 
@@ -305,9 +342,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     all_txs.extend_from_slice(&publish_txs);
 
                     // Check if we've reached the end of an epoch and should finalize commitments
-                    let block_height = new_block_header.height;
+
                     let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
                     let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
+
+                    let arc_commitment_txs = Arc::new(commitments);
 
                     if is_epoch_block {
                         // For epoch blocks, validate that all included commitments are legitimate
@@ -320,13 +359,15 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         // Create a temporary local commitment validation environment
                         // This avoids async overhead while checking commitment validity and creates
                         // an independent cache we can populate and discard
-                        let mut local_commitment_cache =
-                            CommitmentCacheInner::new(commitment_state_guard);
+                        let mut local_commitment_cache = CommitmentCache::default();
 
                         // Validate each commitment transaction before accepting the epoch block
-                        for commitment_tx in commitments.iter() {
-                            let status =
-                                local_commitment_cache.add_commitment(commitment_tx.clone());
+                        for commitment_tx in arc_commitment_txs.iter() {
+                            let is_staked_in_current_epoch =
+                                commitment_state_guard.is_staked(commitment_tx.signer);
+
+                            let status = local_commitment_cache
+                                .add_commitment(commitment_tx, is_staked_in_current_epoch);
 
                             // Reject the entire epoch block if any commitment is invalid
                             // This ensures only verified commitments are finalized at epoch boundaries
@@ -351,16 +392,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         epoch_service.do_send(NewEpochMessage {
                             previous_epoch_block,
                             epoch_block: new_block_header.clone(),
-                            commitments,
+                            commitments: arc_commitment_txs.clone(),
                         });
-
-                        // Clear the CommitmentCache for a new epoch
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        let _ = commitment_cache_sender
-                            .send(CommitmentCacheMessage::ClearCache { response: tx });
-                        let _ = rx
-                            .await
-                            .expect("to receive a response from ClearCache message");
                     }
 
                     // WARNING: All block pre-validation needs to be completed before
@@ -370,6 +403,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     let _ = block_tree_sender.send(BlockTreeServiceMessage::BlockPreValidated {
                         block: new_block_header.clone(),
+                        commitment_txs: arc_commitment_txs,
                         response: oneshot_tx,
                     });
                     let _ = oneshot_rx
@@ -411,14 +445,25 @@ pub async fn get_commitment_tx_in_parallel(
         let tx_ids = tx_ids_clone.clone();
         async move {
             let (tx, rx) = oneshot::channel();
-            mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
+
+            match mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
                 commitment_tx_ids: tx_ids,
                 response: tx,
-            })?;
-            let x = rx
-                .await
-                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
-            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(x)
+            }) {
+                Ok(()) => {
+                    // Message was sent successfully, wait for response with timeout
+                    let result = timeout(Duration::from_secs(5), rx)
+                    .await
+                    .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
+                    .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
+
+                    Ok(result)
+                }
+                Err(_) => {
+                    // Channel is closed - either no receiver was ever created or it was dropped
+                    Err(eyre::eyre!("Mempool service is not available (channel closed - service may not be running)"))
+                }
+            }
         }
     };
 

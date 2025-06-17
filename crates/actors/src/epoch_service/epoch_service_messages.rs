@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 pub struct NewEpochMessage {
     pub epoch_block: Arc<IrysBlockHeader>,
     pub previous_epoch_block: Option<IrysBlockHeader>,
-    pub commitments: Vec<CommitmentTransaction>,
+    pub commitments: Arc<Vec<CommitmentTransaction>>,
 }
 
 impl Handler<NewEpochMessage> for EpochServiceActor {
@@ -28,7 +28,7 @@ impl Handler<NewEpochMessage> for EpochServiceActor {
         self.perform_epoch_tasks(
             &previous_epoch_block,
             &new_epoch_block,
-            new_epoch_commitments,
+            (*new_epoch_commitments).clone(),
         )?;
 
         Ok(())
