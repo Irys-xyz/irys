@@ -103,7 +103,8 @@ impl ActiveValidations {
     }
 
     /// Process completed validations and remove them from the active set
-    pub(crate) async fn process_completed(&mut self) {
+    /// returns `true` if any of the block validatoin tasks succeeded
+    pub(crate) async fn process_completed(&mut self) -> bool {
         let mut completed_blocks = Vec::new();
 
         assert_eq!(
@@ -113,7 +114,7 @@ impl ActiveValidations {
         );
 
         if self.validations.is_empty() {
-            return;
+            return false;
         }
 
         // Check futures in priority order using poll_immediate for non-blocking check
@@ -131,6 +132,7 @@ impl ActiveValidations {
             self.validations.remove(block_hash);
             self.futures.remove(block_hash);
         }
+        !completed_blocks.is_empty()
     }
 }
 

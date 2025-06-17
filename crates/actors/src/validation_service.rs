@@ -170,8 +170,11 @@ impl ValidationService {
                 // Process active validations every 100ms (only if not empty)
                 _ = validation_timer.tick(), if !active_validations.is_empty() => {
                     // Process any completed validations (non-blocking)
-                    active_validations.process_completed().await;
-
+                    let tasks_completed = active_validations.process_completed().await;
+                    if tasks_completed {
+                        // we may have unblocked one or more blocks from sending the validation message
+                        validation_timer.reset();
+                    }
                     // If no active validations and channel closed, exit
                     if active_validations.is_empty() && self.msg_rx.is_closed() {
                         break;
