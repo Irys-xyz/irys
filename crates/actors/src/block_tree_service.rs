@@ -2605,7 +2605,7 @@ mod tests {
             cache.add_local_block(
                 &b14b,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache
             ),
             Ok(_)
         );
