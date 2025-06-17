@@ -1259,8 +1259,13 @@ mod tests {
                 block.cumulative_diff = block.height.into();
                 latest_block_hash = H256::random();
                 block.block_hash = latest_block_hash;
-                tree.add_common(block.block_hash, &block, ChainState::Onchain)
-                    .unwrap();
+                tree.add_common(
+                    block.block_hash,
+                    &block,
+                    Arc::new(CommitmentCache::default()),
+                    ChainState::Onchain,
+                )
+                .unwrap();
             }
             drop(tree)
         };

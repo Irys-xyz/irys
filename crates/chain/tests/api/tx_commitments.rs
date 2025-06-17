@@ -6,12 +6,11 @@ use assert_matches::assert_matches;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::{
-    packing::wait_for_packing, CommitmentCacheMessage, CommitmentCacheStatus,
-    CommitmentStateReadGuard, GetCommitmentStateGuardMessage, GetPartitionAssignmentsGuardMessage,
+    packing::wait_for_packing, CommitmentCacheStatus, CommitmentStateReadGuard,
+    GetCommitmentStateGuardMessage, GetPartitionAssignmentsGuardMessage,
     PartitionAssignmentsReadGuard,
 };
 use irys_api_server::routes;
-use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
@@ -30,7 +29,7 @@ macro_rules! assert_ok {
 async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Configure logging to reduce noise while keeping relevant commitment outputs
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_actors::block_producer=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_actors::block_validation=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     initialize_tracing();
 
     // ===== TEST PURPOSE: Multiple Epochs with Commitments =====
@@ -215,7 +214,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     // Restart the node
     info!("Restarting node");
-    let restarted_node = node.stop().await.start().await;
+    let stopped_node = node.stop().await;
+    let restarted_node = stopped_node.start().await;
 
     // Get access to commitment and partition services for verification
     let epoch_service = restarted_node
@@ -387,7 +387,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     info!("Generated stake_tx.id: {}", stake_tx.id);
 
     // Verify stake commitment starts in 'Unknown' state
-    let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&stake_tx);
     assert_eq!(status, CommitmentCacheStatus::Unknown);
 
     // Submit stake commitment via API
@@ -397,7 +397,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     node.mine_blocks(1).await?;
 
     // Verify stake commitment is now 'Accepted'
-    let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&stake_tx);
     assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
@@ -411,14 +411,14 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Verify pledge starts in 'Unknown' state
-    let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&pledge_tx);
     assert_eq!(status, CommitmentCacheStatus::Unknown);
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
 
     // Verify pledge is still 'Unknown' before mining
-    let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&pledge_tx);
     assert_eq!(status, CommitmentCacheStatus::Unknown);
 
     // Mine a block to include the pledge
@@ -426,12 +426,12 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     node.mine_blocks(1).await?;
 
     // Verify pledge is now 'Accepted' after mining
-    let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&pledge_tx);
     assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // ===== TEST CASE 3: Re-submitting Existing Commitment =====
     // Verify stake commitment is still accepted
-    let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&stake_tx);
     assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // Re-submit the same stake commitment
@@ -439,7 +439,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     node.mine_blocks(1).await?;
 
     // Verify stake is still 'Accepted' (idempotent operation)
-    let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&stake_tx);
     assert_eq!(status, CommitmentCacheStatus::Accepted);
 
     // ===== TEST CASE 4: Pledge Without Stake (Should Fail) =====
@@ -456,7 +456,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Verify pledge starts in 'Unstaked' state
-    let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&pledge_tx);
     assert_eq!(status, CommitmentCacheStatus::Unstaked);
 
     // Submit pledge via API
@@ -464,29 +464,12 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     node.mine_blocks(1).await?;
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
-    let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
+    let status = node.get_commitment_cache_status(&pledge_tx);
     assert_eq!(status, CommitmentCacheStatus::Unstaked);
 
     // ===== TEST CLEANUP =====
     node.node_ctx.stop().await;
     Ok(())
-}
-
-async fn get_commitment_status(
-    commitment_tx: &CommitmentTransaction,
-    node_context: &IrysNodeCtx,
-) -> CommitmentCacheStatus {
-    let commitment_cache = &node_context.service_senders.commitment_cache;
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-
-    let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
-        commitment_tx: commitment_tx.clone(),
-        response: oneshot_tx,
-    });
-
-    oneshot_rx
-        .await
-        .expect("to receive CommitmentStatus from GetCommitmentStatus message")
 }
 
 async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
