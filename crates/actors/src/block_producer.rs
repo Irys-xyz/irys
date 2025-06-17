@@ -319,7 +319,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // === EPOCH BLOCK: Rollup all commitments from the current epoch ===
                 // Epoch blocks don't add new commitments - they summarize all commitments
                 // that were validated throughout the epoch into a single rollup entry
-                let entry = block_tree_guard.read().get_commitment_cache(&prev.block_hash);
+                let entry = block_tree_guard.read().get_commitment_snapshot(&prev.block_hash);
 
                 if let Ok(entry) = entry {
                     let mut txids = H256List::new();
@@ -340,7 +340,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                      // IMPORTANT: On epoch blocks we don't bill the user for system txs
                     commitment_txs_to_bill = &[];
                 } else {
-                     return Err(eyre!("Could not find commitment cache for current epoch"))
+                     return Err(eyre!("Could not find commitment snapshot for current epoch"))
                 }
             } else {
                 // === REGULAR BLOCK: Process new commitment transactions ===

@@ -21,7 +21,7 @@ use irys_actors::{
     packing::wait_for_packing,
     SetTestBlocksRemainingMessage,
 };
-use irys_actors::{CommitmentCacheStatus, GetMinerPartitionAssignmentsMessage};
+use irys_actors::{CommitmentSnapshotStatus, GetMinerPartitionAssignmentsMessage};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::{
@@ -669,17 +669,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
-    pub fn get_commitment_cache_status(
+    pub fn get_commitment_snapshot_status(
         &self,
         commitment_tx: &CommitmentTransaction,
-    ) -> CommitmentCacheStatus {
-        let commitment_cache = self
+    ) -> CommitmentSnapshotStatus {
+        let commitment_snapshot = self
             .node_ctx
             .block_tree_guard
             .read()
-            .canonical_commitment_cache();
+            .canonical_commitment_snapshot();
 
-        commitment_cache.get_commitment_status(commitment_tx)
+        commitment_snapshot.get_commitment_status(commitment_tx)
     }
 
     pub async fn wait_for_mempool(

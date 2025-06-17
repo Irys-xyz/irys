@@ -9,16 +9,16 @@ use std::collections::{BTreeMap, HashSet};
 use tracing::debug;
 
 #[derive(Debug, PartialEq)]
-pub enum CommitmentCacheStatus {
-    Accepted,    // The commitment is valid and was added to the cache
-    Unknown,     // The commitment is unknown to the cache & has no status
+pub enum CommitmentSnapshotStatus {
+    Accepted,    // The commitment is valid and was added to the snapshot
+    Unknown,     // The commitment has no status in the snapshot
     Unsupported, // The commitment is an unsupported type (unstake/unpledge)
     Unstaked,    // The pledge commitment doesn't have a corresponding stake
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct CommitmentCache {
-    cache: BTreeMap<Address, MinerCommitments>,
+pub struct CommitmentSnapshot {
+    commitments: BTreeMap<Address, MinerCommitments>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -27,29 +27,29 @@ struct MinerCommitments {
     pledges: Vec<CommitmentTransaction>,
 }
 
-impl CommitmentCache {
+impl CommitmentSnapshot {
     pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
-        let mut cache = Self::default();
+        let mut snapshot = Self::default();
 
         if let Some(commitment_txs) = commitment_txs {
             for commitment_tx in commitment_txs {
-                let _status = cache.add_commitment(&commitment_tx, false);
+                let _status = snapshot.add_commitment(&commitment_tx, false);
             }
         }
 
-        cache
+        snapshot
     }
 
-    /// Reconstructs the commitment cache for the current epoch by loading all commitment
+    /// Reconstructs the commitment snapshot for the current epoch by loading all commitment
     /// transactions from blocks since the last epoch boundary.
     ///
     /// Iterates through all blocks from the first block after the most recent epoch block
     /// up to the latest block, collecting and applying all commitment transactions to build
     /// the current epoch's commitment state. This is typically used during startup or when
-    /// the commitment cache needs to be rebuilt from persistent storage.
+    /// the commitment snapshot needs to be rebuilt from persistent storage.
     ///
     /// # Returns
-    /// Initialized commitment cache containing all commitments from the current epoch
+    /// Initialized commitment snapshot containing all commitments from the current epoch
     pub fn current_epoch_commitments(
         block_index_guard: BlockIndexReadGuard,
         commitment_state_guard: CommitmentStateReadGuard,
@@ -60,7 +60,7 @@ impl CommitmentCache {
         let block_index = block_index_guard.read();
         let latest_item = block_index.get_latest_item();
 
-        let mut commitment_cache = Self::default();
+        let mut snapshot = Self::default();
 
         if let Some(latest_item) = latest_item {
             let tx = db.tx().unwrap();
@@ -91,23 +91,23 @@ impl CommitmentCache {
                         let is_staked_in_current_epoch =
                             commitment_state_guard.is_staked(commitment_tx.signer);
 
-                        // Apply them to the commitment cache
-                        let _status = commitment_cache
-                            .add_commitment(&commitment_tx, is_staked_in_current_epoch);
+                        // Apply them to the commitment snapshot
+                        let _status =
+                            snapshot.add_commitment(&commitment_tx, is_staked_in_current_epoch);
                     }
                 }
             }
         }
 
-        // Return the initialized commitment cache
-        commitment_cache
+        // Return the initialized commitment snapshot
+        snapshot
     }
 
     /// Checks and returns the status of a commitment transaction
     pub fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
-    ) -> CommitmentCacheStatus {
+    ) -> CommitmentSnapshotStatus {
         debug!("GetCommitmentStatus message received");
 
         let commitment_type = commitment_tx.commitment_type;
@@ -123,11 +123,11 @@ impl CommitmentCache {
                 "CommitmentStatus is Rejected: unsupported type: {:?}",
                 commitment_type
             );
-            return CommitmentCacheStatus::Unsupported;
+            return CommitmentSnapshotStatus::Unsupported;
         }
 
         // Check if we have commitments for this miner address
-        let commitments = self.cache.get(signer);
+        let commitments = self.commitments.get(signer);
 
         // Handle by the input values commitment type
         let status = match commitment_type {
@@ -135,29 +135,29 @@ impl CommitmentCache {
                 if let Some(commitments) = &commitments {
                     // Check for duplicate stake transaction
                     if commitments.stake.as_ref().is_some_and(|s| s.id == txid) {
-                        CommitmentCacheStatus::Accepted
+                        CommitmentSnapshotStatus::Accepted
                     } else {
-                        CommitmentCacheStatus::Unknown
+                        CommitmentSnapshotStatus::Unknown
                     }
                 } else {
                     // No commitments for this address yet
-                    CommitmentCacheStatus::Unknown
+                    CommitmentSnapshotStatus::Unknown
                 }
             }
             CommitmentType::Pledge => {
                 if let Some(commitments) = &commitments {
                     // Check for duplicate pledge transaction
                     if commitments.pledges.iter().any(|p| p.id == txid) {
-                        CommitmentCacheStatus::Accepted
+                        CommitmentSnapshotStatus::Accepted
                     } else if commitments.stake.is_none() {
                         // Require existing stake for pledges
-                        CommitmentCacheStatus::Unstaked
+                        CommitmentSnapshotStatus::Unstaked
                     } else {
-                        CommitmentCacheStatus::Unknown
+                        CommitmentSnapshotStatus::Unknown
                     }
                 } else {
                     // No commitments for this address, so no stake exists
-                    CommitmentCacheStatus::Unstaked
+                    CommitmentSnapshotStatus::Unstaked
                 }
             }
             _ => unreachable!(), // We already handled unsupported types
@@ -167,19 +167,19 @@ impl CommitmentCache {
         status
     }
 
-    /// Adds a new commitment transaction to the cache and validates its acceptance
+    /// Adds a new commitment transaction to the snapshot and validates its acceptance
     pub fn add_commitment(
         &mut self,
         commitment_tx: &CommitmentTransaction,
         is_staked_in_current_epoch: bool,
-    ) -> CommitmentCacheStatus {
+    ) -> CommitmentSnapshotStatus {
         debug!("add_commitment() called for {}", commitment_tx.id);
         let signer = &commitment_tx.signer;
         let tx_type = commitment_tx.commitment_type;
 
         // Early return for unsupported commitment types
         if !matches!(tx_type, CommitmentType::Stake | CommitmentType::Pledge) {
-            return CommitmentCacheStatus::Unsupported;
+            return CommitmentSnapshotStatus::Unsupported;
         }
 
         // Handle stake commitments
@@ -187,27 +187,27 @@ impl CommitmentCache {
             // Check existing commitments in epoch service
             if is_staked_in_current_epoch {
                 // Already staked in current epoch, no need to add again
-                return CommitmentCacheStatus::Accepted;
+                return CommitmentSnapshotStatus::Accepted;
             }
 
             // Get or create miner commitments entry
-            let miner_commitments = self.cache.entry(*signer).or_default();
+            let miner_commitments = self.commitments.entry(*signer).or_default();
 
             // Check if already has pending stake
             if miner_commitments.stake.is_some() {
-                return CommitmentCacheStatus::Accepted;
+                return CommitmentSnapshotStatus::Accepted;
             }
 
             // Store new stake commitment
             miner_commitments.stake = Some(commitment_tx.clone());
-            CommitmentCacheStatus::Accepted
+            CommitmentSnapshotStatus::Accepted
         } else {
             // Handle pledge commitments - only accept if address has a stake
 
             // First check if staked in current epoch
             if is_staked_in_current_epoch {
                 // Address is staked in current epoch, add pledge
-                let miner_commitments = self.cache.entry(*signer).or_default();
+                let miner_commitments = self.commitments.entry(*signer).or_default();
 
                 let existing = miner_commitments
                     .pledges
@@ -219,24 +219,24 @@ impl CommitmentCache {
                 }
 
                 miner_commitments.pledges.push(commitment_tx.clone());
-                return CommitmentCacheStatus::Accepted;
+                return CommitmentSnapshotStatus::Accepted;
             }
 
-            // Next check if there's a pending stake in the local cache
-            if let Some(miner_commitments) = self.cache.get_mut(signer) {
+            // Next check if there's a pending stake in the snapshots commitments
+            if let Some(miner_commitments) = self.commitments.get_mut(signer) {
                 if miner_commitments.stake.is_some() {
                     // Has pending stake, can add pledge
                     miner_commitments.pledges.push(commitment_tx.clone());
-                    return CommitmentCacheStatus::Accepted;
+                    return CommitmentSnapshotStatus::Accepted;
                 }
             }
 
             // No stake found, reject pledge
-            CommitmentCacheStatus::Unstaked
+            CommitmentSnapshotStatus::Unstaked
         }
     }
 
-    /// Removes commitment transactions with specified IDs from the cache
+    /// Removes commitment transactions with specified IDs from the commitment snapshot
     pub fn rollback_commitments(&mut self, commitment_txs: &H256List) -> eyre::Result<()> {
         // Create a HashSet for faster lookups
         let ids_set: HashSet<&H256> = commitment_txs.iter().collect();
@@ -245,13 +245,13 @@ impl CommitmentCache {
         let mut addresses_to_check = Vec::new();
 
         // First pass: collect all addresses (to avoid borrow issues)
-        for address in self.cache.keys() {
+        for address in self.commitments.keys() {
             addresses_to_check.push(*address);
         }
 
         // Second pass: update each address's commitments
         for address in addresses_to_check {
-            if let Some(commitments) = self.cache.get_mut(&address) {
+            if let Some(commitments) = self.commitments.get_mut(&address) {
                 // Check stake transaction
                 if let Some(stake) = &commitments.stake {
                     if ids_set.contains(&stake.id) {
@@ -264,7 +264,7 @@ impl CommitmentCache {
 
                 // If both stake and pledges are empty, remove the entry completely
                 if commitments.stake.is_none() && commitments.pledges.is_empty() {
-                    self.cache.remove(&address);
+                    self.commitments.remove(&address);
                 }
             }
         }
@@ -272,20 +272,20 @@ impl CommitmentCache {
         Ok(())
     }
 
-    /// Collects all commitment transactions from the cache for epoch processing
+    /// Collects all commitment transactions from the snapshot for epoch processing
     pub fn get_epoch_commitments(&self) -> Vec<CommitmentTransaction> {
         let mut commitment_tx: Vec<CommitmentTransaction> = Vec::new();
 
         // First collect all stake transactions in address order
         // BTreeMap is already ordered by keys (addresses)
-        for miner_commitments in self.cache.values() {
+        for miner_commitments in self.commitments.values() {
             if let Some(stake) = &miner_commitments.stake {
                 commitment_tx.push(stake.clone());
             }
         }
 
         // Then collect all pledge transactions in address order
-        for miner_commitments in self.cache.values() {
+        for miner_commitments in self.commitments.values() {
             // Add all pledges for this miner
             for pledge in &miner_commitments.pledges {
                 commitment_tx.push(pledge.clone());

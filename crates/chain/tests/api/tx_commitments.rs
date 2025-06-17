@@ -6,7 +6,7 @@ use assert_matches::assert_matches;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::{
-    packing::wait_for_packing, CommitmentCacheStatus, CommitmentStateReadGuard,
+    packing::wait_for_packing, CommitmentSnapshotStatus, CommitmentStateReadGuard,
     GetCommitmentStateGuardMessage, GetPartitionAssignmentsGuardMessage,
     PartitionAssignmentsReadGuard,
 };
@@ -387,8 +387,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     info!("Generated stake_tx.id: {}", stake_tx.id);
 
     // Verify stake commitment starts in 'Unknown' state
-    let status = node.get_commitment_cache_status(&stake_tx);
-    assert_eq!(status, CommitmentCacheStatus::Unknown);
+    let status = node.get_commitment_snapshot_status(&stake_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Unknown);
 
     // Submit stake commitment via API
     post_commitment_tx_request(&uri, &stake_tx).await;
@@ -397,8 +397,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     node.mine_blocks(1).await?;
 
     // Verify stake commitment is now 'Accepted'
-    let status = node.get_commitment_cache_status(&stake_tx);
-    assert_eq!(status, CommitmentCacheStatus::Accepted);
+    let status = node.get_commitment_snapshot_status(&stake_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address
@@ -411,36 +411,36 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Verify pledge starts in 'Unknown' state
-    let status = node.get_commitment_cache_status(&pledge_tx);
-    assert_eq!(status, CommitmentCacheStatus::Unknown);
+    let status = node.get_commitment_snapshot_status(&pledge_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Unknown);
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
 
     // Verify pledge is still 'Unknown' before mining
-    let status = node.get_commitment_cache_status(&pledge_tx);
-    assert_eq!(status, CommitmentCacheStatus::Unknown);
+    let status = node.get_commitment_snapshot_status(&pledge_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Unknown);
 
     // Mine a block to include the pledge
     debug!("MINE BLOCK - Height should become 2");
     node.mine_blocks(1).await?;
 
     // Verify pledge is now 'Accepted' after mining
-    let status = node.get_commitment_cache_status(&pledge_tx);
-    assert_eq!(status, CommitmentCacheStatus::Accepted);
+    let status = node.get_commitment_snapshot_status(&pledge_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // ===== TEST CASE 3: Re-submitting Existing Commitment =====
     // Verify stake commitment is still accepted
-    let status = node.get_commitment_cache_status(&stake_tx);
-    assert_eq!(status, CommitmentCacheStatus::Accepted);
+    let status = node.get_commitment_snapshot_status(&stake_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // Re-submit the same stake commitment
     post_commitment_tx_request(&uri, &stake_tx).await;
     node.mine_blocks(1).await?;
 
     // Verify stake is still 'Accepted' (idempotent operation)
-    let status = node.get_commitment_cache_status(&stake_tx);
-    assert_eq!(status, CommitmentCacheStatus::Accepted);
+    let status = node.get_commitment_snapshot_status(&stake_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // ===== TEST CASE 4: Pledge Without Stake (Should Fail) =====
     // Create a new signer without any stake commitment
@@ -456,16 +456,16 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Verify pledge starts in 'Unstaked' state
-    let status = node.get_commitment_cache_status(&pledge_tx);
-    assert_eq!(status, CommitmentCacheStatus::Unstaked);
+    let status = node.get_commitment_snapshot_status(&pledge_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
     node.mine_blocks(1).await?;
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
-    let status = node.get_commitment_cache_status(&pledge_tx);
-    assert_eq!(status, CommitmentCacheStatus::Unstaked);
+    let status = node.get_commitment_snapshot_status(&pledge_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
     // ===== TEST CLEANUP =====
     node.node_ctx.stop().await;

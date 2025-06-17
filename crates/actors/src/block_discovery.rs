@@ -5,7 +5,7 @@ use crate::{
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
-    CommitmentCache, CommitmentCacheStatus, GetCommitmentStateGuardMessage,
+    CommitmentSnapshot, CommitmentSnapshotStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -359,19 +359,19 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         // Create a temporary local commitment validation environment
                         // This avoids async overhead while checking commitment validity and creates
                         // an independent cache we can populate and discard
-                        let mut local_commitment_cache = CommitmentCache::default();
+                        let mut local_snapshot = CommitmentSnapshot::default();
 
                         // Validate each commitment transaction before accepting the epoch block
                         for commitment_tx in arc_commitment_txs.iter() {
                             let is_staked_in_current_epoch =
                                 commitment_state_guard.is_staked(commitment_tx.signer);
 
-                            let status = local_commitment_cache
+                            let status = local_snapshot
                                 .add_commitment(commitment_tx, is_staked_in_current_epoch);
 
                             // Reject the entire epoch block if any commitment is invalid
                             // This ensures only verified commitments are finalized at epoch boundaries
-                            if status != CommitmentCacheStatus::Accepted {
+                            if status != CommitmentSnapshotStatus::Accepted {
                                 return Err(eyre::eyre!("Invalid commitments in epoch block"));
                             }
                         }

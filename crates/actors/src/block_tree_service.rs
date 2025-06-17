@@ -6,7 +6,7 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockFinalizedMessage, CommitmentCache, CommitmentStateReadGuard,
+    BlockFinalizedMessage, CommitmentSnapshot, CommitmentStateReadGuard,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
@@ -421,19 +421,19 @@ impl BlockTreeServiceInner {
                 return Ok(());
             }
 
-            // Get previous block's commitment cache
-            let prev_commitment_cache = cache
+            // Get previous block's commitment snapshot
+            let prev_commitment_snapshot = cache
                 .blocks
                 .get(&block.previous_block_hash)
                 .expect("previous block to be in block tree")
-                .commitment_cache
+                .commitment_snapshot
                 .clone();
 
-            // Create commitment cache for this block
-            let commitment_cache = create_commitment_cache_for_block(
+            // Create commitment snapshot for this block
+            let commitment_snapshot = create_commitment_snapshot_for_block(
                 &block,
                 &commitment_txs,
-                &prev_commitment_cache,
+                &prev_commitment_snapshot,
                 &self.consensus_config,
                 &self.commitment_state_guard,
             );
@@ -443,10 +443,10 @@ impl BlockTreeServiceInner {
                 cache.add_local_block(
                     &block,
                     ChainState::Validated(BlockState::Unknown),
-                    commitment_cache,
+                    commitment_snapshot,
                 )
             } else {
-                cache.add_peer_block(&block, commitment_cache)
+                cache.add_peer_block(&block, commitment_snapshot)
             };
 
             if add_result.is_err() {
@@ -781,7 +781,7 @@ pub struct BlockEntry {
     chain_state: ChainState,
     timestamp: SystemTime,
     children: HashSet<H256>,
-    commitment_cache: Arc<CommitmentCache>,
+    commitment_snapshot: Arc<CommitmentSnapshot>,
 }
 
 /// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
@@ -822,7 +822,7 @@ pub enum TipChangeResult {
 impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
-    /// the commitment_cache so it stubs one out
+    /// the commitment snapshot so it stubs one out
     // #[cfg(feature = "test-utils")]
     pub fn new(genesis_block: &IrysBlockHeader) -> Self {
         let block_hash = genesis_block.block_hash;
@@ -834,8 +834,8 @@ impl BlockTreeCache {
         let mut solutions = HashMap::new();
         let mut height_index = BTreeMap::new();
 
-        // Create a dummy commitment cache
-        let commitment_cache = Arc::new(CommitmentCache::default());
+        // Create a dummy commitment snapshot
+        let snapshot = Arc::new(CommitmentSnapshot::default());
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
@@ -844,7 +844,7 @@ impl BlockTreeCache {
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
-            commitment_cache,
+            commitment_snapshot: snapshot,
         };
 
         // Initialize all indices
@@ -870,7 +870,7 @@ impl BlockTreeCache {
     ///
     /// Rebuilds the block tree by iterating the `block_index` and loading the most recent blocks from
     /// the database (up to `BLOCK_CACHE_DEPTH` blocks). For each block, it loads associated commitment
-    /// transactions and reconstructs the commitment cache state for that block. The function also notifies
+    /// transactions and reconstructs the commitment snapshot for that block. The function also notifies
     /// the Reth service of the current chain tip.
     ///
     /// ## Arguments
@@ -926,21 +926,21 @@ impl BlockTreeCache {
             longest_chain_cache: (vec![entry], 0),
         };
 
-        // Initialize commitment cache and add start block
-        let mut commitment_cache = CommitmentCache::current_epoch_commitments(
+        // Initialize commitment snapshot and add start block
+        let mut commitment_snapshot = CommitmentSnapshot::current_epoch_commitments(
             block_index_guard.clone(),
             commitment_state_guard.clone(),
             db.clone(),
             &consensus_config,
         );
 
-        let arc_commitment_cache = Arc::new(commitment_cache.clone());
+        let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
         let block_entry = BlockEntry {
             block: start_block.clone(),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
-            commitment_cache: arc_commitment_cache.clone(),
+            commitment_snapshot: arc_commitment_snapshot.clone(),
         };
 
         block_tree_cache
@@ -953,7 +953,7 @@ impl BlockTreeCache {
             .height_index
             .insert(start_block.height, HashSet::from([start_block_hash]));
 
-        let mut prev_commitment_cache = arc_commitment_cache;
+        let mut prev_commitment_snapshot = arc_commitment_snapshot;
 
         // Process remaining blocks
         for block_height in (start + 1)..end {
@@ -970,30 +970,30 @@ impl BlockTreeCache {
             let commitment_txs =
                 load_commitment_transactions(&block, &db).expect("to load transactions from db");
 
-            // Create commitment cache for this block
-            let arc_commitment_cache = create_commitment_cache_for_block(
+            // Create commitment snapshot for this block
+            let arc_commitment_snapshot = create_commitment_snapshot_for_block(
                 &block,
                 &commitment_txs,
-                &prev_commitment_cache,
+                &prev_commitment_snapshot,
                 &consensus_config,
                 &commitment_state_guard,
             );
 
-            // Update global commitment cache if not epoch block
+            // Update commitment snapshot with new commitments if it's not an epoch block
             if block.height % consensus_config.epoch.num_blocks_in_epoch != 0 {
                 for commitment_tx in &commitment_txs {
                     let is_staked_in_current_epoch =
                         commitment_state_guard.is_staked(commitment_tx.signer);
-                    commitment_cache.add_commitment(commitment_tx, is_staked_in_current_epoch);
+                    commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
                 }
             }
 
-            prev_commitment_cache = arc_commitment_cache.clone();
+            prev_commitment_snapshot = arc_commitment_snapshot.clone();
             block_tree_cache
                 .add_local_block(
                     &block,
                     ChainState::Validated(BlockState::ValidBlock),
-                    arc_commitment_cache,
+                    arc_commitment_snapshot,
                 )
                 .unwrap();
         }
@@ -1020,7 +1020,7 @@ impl BlockTreeCache {
         &mut self,
         hash: BlockHash,
         block: &IrysBlockHeader,
-        commitment_cache: Arc<CommitmentCache>,
+        commitment_snapshot: Arc<CommitmentSnapshot>,
         chain_state: ChainState,
     ) -> eyre::Result<()> {
         let prev_hash = block.previous_block_hash;
@@ -1061,7 +1061,7 @@ impl BlockTreeCache {
                 chain_state,
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
-                commitment_cache,
+                commitment_snapshot,
             },
         );
 
@@ -1081,7 +1081,7 @@ impl BlockTreeCache {
     pub fn add_peer_block(
         &mut self,
         block: &IrysBlockHeader,
-        commitment_cache: Arc<CommitmentCache>,
+        commitment_snapshot: Arc<CommitmentSnapshot>,
     ) -> eyre::Result<()> {
         let hash = block.block_hash;
 
@@ -1100,7 +1100,7 @@ impl BlockTreeCache {
         self.add_common(
             hash,
             block,
-            commitment_cache,
+            commitment_snapshot,
             ChainState::NotOnchain(BlockState::Unknown),
         )
     }
@@ -1118,11 +1118,12 @@ impl BlockTreeCache {
     /// # Parameters
     /// - Block must be locally produced (not received from peers)
     /// - Can specify any `ChainState` and `BlockState` regardless of actual validation status
+    /// - Commitment snapshot reference for the block
     pub fn add_local_block(
         &mut self,
         block: &IrysBlockHeader,
         chain_state: ChainState,
-        commitment_cache: Arc<CommitmentCache>,
+        commitment_snapshot: Arc<CommitmentSnapshot>,
     ) -> eyre::Result<()> {
         let hash = block.block_hash;
         let prev_hash = block.previous_block_hash;
@@ -1142,7 +1143,7 @@ impl BlockTreeCache {
             "Previous block not validated"
         );
 
-        self.add_common(hash, block, commitment_cache, chain_state)
+        self.add_common(hash, block, commitment_snapshot, chain_state)
     }
 
     /// Helper function to delete a single block without recursion
@@ -1419,7 +1420,7 @@ impl BlockTreeCache {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
-    pub fn canonical_commitment_cache(&self) -> Arc<CommitmentCache> {
+    pub fn canonical_commitment_snapshot(&self) -> Arc<CommitmentSnapshot> {
         let head_entry = self
             .longest_chain_cache
             .0
@@ -1428,17 +1429,17 @@ impl BlockTreeCache {
 
         self.blocks
             .get(&head_entry.block_hash)
-            .expect("commitment cache for block")
-            .commitment_cache
+            .expect("commitment snapshot for block")
+            .commitment_snapshot
             .clone()
     }
 
-    pub fn get_commitment_cache(
+    pub fn get_commitment_snapshot(
         &self,
         block_hash: &BlockHash,
-    ) -> eyre::Result<Arc<CommitmentCache>> {
+    ) -> eyre::Result<Arc<CommitmentSnapshot>> {
         match self.blocks.get(block_hash) {
-            Some(entry) => Ok(entry.commitment_cache.clone()),
+            Some(entry) => Ok(entry.commitment_snapshot.clone()),
             None => Err(eyre::eyre!("Block not found: {}", block_hash)),
         }
     }
@@ -1731,46 +1732,47 @@ pub async fn get_block(
     Ok(res)
 }
 
-/// Creates a new commitment cache for the given block based on commitment transactions
-/// and the previous cache state.
+/// Creates a new commitment snapshot for the given block based on commitment transactions
+/// and the previous commitment snapshot.
 ///
 /// ## Behavior
-/// - Returns a fresh empty cache if this is an epoch block (height divisible by num_blocks_in_epoch)
-/// - Returns a clone of the previous cache if no commitment transactions are present in the new block
-/// - Otherwise, creates a new cache by adding all commitment transactions to a copy of the previous cache
+/// - Returns a fresh empty snapshot if this is an epoch block (height divisible by num_blocks_in_epoch)
+/// - Returns a clone of the previous snapshot if no commitment transactions are present in the new block
+/// - Otherwise, creates a new commitment snapshot by adding all commitment transactions to a copy of the
+/// previous snapshot
 ///
 /// ## Arguments
-/// * `block` - The block header to create a commitment cache for
+/// * `block` - The block header to create a commitment snapshot for
 /// * `commitment_txs` - Slice of commitment transactions to process for this block (should match txids in the block)
-/// * `prev_commitment_cache` - The commitment cache from the previous block
+/// * `prev_commitment_snapshot` - The commitment snapshot from the previous block
 /// * `consensus_config` - Configuration containing epoch settings
 /// * `commitment_state_guard` - Read guard for checking staking status of transaction signers
 ///
 /// # Returns
-/// Arc-wrapped commitment cache inner structure for the new block
-fn create_commitment_cache_for_block(
+/// Arc-wrapped commitment snapshot for the new block
+fn create_commitment_snapshot_for_block(
     block: &IrysBlockHeader,
     commitment_txs: &[CommitmentTransaction],
-    prev_commitment_cache: &Arc<CommitmentCache>,
+    prev_commitment_snapshot: &Arc<CommitmentSnapshot>,
     consensus_config: &ConsensusConfig,
     commitment_state_guard: &CommitmentStateReadGuard,
-) -> Arc<CommitmentCache> {
+) -> Arc<CommitmentSnapshot> {
     let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
-        return Arc::new(CommitmentCache::default());
+        return Arc::new(CommitmentSnapshot::default());
     }
 
     if commitment_txs.is_empty() {
-        return prev_commitment_cache.clone();
+        return prev_commitment_snapshot.clone();
     }
 
-    let mut new_commitment_cache = (**prev_commitment_cache).clone();
+    let mut new_commitment_snapshot = (**prev_commitment_snapshot).clone();
     for commitment_tx in commitment_txs {
         let is_staked_in_current_epoch = commitment_state_guard.is_staked(commitment_tx.signer);
-        new_commitment_cache.add_commitment(commitment_tx, is_staked_in_current_epoch);
+        new_commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
     }
-    Arc::new(new_commitment_cache)
+    Arc::new(new_commitment_snapshot)
 }
 
 /// Loads commitment transactions from the database for the given block's commitment ledger transaction IDs.
@@ -1807,7 +1809,7 @@ mod tests {
         let b1 = random_block(U256::from(0));
 
         // For the purposes of these tests, the block cache will not track transaction headers
-        let comm_cache = Arc::new(CommitmentCache::default());
+        let comm_cache = Arc::new(CommitmentSnapshot::default());
 
         // Initialize block tree cache from `b1`
         let mut cache = BlockTreeCache::new(&b1);

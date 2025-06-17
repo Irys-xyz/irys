@@ -1,6 +1,6 @@
 use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
 use crate::services::ServiceSenders;
-use crate::{CommitmentCacheStatus, CommitmentStateReadGuard};
+use crate::{CommitmentSnapshotStatus, CommitmentStateReadGuard};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -601,7 +601,7 @@ impl Inner {
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
-        if commitment_status == CommitmentCacheStatus::Accepted {
+        if commitment_status == CommitmentSnapshotStatus::Accepted {
             // Validate tx signature
             if let Err(e) = self.validate_signature(&commitment_tx).await {
                 tracing::error!(
@@ -659,7 +659,7 @@ impl Inner {
                 .gossip_broadcast
                 .send(GossipData::CommitmentTransaction(commitment_tx.clone()))
                 .expect("Failed to send gossip data");
-        } else if commitment_status == CommitmentCacheStatus::Unstaked {
+        } else if commitment_status == CommitmentSnapshotStatus::Unstaked {
             // For unstaked pledges, we cache them in a 2-level LRU structure:
             // Level 1: Keyed by signer address (allows tracking multiple addresses)
             // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
@@ -784,7 +784,7 @@ impl Inner {
         // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
         // 6. Similar work with commitment transactions (stake and pledge)
-        //    - This may require adding some features to the commitment_cache so that stake/pledge tx can be rolled back and new ones applied
+        //    - This may require adding some features to the commitment_snapshot so that stake/pledge tx can be rolled back and new ones applied
 
         tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
 
@@ -1200,7 +1200,7 @@ impl Inner {
         );
 
         // TODO: This approach should be applied to storage TX and commitment TX should instead
-        // be checked for prior inclusion using the Commitment State and current Commitment Cache
+        // be checked for prior inclusion using the Commitment State and current Commitment Snapshot
         for entry in canonical {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
@@ -1782,7 +1782,7 @@ impl Inner {
     async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
-    ) -> CommitmentCacheStatus {
+    ) -> CommitmentSnapshotStatus {
         let mempool_state = &self.mempool_state;
         // Check if already staked in the blockchain
         let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
@@ -1791,28 +1791,28 @@ impl Inner {
         // Only pledges require special validation when not already staked
         let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
         if !is_pledge || is_staked {
-            return CommitmentCacheStatus::Accepted;
+            return CommitmentSnapshotStatus::Accepted;
         }
 
         // For unstaked pledges, validate against cache and pending transactions
-        let commitment_cache = self
+        let commitment_snapshot = self
             .block_tree_read_guard
             .read()
-            .canonical_commitment_cache();
+            .canonical_commitment_snapshot();
 
-        let cache_status = commitment_cache.get_commitment_status(commitment_tx);
+        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx);
 
         // Reject unsupported commitment types
-        if matches!(cache_status, CommitmentCacheStatus::Unsupported) {
+        if matches!(cache_status, CommitmentSnapshotStatus::Unsupported) {
             warn!(
                 "Commitment is unsupported: {}",
                 commitment_tx.id.0.to_base58()
             );
-            return CommitmentCacheStatus::Unsupported;
+            return CommitmentSnapshotStatus::Unsupported;
         }
 
         // For unstaked addresses, check for pending stake transactions
-        if matches!(cache_status, CommitmentCacheStatus::Unstaked) {
+        if matches!(cache_status, CommitmentSnapshotStatus::Unstaked) {
             let mempool_state_guard = mempool_state.read().await;
             // Get pending transactions for this address
             if let Some(pending) = mempool_state_guard
@@ -1824,7 +1824,7 @@ impl Inner {
                     .iter()
                     .any(|c| c.commitment_type == CommitmentType::Stake)
                 {
-                    return CommitmentCacheStatus::Accepted;
+                    return CommitmentSnapshotStatus::Accepted;
                 }
             }
 
@@ -1833,11 +1833,11 @@ impl Inner {
                 "Pledge Commitment is unstaked: {}",
                 commitment_tx.id.0.to_base58()
             );
-            return CommitmentCacheStatus::Unstaked;
+            return CommitmentSnapshotStatus::Unstaked;
         }
 
         // All other cases are valid
-        CommitmentCacheStatus::Accepted
+        CommitmentSnapshotStatus::Accepted
     }
 
     // Helper to validate anchor

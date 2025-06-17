@@ -840,7 +840,7 @@ mod price_cache_context {
 mod tests {
     use super::*;
     use crate::block_tree_service::{get_canonical_chain, BlockTreeCache, ChainState, ReorgEvent};
-    use crate::CommitmentCache;
+    use crate::CommitmentSnapshot;
     use irys_types::{
         block_height_to_use_for_price, storage_pricing::TOKEN_SCALE, ConsensusConfig,
         ConsensusOptions, EmaConfig, NodeConfig, H256,
@@ -917,7 +917,7 @@ mod tests {
                 .add_common(
                     block.block_hash,
                     block,
-                    Arc::new(CommitmentCache::default()),
+                    Arc::new(CommitmentSnapshot::default()),
                     state.clone(),
                 )
                 .unwrap();
@@ -1152,7 +1152,7 @@ mod tests {
                 tree.add_common(
                     header.block_hash,
                     &header,
-                    Arc::new(CommitmentCache::default()),
+                    Arc::new(CommitmentSnapshot::default()),
                     ChainState::Validated(crate::block_tree_service::BlockState::ValidBlock),
                 )
                 .unwrap();
@@ -1581,7 +1581,7 @@ mod tests {
                 tree.add_common(
                     block.block_hash,
                     &block,
-                    Arc::new(CommitmentCache::default()),
+                    Arc::new(CommitmentSnapshot::default()),
                     ChainState::Onchain,
                 )
                 .unwrap();
