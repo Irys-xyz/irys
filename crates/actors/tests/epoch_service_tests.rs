@@ -1,25 +1,18 @@
-use actix::{Actor, Context, Handler};
-use base58::ToBase58;
+use actix::{Actor as _, Context, Handler as _};
+use base58::ToBase58 as _;
 use irys_actors::epoch_service::{
     EpochReplayData, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
 };
 
-use irys_config::submodules::StorageSubmodulesConfig;
-use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
-use irys_types::{
-    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
-};
-use irys_types::{Config, U256};
+use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
+use reth::payload::EthBuiltPayload;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
+use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
 use tracing::{debug, error, info};
 
-use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
-
-use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
-use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
-
+use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     epoch_service::{EpochServiceActor, NewEpochMessage},
@@ -29,12 +22,18 @@ use irys_actors::{
     packing::{PackingActor, PackingRequest},
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
+use irys_config::StorageSubmodulesConfig;
 use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::NodeConfig;
 use irys_types::PartitionChunkRange;
-use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
+use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
+use irys_types::{
+    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
+};
+use irys_types::{Config, U256};
+use irys_vdf::state::{VdfState, VdfStateReadonly};
 
 #[actix::test]
 async fn genesis_test() {
@@ -48,10 +47,14 @@ async fn genesis_test() {
         BlockIndex::new(&config.node_config).await.unwrap(),
     ));
 
-    let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
-    SystemRegistry::set(block_index_actor.clone());
+    let block_index_actor = BlockIndexService::new(block_index, &config.consensus).start();
+    SystemRegistry::set(block_index_actor);
 
-    let mut epoch_service = EpochServiceActor::new(&config);
+    let storage_submodules_config =
+        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let service_senders = ServiceSenders::new().0;
+    let mut epoch_service =
+        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
     let miner_address = config.node_config.miner_address();
 
     // Process genesis message directly instead of through actor system
@@ -210,11 +213,13 @@ async fn add_slots_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let commitments = add_genesis_commitments(&mut genesis_block, &config);
 
-    let mut epoch_service = EpochServiceActor::new(&config);
-    let mut ctx = Context::new();
-    let storage_submodule_config =
+    let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
-    let _ = epoch_service.initialize(genesis_block.clone(), commitments, storage_submodule_config);
+    let service_senders = ServiceSenders::new().0;
+    let mut epoch_service =
+        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
+    let mut ctx = Context::new();
+    let _ = epoch_service.initialize(genesis_block.clone(), commitments);
 
     let mut mock_header = IrysBlockHeader::new_mock_header();
     mock_header.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
@@ -333,14 +338,12 @@ async fn partition_expiration_and_repacking_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
 
     // Create epoch service
-    let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
-    let mut epoch_service = EpochServiceActor::new(&config);
+    let storage_submodules_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
+    let service_senders = ServiceSenders::new().0;
+    let mut epoch_service =
+        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
     let storage_module_infos = epoch_service
-        .initialize(
-            genesis_block.clone(),
-            commitments,
-            storage_module_config.clone(),
-        )
+        .initialize(genesis_block.clone(), commitments)
         .unwrap();
 
     let epoch_service_actor = epoch_service.start();
@@ -361,9 +364,7 @@ async fn partition_expiration_and_repacking_test() {
     let closure_arc = arc_rwlock.clone();
 
     let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |_msg, _ctx| {
-        let inner_result: eyre::Result<
-            Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>,
-        > = Ok(None);
+        let inner_result: eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> = Ok(None);
         Box::new(Some(inner_result)) as Box<dyn Any>
     }));
 
@@ -384,7 +385,7 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStepsReadGuard::new(Arc::new(RwLock::new(VdfState {
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
         capacity: 10,
         global_step: 0,
         seeds: VecDeque::new(),
@@ -406,6 +407,7 @@ async fn partition_expiration_and_repacking_test() {
             vdf_steps_guard.clone(),
             atomic_global_step_number.clone(),
             U256::zero(),
+            None,
         );
 
         let part_arbiter = Arbiter::new();
@@ -428,7 +430,7 @@ async fn partition_expiration_and_repacking_test() {
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
-            .map(|(hash, _)| hash.clone())
+            .map(|(hash, _)| *hash)
             .expect("There should be a partition assigned to submit ledger");
 
         partition_hash
@@ -460,7 +462,7 @@ async fn partition_expiration_and_repacking_test() {
             .read()
             .capacity_partitions
             .keys()
-            .map(|partition| partition.clone())
+            .copied()
             .collect();
 
         assert!(
@@ -559,7 +561,7 @@ async fn partition_expiration_and_repacking_test() {
 
         assert_eq!(sub_slots.len(), 3, "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!");
         assert!(
-            sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
+            sub_slots[0].is_expired && sub_slots[0].partitions.is_empty(),
             "Slot 0 should have expired and have no assigned partition!"
         );
 
@@ -580,21 +582,18 @@ async fn partition_expiration_and_repacking_test() {
 
         println!("{}", serde_json::to_string_pretty(&sub_slots).unwrap());
 
-        let publish_partition = pub_slots[0]
+        let publish_partition = *pub_slots[0]
             .partitions
-            .get(0)
-            .expect("publish ledger slot 0 should have a partition assigned")
-            .clone();
-        let submit_partition = sub_slots[1]
+            .first()
+            .expect("publish ledger slot 0 should have a partition assigned");
+        let submit_partition = *sub_slots[1]
             .partitions
-            .get(0)
-            .expect("submit ledger slot 1 should have a partition assigned")
-            .clone();
-        let submit_partition2 = sub_slots[2]
+            .first()
+            .expect("submit ledger slot 1 should have a partition assigned");
+        let submit_partition2 = *sub_slots[2]
             .partitions
-            .get(0)
-            .expect("submit ledger slot 2 should have a partition assigned")
-            .clone();
+            .first()
+            .expect("submit ledger slot 2 should have a partition assigned");
 
         (publish_partition, submit_partition, submit_partition2)
     };
@@ -705,7 +704,11 @@ async fn epoch_blocks_reinitialization_test() {
     let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
     SystemRegistry::set(block_index_actor.clone());
 
-    let mut epoch_service = EpochServiceActor::new(&config);
+    let storage_submodules_config =
+        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let service_senders = ServiceSenders::new().0;
+    let mut epoch_service =
+        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
 
     // Process genesis message directly instead of through actor system
     // This allows us to inspect the actor's state after processing
@@ -717,14 +720,9 @@ async fn epoch_blocks_reinitialization_test() {
     let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
 
     // Get the genesis storage modules and their assigned partitions
-    let storage_module_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+
     let storage_module_infos = epoch_service
-        .initialize(
-            genesis_block.clone(),
-            commitments.clone(),
-            storage_module_config.clone(),
-        )
+        .initialize(genesis_block.clone(), commitments.clone())
         .unwrap();
     debug!("{:#?}", storage_module_infos);
 
@@ -765,10 +763,6 @@ async fn epoch_blocks_reinitialization_test() {
     // Capacity +---+
     //          |sm2|
     //          +-+-+
-
-    let ledgers = epoch_service.ledgers.read().unwrap();
-    debug!("{:#?}", ledgers);
-    drop(ledgers);
 
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
@@ -847,20 +841,22 @@ async fn epoch_blocks_reinitialization_test() {
         block_index_guard.read().num_blocks()
     );
 
+    let service_senders = ServiceSenders::new().0;
     // Get the genesis storage modules and their assigned partitions
-    let mut epoch_service = EpochServiceActor::new(&config);
+    let mut epoch_service =
+        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
     let storage_module_infos = epoch_service
-        .initialize(genesis_block, commitments, storage_module_config.clone())
+        .initialize(genesis_block, commitments)
         .unwrap();
 
     epoch_service
-        .replay_epoch_data(epoch_replay_data, storage_module_config.clone())
+        .replay_epoch_data(epoch_replay_data)
         .expect("to replay the epoch data");
 
     debug!("{:#?}", storage_module_infos);
 
     let new_sm_infos =
-        epoch_service.map_storage_modules_to_partition_assignments(storage_module_config);
+        epoch_service.map_storage_modules_to_partition_assignments(&storage_submodules_config);
 
     debug!("{:#?}", new_sm_infos);
 
@@ -878,6 +874,7 @@ async fn epoch_blocks_reinitialization_test() {
 
 #[actix::test]
 async fn partitions_assignment_determinism_test() {
+    //std::env::set_var("RUST_LOG", "debug");
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
@@ -911,9 +908,12 @@ async fn partitions_assignment_determinism_test() {
     let pledge_count = 20;
     let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
 
-    let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
-    let mut epoch_service = EpochServiceActor::new(&config);
-    let _ = epoch_service.initialize(genesis_block.clone(), commitments, storage_module_config);
+    let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
+    let service_senders = ServiceSenders::new().0;
+    let mut epoch_service =
+        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
+
+    let _ = epoch_service.initialize(genesis_block.clone(), commitments);
 
     let mut ctx = Context::new();
 

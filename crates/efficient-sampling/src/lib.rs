@@ -87,11 +87,7 @@ impl Ranges {
         }
         self.last_range_pos = self.num_recall_ranges_in_partition - 1;
 
-        let last_step_to_keep = if self.last_step_num >= NUMBER_OF_KEPT_LAST_STEPS {
-            self.last_step_num - NUMBER_OF_KEPT_LAST_STEPS
-        } else {
-            0
-        };
+        let last_step_to_keep = self.last_step_num.saturating_sub(NUMBER_OF_KEPT_LAST_STEPS);
         self.last_recall_ranges
             .retain(|k, _| *k > last_step_to_keep);
     }

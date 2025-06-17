@@ -5,10 +5,9 @@ use actix_web::{
     Result,
 };
 use base58::FromBase58 as _;
-use irys_database::database;
+use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
-use reth::{providers::BlockReader, revm::primitives::alloy_primitives::TxHash};
-use reth_db::Database;
+use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -23,7 +22,7 @@ pub async fn get_block(
 
     // all roads lead to block hash
     let block_hash: H256 = match tag_param {
-        BlockParam::Latest => state.block_tree.read().tip.clone(),
+        BlockParam::Latest => state.block_tree.read().tip,
         BlockParam::BlockHeight(height) => 'outer: {
             let in_block_tree = state
                 .block_tree
@@ -31,13 +30,16 @@ pub async fn get_block(
                 .get_canonical_chain()
                 .0
                 .iter()
-                .find_map(|(hash, hght, _, _)| match *hght == height {
-                    true => Some(hash),
-                    false => None,
+                .find_map(|e| {
+                    if e.height == height {
+                        Some(&e.block_hash)
+                    } else {
+                        None
+                    }
                 })
-                .cloned();
+                .copied();
             if let Some(hash) = in_block_tree {
-                break 'outer hash.clone();
+                break 'outer hash;
             }
             state
                 .block_index
@@ -47,7 +49,7 @@ pub async fn get_block(
                     id: path.to_string(),
                     err: String::from("Invalid block height"),
                 })
-                .map(|b| (*b).block_hash)?
+                .map(|b| b.block_hash)?
         }
         BlockParam::Finalized | BlockParam::Pending => {
             return Err(ApiError::Internal {
@@ -96,13 +98,13 @@ fn get_block_by_hash(
         .body
         .transactions
         .iter()
-        .map(|tx| tx.hash())
+        .map(|tx| *tx.hash())
         .collect::<Vec<TxHash>>();
 
     let cbh = CombinedBlockHeader {
         irys: irys_header,
         execution: ExecutionHeader {
-            header: reth_block.header.clone(),
+            header: reth_block.header,
             transactions: exec_txs,
         },
     };
@@ -124,15 +126,15 @@ impl FromStr for BlockParam {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "latest" => Ok(BlockParam::Latest),
-            "pending" => Ok(BlockParam::Pending),
-            "finalized" => Ok(BlockParam::Finalized),
+            "latest" => Ok(Self::Latest),
+            "pending" => Ok(Self::Pending),
+            "finalized" => Ok(Self::Finalized),
             _ => {
                 if let Ok(block_height) = s.parse::<u64>() {
-                    return Ok(BlockParam::BlockHeight(block_height));
+                    return Ok(Self::BlockHeight(block_height));
                 }
                 match s.from_base58() {
-                    Ok(v) => Ok(BlockParam::Hash(H256::from_slice(v.as_slice()))),
+                    Ok(v) => Ok(Self::Hash(H256::from_slice(v.as_slice()))),
                     Err(_) => Err("Invalid block tag parameter".to_string()),
                 }
             }

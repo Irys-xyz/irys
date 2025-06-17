@@ -1,7 +1,7 @@
 use crate::{partition::PartitionHash, ChunkDataPath, H256List, IrysBlockHeader, TxPath, H256};
 use actix::Message;
 use alloy_primitives::Address;
-use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
+use reth::payload::EthBuiltPayload;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ impl Seed {
 }
 
 #[derive(Message, Debug, Clone, PartialEq, Default)]
-#[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]
+#[rtype(result = "Option<(Arc<IrysBlockHeader>,EthBuiltPayload)>")]
 pub struct SolutionContext {
     pub partition_hash: PartitionHash,
     pub chunk_offset: u32,

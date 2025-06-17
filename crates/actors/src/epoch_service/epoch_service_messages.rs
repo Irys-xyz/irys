@@ -1,6 +1,6 @@
 use super::{CommitmentState, EpochServiceActor, EpochServiceError, PartitionAssignments};
 use crate::services::Stop;
-use actix::{ActorContext, Handler, Message, MessageResponse};
+use actix::{ActorContext as _, Handler, Message, MessageResponse};
 use irys_database::Ledgers;
 use irys_primitives::CommitmentStatus;
 use irys_types::{
@@ -170,6 +170,26 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
     ) -> Self::Result {
         let pa = self.partition_assignments.read().unwrap();
         pa.get_assignment(msg.0)
+    }
+}
+
+//==============================================================================
+// GetMinerPartitionAssignments
+//------------------------------------------------------------------------------
+/// Retrieve all partition assignments for a given mining address
+#[derive(Message, Debug)]
+#[rtype(result = "Vec<PartitionAssignment>")]
+pub struct GetMinerPartitionAssignmentsMessage(pub Address);
+
+impl Handler<GetMinerPartitionAssignmentsMessage> for EpochServiceActor {
+    type Result = Vec<PartitionAssignment>;
+    fn handle(
+        &mut self,
+        msg: GetMinerPartitionAssignmentsMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        let miner_address = msg.0;
+        self.get_partition_assignments(miner_address)
     }
 }
 

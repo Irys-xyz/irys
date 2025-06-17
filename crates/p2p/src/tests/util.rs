@@ -1,16 +1,17 @@
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
-use crate::{GossipService, ServiceHandleWithShutdownSignal};
+use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade,
+    mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
+};
 use irys_api_client::ApiClient;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -35,12 +36,12 @@ use tracing::{debug, warn};
 pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub internal_message_bus: mpsc::Sender<GossipData>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipData>,
 }
 
 impl MempoolStub {
     #[must_use]
-    pub(crate) fn new(internal_message_bus: mpsc::Sender<GossipData>) -> Self {
+    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipData>) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),
@@ -51,7 +52,7 @@ impl MempoolStub {
 
 #[async_trait]
 impl MempoolFacade for MempoolStub {
-    async fn handle_data_transaction(
+    async fn handle_data_transaction_ingress(
         &self,
         tx_header: IrysTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
@@ -75,21 +76,20 @@ impl MempoolFacade for MempoolStub {
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
                 .send(GossipData::Transaction(tx_header))
-                .await
                 .expect("to send transaction");
         });
 
         Ok(())
     }
 
-    async fn handle_commitment_transaction(
+    async fn handle_commitment_transaction_ingress(
         &self,
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
-    async fn handle_chunk(
+    async fn handle_chunk_ingress(
         &self,
         chunk: UnpackedChunk,
     ) -> std::result::Result<(), ChunkIngressError> {
@@ -103,14 +103,13 @@ impl MempoolFacade for MempoolStub {
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
                 .send(GossipData::Chunk(chunk))
-                .await
                 .expect("to send chunk");
         });
 
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> std::result::Result<bool, TxIngressError> {
+    async fn is_known_transaction(&self, tx_id: H256) -> std::result::Result<bool, TxReadError> {
         let exists = self
             .txs
             .read()
@@ -124,7 +123,7 @@ impl MempoolFacade for MempoolStub {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
-    pub internal_message_bus: mpsc::Sender<GossipData>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipData>,
 }
 
 #[async_trait]
@@ -141,7 +140,6 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
         tokio::runtime::Handle::current().spawn(async move {
             sender
                 .send(GossipData::Block(block))
-                .await
                 .expect("to send block");
         });
 
@@ -264,15 +262,11 @@ pub(crate) struct GossipServiceTestFixture {
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub api_client_stub: ApiClientStub,
     // Tets need the task manager to be stored somewhere
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
-}
-
-impl Default for GossipServiceTestFixture {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub block_status_provider: BlockStatusProvider,
+    pub config: Config,
 }
 
 #[derive(Debug, Clone)]
@@ -294,10 +288,12 @@ impl GossipServiceTestFixture {
     /// # Panics
     /// Can panic
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
-        let config = NodeConfig::testnet().into();
+        let mut node_config = NodeConfig::testnet();
+        node_config.base_directory = temp_dir.path().to_path_buf();
+        let config = Config::new(node_config);
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
@@ -314,7 +310,7 @@ impl GossipServiceTestFixture {
         );
         let peer_list = peer_service.start();
 
-        let (gossip_sender, _rx) = mpsc::channel(100);
+        let (gossip_sender, _rx) = mpsc::unbounded_channel();
 
         let mempool_stub = MempoolStub::new(gossip_sender.clone());
         let mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -327,6 +323,8 @@ impl GossipServiceTestFixture {
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
         let tokio_runtime = tokio::runtime::Handle::current();
+
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
 
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
@@ -347,16 +345,21 @@ impl GossipServiceTestFixture {
             api_client_stub: ApiClientStub::new(),
             task_manager,
             task_executor,
+            block_status_provider: block_status_provider_mock,
+            config,
         }
     }
 
     /// # Panics
     /// Can panic
-    pub(crate) async fn run_service(
+    pub(crate) fn run_service(
         &mut self,
-        catch_up: bool,
-    ) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
-        let (gossip_service, internal_message_bus) = GossipService::new(self.mining_address);
+    ) -> (
+        ServiceHandleWithShutdownSignal,
+        mpsc::UnboundedSender<GossipData>,
+    ) {
+        let (internal_message_bus, rx) = tokio::sync::mpsc::unbounded_channel::<GossipData>();
+        let gossip_service = P2PService::new(self.mining_address, rx);
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()
@@ -375,20 +378,19 @@ impl GossipServiceTestFixture {
             internal_message_bus: internal_message_bus.clone(),
         };
 
-        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
+        let peer_list = self.peer_list.clone();
 
+        gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
                 mempool_stub,
                 block_discovery_stub,
                 self.api_client_stub.clone(),
                 &self.task_executor,
-                self.peer_list.clone().into(),
+                peer_list,
                 self.db.clone(),
-                vdf_tx,
                 gossip_listener,
-                catch_up,
-                0,
+                self.block_status_provider.clone(),
             )
             .expect("failed to run gossip service");
 
@@ -562,7 +564,7 @@ impl FakeGossipServer {
         let server = HttpServer::new(move || {
             let handler = handler.clone();
             App::new()
-                .app_data(web::Data::new(handler.clone()))
+                .app_data(web::Data::new(handler))
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
                 .default_service(web::to(|| async {
@@ -578,7 +580,7 @@ impl FakeGossipServer {
         .bind(address)
         .expect("to bind");
 
-        let addr = server.addrs()[0].clone();
+        let addr = server.addrs()[0];
         let server = server.run();
         (server, addr)
     }

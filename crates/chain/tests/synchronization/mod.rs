@@ -1,14 +1,12 @@
+use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
-use base58::ToBase58;
+use alloy_genesis::GenesisAccount;
+use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
-use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::IrysTransactionHeader;
 use irys_types::{irys::IrysSigner, NodeConfig};
-
-use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
-use reth::rpc::eth::EthApiServer;
-use reth_primitives::GenesisAccount;
+use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -34,10 +32,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -116,9 +111,9 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let latest_block_before_restart = {
-        let context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
-
-        let latest = context
+        let latest = node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()
@@ -138,17 +133,18 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     info!("getting reth node context");
     let (latest_block_right_after_restart, earliest_block) = {
-        let context =
-            RethNodeContext::new(restarted_node.node_ctx.reth_handle.clone().into()).await?;
-
-        let latest = context
+        let latest = restarted_node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await?;
 
-        let earliest = context
+        let earliest = restarted_node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()
@@ -162,10 +158,9 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     mine_block(&restarted_node.node_ctx).await?;
 
     let next_block = {
-        let context =
-            RethNodeContext::new(restarted_node.node_ctx.reth_handle.clone().into()).await?;
-
-        let latest = context
+        let latest = restarted_node
+            .node_ctx
+            .reth_node_adapter
             .rpc
             .inner
             .eth_api()
@@ -199,7 +194,11 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         earliest_block.header.hash,
         latest_block_before_restart.header.parent_hash
     );
-    // Check that the header hash is the same
+    // Check that the header number & hash is the same
+    assert_eq!(
+        latest_block_before_restart.header.number,
+        latest_block_right_after_restart.header.number
+    );
     assert_eq!(
         latest_block_before_restart.header.hash,
         latest_block_right_after_restart.header.hash

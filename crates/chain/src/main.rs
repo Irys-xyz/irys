@@ -1,100 +1,70 @@
-use irys_chain::IrysNode;
-use irys_types::Config;
-use irys_types::{NodeConfig, NodeMode};
-use reth_primitives::GenesisAccount;
-use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
-use std::path::PathBuf;
-use tracing::{debug, info, warn};
+use irys_chain::{utils::load_config, IrysNode};
+use tracing::info;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt, util::SubscriberInitExt as _, EnvFilter, Layer, Registry,
+    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
 };
 
-#[tokio::main(flavor = "current_thread")]
+#[actix_web::main]
 async fn main() -> eyre::Result<()> {
     // init logging
     init_tracing().expect("initializing tracing should work");
     color_eyre::install().expect("color eyre could not be installed");
 
     // load the config
-    let config_path = std::env::var("CONFIG")
-        .map(|s| s.parse::<PathBuf>().expect("file path to be valid"))
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .expect("Unable to determine working dir, aborting")
-                .join("config.toml")
-        });
+    let config = load_config()?;
 
-    let mut config = std::fs::read_to_string(&config_path)
-        .map(|config_file| {
-            debug!("Loading config from {:?}", &config_path);
-            toml::from_str::<NodeConfig>(&config_file).expect("invalid config file")
-        })
-        .unwrap_or_else(|err| {
-            warn!(
-                ?err,
-                "config file not provided, defaulting to testnet config"
-            );
-            NodeConfig::testnet()
-        });
-    let is_genesis = std::env::var("GENESIS").map(|_| true).unwrap_or(false);
-    if is_genesis {
-        config.mode = NodeMode::Genesis;
-    } else {
-        config.mode = NodeMode::PeerSync;
-    }
-
-    // !!!TESTNET ONLY!!!
-    {
-        debug!("Loading accounts file");
-        let file = std::fs::File::open("genesis-accounts.json")?;
-        let reader = std::io::BufReader::with_capacity(10 * 1024 * 1024, file);
-        let accounts: Vec<(irys_types::Address, reth_primitives::Account)> =
-            serde_json::from_reader(reader)?;
-        debug!("extending accounts");
-        config
-            .consensus
-            .extend_genesis_accounts(accounts.iter().map(|(addr, acc)| {
-                let mapped_acc = reth_primitives::GenesisAccount {
-                    balance: acc.balance,
-                    nonce: None,
-                    ..Default::default()
-                };
-                (*addr, mapped_acc)
-            }));
-        debug!("Finished loading accounts");
-        config.consensus.extend_genesis_accounts([
-            (
-                irys_types::Address::from_slice(
-                    hex::decode("6f8450cfdb7c9aeddab081a5cf43755201f69582")
-                        .unwrap()
-                        .as_slice(),
-                ),
-                reth_primitives::GenesisAccount {
-                    balance: alloy_core::primitives::U256::from(690000000000000000_u128),
-                    ..Default::default()
-                },
-            ),
-            (
-                irys_types::Address::from_slice(
-                    hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
-                        .unwrap()
-                        .as_slice(),
-                ),
-                reth_primitives::GenesisAccount {
-                    balance: alloy_core::primitives::U256::from(
-                        1_000_000_000_000_000_000_000_000_000_000_000_000_u128,
-                    ),
-                    ..Default::default()
-                },
-            ),
-        ]);
-    }
+    // // !!!TESTNET ONLY!!!
+    // {
+    //     debug!("Loading accounts file");
+    //     let file = std::fs::File::open("genesis-accounts.json")?;
+    //     let reader = std::io::BufReader::with_capacity(10 * 1024 * 1024, file);
+    //     let accounts: Vec<(irys_types::Address, reth_primitives::Account)> =
+    //         serde_json::from_reader(reader)?;
+    //     debug!("extending accounts");
+    //     config
+    //         .consensus
+    //         .extend_genesis_accounts(accounts.iter().map(|(addr, acc)| {
+    //             let mapped_acc = reth_primitives::GenesisAccount {
+    //                 balance: acc.balance,
+    //                 nonce: None,
+    //                 ..Default::default()
+    //             };
+    //             (*addr, mapped_acc)
+    //         }));
+    //     debug!("Finished loading accounts");
+    //     config.consensus.extend_genesis_accounts([
+    //         (
+    //             irys_types::Address::from_slice(
+    //                 hex::decode("6f8450cfdb7c9aeddab081a5cf43755201f69582")
+    //                     .unwrap()
+    //                     .as_slice(),
+    //             ),
+    //             reth_primitives::GenesisAccount {
+    //                 balance: alloy_core::primitives::U256::from(690000000000000000_u128),
+    //                 ..Default::default()
+    //             },
+    //         ),
+    //         (
+    //             irys_types::Address::from_slice(
+    //                 hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+    //                     .unwrap()
+    //                     .as_slice(),
+    //             ),
+    //             reth_primitives::GenesisAccount {
+    //                 balance: alloy_core::primitives::U256::from(
+    //                     1_000_000_000_000_000_000_000_000_000_000_000_000_u128,
+    //                 ),
+    //                 ..Default::default()
+    //             },
+    //         ),
+    //     ]);
+    // }
 
     // start the node
     info!("starting the node, mode: {:?}", &config.mode);
-    let handle = IrysNode::new(config).await?.start().await?;
-    handle.start_mining()?;
+    let handle = IrysNode::new(config)?.start().await?;
+    handle.start_mining().await?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down
     tokio::task::spawn_blocking(|| {

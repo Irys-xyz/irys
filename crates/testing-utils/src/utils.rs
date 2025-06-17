@@ -1,8 +1,24 @@
-use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
+use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _, time::Duration};
 pub use tempfile;
 use tempfile::TempDir;
 use tracing::debug;
-use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    fmt::{self, SubscriberBuilder},
+    util::SubscriberInitExt as _,
+    EnvFilter,
+};
+
+pub fn initialize_tracing() {
+    let _ = SubscriberBuilder::default()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
+        .finish()
+        .try_init();
+}
+
+pub async fn tokio_sleep(seconds: u64) {
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
+}
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.  
 /// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
@@ -12,6 +28,7 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     // TODO: expose tracing configuration
     let _ = SubscriberBuilder::default()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
         .finish()
         .try_init();
 
@@ -36,7 +53,7 @@ pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
     let builder = tempfile::Builder::new()
         .prefix(name.unwrap_or("irys-test-"))
         .rand_bytes(8)
-        .keep(keep)
+        .disable_cleanup(keep)
         .tempdir_in(tmp_path);
 
     let temp_dir = builder.expect("Not able to create a temporary directory.");

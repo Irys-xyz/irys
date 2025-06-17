@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use irys_database::{
-    cache_chunk, cached_chunk_by_chunk_offset, open_or_create_db,
+    cache_chunk, cached_chunk_by_chunk_offset,
+    db::IrysDatabaseExt as _,
+    open_or_create_db,
     submodule::{
         get_data_size_by_data_root, get_full_tx_path, get_path_hashes_by_offset,
         get_start_offsets_by_data_root,
@@ -18,7 +20,7 @@ use irys_types::{
     UnpackedChunk, H256,
 };
 use openssl::sha;
-use reth_db::Database;
+use reth_db::Database as _;
 use tracing::info;
 
 #[test_log::test(test)]
@@ -37,7 +39,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         entropy_packing_iterations: 1,
         ..node_config.consensus_config()
     });
-    node_config.base_directory = base_path.clone();
+    node_config.base_directory = base_path;
     let config = Config::new(node_config);
 
     // Configure 3 storage modules that are assigned to the submit ledger in
@@ -237,10 +239,10 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_root = tx_headers[2].data_root;
     let offset = proofs[2].offset as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * config.consensus.chunk_size);
+        (offset + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
     let data_size = tx_headers[2].data_size;
     assert_eq!(bytes_in_tx, data_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1u64;
+    let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -289,9 +291,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_size = tx_headers[3].data_size;
     let offset = proofs[3].offset as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * config.consensus.chunk_size);
+        (offset + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1u64;
+    let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -348,7 +350,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let offset = proofs[4].offset as u64;
     let bytes_in_tx = (offset + 1) - ((*tx_ledger_range.end() + 1) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1u64;
+    let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_1_range,
@@ -419,11 +421,10 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             .try_into()
             .expect("Value exceeds u32::MAX");
 
-        let mut chunks_added = 0;
         // loop though the assigned partitions
         for storage_module in &storage_modules {
             let _ = db.view(|tx| {
-                for i in chunks_added..num_chunks {
+                for i in 0..num_chunks {
                     let tx_chunk_offset = TxChunkOffset::from(i);
                     // first make sure the ledger_offset falls within the bounds
                     // of the storage_module. Sometime txs contain ledger relative
@@ -453,12 +454,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                             panic!("{}", err);
                         }
                     }
-
                     ledger_offset += 1;
-                    chunks_added += 1;
                 }
             });
-
             //storage_module.print_pending_writes();
         }
     }

@@ -1,7 +1,8 @@
 use core::{future::Future, task::Poll, time::Duration};
-use eyre::Context;
+use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_database::{
+    db::IrysDatabaseExt as _,
     db_cache::DataRootLRUEntry,
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{
@@ -49,7 +50,7 @@ impl ChunkCacheService {
         config: Config,
     ) -> JoinHandle<()> {
         exec.spawn_critical_with_graceful_shutdown_signal("Cache Service", |shutdown| async move {
-            let cache_service = ChunkCacheService {
+            let cache_service = Self {
                 shutdown,
                 db,
                 config,

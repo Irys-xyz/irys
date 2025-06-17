@@ -1,29 +1,20 @@
-use crate::utils::{get_block_parent, get_chunk, mine_block, verify_published_chunk, IrysNodeTest};
+use crate::utils::{get_block_parent, mine_block, verify_published_chunk, IrysNodeTest};
 use crate::utils::{mine_blocks, post_chunk};
-use actix_web::{
-    middleware::Logger,
-    test::{self, call_service, TestRequest},
-    web::{self, JsonConfig},
-    App,
-};
+use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
 use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use reth_db::Database as _;
-use reth_primitives::GenesisAccount;
 use std::time::Duration;
-use tokio::time::sleep;
 use tracing::debug;
-use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let chunk_size = 32; // 32 byte chunks
     config.consensus.get_mut().chunk_size = chunk_size;
@@ -32,7 +23,8 @@ async fn heavy_double_root_data_promotion_test() {
     config.consensus.get_mut().num_partitions_per_slot = 1;
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
-    config.consensus.get_mut().chunk_migration_depth = 1; // Testnet / single node config
+    // Testnet / single node config
+    config.consensus.get_mut().chunk_migration_depth = 1;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
@@ -51,10 +43,7 @@ async fn heavy_double_root_data_promotion_test() {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -65,35 +54,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     let block1 = mine_block(&node.node_ctx).await.unwrap().unwrap();
 
-    // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
-    let app_state = ApiState {
-        ema_service: ema_tx,
-        reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node
-            .node_ctx
-            .reth_handle
-            .rpc_server_handle()
-            .http_url()
-            .unwrap(),
-        block_index: node.node_ctx.block_index_guard.clone(),
-        block_tree: node.node_ctx.block_tree_guard.clone(),
-        db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
-        peer_list: node.node_ctx.peer_list.clone(),
-        chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: config.into(),
-        sync_state: node.node_ctx.sync_state.clone(),
-    };
-
-    // Initialize the app
-    let app = test::init_service(
-        App::new()
-            .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
-            .app_data(web::Data::new(app_state))
-            .wrap(Logger::default())
-            .service(routes()),
-    )
-    .await;
+    let app = node.start_public_api().await;
 
     // Create a bunch of TX chunks
     let data_chunks = [
@@ -139,53 +100,13 @@ async fn heavy_double_root_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
-    let delay = Duration::from_secs(1);
-    for attempt in 1..20 {
-        // Do we have any unconfirmed tx?
-        let Some(tx) = unconfirmed_tx.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the tx header from the HTTP endpoint
-        let id: String = tx.id.as_bytes().to_base58();
-        let resp = call_service(
-            &app,
-            TestRequest::get()
-                .uri(&format!("/v1/tx/{}", id))
-                .to_request(),
-        )
-        .await;
-
-        if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(*tx, result);
-            info!("Transaction was retrieved ok after {} attempts", attempt);
-            unconfirmed_tx.remove(0);
-        }
-
-        mine_block(&node.node_ctx).await.unwrap();
-    }
-
+    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
-    assert_eq!(unconfirmed_tx.len(), 0);
+    assert!(result.is_ok());
 
     // ==============================
     // Post Tx chunks out of order
     // ------------------------------
-    let _tx_index = 2;
-
-    // // Last Tx, last chunk
-    // let chunk_index = 2;
-    // post_chunk(&app, &txs[tx_index], chunk_index, &data_chunks[tx_index]).await;
-
-    // // Last Tx, middle chunk
-    // let chunk_index = 1;
-    // post_chunk(&app, &txs[tx_index], chunk_index, &data_chunks[tx_index]).await;
-
-    // // Last Tx, first chunk
-    // let chunk_index = 0;
-    // post_chunk(&app, &txs[tx_index], chunk_index, &data_chunks[tx_index]).await;
 
     let tx_index = 1;
 
@@ -219,101 +140,30 @@ async fn heavy_double_root_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
-    let mut unconfirmed_promotions = vec![
-        // txs[2].header.id.as_bytes().to_base58(),
-        txs[0].header.id.as_bytes().to_base58(),
-    ];
-    println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
+    let unconfirmed_promotions = vec![txs[0].header.id];
+    let result = node
+        .wait_for_ingress_proofs(unconfirmed_promotions, 20)
+        .await;
+    assert!(result.is_ok());
 
-    for attempts in 1..20 {
-        // Do we have any unconfirmed promotions?
-        let Some(txid) = unconfirmed_promotions.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the transactions from the node endpoint
-        println!("Attempting... {}", txid);
-        let req = test::TestRequest::get()
-            .uri(&format!("/v1/tx/{}", &txid))
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-
-        if resp.status() == StatusCode::OK {
-            let tx_header: IrysTransactionHeader = test::read_body_json(resp).await;
-            info!("Transaction was retrieved ok after {} attempts", attempts);
-            if let Some(_proof) = tx_header.ingress_proofs {
-                assert_eq!(tx_header.id.as_bytes().to_base58(), *txid);
-                println!("Confirming... {}", tx_header.id.as_bytes().to_base58());
-                unconfirmed_promotions.remove(0);
-                println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-            }
-        }
-        mine_block(&node.node_ctx).await.unwrap();
-        sleep(delay).await;
-    }
-
-    assert_eq!(unconfirmed_promotions.len(), 0);
-
-    // wait for the first set of chunks chunk to appear in the publish ledger
-    for _attempts in 1..20 {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
-        {
-            println!("First set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-    }
+    // wait for the first set of chunks to appear in the publish ledger
+    // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
+    //        assert commented out to mimic prior (passing test) behaviour
+    let _result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
+    //assert!(result.is_ok());
 
     // wait for the second set of chunks to appear in the publish ledger
-    for _attempts in 1..20 {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
-        {
-            println!("Second set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-    }
+    // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
+    //        assert commented out to mimic prior (passing test) behaviour
+    let _result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
+    //assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
-    // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
-
-    let first_tx_index: usize;
-    let _next_tx_index: usize;
-
-    // if block_tx1.block_hash == block_tx2.block_hash {
-    //     // Extract the transaction order
-    //     let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     // let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[1];
-    //     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    //     // next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    //     println!("1:{}", block_tx1);
-    // } else if block_tx1.height > block_tx2.height {
-    //     let txid_1 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    //     println!("1:{}", block_tx2);
-    //     println!("2:{}", block_tx1);
-    // } else {
-    //     let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    //     println!("1:{}", block_tx1);
-    //     println!("2:{}", block_tx2);
-    // }
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
-    //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
+    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     println!("1:{}", block_tx1);
-    //     println!("2:{}", block_tx2);
 
     // ==============================
     // Verify chunk ordering in publish ledger storage module
@@ -359,10 +209,7 @@ async fn heavy_double_root_data_promotion_test() {
     debug!("P2 block {}", &blk.0.height);
 
     // ensure the ingress proof still exists
-    let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
-        .unwrap()
-        .unwrap();
+    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 1);
 
     // same chunks as tx1
@@ -373,7 +220,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
-    for (_i, chunks) in data_chunks.iter().enumerate() {
+    for chunks in data_chunks.iter() {
         let mut data: Vec<u8> = Vec::new();
         for chunk in chunks {
             data.extend_from_slice(chunk);
@@ -408,36 +255,9 @@ async fn heavy_double_root_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
-    let delay = Duration::from_secs(1);
-    for attempt in 1..20 {
-        // Do we have any unconfirmed tx?
-        let Some(tx) = unconfirmed_tx.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the tx header from the HTTP endpoint
-        let id: String = tx.id.as_bytes().to_base58();
-        let resp = call_service(
-            &app,
-            TestRequest::get()
-                .uri(&format!("/v1/tx/{}", id))
-                .to_request(),
-        )
-        .await;
-
-        if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(*tx, result);
-            info!("Transaction was retrieved ok after {} attempts", attempt);
-            unconfirmed_tx.remove(0);
-        }
-
-        mine_blocks(&node.node_ctx, 1).await.unwrap();
-    }
-
+    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
-    assert_eq!(unconfirmed_tx.len(), 0);
+    assert!(result.is_ok());
 
     // ==============================
     // Post Tx chunks out of order
@@ -462,63 +282,23 @@ async fn heavy_double_root_data_promotion_test() {
     // Verify ingress proofs
     // ------------------------------
     // Wait for the transactions to be promoted
-    let mut unconfirmed_promotions = vec![
-        // txs[2].header.id.as_bytes().to_base58(),
-        txs[0].header.id.as_bytes().to_base58(),
-    ];
-    println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-
-    for attempts in 1..20 {
-        // Do we have any unconfirmed promotions?
-        let Some(txid) = unconfirmed_promotions.first() else {
-            // if not exit the loop.
-            break;
-        };
-
-        // Attempt to retrieve the transactions from the node endpoint
-        println!("Attempting... {}", txid);
-        let req = test::TestRequest::get()
-            .uri(&format!("/v1/tx/{}", &txid))
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-
-        if resp.status() == StatusCode::OK {
-            let tx_header: IrysTransactionHeader = test::read_body_json(resp).await;
-            info!("Transaction was retrieved ok after {} attempts", attempts);
-            if let Some(_proof) = tx_header.ingress_proofs {
-                assert_eq!(tx_header.id.as_bytes().to_base58(), *txid);
-                println!("Confirming... {}", tx_header.id.as_bytes().to_base58());
-                unconfirmed_promotions.remove(0);
-                println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
-            }
-        }
-        mine_blocks(&node.node_ctx, 1).await.unwrap();
-        sleep(delay).await;
-    }
-
-    assert_eq!(unconfirmed_promotions.len(), 0);
+    let unconfirmed_promotions = vec![txs[0].header.id];
+    let result = node
+        .wait_for_ingress_proofs(unconfirmed_promotions, 20)
+        .await;
+    assert!(result.is_ok());
 
     // wait for the second set of chunks to appear in the publish ledger
-    for _attempts in 1..20 {
-        if let Some(_packed_chunk) =
-            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
-        {
-            println!("Second set of chunks found!");
-            break;
-        }
-        sleep(delay).await;
-    }
+    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
+    assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
-    let first_tx_index: usize;
-
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
     println!("1:{}", block_tx1);
     //     println!("2:{}", block_tx2);
@@ -578,10 +358,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     mine_blocks(&node.node_ctx, 5).await.unwrap();
     // ensure the ingress proof is gone
-    let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
-        .unwrap()
-        .unwrap();
+    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
     assert_eq!(ingress_proofs.len(), 0);
 
     node.node_ctx.stop().await;

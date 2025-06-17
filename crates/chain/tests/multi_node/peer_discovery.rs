@@ -4,25 +4,18 @@ use std::{
 };
 
 use crate::utils::IrysNodeTest;
-use actix_web::{
-    middleware::Logger,
-    test::{self, call_service, read_body, TestRequest},
-    web::{self, JsonConfig},
-    App,
-};
+use actix_web::test::{call_service, read_body, TestRequest};
 use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
 use irys_types::{
     build_user_agent, irys::IrysSigner, NodeConfig, PeerAddress, PeerResponse, RethPeerInfo,
     VersionRequest,
 };
-use reth_primitives::GenesisAccount;
 use tracing::{debug, error};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     config.trusted_peers = vec![];
     config.consensus.get_mut().chunk_size = 32;
@@ -40,7 +33,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             ..Default::default()
         },
     )]);
-    let node = IrysNodeTest::new_genesis(config.clone()).await;
+    let node = IrysNodeTest::new_genesis(config.clone());
     let node = node.start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -48,36 +41,9 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     )
     .await?;
 
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+    node.node_ctx.start_mining().await.unwrap();
 
-    let app_state = ApiState {
-        ema_service: ema_tx,
-        reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node
-            .node_ctx
-            .reth_handle
-            .rpc_server_handle()
-            .http_url()
-            .unwrap(),
-        block_index: node.node_ctx.block_index_guard.clone(),
-        block_tree: node.node_ctx.block_tree_guard.clone(),
-        db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
-        peer_list: node.node_ctx.peer_list.clone(),
-        chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: config.clone().into(),
-        sync_state: node.node_ctx.sync_state.clone(),
-    };
-
-    // Initialize the app
-    let app = test::init_service(
-        App::new()
-            .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
-            .app_data(web::Data::new(app_state))
-            .wrap(Logger::default())
-            .service(routes()),
-    )
-    .await;
+    let app = node.start_public_api().await;
 
     // Invoke the peer list endpoint
     let req = TestRequest::get().uri("/v1/peer_list").to_request();
@@ -166,7 +132,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Verify the version response body contains the previously discovered peers
     match peer_response {
         PeerResponse::Accepted(accepted) => {
-            assert!(accepted.peers.len() >= 1, "Expected at least 1 peers");
+            assert!(!accepted.peers.is_empty(), "Expected at least 1 peers");
             debug!("Accepted peers: {:?}", accepted.peers);
             assert!(
                 accepted.peers.contains(&PeerAddress {

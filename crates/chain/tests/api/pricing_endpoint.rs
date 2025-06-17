@@ -1,14 +1,14 @@
 //! endpoint tests
 
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
-use actix_web::{http::header::ContentType, HttpMessage};
+use actix_web::{http::header::ContentType, HttpMessage as _};
 use irys_api_server::routes::price::PriceInfo;
 use irys_types::{DataLedger, U256};
 
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     // setup
-    let ctx = IrysNodeTest::default_async().await.start().await;
+    let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
         "http://127.0.0.1:{}",
         ctx.node_ctx.config.node_config.http.bind_port
@@ -62,7 +62,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
-    let ctx = IrysNodeTest::default_async().await.start().await;
+    let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
         "http://127.0.0.1:{}",
         ctx.node_ctx.config.node_config.http.bind_port
@@ -117,7 +117,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
-    let ctx = IrysNodeTest::default_async().await.start().await;
+    let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
         "http://127.0.0.1:{}",
         ctx.node_ctx.config.node_config.http.bind_port

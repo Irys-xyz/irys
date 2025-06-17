@@ -1,52 +1,66 @@
-use actix::MailboxError;
+use actix_http::Request;
+use actix_web::test::call_service;
+use actix_web::test::{self, TestRequest};
+use actix_web::App;
+use actix_web::{
+    body::BoxBody,
+    dev::{Service, ServiceResponse},
+    Error,
+};
+use alloy_eips::BlockId;
+use awc::{body::MessageBody, http::StatusCode};
+use base58::ToBase58 as _;
 use futures::future::select;
-use irys_actors::block_producer::SolutionFoundMessage;
-use irys_actors::block_tree_service::get_canonical_chain;
-use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
-use irys_actors::{block_validation, SetTestBlocksRemainingMessage};
-use irys_api_server::create_listener;
+use irys_actors::block_tree_service::ReorgEvent;
+use irys_actors::mempool_service::MempoolTxs;
+use irys_actors::GetMinerPartitionAssignmentsMessage;
+use irys_actors::{
+    block_producer::SolutionFoundMessage,
+    block_tree_service::get_canonical_chain,
+    block_validation,
+    mempool_service::{MempoolServiceMessage, TxIngressError},
+    packing::wait_for_packing,
+    SetTestBlocksRemainingMessage,
+};
+use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
-use irys_database::tx_header_by_txid;
+use irys_database::{
+    db::IrysDatabaseExt as _,
+    tables::{IngressProofs, IrysBlockHeaders},
+    tx_header_by_txid,
+};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
+use irys_primitives::CommitmentType;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
+use irys_types::partition::PartitionAssignment;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
-use irys_types::{Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
+use irys_types::{
+    Base64, CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
+    NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+};
+use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
-use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
-use sha2::{Digest, Sha256};
+use reth::payload::EthBuiltPayload;
+use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
+use sha2::{Digest as _, Sha256};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
-use tokio::time::sleep;
-use tracing::info;
-
-use std::collections::HashMap;
-
-use actix_web::{
-    dev::{Service, ServiceResponse},
-    test,
-};
-use awc::{body::MessageBody, http::StatusCode};
-use irys_database::tables::IrysBlockHeaders;
-use irys_types::{
-    Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
-    UnpackedChunk,
-};
-use reth_db::cursor::*;
-use reth_db::Database;
-use tracing::error;
+use tokio::{sync::oneshot::error::RecvError, time::sleep};
+use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
-    vdf_steps_guard: VdfStepsReadGuard,
+    vdf_steps_guard: VdfStateReadonly,
     config: &Config,
 ) -> SolutionContext {
     let max_retries = 20;
@@ -81,7 +95,7 @@ pub async fn capacity_chunk_solution(
         &mut salt,
         &mut seed,
         config.consensus.vdf.num_checkpoints_in_vdf_step,
-        config.consensus.vdf.sha_1s_difficulty,
+        config.consensus.vdf.num_iterations_per_checkpoint(),
         &mut checkpoints,
     );
 
@@ -106,7 +120,7 @@ pub async fn capacity_chunk_solution(
     );
 
     let max: irys_types::serialization::U256 = irys_types::serialization::U256::MAX;
-    let mut le_bytes = [0u8; 32];
+    let mut le_bytes = [0_u8; 32];
     max.to_little_endian(&mut le_bytes);
     let solution_hash = H256(le_bytes);
 
@@ -135,7 +149,7 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub async fn random_port() -> eyre::Result<u16> {
+pub fn random_port() -> eyre::Result<u16> {
     let listener = create_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
     //the assigned port will be random (decided by the OS)
     let port = listener
@@ -146,11 +160,14 @@ pub async fn random_port() -> eyre::Result<u16> {
 }
 
 // Reasons tx could fail to be added to mempool
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AddTxError {
+    #[error("Failed to create transaction")]
     CreateTx(eyre::Report),
+    #[error("Failed to add transaction to mempool")]
     TxIngress(TxIngressError),
-    Mailbox(MailboxError),
+    #[error("Failed to send transaction to mailbox")]
+    Mailbox(RecvError),
 }
 
 // TODO: add an "name" field for debug logging
@@ -161,27 +178,26 @@ pub struct IrysNodeTest<T = ()> {
 }
 
 impl IrysNodeTest<()> {
-    pub async fn default_async() -> Self {
+    pub fn default_async() -> Self {
         let config = NodeConfig::testnet();
-        Self::new_genesis(config).await
+        Self::new_genesis(config)
     }
 
     /// Start a new test node in peer-sync mode
-    pub async fn new(mut config: NodeConfig) -> Self {
+    pub fn new(mut config: NodeConfig) -> Self {
         config.mode = NodeMode::PeerSync;
-        Self::new_inner(config).await
+        Self::new_inner(config)
     }
 
     /// Start a new test node in genesis mode
-    pub async fn new_genesis(mut config: NodeConfig) -> Self {
+    pub fn new_genesis(mut config: NodeConfig) -> Self {
         config.mode = NodeMode::Genesis;
-        Self::new_inner(config).await
+        Self::new_inner(config)
     }
 
-    async fn new_inner(mut config: NodeConfig) -> Self {
+    fn new_inner(mut config: NodeConfig) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-
         Self {
             cfg: config,
             temp_dir,
@@ -190,7 +206,7 @@ impl IrysNodeTest<()> {
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
-        let node = IrysNode::new(self.cfg.clone()).await.unwrap();
+        let node = IrysNode::new(self.cfg.clone()).unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: self.cfg,
@@ -198,9 +214,157 @@ impl IrysNodeTest<()> {
             temp_dir: self.temp_dir,
         }
     }
+
+    pub async fn start_with_name(self, log_name: &str) -> IrysNodeTest<IrysNodeCtx> {
+        let span = debug_span!("NODE", name = %log_name);
+        let _enter = span.enter();
+        self.start().await
+    }
+
+    pub async fn start_and_wait_for_packing(
+        self,
+        log_name: &str,
+        seconds_to_wait: usize,
+    ) -> IrysNodeTest<IrysNodeCtx> {
+        let span = debug_span!("NODE", name = %log_name);
+        let _enter = span.enter();
+        let node = self.start().await;
+        node.wait_for_packing(seconds_to_wait).await;
+        node
+    }
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_peer(&self) -> NodeConfig {
+        let node_config = &self.node_ctx.config.node_config;
+        let peer_signer = IrysSigner::random_signer(&node_config.consensus_config());
+        self.testnet_peer_with_signer(&peer_signer)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
+        use irys_types::{PeerAddress, RethPeerInfo};
+
+        let node_config = &self.node_ctx.config.node_config;
+
+        if node_config.mode == NodeMode::PeerSync {
+            panic!("Can only create a peer from a genesis config");
+        }
+
+        // Initialize the peer with a random signer, copying the genesis config
+
+        let mut peer_config = node_config.clone();
+        peer_config.mining_key = peer_signer.signer.clone();
+        peer_config.reward_address = peer_signer.address();
+
+        // Make sure this peer does port randomization instead of copying the genesis ports
+        peer_config.http.bind_port = 0;
+        peer_config.http.public_port = 0;
+        peer_config.gossip.bind_port = 0;
+        peer_config.gossip.public_port = 0;
+
+        // Make sure to mark this config as a peer
+        peer_config.mode = NodeMode::PeerSync;
+
+        // Add the genesis node details as a trusted peer
+        peer_config.trusted_peers = vec![
+            (PeerAddress {
+                api: format!(
+                    "{}:{}",
+                    node_config.http.public_ip, node_config.http.public_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                gossip: format!(
+                    "{}:{}",
+                    node_config.http.bind_ip, node_config.http.bind_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                execution: RethPeerInfo::default(),
+            }),
+        ];
+        peer_config
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
+        let seconds_to_wait = 20;
+
+        // Create a new peer config using the provided signer
+        let peer_config = self.testnet_peer_with_signer(peer_signer);
+
+        // Start the peer node
+        let peer_node = IrysNodeTest::new(peer_config)
+            .start_with_name("PEER_WITH_ASSIGNMENTS")
+            .await;
+
+        // Get the latest block hash to use as anchor
+        let current_height = self.get_height().await;
+        let latest_block = self
+            .get_block_by_height(current_height)
+            .await
+            .expect("to get latest block");
+        let anchor = latest_block.block_hash;
+
+        // Post stake + pledge commitments to establish validator status
+        let stake_tx = peer_node.post_stake_commitment(anchor).await;
+        let pledge_tx = peer_node.post_pledge_commitment(anchor).await;
+
+        // Wait for commitment transactions to show up in this node's mempool
+        self.wait_for_mempool(stake_tx.id, seconds_to_wait)
+            .await
+            .expect("stake tx to be in mempool");
+        self.wait_for_mempool(pledge_tx.id, seconds_to_wait)
+            .await
+            .expect("pledge tx to be in mempool");
+
+        // Mine a block to get the commitments included
+        self.mine_block()
+            .await
+            .expect("to mine block with commitments");
+
+        // Get epoch configuration to calculate when next epoch round occurs
+        let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+        let current_height_after_commitment = self.get_height().await;
+
+        // Calculate how many blocks we need to mine to reach the next epoch
+        let blocks_until_next_epoch =
+            num_blocks_in_epoch - (current_height_after_commitment % num_blocks_in_epoch);
+
+        // Mine blocks until we reach the next epoch round
+        for _ in 0..blocks_until_next_epoch {
+            self.mine_block()
+                .await
+                .expect("to mine block towards next epoch");
+        }
+
+        let final_height = self.get_height().await;
+
+        // Wait for the peer to receive & process the epoch block
+        peer_node
+            .wait_until_height(final_height, seconds_to_wait)
+            .await
+            .expect("peer to sync to epoch height");
+
+        // Wait for packing to complete on the peer (this indicates partition assignments are active)
+        peer_node.wait_for_packing(seconds_to_wait).await;
+
+        // Verify that partition assignments were created
+        let peer_assignments = peer_node
+            .get_partition_assignments(peer_signer.address())
+            .await;
+
+        // Ensure at least one partition has been assigned
+        assert!(
+            !peer_assignments.is_empty(),
+            "Peer should have at least one partition assignment"
+        );
+
+        peer_node
+    }
+
     pub async fn wait_until_height_on_chain(
         &self,
         target_height: u64,
@@ -216,16 +380,52 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height after {} retries",
+                "Failed to reach target height of {} after {} retries",
+                target_height,
                 retries
             ))
         } else {
             info!(
-                "got block after {} seconds and {} retries",
-                max_seconds, &retries
+                "got block at height: {} after {} seconds and {} retries",
+                target_height, max_seconds, &retries
             );
             Ok(())
         }
+    }
+
+    pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
+        wait_for_packing(
+            self.node_ctx.actor_addresses.packing.clone(),
+            Some(Duration::from_secs(seconds_to_wait as u64)),
+        )
+        .await
+        .expect("for packing to complete in the wait period");
+    }
+
+    pub async fn start_mining(&self) {
+        if self.node_ctx.start_mining().await.is_err() {
+            panic!("Expected to start mining")
+        }
+    }
+
+    pub async fn stop_mining(&self) {
+        if self.node_ctx.stop_mining().await.is_err() {
+            panic!("Expected to stop mining")
+        }
+    }
+
+    pub async fn start_public_api(
+        &self,
+    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
+        let api_state = self.node_ctx.get_api_state();
+
+        actix_web::test::init_service(
+            App::new()
+                // Remove the logger middleware
+                .app_data(actix_web::web::Data::new(api_state))
+                .service(routes()),
+        )
+        .await
     }
 
     pub async fn wait_until_height(
@@ -242,7 +442,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .last()
             .unwrap()
-            .1
+            .height
             < target_height
             && retries < max_retries
         {
@@ -251,16 +451,135 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height after {} retries",
+                "Failed to reach target height {} after {} retries",
+                target_height,
                 retries
             ))
         } else {
             info!(
-                "got block after {} seconds and {} retries",
-                max_seconds, &retries
+                "reached height {} after {} retries",
+                target_height, &retries
             );
             Ok(())
         }
+    }
+
+    pub async fn wait_for_chunk(
+        &self,
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = ServiceResponse,
+            Error = actix_web::Error,
+        >,
+        ledger: DataLedger,
+        offset: i32,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        let delay = Duration::from_secs(1);
+        for attempt in 1..seconds {
+            if let Some(_packed_chunk) =
+                get_chunk(&app, ledger, LedgerChunkOffset::from(offset)).await
+            {
+                info!("chunk found {} attempts", attempt);
+                return Ok(());
+            }
+            sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed waiting for chunk to arrive. Waited {} seconds",
+            seconds,
+        ))
+    }
+
+    // FIXME: This fn does not guarantee the tx is "confirmed"
+    //        Essentially there is nothing in the fn that confirms the tx is in a block, simply that it is in the mdbx
+    pub async fn wait_for_confirmed_txs(
+        &self,
+        mut unconfirmed_txs: Vec<IrysTransactionHeader>,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        let delay = Duration::from_secs(1);
+        for attempt in 1..seconds {
+            // Do we have any unconfirmed tx?
+            let Some(tx) = unconfirmed_txs.first() else {
+                // if not return we are done
+                return Ok(());
+            };
+
+            let ro_tx = self
+                .node_ctx
+                .db
+                .as_ref()
+                .tx()
+                .map_err(|e| {
+                    tracing::error!("Failed to create mdbx transaction: {}", e);
+                })
+                .unwrap();
+
+            // Retrieve the transaction header from database
+            if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                assert_eq!(*tx, header);
+                info!("Transaction was retrieved ok after {} attempts", attempt);
+                unconfirmed_txs.pop();
+            };
+            drop(ro_tx);
+            mine_blocks(&self.node_ctx, 1).await.unwrap();
+            sleep(delay).await;
+        }
+        Err(eyre::eyre!(
+            "Failed waiting for confirmed txs. Waited {} seconds",
+            seconds,
+        ))
+    }
+
+    pub async fn wait_for_ingress_proofs(
+        &self,
+        mut unconfirmed_promotions: Vec<H256>,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        tracing::info!(
+            "waiting up to {} seconds for unconfirmed_promotions: {:?}",
+            seconds,
+            unconfirmed_promotions
+        );
+        for attempts in 1..seconds {
+            // Do we have any unconfirmed promotions?
+            let Some(txid) = unconfirmed_promotions.first() else {
+                // if not return we are done
+                return Ok(());
+            };
+
+            // create db read transaction
+            let ro_tx = self
+                .node_ctx
+                .db
+                .as_ref()
+                .tx()
+                .map_err(|e| {
+                    tracing::error!("Failed to create mdbx transaction: {}", e);
+                })
+                .unwrap();
+
+            // Retrieve the transaction header from database
+            let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap();
+            if let Some(tx_header) = tx_header {
+                //read its ingressproof(s)
+                if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+                    assert_eq!(proof.data_root, tx_header.data_root);
+                    tracing::info!("Proofs available after {} attempts", attempts);
+                    unconfirmed_promotions.pop();
+                };
+            }
+            drop(ro_tx);
+            mine_block(&self.node_ctx).await.unwrap();
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed waiting for ingress proofs. Waited {} seconds",
+            seconds,
+        ))
     }
 
     pub fn get_height_on_chain(&self) -> u64 {
@@ -274,7 +593,52 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .last()
             .unwrap()
-            .1
+            .height
+    }
+
+    /// Returns a future that resolves when a reorg is detected.
+    ///
+    /// Subscribes to the reorg broadcast channel and waits up to `seconds_to_wait` for the ReorgEvent.
+    /// The future can be created before triggering operations that might cause a reorg.
+    ///
+    /// # Returns
+    /// * `Ok(ReorgEvent)` - Details about the reorg (orphaned blocks, new chain, fork point)
+    /// * `Err` - On timeout or channel closure
+    ///
+    /// # Example
+    /// ```
+    /// let reorg_future = node.wait_for_reorg(30);
+    /// peer.mine_competing_block().await?;
+    /// let reorg = reorg_future.await?;
+    /// ```
+    pub fn wait_for_reorg(
+        &self,
+        seconds_to_wait: usize,
+    ) -> impl Future<Output = eyre::Result<ReorgEvent>> {
+        // Subscribe to reorg events
+        let mut reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
+        let timeout_duration = Duration::from_secs(seconds_to_wait as u64);
+
+        // Return the future without awaiting it
+        async move {
+            match tokio::time::timeout(timeout_duration, reorg_rx.recv()).await {
+                Ok(Ok(reorg_event)) => {
+                    info!(
+                    "Reorg detected: {} blocks in old fork, {} in new fork, fork at height {}, new tip: {}",
+                    reorg_event.old_fork.len(),
+                    reorg_event.new_fork.len(),
+                    reorg_event.fork_parent.height,
+                    reorg_event.new_tip.0.to_base58()
+                );
+                    Ok(reorg_event)
+                }
+                Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
+                Err(_) => Err(eyre::eyre!(
+                    "Timeout: No reorg event received within {} seconds",
+                    seconds_to_wait
+                )),
+            }
+        }
     }
 
     pub async fn mine_block(&self) -> eyre::Result<()> {
@@ -287,14 +651,135 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
-        self.node_ctx.actor_addresses.set_mining(true)?;
+        self.node_ctx.start_mining().await?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(None));
-        self.node_ctx.actor_addresses.set_mining(false)
+        self.node_ctx.stop_mining().await
+    }
+
+    pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        self.mine_blocks(num_blocks).await?;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        Ok(())
+    }
+
+    pub async fn wait_for_mempool(
+        &self,
+        tx_id: IrysTransactionId,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait; // 1 second per retry
+
+        for _ in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            mempool_service.send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))?;
+
+            //if transaction exists
+            if oneshot_rx
+                .await
+                .expect("to process ChunkIngressMessage")
+                .expect("boolean response to transaction existence")
+            {
+                break;
+            }
+
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+
+        if retries == max_retries {
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transaction found in mempool after {} retries", &retries);
+            Ok(())
+        }
+    }
+
+    pub async fn wait_for_mempool_commitment_txs(
+        &self,
+        mut tx_ids: Vec<H256>,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait * 5; // 200ms per retry
+
+        while let Some(tx_id) = tx_ids.pop() {
+            'inner: while retries < max_retries {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
+                    commitment_tx_ids: vec![tx_id],
+                    response: oneshot_tx,
+                })?;
+
+                //if transaction exists in mempool
+                if oneshot_rx
+                    .await
+                    .expect("to process GetCommitmentTxs")
+                    .contains_key(&tx_id)
+                {
+                    break 'inner;
+                }
+
+                sleep(Duration::from_millis(200)).await;
+                retries += 1;
+            }
+        }
+
+        if retries == max_retries {
+            tracing::error!(
+                "transaction not found in mempool after {} retries",
+                &retries
+            );
+            Err(eyre::eyre!(
+                "Failed to locate tx in mempool after {} retries",
+                retries
+            ))
+        } else {
+            info!("transactions found in mempool after {} retries", &retries);
+            Ok(())
+        }
+    }
+
+    // Get the best txs from the mempool, based off the account state at the optional parent EVM block
+    // if None is provided, it will use the latest state.
+    pub async fn get_best_mempool_tx(&self, parent_evm_block_hash: Option<BlockId>) -> MempoolTxs {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBestMempoolTxs(
+                parent_evm_block_hash,
+                tx,
+            ))
+            .expect("to send MempoolServiceMessage");
+        rx.await.expect("to receive best transactions from mempool")
+    }
+
+    pub fn peer_address(&self) -> PeerAddress {
+        let http = &self.node_ctx.config.node_config.http;
+        let gossip = &self.node_ctx.config.node_config.gossip;
+
+        PeerAddress {
+            api: format!("{}:{}", http.bind_ip, http.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("{}:{}", gossip.bind_ip, gossip.bind_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+        }
     }
 
     pub async fn create_submit_data_tx(
@@ -307,17 +792,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             .map_err(AddTxError::CreateTx)?;
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
-        match self
-            .node_ctx
-            .actor_addresses
-            .mempool
-            .send(TxIngressMessage(tx.header.clone()))
-            .await
-        {
-            Ok(Ok(())) => return Ok(tx),
-            Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
-            Err(e) => return Err(AddTxError::Mailbox(e)),
-        };
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let response =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTx(
+                    tx.header.clone(),
+                    oneshot_tx,
+                ));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+
+        match oneshot_rx.await {
+            Ok(Ok(())) => Ok(tx),
+            Ok(Err(tx_error)) => Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => Err(AddTxError::Mailbox(e)),
+        }
     }
 
     pub fn create_signed_data_tx(
@@ -369,16 +861,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             .unwrap()
             .0
             .iter()
-            .find(|(_, blk_height, _, _)| *blk_height == height)
-            .map(|(blk_hash, _, _, _)| {
+            .find(|e| e.height == height)
+            .and_then(|e| {
                 self.node_ctx
                     .block_tree_guard
                     .read()
-                    .get_block(blk_hash)
+                    .get_block(&e.block_hash)
                     .cloned()
             })
-            .flatten()
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+    }
+
+    pub fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+        self.node_ctx
+            .service_senders
+            .gossip_broadcast
+            .send(GossipData::Block((*block_header).clone()))?;
+
+        Ok(())
     }
 
     pub fn get_block_by_hash_on_chain(
@@ -407,11 +907,158 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        let cfg = NodeConfig { ..self.cfg };
+        let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),
             cfg,
             temp_dir: self.temp_dir,
+        }
+    }
+
+    pub async fn post_storage_tx_without_gossip(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        let tx = self.post_storage_tx(anchor, data, signer).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        tx
+    }
+
+    pub async fn post_storage_tx(
+        &self,
+        anchor: H256,
+        data: Vec<u8>,
+        signer: &IrysSigner,
+    ) -> IrysTransaction {
+        let tx = signer
+            .create_transaction(data, Some(anchor))
+            .expect("Expect to create a storage transaction from the data");
+        let tx = signer
+            .sign_transaction(tx)
+            .expect("to sign the storage transaction");
+
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/tx", api_uri);
+        let mut response = client
+            .post(url)
+            .send_json(&tx.header) // Send the tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        if response.status() != StatusCode::OK {
+            // Read the response body
+            let body_bytes = response.body().await.expect("Failed to read response body");
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            panic!(
+                "Response status: {} - {}\nRequest Body: {}",
+                response.status(),
+                body_str,
+                serde_json::to_string_pretty(&tx.header).unwrap(),
+            );
+        } else {
+            info!(
+                "Response status: {}\n{}",
+                response.status(),
+                serde_json::to_string_pretty(&tx).unwrap()
+            );
+        }
+        tx
+    }
+
+    pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        self.post_commitment_tx_request(&api_uri, commitment_tx)
+            .await;
+    }
+
+    pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
+        let pledge_tx = CommitmentTransaction {
+            commitment_type: CommitmentType::Pledge,
+            anchor,
+            fee: 1,
+            ..Default::default()
+        };
+        let signer = self.cfg.signer();
+        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+
+        // Submit pledge commitment via API
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        self.post_commitment_tx_request(&api_uri, &pledge_tx).await;
+
+        pledge_tx
+    }
+
+    pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
+        let stake_tx = CommitmentTransaction {
+            commitment_type: CommitmentType::Stake,
+            // TODO: real staking amounts
+            fee: 1,
+            anchor,
+            ..Default::default()
+        };
+
+        let signer = self.cfg.signer();
+        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
+
+        // Submit stake commitment via public API
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        self.post_commitment_tx_request(&api_uri, &stake_tx).await;
+
+        stake_tx
+    }
+
+    pub async fn get_partition_assignments(
+        &self,
+        mining_address: Address,
+    ) -> Vec<PartitionAssignment> {
+        self.node_ctx
+            .actor_addresses
+            .epoch_service
+            .send(GetMinerPartitionAssignmentsMessage(mining_address))
+            .await
+            .expect("to retrieve partition assignments for miner")
+    }
+
+    async fn post_commitment_tx_request(
+        &self,
+        api_uri: &str,
+        commitment_tx: &CommitmentTransaction,
+    ) {
+        info!("Posting Commitment TX: {}", commitment_tx.id.0.to_base58());
+
+        let client = awc::Client::default();
+        let url = format!("{}/v1/commitment_tx", api_uri);
+        let mut response = client
+            .post(url)
+            .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        if response.status() != StatusCode::OK {
+            // Read the response body
+            let body_bytes = response.body().await.expect("Failed to read response body");
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            panic!(
+                "Response status: {} - {}\nRequest Body: {}",
+                response.status(),
+                body_str,
+                serde_json::to_string_pretty(&commitment_tx).unwrap(),
+            );
+        } else {
+            info!(
+                "Response status: {}\n{}",
+                response.status(),
+                serde_json::to_string_pretty(&commitment_tx).unwrap()
+            );
         }
     }
 }
@@ -419,7 +1066,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 pub async fn mine_blocks(
     node_ctx: &IrysNodeCtx,
     blocks: usize,
-) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let mut results = Vec::with_capacity(blocks);
     for _ in 0..blocks {
         results.push(mine_block(node_ctx).await?.unwrap());
@@ -429,14 +1076,17 @@ pub async fn mine_blocks(
 
 pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
-) -> eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+    node_ctx.start_vdf().await?;
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
         &node_ctx.config,
     )
     .await;
+    node_ctx.stop_vdf().await?;
+
     node_ctx
         .actor_addresses
         .block_producer
@@ -456,12 +1106,6 @@ where
     F: Future<Output = T> + Unpin,
 {
     loop {
-        let poa_solution = capacity_chunk_solution(
-            node_ctx.config.node_config.miner_address(),
-            node_ctx.vdf_steps_guard.clone(),
-            &node_ctx.config,
-        )
-        .await;
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
         match race {
             // provided future finished
@@ -471,13 +1115,7 @@ where
                 info!("deployment timed out, creating new block..")
             }
         };
-
-        let _ = node_ctx
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()))
-            .await?
-            .unwrap();
+        mine_block(&node_ctx).await?;
     }
 }
 
@@ -487,14 +1125,14 @@ pub async fn post_chunk<T, B>(
     app: &T,
     tx: &IrysTransaction,
     chunk_index: usize,
-    chunks: &Vec<[u8; 32]>,
+    chunks: &[[u8; 32]],
 ) where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
 {
     let chunk = UnpackedChunk {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
-        data_path: Base64(tx.proofs[chunk_index].proof.to_vec()),
+        data_path: Base64(tx.proofs[chunk_index].proof.clone()),
         bytes: Base64(chunks[chunk_index].to_vec()),
         tx_offset: TxChunkOffset::from(chunk_index as u32),
     };
@@ -509,6 +1147,76 @@ pub async fn post_chunk<T, B>(
     .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Posts a storage transaction to the node via HTTP POST request using the actix-web test framework.
+///
+/// This function submits the transaction header to the `/v1/tx` endpoint and verifies
+/// that the response has a successful HTTP 200 status code. The response body is logged
+/// for debugging purposes.
+///
+/// # Arguments
+/// * `app` - The actix-web service to test against
+/// * `tx` - The Irys transaction to submit (only the header is sent)
+///
+/// # Panics
+/// Panics if the response status is not HTTP 200 OK.
+pub async fn post_storage_tx<T, B>(app: &T, tx: &IrysTransaction)
+where
+    T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+    B: MessageBody + Unpin,
+{
+    let req = TestRequest::post()
+        .uri("/v1/tx")
+        .set_json(tx.header.clone())
+        .to_request();
+
+    let resp = call_service(&app, req).await;
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    debug!("Response body: {:#?}", body);
+    assert_eq!(status, StatusCode::OK);
+}
+
+pub async fn post_commitment_tx<T, B>(app: &T, tx: &CommitmentTransaction)
+where
+    T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+    B: MessageBody + Unpin,
+{
+    let req = TestRequest::post()
+        .uri("/v1/commitment_tx")
+        .set_json(tx.clone())
+        .to_request();
+
+    let resp = call_service(&app, req).await;
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    debug!("Response body: {:#?}", body);
+    assert_eq!(status, StatusCode::OK);
+}
+
+pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
+    let stake_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Stake,
+        // TODO: real staking amounts
+        fee: 1,
+        anchor: *anchor,
+        ..Default::default()
+    };
+
+    signer.sign_commitment(stake_tx).unwrap()
+}
+
+pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
+    let stake_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Pledge,
+        // TODO: real pledging amounts
+        fee: 1,
+        anchor: *anchor,
+        ..Default::default()
+    };
+
+    signer.sign_commitment(stake_tx).unwrap()
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.

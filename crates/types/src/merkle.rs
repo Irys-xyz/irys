@@ -4,7 +4,7 @@ use crate::chunked::ChunkedIterator;
 use crate::ChunkBytes;
 use crate::H256;
 use alloy_primitives::Address;
-use borsh::BorshDeserialize;
+use borsh::BorshDeserialize as _;
 use borsh_derive::BorshDeserialize;
 use eyre::eyre;
 use eyre::Error;
@@ -55,9 +55,9 @@ pub trait ProofDeserialize<T> {
     fn hash(&self) -> Option<[u8; HASH_SIZE]>;
 }
 
-impl ProofDeserialize<LeafProof> for LeafProof {
+impl ProofDeserialize<Self> for LeafProof {
     fn try_from_proof_slice(slice: &[u8]) -> Result<Self, Error> {
-        let proof = LeafProof::try_from_slice(slice)?;
+        let proof = Self::try_from_slice(slice)?;
         Ok(proof)
     }
     fn offset(&self) -> usize {
@@ -69,9 +69,9 @@ impl ProofDeserialize<LeafProof> for LeafProof {
     }
 }
 
-impl ProofDeserialize<BranchProof> for BranchProof {
+impl ProofDeserialize<Self> for BranchProof {
     fn try_from_proof_slice(slice: &[u8]) -> Result<Self, Error> {
-        let proof = BranchProof::try_from_slice(slice)?;
+        let proof = Self::try_from_slice(slice)?;
         Ok(proof)
     }
     fn offset(&self) -> usize {
@@ -92,7 +92,7 @@ pub trait Helpers<T> {
     fn to_note_vec(&self) -> Vec<u8>;
 }
 
-impl Helpers<usize> for usize {
+impl Helpers<Self> for usize {
     fn to_note_vec(&self) -> Vec<u8> {
         let mut note = vec![0; NOTE_SIZE - 8];
         note.extend((*self as u64).to_be_bytes());
@@ -151,9 +151,10 @@ pub fn validate_path(
 
         // Choose the next expected_path_hash based on weather the target_offset
         // byte is to the left or right of the branch_proof's "offset" value
-        expected_path_hash = match is_right_of_offset {
-            true => branch_proof.right_id,
-            false => branch_proof.left_id,
+        expected_path_hash = if is_right_of_offset {
+            branch_proof.right_id
+        } else {
+            branch_proof.left_id
         };
 
         // Keep track of left bound as we traverse down the branches
@@ -188,7 +189,7 @@ pub fn validate_path(
 }
 
 /// Utility method for logging a proof out to the terminal.
-pub fn print_debug(proof: &Vec<u8>, target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
+pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
     // Split proof into branches and leaf. Leaf is at the end and branches are
     // ordered from root to leaf.
     let (branches, leaf) = proof.split_at(proof.len() - HASH_SIZE - NOTE_SIZE);
@@ -280,9 +281,10 @@ pub fn validate_chunk(
 
                 // If the offset from the proof is greater than the offset in the data chunk,
                 // then the next id to validate against is from the left.
-                root_id = match max_byte_range > &branch_proof.offset() {
-                    true => branch_proof.right_id,
-                    false => branch_proof.left_id,
+                root_id = if max_byte_range > &branch_proof.offset() {
+                    branch_proof.right_id
+                } else {
+                    branch_proof.left_id
                 }
             }
 
@@ -317,7 +319,7 @@ pub fn generate_leaves_from_chunks(
     for chunk in chunks {
         let chunk = chunk?;
         let data_hash = hash_sha256(&chunk)?;
-        let max_byte_range = min_byte_range + &chunk.len();
+        let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
 
@@ -347,8 +349,8 @@ pub fn generate_ingress_leaves(
     for chunk in chunks {
         let chunk = chunk?;
         let chunk = chunk.as_ref(); // double-binding required
-        let data_hash = hash_ingress_sha256(&chunk, address)?;
-        let max_byte_range = min_byte_range + &chunk.len();
+        let data_hash = hash_ingress_sha256(chunk, address)?;
+        let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
 
@@ -362,7 +364,7 @@ pub fn generate_ingress_leaves(
         });
 
         if and_regular {
-            let data_hash = hash_sha256(&chunk)?;
+            let data_hash = hash_sha256(chunk)?;
             let id = hash_all_sha256(vec![&data_hash, &offset])?;
             regular_leaves.push(Node {
                 id,
@@ -385,9 +387,7 @@ pub struct DataRootLeave {
 }
 
 /// Generates merkle leaves from data roots
-pub fn generate_leaves_from_data_roots(
-    data_roots: &Vec<DataRootLeave>,
-) -> Result<Vec<Node>, Error> {
+pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for data_root in data_roots.iter() {

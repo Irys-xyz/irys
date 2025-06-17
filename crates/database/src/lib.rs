@@ -18,6 +18,8 @@ pub mod db;
 pub mod db_index;
 pub mod metadata;
 pub mod migration;
+/// Extension traits for custom tables
+pub mod reth_ext;
 /// Tables & methods specific to submodule databases
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables

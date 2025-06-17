@@ -15,10 +15,12 @@ pub mod mining;
 pub mod packing;
 pub mod reth_service;
 pub mod services;
+pub mod storage_module_service;
+pub mod system_tx_generator;
 pub mod validation_service;
-pub mod vdf_service;
 
 pub use addresses::*;
 pub use block_producer::*;
 pub use commitment_cache::*;
 pub use epoch_service::*;
+pub use storage_module_service::*;

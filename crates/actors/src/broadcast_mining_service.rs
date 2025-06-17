@@ -1,9 +1,9 @@
 use crate::mining::PartitionMiningActor;
 use actix::prelude::*;
 use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
+use irys_vdf::MiningBroadcaster;
 use std::sync::Arc;
-use tracing::{debug, info};
-
+use tracing::{debug, info, Span};
 // Message types
 
 /// Subscribes a `PartitionMiningActor` so the broadcaster to receive broadcast messages
@@ -38,15 +38,17 @@ pub struct BroadcastPartitionsExpiration(pub H256List);
 /// Broadcaster actor
 #[derive(Debug, Default)]
 pub struct BroadcastMiningService {
-    subscribers: Vec<Addr<PartitionMiningActor>>,
+    pub subscribers: Vec<Addr<PartitionMiningActor>>,
+    pub span: Option<Span>,
 }
 // Actor Definition
 
 impl BroadcastMiningService {
     /// Initialize a new `MiningBroadcaster`
-    pub const fn new() -> Self {
+    pub fn new(span: Option<Span>) -> Self {
         Self {
             subscribers: Vec::new(),
+            span: Some(span.unwrap_or(Span::current())),
         }
     }
 }
@@ -69,6 +71,13 @@ impl Handler<Subscribe> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: Subscribe, _: &mut Context<Self>) {
+        if self.span.is_some() {
+            let span = self.span.clone().unwrap();
+            let _span = span.enter();
+        }
+
+        debug!("PartitionMiningActor subscribed");
+
         self.subscribers.push(msg.0);
     }
 }
@@ -87,12 +96,14 @@ impl Handler<BroadcastMiningSeed> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
+        let span = self.span.clone().unwrap();
+        let _span = span.enter();
         info!(
             "Broadcast Mining: {:?} subs: {}",
             msg.seed,
             &self.subscribers.len()
         );
-        self.subscribers.retain(|addr| addr.connected());
+        self.subscribers.retain(actix::Addr::connected);
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }
@@ -103,7 +114,7 @@ impl Handler<BroadcastDifficultyUpdate> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
-        self.subscribers.retain(|addr| addr.connected());
+        self.subscribers.retain(actix::Addr::connected);
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }
@@ -114,10 +125,28 @@ impl Handler<BroadcastPartitionsExpiration> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, _: &mut Context<Self>) {
-        self.subscribers.retain(|addr| addr.connected());
+        self.subscribers.retain(actix::Addr::connected);
         debug!(msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MiningServiceBroadcaster(Addr<BroadcastMiningService>);
+impl MiningBroadcaster for MiningServiceBroadcaster {
+    fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64) {
+        self.0.do_send(BroadcastMiningSeed {
+            seed,
+            checkpoints,
+            global_step,
+        })
+    }
+}
+
+impl From<Addr<BroadcastMiningService>> for MiningServiceBroadcaster {
+    fn from(addr: Addr<BroadcastMiningService>) -> Self {
+        Self(addr)
     }
 }

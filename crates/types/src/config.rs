@@ -6,9 +6,10 @@ use crate::{
     },
     PeerAddress, RethPeerInfo,
 };
+use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
+use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
 use reth_chainspec::Chain;
-use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, Genesis, GenesisAccount};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -209,13 +210,18 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
+    /// Reth node configuration
+    pub reth: RethConfig,
+
     /// Reth settings
     pub reth_peer_info: RethPeerInfo,
+
+    pub genesis_peer_discovery_timeout_millis: u64,
 }
 
-impl Into<Config> for NodeConfig {
-    fn into(self) -> Config {
-        Config::new(self)
+impl From<NodeConfig> for Config {
+    fn from(val: NodeConfig) -> Self {
+        Self::new(val)
     }
 }
 
@@ -223,7 +229,7 @@ impl Into<Config> for NodeConfig {
 ///
 /// Defines how the node participates in the network - either as a genesis node
 /// that starts a new network or as a peer that syncs with existing nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
@@ -254,10 +260,6 @@ impl ConsensusOptions {
     ) {
         let config = self.get_mut();
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
-    }
-
-    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) {
-        self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
@@ -325,7 +327,10 @@ pub struct EmaConfig {
 /// Settings for the time-delay proof mechanism used in consensus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VdfConfig {
-    /// How often the VDF parameters are reset (in blocks)
+    /// VDF reset frequency in global steps
+    /// Formula: blocks_between_resets × vdf_steps_per_block
+    /// Example: 50 blocks × 12 steps = 600 global steps
+    /// At 12s/block target, resets occur every ~10 minutes
     pub reset_frequency: usize,
 
     /// Maximum number of threads to use for parallel VDF verification
@@ -334,8 +339,19 @@ pub struct VdfConfig {
     /// Number of checkpoints to include in each VDF step
     pub num_checkpoints_in_vdf_step: usize,
 
+    /// Minimum number of steps to store in FIFO VecDeque to allow for network forks
+    pub max_allowed_vdf_fork_steps: u64,
+
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
+}
+
+impl VdfConfig {
+    /// Returns the number of iterations per checkpoint,
+    /// computed as the floor of (step difficulty ÷ number of checkpoints in a step).
+    pub fn num_iterations_per_checkpoint(&self) -> u64 {
+        self.sha_1s_difficulty / self.num_checkpoints_in_vdf_step as u64
+    }
 }
 
 /// # Epoch Configuration
@@ -375,6 +391,22 @@ pub struct MempoolConfig {
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
+
+    /// Maximum number of addresses in the LRU cache for out-of-order stakes and pledges
+    /// Controls memory usage for tracking transactions that arrive before their dependencies
+    pub max_pending_pledge_items: usize,
+
+    /// Maximum number of pending pledge transactions allowed per address
+    /// Limits the resources that can be consumed by a single address
+    pub max_pledges_per_item: usize,
+
+    /// Maximum number of transaction data roots to keep in the pending cache
+    /// For transactions whose chunks arrive before the transaction header
+    pub max_pending_chunk_items: usize,
+
+    /// Maximum number of chunks that can be cached per data root
+    /// Prevents memory exhaustion from excessive chunk storage for a single transaction
+    pub max_chunks_per_item: usize,
 }
 
 /// # Gossip Network Configuration
@@ -390,6 +422,14 @@ pub struct GossipConfig {
     pub bind_ip: String,
     /// The port number the gossip service listens on
     pub bind_port: u16,
+}
+
+/// # Reth Configuration
+///
+/// Settings that are passed to the reth node
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RethConfig {
+    pub use_random_ports: bool,
 }
 
 /// # Data Packing Configuration
@@ -425,7 +465,7 @@ pub struct HttpConfig {
     pub public_port: u16,
     /// The IP address the HTTP service binds to
     pub bind_ip: String,
-    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
+    /// The port that the Node's HTTP server should listen on. Set to 0 for randomization.
     pub bind_port: u16,
 }
 
@@ -479,12 +519,20 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 anchor_expiry_depth: 10,
+                // TODO: Move the following to a node config
+                max_pending_pledge_items: 100,
+                max_pledges_per_item: 100,
+                max_pending_chunk_items: 30,
+                max_chunks_per_item: 500,
             },
             vdf: VdfConfig {
-                reset_frequency: 10 * 120,
+                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
+                // With 12s target block time, this resets approximately every 10 minutes
+                reset_frequency: 50 * 12,
                 parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
-                sha_1s_difficulty: 7_000,
+                max_allowed_vdf_fork_steps: 60_000,
+                sha_1s_difficulty: 70_000,
             },
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 10,
@@ -500,7 +548,7 @@ impl ConsensusConfig {
             entropy_packing_iterations: 1000,
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: DEFAULT_BLOCK_TIME,
-                difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000)
+                difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000)
                     .div_ceil(DEFAULT_BLOCK_TIME)
                     * 14,
                 max_difficulty_adjustment_factor: dec!(4),
@@ -512,7 +560,7 @@ impl ConsensusConfig {
             reth: RethChainSpec {
                 chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
                 genesis: Genesis {
-                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
+                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
                     alloc: {
                         let mut map = BTreeMap::new();
                         map.insert(
@@ -573,18 +621,45 @@ impl NodeConfig {
         Address::from_private_key(&self.mining_key)
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn testnet() -> Self {
-        use alloy_signer::utils::secret_key_to_address;
-        use k256::ecdsa::SigningKey;
-        use rust_decimal_macros::dec;
+    pub fn new_random_signer(&self) -> IrysSigner {
+        IrysSigner::random_signer(&self.consensus_config())
+    }
 
-        let mining_key = SigningKey::from_slice(
-            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                .expect("valid hex"),
-        )
-        .expect("valid key");
-        let reward_address = secret_key_to_address(&mining_key);
+    pub fn signer(&self) -> IrysSigner {
+        IrysSigner {
+            signer: self.mining_key.clone(),
+            chain_id: self.consensus_config().chain_id,
+            chunk_size: self.consensus_config().chunk_size,
+        }
+    }
+
+    pub fn api_uri(&self) -> String {
+        format!("http://{}:{}", self.http.public_ip, self.http.public_port)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fund_genesis_accounts<'a>(
+        &mut self,
+        signers: impl IntoIterator<Item = &'a IrysSigner>,
+    ) -> &mut Self {
+        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
+        for signer in signers {
+            accounts.push((
+                signer.address(),
+                GenesisAccount {
+                    balance: alloy_primitives::U256::from(690000000000000000_u128),
+                    ..Default::default()
+                },
+            ))
+        }
+        self.consensus.extend_genesis_accounts(accounts);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_signer(signer: &IrysSigner) -> Self {
+        let mining_key = signer.signer.clone();
+        let reward_address = signer.address();
         Self {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
@@ -614,6 +689,9 @@ impl NodeConfig {
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
                 bind_port: 0,
             },
+            reth: RethConfig {
+                use_random_ports: true,
+            },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
                 gpu_packing_batch_size: 1024,
@@ -626,7 +704,33 @@ impl NodeConfig {
                 bind_port: 0,
             },
             reth_peer_info: RethPeerInfo::default(),
+
+            genesis_peer_discovery_timeout_millis: 10000,
         }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet_with_epochs(num_blocks_in_epoch: usize) -> Self {
+        let mut node_config = Self::testnet();
+        node_config.consensus.get_mut().epoch.num_blocks_in_epoch = num_blocks_in_epoch as u64;
+        node_config
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet() -> Self {
+        use k256::ecdsa::SigningKey;
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let signer = IrysSigner {
+            signer: mining_key,
+            chain_id: 0,
+            chunk_size: 0,
+        };
+
+        Self::testnet_with_signer(&signer)
     }
 
     /// get the storage module directory path
@@ -636,6 +740,11 @@ impl NodeConfig {
     /// get the irys consensus data directory path
     pub fn irys_consensus_data_dir(&self) -> PathBuf {
         self.base_directory.join("irys_consensus_data")
+    }
+
+    /// get the irys mempool persistence path
+    pub fn mempool_dir(&self) -> PathBuf {
+        self.base_directory.join("mempool")
     }
     /// get the reth data directory path
     pub fn reth_data_dir(&self) -> PathBuf {
@@ -785,6 +894,7 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
+        genesis_peer_discovery_timeout_millis = 10000
 
         [reth]
         chain = 1270
@@ -812,6 +922,10 @@ mod tests {
         [mempool]
         max_data_txs_per_block = 100
         anchor_expiry_depth = 10
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
 
         [difficulty_adjustment]
         block_time = 1
@@ -820,10 +934,12 @@ mod tests {
         min_difficulty_adjustment_factor = 0.25
 
         [vdf]
-        reset_frequency = 1200
+        reset_frequency = 600
+        max_allowed_vdf_fork_steps = 60000
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25
-        sha_1s_difficulty = 7000
+
+        sha_1s_difficulty = 70000
 
         [block_reward_config]
         inflation_cap = 100000000
@@ -860,6 +976,7 @@ mod tests {
         consensus = "Testnet"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
         reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        genesis_peer_discovery_timeout_millis = 10000
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
@@ -899,6 +1016,9 @@ mod tests {
         bind_port = 0
         public_ip = "127.0.0.1"
         public_port = 0
+
+        [reth]
+        use_random_ports = true
 
         [reth_peer_info]
         peering_tcp_addr = "0.0.0.0:0"

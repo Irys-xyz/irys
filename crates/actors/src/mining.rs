@@ -8,7 +8,7 @@ use crate::broadcast_mining_service::{
 use crate::packing::PackingRequest;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
-use eyre::WrapErr;
+use eyre::WrapErr as _;
 use irys_efficient_sampling::Ranges;
 use irys_storage::{ie, ii, StorageModule};
 use irys_types::block_production::Seed;
@@ -17,9 +17,9 @@ use irys_types::{
     partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
     PartitionChunkOffset, PartitionChunkRange,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
+use irys_vdf::state::VdfStateReadonly;
 use openssl::sha;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Span};
 
 #[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
@@ -30,8 +30,9 @@ pub struct PartitionMiningActor {
     should_mine: bool,
     difficulty: U256,
     ranges: Ranges,
-    steps_guard: VdfStepsReadGuard,
+    steps_guard: VdfStateReadonly,
     atomic_global_step_number: AtomicVdfStepNumber,
+    span: Span,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -44,9 +45,10 @@ impl PartitionMiningActor {
         packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
-        steps_guard: VdfStepsReadGuard,
+        steps_guard: VdfStateReadonly,
         atomic_global_step_number: AtomicVdfStepNumber,
         initial_difficulty: U256,
+        span: Option<Span>,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -63,6 +65,7 @@ impl PartitionMiningActor {
             difficulty: initial_difficulty,
             steps_guard,
             atomic_global_step_number,
+            span: span.unwrap_or(Span::current()),
         }
     }
 
@@ -72,6 +75,8 @@ impl PartitionMiningActor {
         seed: &H256,
         partition_hash: &H256,
     ) -> eyre::Result<u64> {
+        let span = self.span.clone();
+        let _span = span.enter();
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
         if next_ranges_step >= step {
             debug!("Step {} already processed or next consecutive one", step);
@@ -116,6 +121,8 @@ impl PartitionMiningActor {
         vdf_step: u64,
         checkpoints: H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
+        let span = self.span.clone();
+        let _span = span.enter();
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
             None => {
@@ -226,8 +233,12 @@ impl Actor for PartitionMiningActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let broadcaster = BroadcastMiningService::from_registry();
         broadcaster.do_send(Subscribe(ctx.address()));
+        debug!("Partition Mining Actor Started");
     }
 
     fn stopping(&mut self, ctx: &mut Context<Self>) -> Running {
@@ -241,9 +252,17 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
+            return;
+        }
+
+        if self.storage_module.partition_assignment().is_none() {
+            debug!("No partition assigned - skipping seed {:?}", seed);
             return;
         }
 
@@ -277,7 +296,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
 
         match self.mine_partition_with_seed(seed.into_inner(), msg.global_step, msg.checkpoints) {
             Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
-                Ok(_) => {
+                Ok(()) => {
                     // debug!("Solution sent!");
                 }
                 Err(err) => error!("Error submitting solution to block producer {:?}", err),
@@ -295,6 +314,9 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let new_diff = msg.0.diff;
         debug!(
             "updating difficulty target in partition miner {}: from {} to {} (diff: {})",
@@ -311,6 +333,8 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, _ctx: &mut Context<Self>) {
+        let span = self.span.clone();
+        let _span = span.enter();
         self.storage_module.partition_hash().map(|partition_hash| {
             let msg = msg.0;
             if msg.0.contains(&partition_hash) {
@@ -351,6 +375,9 @@ impl Handler<MiningControl> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, control: MiningControl, _ctx: &mut Context<Self>) -> Self::Result {
+        let span = self.span.clone();
+        let _span = span.enter();
+
         let should_mine = control.into_inner();
         debug!(
             "Setting should_mine to {} from {}",
@@ -367,16 +394,14 @@ pub fn hash_to_number(hash: &[u8]) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_producer::{
-        BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
+    use crate::{
+        block_producer::{BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage},
+        broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
+        mining::{PartitionMiningActor, Seed},
+        packing::PackingActor,
     };
-    use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
-    use crate::mining::{PartitionMiningActor, Seed};
-    use crate::packing::PackingActor;
-    use crate::vdf_service::{GetVdfStateMessage, VdfSeed, VdfService};
     use actix::actors::mocker::Mocker;
-    use actix::{Actor, Addr, Recipient};
-    use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
+    use actix::{Addr, Recipient};
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
@@ -388,9 +413,9 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
         NodeConfig,
     };
-    use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
+    use irys_vdf::state::test_helpers::mocked_vdf_service;
+    use reth::payload::EthBuiltPayload;
     use std::any::Any;
-    use std::collections::VecDeque;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
@@ -399,7 +424,6 @@ mod tests {
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
     ) -> BlockProducerMockActor {
-        let closure_arc = closure_arc.clone();
         BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
             let solution_message: SolutionFoundMessage =
                 *msg.downcast::<SolutionFoundMessage>().unwrap();
@@ -410,12 +434,14 @@ mod tests {
                 lck.replace(solution);
             }
 
-            let inner_result = None::<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>;
+            let inner_result = None::<(Arc<IrysBlockHeader>, EthBuiltPayload)>;
             Box::new(Some(inner_result)) as Box<dyn Any>
         }))
     }
 
     #[test_log::test(actix_rt::test)]
+    #[expect(clippy::await_holding_lock, reason = "test")]
+
     async fn test_solution() {
         let chunk_count = 4;
         let chunk_size = 32;
@@ -424,7 +450,7 @@ mod tests {
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size,
-                num_chunks_in_partition: chunk_count.into(),
+                num_chunks_in_partition: chunk_count,
                 num_chunks_in_recall_range: 2,
                 num_partitions_per_slot: 1,
                 entropy_packing_iterations: 1,
@@ -459,7 +485,7 @@ mod tests {
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
         // Set up the storage geometry for this test
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
@@ -510,12 +536,11 @@ mod tests {
 
         let _ = storage_module.sync_pending_chunks();
 
-        let mining_broadcaster = BroadcastMiningService::new();
+        let mining_broadcaster = BroadcastMiningService::new(None);
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        let vdf_service = VdfService::from_capacity(100).start();
-        let vdf_steps_guard: VdfStepsReadGuard =
-            vdf_service.send(GetVdfStateMessage).await.unwrap();
+        let vdf_state = mocked_vdf_service(&config);
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
@@ -528,6 +553,7 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
+            None,
         );
 
         let seed: Seed = Seed(H256::random());
@@ -608,10 +634,10 @@ mod tests {
 
         let partition_hash = H256::random();
 
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                partition_hash: partition_hash.clone(),
+                partition_hash,
                 miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
@@ -623,7 +649,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = Arc::new(StorageModule::new(&storage_module_info, &config).unwrap());
+        let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
         let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
         let arc_rwlock = Arc::new(rwlock);
@@ -633,29 +659,25 @@ mod tests {
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
-        let vdf_state = VdfState {
-            global_step: 0,
-            capacity: 5,
-            seeds: VecDeque::new(),
-            mining_state_sender: None,
-        };
-
-        let vdf_service = VdfService {
-            vdf_state: Arc::new(RwLock::new(vdf_state)),
-        }
-        .start();
-        let vdf_steps_guard: VdfStepsReadGuard =
-            vdf_service.send(GetVdfStateMessage).await.unwrap();
+        let vdf_state = mocked_vdf_service(&config);
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let hash: H256 = H256::random();
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash))); //5
-                                                  // reset
-        vdf_service.do_send(VdfSeed(Seed(hash))); //6
-        vdf_service.do_send(VdfSeed(Seed(hash))); //7
+        for _ in 0..5 {
+            // seeds 1 to 5
+            vdf_state
+                .write()
+                .expect("to write to vdf state")
+                .increment_step(Seed(hash));
+        }
+        // reset occurs at step 5
+        for _ in 0..2 {
+            // seeds 6 and 7
+            vdf_state
+                .write()
+                .expect("to write to vdf state")
+                .increment_step(Seed(hash));
+        }
 
         sleep(Duration::from_secs(1)).await;
 
@@ -674,6 +696,7 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
+            None,
         );
 
         let range = partition_mining_actor

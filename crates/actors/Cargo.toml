@@ -11,22 +11,21 @@ irys-database.workspace = true
 irys-packing.workspace = true
 irys-storage.workspace = true
 irys-config.workspace = true
-irys-vdf.workspace = true
 irys-price-oracle.workspace = true
 irys-efficient-sampling.workspace = true
+irys-vdf.workspace = true
 
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
 
 tokio.workspace = true
+lru.workspace = true
 reth-db.workspace = true
 irys-primitives.workspace = true
 eyre.workspace = true
 openssl.workspace = true
 irys-reth-node-bridge.workspace = true
-reth.workspace = true
-alloy-rpc-types-engine.workspace = true
 tracing.workspace = true
 tempfile.workspace = true
 irys-testing-utils.workspace = true
@@ -35,8 +34,16 @@ futures.workspace = true
 rust_decimal.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 irys-reward-curve.workspace = true
-async-trait = "0.1.83"
-# serde.workspace = true
+async-trait.workspace = true
+reth.workspace = true
+irys-reth.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-signer-local.workspace = true
+alloy-network.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+reth-transaction-pool.workspace = true
+itertools.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

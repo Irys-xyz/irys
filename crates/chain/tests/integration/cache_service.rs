@@ -1,17 +1,16 @@
 use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
-use base58::ToBase58;
+use alloy_genesis::GenesisAccount;
+use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::get_cache_size;
 use irys_database::tables::CachedChunks;
-use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth::providers::BlockReader as _;
-use reth_db::Database as _;
-use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -21,6 +20,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().chunk_migration_depth = 2;
+
     let main_address = config.miner_address();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
@@ -39,7 +39,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config).await;
+    let node = IrysNodeTest::new_genesis(config);
     let node = node.start().await;
 
     wait_for_packing(
@@ -118,7 +118,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
         let chunk = UnpackedChunk {
             data_root,
@@ -175,7 +175,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     .unwrap();
 
     // mine a couple blocks
-    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
+    let reth_context = node.node_ctx.reth_node_adapter.clone();
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;

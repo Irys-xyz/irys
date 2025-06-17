@@ -1,7 +1,7 @@
 use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens};
+use quote::{quote, ToTokens as _};
 use std::{collections::HashSet, env, fs};
 use syn::{parse2, parse_quote, Error, Expr, ExprStruct, Ident, Lit, LitStr, Result, Token};
 

@@ -12,15 +12,17 @@ serde.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 rand.workspace = true
 tracing.workspace = true
+tokio.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-reth-db.workspace = true
 irys-database.workspace = true
 irys-testing-utils.workspace = true
 irys-packing.workspace = true
 derive_more.workspace = true
 base58.workspace = true
 atomic-write-file = "0.2"
+reth-db.workspace = true
+
 
 [dev-dependencies]
 test-log.workspace = true

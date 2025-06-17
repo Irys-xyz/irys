@@ -11,7 +11,7 @@ use irys_types::U256;
 
 /// ln(2) in 18-decimal fixed-point:
 /// Approximately 0.693147180559945309 * 1e18 = 693147180559945309
-const LN2_FP18: U256 = U256([693_147_180_559_945_309u64, 0, 0, 0]);
+const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
 
 /// Continuous halving emission curve
 ///
@@ -219,7 +219,7 @@ mod tests {
         let expected = expected_reward(&curve, from_year, to_year)?;
 
         assert_eq!(
-            U256::from(actual),
+            actual,
             U256::from(expected),
             "Δ[{from_year},{to_year}]: expected {expected}, got {actual}"
         );
@@ -247,7 +247,7 @@ mod tests {
         let expected = expected_reward(&curve, from_year, to_year)?;
 
         assert_eq!(
-            U256::from(actual),
+            actual,
             U256::from(expected),
             "Δ[{from_year},{to_year}]: expected {expected}, got {actual}"
         );

@@ -37,15 +37,18 @@
 //! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
 
 use atomic_write_file::AtomicWriteFile;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use derive_more::derive::{Deref, DerefMut};
-use eyre::{ensure, eyre, Context, OptionExt, Result};
-use irys_database::submodule::{
-    add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-    add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-    clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
-    get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
-    set_data_size_for_data_root, tables::RelativeStartOffsets,
+use eyre::{ensure, eyre, Context as _, OptionExt as _, Result};
+use irys_database::{
+    db::IrysDatabaseExt as _,
+    submodule::{
+        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
+        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
+        get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
+        set_data_size_for_data_root, tables::RelativeStartOffsets,
+    },
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
@@ -54,17 +57,17 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
     DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
-    PartitionChunkRange, ProofDeserialize, RelativeChunkOffset, TxChunkOffset, TxPath,
+    PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath,
     UnpackedChunk, H256,
 };
-use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
+use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
 use openssl::sha;
-use reth_db::Database;
+use reth_db::Database as _;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
@@ -88,7 +91,7 @@ pub struct StorageModule {
     /// an integer uniquely identifying the module
     pub id: usize,
     /// The (Optional) info about a partition assigned to this storage module
-    pub partition_assignment: Option<PartitionAssignment>,
+    pub partition_assignment: RwLock<Option<PartitionAssignment>>,
     /// In-memory chunk buffer awaiting disk write
     pending_writes: Arc<RwLock<ChunkMap>>,
     /// Tracks the storage state of each chunk across all submodules
@@ -138,9 +141,11 @@ impl PackingParams {
 
     pub fn write_to_disk(&self, path: &Path) {
         let toml = toml::to_string(self).expect("Able to serialize config");
-        fs::write(&path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
+        fs::write(path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
     }
 }
+
+static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
@@ -157,10 +162,10 @@ pub struct StorageSubmodule {
 }
 
 pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Result<AtomicWriteFile> {
-    Ok(AtomicWriteFile::options()
+    AtomicWriteFile::options()
         .read(true)
         .open(&path)
-        .wrap_err_with(|| format!("Failed to create or open atomic file for {:?}", &path))?)
+        .wrap_err_with(|| format!("Failed to create or open atomic file for {:?}", &path))
 }
 
 /// Defines how chunk data is processed and stored
@@ -237,6 +242,7 @@ impl StorageModule {
                     .read(true)
                     .write(true)
                     .create(true) // Optional: creates file if it doesn't exist
+                    .truncate(false)
                     .open(&path)
                     .map_err(|e| {
                         eyre!(
@@ -248,6 +254,7 @@ impl StorageModule {
             ));
 
             let submodule_db_path = sub_base_path.join("db");
+            debug!("submodule_db_path: {:?}", submodule_db_path);
             let submodule_db = create_or_open_submodule_db(&submodule_db_path).map_err(|e| {
                 eyre!(
                     "Failed to create or open submodule database: {} - {}",
@@ -256,8 +263,8 @@ impl StorageModule {
                 )
             })?;
 
-            let params_path = sub_base_path.join("packing_params.toml");
-            if params_path.exists() == false {
+            let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
+            if !params_path.exists() {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
                     ..Default::default()
@@ -299,7 +306,7 @@ impl StorageModule {
             // that maintains system resources connected to the files in that submodule
             submodule_map
                 .insert_strict(
-                    submodule_interval.clone(),
+                    submodule_interval,
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
@@ -332,7 +339,7 @@ impl StorageModule {
                 .expect("Value exceeds u32::MAX"),
             u32::MAX
         )];
-        if &gaps != &expected {
+        if gaps != expected {
             return Err(eyre!(
                 "Invalid storage module config, expected range {:?}, got range {:?}",
                 &expected,
@@ -343,9 +350,9 @@ impl StorageModule {
         // Attempt to load a global set of intervals from the submodules
         let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
 
-        Ok(StorageModule {
+        Ok(Self {
             id: storage_module_info.id,
-            partition_assignment: storage_module_info.partition_assignment,
+            partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             submodules: submodule_map,
@@ -353,13 +360,33 @@ impl StorageModule {
         })
     }
 
+    pub fn assign_partition(&self, partition_assignment: PartitionAssignment) {
+        let mut pa = self.partition_assignment.write().unwrap();
+        *pa = Some(partition_assignment);
+
+        // Also update the packing params file in each submodule
+        for (_, submodule) in self.submodules.iter() {
+            let params = PackingParams {
+                packing_address: self.config.node_config.miner_address(),
+                partition_hash: Some(partition_assignment.partition_hash),
+                ledger: partition_assignment.ledger_id,
+                slot: partition_assignment.slot_index,
+            };
+
+            let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
+            params.write_to_disk(&params_path);
+        }
+    }
+
     /// Returns the StorageModules partition_hash if assigned
     pub fn partition_hash(&self) -> Option<PartitionHash> {
-        if let Some(part_assign) = self.partition_assignment {
-            Some(part_assign.partition_hash)
-        } else {
-            None
-        }
+        let pa = self.partition_assignment.read().unwrap();
+        (*pa).map(|part_assign| part_assign.partition_hash)
+    }
+
+    pub fn partition_assignment(&self) -> Option<PartitionAssignment> {
+        let pa = self.partition_assignment.read().unwrap();
+        *pa
     }
 
     /// Reinit intervals setting them as Uninitialized, and erase db
@@ -379,9 +406,7 @@ impl StorageModule {
             .wrap_err("Could not update submodule interval files")?;
 
         for (_interval, submodule) in self.submodules.iter() {
-            submodule
-                .db
-                .update_eyre(|tx| clear_submodule_database(tx))?;
+            submodule.db.update_eyre(clear_submodule_database)?;
         }
 
         Ok(storage_interval)
@@ -390,6 +415,8 @@ impl StorageModule {
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
     pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
         self.partition_assignment
+            .read()
+            .unwrap()
             .and_then(|part| part.slot_index)
             .map(|slot_index| {
                 let start_offset =
@@ -640,7 +667,7 @@ impl StorageModule {
         // Calculate file offset and prepare buffer
         let chunk_size = self.config.consensus.chunk_size;
         let file_offset = *(chunk_offset - interval.start()) as u64 * chunk_size;
-        let mut buf = vec![0u8; chunk_size as usize];
+        let mut buf = vec![0_u8; chunk_size as usize];
 
         // Read chunk from file
         let mut file = submodule.file.lock().unwrap();
@@ -662,7 +689,7 @@ impl StorageModule {
         let mut set = NoditSet::new();
         for (interval, ct) in intervals.iter() {
             if *ct == chunk_type {
-                let _ = set.insert_merge_touching_or_overlapping(interval.clone());
+                let _ = set.insert_merge_touching_or_overlapping(*interval);
             }
         }
         drop(intervals);
@@ -704,7 +731,7 @@ impl StorageModule {
         chunk_offset: PartitionChunkOffset,
         bytes: Vec<u8>,
         chunk_type: ChunkType,
-    ) -> () {
+    ) {
         let mut pending = self.pending_writes.write().unwrap();
         pending.insert(chunk_offset, (bytes, chunk_type));
         drop(pending);
@@ -751,11 +778,7 @@ impl StorageModule {
                     // Add the tx_path_hash to every offset in the intersecting range
                     for offset in *range.start()..=*range.end() {
                         let part_offset = PartitionChunkOffset::from(offset);
-                        add_tx_path_hash_to_offset_index(
-                            tx,
-                            part_offset,
-                            Some(tx_path_hash.clone()),
-                        )?;
+                        add_tx_path_hash_to_offset_index(tx, part_offset, Some(tx_path_hash))?;
                     }
                     // Also update the start offset by data_root index
                     add_start_offset_to_data_root_index(tx, data_root, relative_offset)?;
@@ -850,7 +873,7 @@ impl StorageModule {
             let pending = self.pending_writes.read().unwrap();
             if pending
                 .get(&partition_offset)
-                .map_or(false, |(_, chunk_type)| *chunk_type == ChunkType::Entropy)
+                .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Entropy)
             {
                 pending_offsets.push(partition_offset);
             }
@@ -1074,16 +1097,17 @@ impl StorageModule {
     /// Utility method asking the StorageModule to return its chunk range in
     /// ledger relative coordinates
     pub fn get_storage_module_ledger_range(&self) -> eyre::Result<LedgerChunkRange> {
-        if let Some(part_assign) = self.partition_assignment {
+        let pa = self.partition_assignment.read().unwrap();
+        if let Some(part_assign) = *pa {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
                 let end = start + self.config.consensus.num_chunks_in_partition;
-                return Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)));
+                Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
             } else {
-                return Err(eyre::eyre!("Ledger slot not assigned!"));
+                Err(eyre::eyre!("Ledger slot not assigned!"))
             }
         } else {
-            return Err(eyre::eyre!("Partition not assigned!"));
+            Err(eyre::eyre!("Partition not assigned!"))
         }
     }
 
@@ -1133,7 +1157,7 @@ impl StorageModule {
 
     /// Test utility function to mark a StorageModule as packed
     pub fn pack_with_zeros(&self) {
-        let entropy_bytes = vec![0u8; self.config.consensus.chunk_size as usize];
+        let entropy_bytes = vec![0_u8; self.config.consensus.chunk_size as usize];
         for chunk_offset in 0..self.config.consensus.num_chunks_in_partition as u32 {
             self.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
@@ -1158,7 +1182,8 @@ fn ensure_default_intervals(
         .read(true)
         .write(true)
         .create(true)
-        .open(&intervals_path)
+        .truncate(false)
+        .open(intervals_path)
         .wrap_err_with(|| {
             format!(
                 "Failed to create or open intervals file at {}",
@@ -1168,7 +1193,7 @@ fn ensure_default_intervals(
 
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        let mut file = get_atomic_file(&intervals_path)?;
+        let mut file = get_atomic_file(intervals_path)?;
         file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
         file.commit()?;
     }
@@ -1184,7 +1209,8 @@ pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
         .read(true)
         .write(true)
         .create(true)
-        .open(&path)
+        .truncate(false)
+        .open(path)
         .wrap_err_with(|| {
             format!(
                 "Failed to create or open intervals file at {}",
@@ -1223,10 +1249,11 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
     let mut info_file = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
 
-    info_file.write_all(serde_json::to_string_pretty(&*info)?.as_bytes())?;
+    info_file.write_all(serde_json::to_string_pretty(info)?.as_bytes())?;
     Ok(())
 }
 
@@ -1247,13 +1274,15 @@ pub fn get_overlapped_storage_modules(
         .read()
         .iter()
         .filter(|module| {
-            module
+            (module
                 .partition_assignment
+                .read()
+                .unwrap()
                 .and_then(|pa| pa.ledger_id)
-                .map_or(false, |id| id == ledger as u32)
+                == Some(ledger as u32))
                 && module
                     .get_storage_module_ledger_range()
-                    .map_or(false, |range| range.overlaps(tx_chunk_range))
+                    .is_ok_and(|range| range.overlaps(tx_chunk_range))
         })
         .cloned() // Clone the Arc, which is cheap
         .collect()
@@ -1270,13 +1299,15 @@ pub fn get_storage_module_at_offset(
         .read()
         .iter()
         .find(|module| {
-            module
+            (module
                 .partition_assignment
+                .read()
+                .unwrap()
                 .and_then(|pa| pa.ledger_id)
-                .map_or(false, |id| id == ledger as u32)
+                == Some(ledger as u32))
                 && module
                     .get_storage_module_ledger_range()
-                    .map_or(false, |range| range.contains_point(chunk_offset))
+                    .is_ok_and(|range| range.contains_point(chunk_offset))
         })
         .cloned()
 }
@@ -1312,7 +1343,7 @@ pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<PartitionChunk
             }
         }
         if left != range.end() {
-            invalid_starts.push(left - PartitionChunkOffset::from(1u64))
+            invalid_starts.push(left - PartitionChunkOffset::from(1_u64))
         }
     }
     invalid_starts
@@ -1351,7 +1382,7 @@ mod tests {
 
     #[test]
     fn storage_module_test() -> eyre::Result<()> {
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: None,
             submodules: vec![
@@ -1391,7 +1422,7 @@ mod tests {
         let entropy_chunk = vec![0xff; 32]; // All bytes set to 0xff
         storage_module.write_chunk(
             PartitionChunkOffset::from(1),
-            entropy_chunk.to_vec(),
+            entropy_chunk.clone(),
             ChunkType::Entropy,
         );
 
@@ -1432,12 +1463,12 @@ mod tests {
 
         storage_module.write_chunk(
             PartitionChunkOffset::from(4),
-            data1_chunk.to_vec(),
+            data1_chunk.clone(),
             ChunkType::Data,
         );
         storage_module.write_chunk(
             PartitionChunkOffset::from(5),
-            data2_chunk.to_vec(),
+            data2_chunk.clone(),
             ChunkType::Data,
         );
 
@@ -1504,7 +1535,7 @@ mod tests {
                 ),
                 (
                     PartitionChunkOffset::from(5),
-                    (data2_chunk.clone(), ChunkType::Data)
+                    (data2_chunk, ChunkType::Data)
                 )
             ]
         );
@@ -1518,7 +1549,7 @@ mod tests {
             chunks.into_iter().collect::<Vec<_>>(),
             [(
                 PartitionChunkOffset::from(4),
-                (data1_chunk.clone(), ChunkType::Data)
+                (data1_chunk, ChunkType::Data)
             ),]
         );
 
@@ -1556,7 +1587,7 @@ mod tests {
 
     #[test]
     fn pending_writes_test() -> eyre::Result<()> {
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![
@@ -1576,7 +1607,7 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
             },
-            base_directory: base_path.clone(),
+            base_directory: base_path,
             ..NodeConfig::testnet()
         };
         let config = Config::new(node_config);
@@ -1587,8 +1618,8 @@ mod tests {
         let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         // Queue up some entropy chunks in the pending writes queue
-        let entropy_bytes = vec![0u8; chunk_size];
-        for chunk_offset in 0..10 as u32 {
+        let entropy_bytes = vec![0_u8; chunk_size];
+        for chunk_offset in 0..10_u32 {
             storage_module.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
                 entropy_bytes.clone(),
@@ -1600,7 +1631,7 @@ mod tests {
         storage_module.sync_pending_chunks()?;
 
         // Write 9 more entropy chunks
-        for chunk_offset in 10..19 as u32 {
+        for chunk_offset in 10..19_u32 {
             storage_module.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
                 entropy_bytes.clone(),
@@ -1629,7 +1660,7 @@ mod tests {
         }
 
         // Test - write a data chunk that overwrites a pending entropy chunk
-        let bytes = vec![10u8; chunk_size];
+        let bytes = vec![10_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(11);
         storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Data);
 
@@ -1654,9 +1685,9 @@ mod tests {
         }
 
         // Test - write a data chunk that overwrites a stored entropy chunk
-        let bytes = vec![20u8; chunk_size];
+        let bytes = vec![20_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(2);
-        storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Data);
+        storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
 
         {
             // Verify the resulting intervals
@@ -1671,9 +1702,9 @@ mod tests {
         }
 
         // Test - write an pending entropy chunk to an uninitialized offset on disk
-        let bytes = vec![30u8; chunk_size];
+        let bytes = vec![30_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(20);
-        storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Entropy);
+        storage_module.write_chunk(chunk_offset, bytes, ChunkType::Entropy);
 
         {
             // Verify the resulting intervals
@@ -1692,9 +1723,9 @@ mod tests {
         }
 
         // Test - write a pending data chunk to an uninitialized offset on disk
-        let bytes = vec![40u8; chunk_size];
+        let bytes = vec![40_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(19);
-        storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Data);
+        storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
         {
             // Verify the resulting intervals
             let data = storage_module.get_intervals(ChunkType::Data);
@@ -1766,7 +1797,7 @@ mod tests {
 
     #[test]
     fn data_path_test() -> eyre::Result<()> {
-        let infos = vec![StorageModuleInfo {
+        let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![
@@ -1782,7 +1813,7 @@ mod tests {
                 num_chunks_in_partition: 5,
                 ..ConsensusConfig::testnet()
             }),
-            base_directory: base_path.clone(),
+            base_directory: base_path,
             ..NodeConfig::testnet()
         };
         let config = Config::new(node_config);

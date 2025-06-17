@@ -3,6 +3,7 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 pub mod app_state;
+pub mod arbiter_handle;
 pub mod block;
 pub mod block_production;
 pub mod chunk;
@@ -23,6 +24,8 @@ pub mod storage_pricing;
 pub mod transaction;
 pub mod version;
 
+pub mod h256;
+
 use std::sync::{atomic::AtomicU64, Arc};
 
 pub use block::*;
@@ -36,6 +39,7 @@ pub use transaction::*;
 
 pub use alloy_primitives::{Address, Signature};
 pub use app_state::*;
+pub use arbiter_handle::*;
 pub use arbitrary::Arbitrary;
 pub use chunk::*;
 pub use merkle::*;

@@ -1,14 +1,14 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
 use actix::dev::MessageResponse;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem,
     NodeConfig, H256,
 };
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,7 +30,7 @@ impl Default for BlockIndex {
 impl BlockIndex {
     /// Initializes a block index from disk, if this was a multi node network
     /// it could also read the latest block information from the network.
-    pub async fn new(config: &NodeConfig) -> Result<BlockIndex> {
+    pub async fn new(config: &NodeConfig) -> Result<Self> {
         let block_index_dir = config.block_index_dir();
         tokio::fs::create_dir_all(&block_index_dir).await?;
         let block_index_file = block_index_dir.join(FILE_NAME);
@@ -39,7 +39,7 @@ impl BlockIndex {
         let index = load_index_from_file(&block_index_file)?;
 
         // Return the "Initialized" state of the BlockIndex type
-        Ok(BlockIndex {
+        Ok(Self {
             items: index.into(),
             block_index_file,
         })
@@ -69,7 +69,7 @@ impl BlockIndex {
 
     /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
     pub fn get_latest_item(&self) -> Option<&BlockIndexItem> {
-        if self.items.len() == 0 {
+        if self.items.is_empty() {
             return None;
         };
         self.items.last()
@@ -88,7 +88,7 @@ impl BlockIndex {
     pub fn push_block(
         &mut self,
         block: &IrysBlockHeader,
-        all_txs: &Vec<IrysTransactionHeader>,
+        all_txs: &[IrysTransactionHeader],
         chunk_size: u64,
     ) -> eyre::Result<()> {
         /// Inner function: Calculates the total number of full chunks needed to store transactions
@@ -117,11 +117,23 @@ impl BlockIndex {
         {
             (0, sub_chunks_added)
         } else {
-            let prev_block = self.get_item(block.height.saturating_sub(1)).unwrap();
-            (
-                prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
-                prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
-            )
+            let prev_block = self.get_item(block.height.saturating_sub(1));
+            if let Some(prev_block) = prev_block {
+                (
+                    prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
+                    prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
+                )
+            } else {
+                // Use println! here because errors and tracing are not getting propagated
+                println!(
+                    "Panic: prev_block at index {} not found in block_index",
+                    block.height.saturating_sub(1)
+                );
+                return Err(eyre::eyre!(
+                    "prev_block at index {} not found in block_index",
+                    block.height.saturating_sub(1)
+                ));
+            }
         };
 
         let block_index_item = BlockIndexItem {
@@ -145,8 +157,10 @@ impl BlockIndex {
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
     pub fn get_block_bounds(&self, ledger: DataLedger, chunk_offset: u64) -> BlockBounds {
-        let mut block_bounds: BlockBounds = Default::default();
-        block_bounds.ledger = ledger;
+        let mut block_bounds = BlockBounds {
+            ledger,
+            ..Default::default()
+        };
 
         let result = self.get_block_index_item(ledger, chunk_offset);
         if let Ok((block_height, found_item)) = result {
@@ -212,7 +226,7 @@ pub struct BlockBounds {
 }
 
 fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
-    match OpenOptions::new().append(true).open(&file_path) {
+    match OpenOptions::new().append(true).open(file_path) {
         Ok(mut file) => {
             file.write_all(&item.to_bytes())?;
             Ok(())
@@ -231,13 +245,14 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(file_path)?;
 
     // Determine the file size
     let file_size = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
 
-    let mut buffer = vec![0u8; file_size as usize];
+    let mut buffer = vec![0_u8; file_size as usize];
     file.read_exact(&mut buffer)?;
 
     let mut block_index_items = Vec::new();
@@ -277,7 +292,7 @@ mod tests {
         block_index_items: &[BlockIndexItem],
         config: &NodeConfig,
     ) -> eyre::Result<()> {
-        fs::create_dir_all(&config.block_index_dir())?;
+        fs::create_dir_all(config.block_index_dir())?;
         let path = config.block_index_dir().join(FILE_NAME);
         let mut file = File::create(path)?;
         for item in block_index_items {

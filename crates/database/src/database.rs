@@ -9,30 +9,29 @@ use crate::tables::{
 };
 
 use crate::metadata::MetadataKey;
+use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
-    U256,
 };
-use reth_db::cursor::DbDupCursorRO;
-
-use reth_db::table::Table;
+use reth_db::cursor::DbDupCursorRO as _;
+use reth_db::mdbx::init_db_for;
+use reth_db::table::{Table, TableInfo};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
+use reth_db::TableSet;
 use reth_db::{
-    create_db as reth_create_db,
     cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
-use reth_db::{HasName, HasTableType, PlainAccountState};
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
-pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
+pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
     args: Option<DatabaseArguments>,
@@ -41,18 +40,18 @@ pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
         DatabaseArguments::new(ClientVersion::default())
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((10 * MEGABYTE).try_into()?),
+            .with_growth_step((10 * MEGABYTE).into()),
     );
 
     // Register the prometheus recorder before creating the database,
     // because irys_database init needs it to register metrics.
     let _ = install_prometheus_recorder();
-    let db = reth_create_db(path, args)?.with_metrics_and_tables(tables);
+    let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
 
     Ok(db)
 }
 
-pub fn open_or_create_cache_db<P: AsRef<Path>, T: HasName + HasTableType>(
+pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
     args: Option<DatabaseArguments>,
@@ -61,7 +60,7 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: HasName + HasTableType>(
         DatabaseArguments::new(ClientVersion::default())
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((50 * MEGABYTE).try_into()?)
+            .with_growth_step((50 * MEGABYTE).into())
             .with_shrink_threshold((100 * MEGABYTE).try_into()?),
     );
     open_or_create_db(path, tables, Some(args))
@@ -272,21 +271,12 @@ pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Res
     Ok((chunk_count as u64, chunk_count as u64 * chunk_size))
 }
 
-/// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
-pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
-    debug!("balance check on address: {:?}", address);
-    Ok(tx
-        .get::<PlainAccountState>(address)?
-        .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
-        .unwrap_or(U256::from(0)))
-}
-
 pub fn insert_peer_list_item<T: DbTxMut>(
     tx: &T,
     mining_address: &Address,
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<PeerListItems>(mining_address.clone(), peer_list_entry.clone().into())?)
+    Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
 }
 
 pub fn walk_all<T: Table, TX: DbTx>(
@@ -318,11 +308,11 @@ pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseE
 #[cfg(test)]
 mod tests {
     use irys_types::{CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader, H256};
-    use reth_db::Database;
+    use reth_db::Database as _;
 
     use crate::{
-        block_header_by_hash, commitment_tx_by_txid, config::get_data_dir, insert_commitment_tx,
-        tables::IrysTables,
+        block_header_by_hash, commitment_tx_by_txid, config::get_data_dir,
+        db::IrysDatabaseExt as _, insert_commitment_tx, tables::IrysTables,
     };
 
     use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
@@ -345,7 +335,7 @@ mod tests {
         // Write a commitment tx
         let commitment_tx = CommitmentTransaction {
             // Override some defaults to insure deserialization is working
-            id: H256::from([10u8; 32]),
+            id: H256::from([10_u8; 32]),
             version: 1,
             ..Default::default()
         };

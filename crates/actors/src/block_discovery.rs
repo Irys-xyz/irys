@@ -1,25 +1,31 @@
 use crate::{
     block_index_service::BlockIndexReadGuard,
-    block_tree_service::BlockTreeService,
+    block_tree_service::BlockTreeServiceMessage,
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
+    mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
-    CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
+    CommitmentCacheInner, CommitmentCacheMessage, CommitmentCacheStatus,
+    GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::eyre;
-use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, SystemLedger};
+use irys_database::{
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
+    SystemLedger,
+};
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
-    IrysBlockHeader, IrysTransactionHeader,
+    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
-use reth_db::Database;
-use std::sync::Arc;
-use tracing::{debug, error, info};
+use irys_vdf::state::VdfStateReadonly;
+use reth_db::Database as _;
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use tracing::{debug, error, info, Instrument as _, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -37,11 +43,11 @@ pub struct BlockDiscoveryActor {
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// Store last VDF Steps
-    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStateReadonly,
     /// Service Senders
     pub service_senders: ServiceSenders,
-    /// Gossip message bus
-    pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
+    /// Tracing span
+    pub span: Span,
 }
 
 #[async_trait::async_trait]
@@ -69,7 +75,6 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
             .map_err(|mailbox_error: MailboxError| eyre!("MailboxError: {:?}", mailbox_error))?
     }
 }
-
 /// When a block is discovered, either produced locally or received from
 /// a network peer, this message is broadcast.
 #[derive(Message, Debug, Clone)]
@@ -92,6 +97,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     type Result = ResponseFuture<eyre::Result<()>>;
 
     fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
+        let span = self.span.clone();
+        let _span = span.enter();
         // Validate discovered block
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
@@ -126,13 +133,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .tx_ids
             .iter()
             .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| {
-                            eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
-                        })
-                    })
+                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
+                opt.ok_or_else(|| {
+                    eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
+                })
             })
             .collect::<Result<Vec<_>, _>>()
         {
@@ -156,11 +160,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .tx_ids
             .iter()
             .map(|txid| {
-                self.db
-                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                    })
+                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
+                opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
             })
             .collect::<Result<Vec<_>, _>>()
         {
@@ -191,55 +192,20 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         }
 
         //====================================
-        // Commitment ledger TX Validation
-        //------------------------------------
-        // Extract the Commitment ledger from the epoch block
-        let commitment_ledger = new_block_header
-            .system_ledgers
-            .iter()
-            .find(|b| b.ledger_id == SystemLedger::Commitment);
-
-        // Validate commitments (if there are some)
-        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-        let mut commitment_txids: H256List = H256List::new();
-        if let Some(commitment_ledger) = commitment_ledger {
-            debug!("{:#?}", commitment_ledger);
-            let read_tx = self.db.tx().expect("to create a database read tx");
-
-            // Collect commitments with proper error handling
-            match commitment_ledger
-                .tx_ids
-                .iter()
-                .map(|txid| {
-                    commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(collected) => {
-                    commitments = collected;
-                    commitment_txids = commitment_ledger.tx_ids.clone();
-                }
-
-                Err(e) => error!("Failed to collect commitment transactions: {:?}", e),
-            }
-        }
-
-        //====================================
         // Block header pre-validation
         //------------------------------------
         let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
-        let block_tree_addr = BlockTreeService::from_registry();
         let config = self.config.clone();
-        let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
         let commitment_cache_sender = self.service_senders.commitment_cache.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
+        let span2 = self.span.clone();
+        let block_tree_sender = self.service_senders.block_tree.clone();
+        let mempool_sender = self.service_senders.mempool.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -248,24 +214,60 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             "Validating block"
         );
 
-        let gossip_sender = self.gossip_sender.clone();
+        let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
         Box::pin(async move {
+            let span3 = span2.clone();
+            let _span = span3.enter();
+
+            //====================================
+            // Commitment ledger TX Validation
+            //------------------------------------
+            // Extract the Commitment ledger from the epoch block
+            let commitment_ledger = new_block_header
+                .system_ledgers
+                .iter()
+                .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+            // Validate commitments (if there are some)
+            let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+            let mut commitment_tx_ids: H256List = H256List::new();
+            if let Some(commitment_ledger) = commitment_ledger {
+                debug!("{:#?}", commitment_ledger);
+                commitment_tx_ids = commitment_ledger.tx_ids.clone();
+                match get_commitment_tx_in_parallel(
+                    commitment_tx_ids.0.clone(),
+                    &mempool_sender,
+                    &db,
+                )
+                .await
+                {
+                    Ok(tx) => {
+                        commitments = tx;
+                    }
+                    Err(e) => error!("Failed to collect commitment transactions: {:?}", e),
+                }
+            }
+
             info!("Pre-validating block");
-            let validation_future = tokio::task::spawn_blocking(move || {
+
+            let validation_result = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
                     previous_block_header,
                     partitions_guard,
                     config,
                     reward_curve,
-                    vdf_steps_guard,
                     ema_service_sender,
                 )
-            });
+                .instrument(span2)
+            })
+            .await
+            .unwrap()
+            .await;
 
-            match validation_future.await.unwrap().await {
-                Ok(_) => {
+            match validation_result {
+                Ok(()) => {
                     // Attempt to validate / update the epoch commitment cache
                     for commitment_tx in commitments.iter() {
                         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -278,12 +280,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .await
                             .expect("to receive CommitmentStatus from AddCommitment message");
 
-                        if matches!(status, CommitmentStatus::Accepted) == false {
+                        if !matches!(status, CommitmentCacheStatus::Accepted) {
                             // Something went wrong with the commitments validation, it's time to roll back
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             let _ = commitment_cache_sender.send(
                                 CommitmentCacheMessage::RollbackCommitments {
-                                    commitment_txs: commitment_txids,
+                                    commitment_txs: commitment_tx_ids,
                                     response: tx,
                                 },
                             );
@@ -328,7 +330,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                             // Reject the entire epoch block if any commitment is invalid
                             // This ensures only verified commitments are finalized at epoch boundaries
-                            if status != CommitmentStatus::Accepted {
+                            if status != CommitmentCacheStatus::Accepted {
                                 return Err(eyre::eyre!("Invalid commitments in epoch block"));
                             }
                         }
@@ -364,21 +366,23 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     // WARNING: All block pre-validation needs to be completed before
                     // sending this message.
                     info!("Block is valid, sending to block tree");
-                    block_tree_addr
-                        .send(BlockPreValidatedMessage(
-                            new_block_header.clone(),
-                            Arc::new(all_txs),
-                        ))
-                        .await??;
+
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    let _ = block_tree_sender.send(BlockTreeServiceMessage::BlockPreValidated {
+                        block: new_block_header.clone(),
+                        response: oneshot_tx,
+                    });
+                    let _ = oneshot_rx
+                        .await
+                        .expect("to send the BlockPreValidated message");
 
                     // Send the block to the gossip bus
                     tracing::trace!(
                         "sending block to bus: block height {:?}",
                         &new_block_header.height
                     );
-                    if let Err(error) = gossip_sender
-                        .send(GossipData::Block(new_block_header.as_ref().clone()))
-                        .await
+                    if let Err(error) =
+                        gossip_sender.send(GossipData::Block(new_block_header.as_ref().clone()))
                     {
                         tracing::error!("Failed to send gossip message: {}", error);
                     }
@@ -391,5 +395,148 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
         })
+    }
+}
+
+/// Get all commitment transactions from the mempool and database
+pub async fn get_commitment_tx_in_parallel(
+    commitment_tx_ids: Vec<IrysTransactionId>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let tx_ids_clone = commitment_tx_ids.clone();
+
+    // Set up a function to query the mempool for commitment transactions
+    let mempool_future = {
+        let tx_ids = tx_ids_clone.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
+                commitment_tx_ids: tx_ids,
+                response: tx,
+            })?;
+            let x = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
+            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(x)
+        }
+    };
+
+    // Set up a function to query the database for commitment transactions
+    let db_future = {
+        let tx_ids = commitment_tx_ids.clone();
+        let db_ref = db.clone();
+        async move {
+            let db_tx = db_ref.tx()?;
+            let mut results = HashMap::new();
+            for tx_id in &tx_ids {
+                if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
+                    results.insert(*tx_id, header);
+                }
+            }
+            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
+        }
+    };
+
+    // Query mempool and database in parallel
+    let (mempool_results, db_results) = tokio::join!(mempool_future, db_future);
+    let mempool_map = mempool_results?;
+    let db_map = db_results?;
+
+    // Combine results, preferring mempool
+    let mut headers = Vec::with_capacity(commitment_tx_ids.len());
+    let mut missing = Vec::new();
+
+    for tx_id in commitment_tx_ids {
+        if let Some(header) = mempool_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else if let Some(header) = db_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else {
+            missing.push(tx_id);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(headers)
+    } else {
+        Err(eyre::eyre!("Missing transactions: {:?}", missing))
+    }
+}
+
+/// Get all data/storage transactions from the mempool and database
+pub async fn get_data_tx_in_parallel(
+    storage_tx_ids: Vec<IrysTransactionId>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<IrysTransactionHeader>> {
+    let tx_ids_clone = storage_tx_ids.clone();
+
+    // Set up a function to query the mempool for storage transactions
+    let mempool_future = {
+        let tx_ids = tx_ids_clone.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            mempool_sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx))?;
+            let x = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .into_iter()
+                .filter(Option::is_some)
+                .map(|v| (v.clone().unwrap().id, v.unwrap()))
+                .collect::<HashMap<IrysTransactionId, IrysTransactionHeader>>();
+            Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(x)
+        }
+    };
+
+    // Set up a function to query the database for commitment transactions
+    let db_future = {
+        let tx_ids = storage_tx_ids.clone();
+        let db_ref = db.clone();
+        async move {
+            let db_tx = db_ref.tx()?;
+            let mut results = HashMap::new();
+            for tx_id in &tx_ids {
+                if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
+                    results.insert(*tx_id, header);
+                }
+            }
+            Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(results)
+        }
+    };
+
+    // Query mempool and database in parallel
+    let (mempool_results, db_results) = tokio::join!(mempool_future, db_future);
+
+    let mempool_map = mempool_results?;
+    let db_map = db_results?;
+
+    debug!(
+        "mempool_results:\n {:?}",
+        mempool_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    );
+    debug!(
+        "db_results:\n {:?}",
+        db_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    );
+
+    // Combine results, preferring mempool
+    let mut headers = Vec::with_capacity(storage_tx_ids.len());
+    let mut missing = Vec::new();
+
+    for tx_id in storage_tx_ids {
+        if let Some(header) = mempool_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else if let Some(header) = db_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else {
+            missing.push(tx_id);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(headers)
+    } else {
+        Err(eyre::eyre!("Missing transactions: {:?}", missing))
     }
 }

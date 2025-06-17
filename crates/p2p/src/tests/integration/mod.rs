@@ -1,13 +1,16 @@
 use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use core::time::Duration;
-use irys_actors::mempool_service::MempoolFacade;
-use irys_types::{DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore};
+use irys_actors::mempool_service::MempoolFacade as _;
+use irys_types::irys::IrysSigner;
+use irys_types::{
+    BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
+};
 use tracing::debug;
 
 #[actix_web::test]
 async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
-    let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
-    let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new();
+    let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new().await;
+    let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new().await;
 
     gossip_service_test_fixture_1
         .add_peer(&gossip_service_test_fixture_2)
@@ -17,9 +20,9 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
         .await;
 
     let (service1_handle, gossip_service1_message_bus) =
-        gossip_service_test_fixture_1.run_service(false).await;
+        gossip_service_test_fixture_1.run_service();
     let (service2_handle, _gossip_service2_message_bus) =
-        gossip_service_test_fixture_2.run_service(false).await;
+        gossip_service_test_fixture_2.run_service();
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -28,7 +31,6 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
     // Service 1 receives a message through the message bus from a system's component
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send transaction through message bus");
 
     // Waiting a little for service 2 to receive the tx over gossip
@@ -56,10 +58,10 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
 #[actix_web::test]
 async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
     let mut fixtures = vec![
-        GossipServiceTestFixture::new(),
-        GossipServiceTestFixture::new(),
-        GossipServiceTestFixture::new(),
-        GossipServiceTestFixture::new(),
+        GossipServiceTestFixture::new().await,
+        GossipServiceTestFixture::new().await,
+        GossipServiceTestFixture::new().await,
+        GossipServiceTestFixture::new().await,
     ];
 
     // Connect all peers to each other
@@ -80,7 +82,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
 
     // Start all services
     for fixture in &mut fixtures {
-        let (handle, bus) = fixture.run_service(false).await;
+        let (handle, bus) = fixture.run_service();
         handles.push(handle);
         message_buses.push(bus);
     }
@@ -92,7 +94,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
         .first()
         .expect("to have a fixture")
         .mempool_stub
-        .handle_data_transaction(generate_test_tx().header)
+        .handle_data_transaction_ingress(generate_test_tx().header)
         .await
         .expect("To handle tx");
 
@@ -122,14 +124,14 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
 
 #[actix_web::test]
 async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new();
-    let mut fixture2 = GossipServiceTestFixture::new();
+    let mut fixture1 = GossipServiceTestFixture::new().await;
+    let mut fixture2 = GossipServiceTestFixture::new().await;
 
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -139,7 +141,6 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     for _ in 0_i32..3_i32 {
         gossip_service1_message_bus
             .send(data.clone())
-            .await
             .expect("Failed to send duplicate transaction");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -167,14 +168,14 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new();
-    let mut fixture2 = GossipServiceTestFixture::new();
+    let mut fixture1 = GossipServiceTestFixture::new().await;
+    let mut fixture2 = GossipServiceTestFixture::new().await;
 
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
+    let (service2_handle, _) = fixture2.run_service();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -185,7 +186,6 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
 
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send chunk data");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -210,8 +210,8 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new();
-    let mut fixture2 = GossipServiceTestFixture::new();
+    let mut fixture1 = GossipServiceTestFixture::new().await;
+    let mut fixture2 = GossipServiceTestFixture::new().await;
 
     // Add peer2 with low reputation
     fixture1
@@ -219,15 +219,14 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
         .await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let data = GossipData::Transaction(generate_test_tx().header);
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send transaction to low reputation peer");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -239,7 +238,7 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
             .read()
             .expect("Failed to read service 2 mempool transactions for reputation check");
         eyre::ensure!(
-            service2_mempool_txs.len() == 0,
+            service2_mempool_txs.is_empty(),
             "Expected 0 transactions in low reputation peer mempool, but found {}",
             service2_mempool_txs.len()
         );
@@ -253,13 +252,13 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
 
 #[actix_web::test]
 async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new();
-    let fixture2 = GossipServiceTestFixture::new();
+    let mut fixture1 = GossipServiceTestFixture::new().await;
+    let fixture2 = GossipServiceTestFixture::new().await;
 
     // Add peer2 but don't start its service
     fixture1.add_peer(&fixture2).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -268,7 +267,6 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     // Should not panic when peer is offline
     gossip_service1_message_bus
         .send(data)
-        .await
         .expect("Failed to send transaction to offline peer");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -280,27 +278,34 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new();
-    let mut fixture2 = GossipServiceTestFixture::new();
+    let mut fixture1 = GossipServiceTestFixture::new().await;
+    let mut fixture2 = GossipServiceTestFixture::new().await;
 
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
     // Create a test block with transactions
-    let mut block = IrysBlockHeader::default();
+    let mut block = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        ..IrysBlockHeader::new_mock_header()
+    };
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
     debug!("Added transactions to ledger: {:?}", ledger.tx_ids);
     block.data_ledgers.push(ledger);
+    let signer = IrysSigner::random_signer(&fixture1.config.consensus);
+    signer
+        .sign_block_header(&mut block)
+        .expect("to sign block header");
 
     // Set up the mock API client to return the transactions
     fixture2.api_client_stub.txs.insert(tx1.id, tx1.clone());
     fixture2.api_client_stub.txs.insert(tx2.id, tx2.clone());
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -308,7 +313,6 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     // Send block from service 1 to service 2
     gossip_service1_message_bus
         .send(GossipData::Block(block))
-        .await
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and fetch transactions
@@ -332,14 +336,14 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
 
 #[actix_web::test]
 async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new();
-    let mut fixture2 = GossipServiceTestFixture::new();
+    let mut fixture1 = GossipServiceTestFixture::new().await;
+    let mut fixture2 = GossipServiceTestFixture::new().await;
 
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service(false).await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service(false).await;
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -359,7 +363,6 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     // Send block from service 1 to service 2
     gossip_service1_message_bus
         .send(GossipData::Block(block))
-        .await
         .expect("Failed to send block to service 1");
 
     // Wait for service 2 to process the block and attempt to fetch transactions
@@ -369,7 +372,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
         // Check that service 2 rejected the block due to missing transactions
         let service2_mempool_txs = fixture2.mempool_txs.read().expect("to get mempool txs");
         eyre::ensure!(
-            service2_mempool_txs.len() == 0,
+            service2_mempool_txs.is_empty(),
             "Expected {} transaction(s), but found {}",
             0,
             service2_mempool_txs.len()

@@ -1,15 +1,15 @@
 use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
-use base58::ToBase58;
-use irys_actors::mempool_service::GetBestMempoolTxs;
+use alloy_genesis::GenesisAccount;
+use base58::ToBase58 as _;
+use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
 use irys_types::{irys::IrysSigner, Address, NodeConfig};
-use reth_db::transaction::DbTx;
+use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
-use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -32,7 +32,7 @@ async fn external_api() -> eyre::Result<()> {
     testnet_config.http.bind_port = 8080; // external test, should never be run concurrently
 
     let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
     let main_address = node.cfg.miner_address();
     node.cfg.consensus.extend_genesis_accounts(vec![
         (
@@ -59,7 +59,7 @@ async fn external_api() -> eyre::Result<()> {
     ]);
     let node = node.start().await;
 
-    node.node_ctx.actor_addresses.stop_mining()?;
+    node.node_ctx.stop_mining().await?;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -87,13 +87,16 @@ async fn external_api() -> eyre::Result<()> {
     info!("waiting for tx header...");
 
     let recv_tx = loop {
-        let txs = node
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let response = node
             .node_ctx
-            .actor_addresses
+            .service_senders
             .mempool
-            .send(GetBestMempoolTxs)
-            .await;
-        match txs {
+            .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx));
+        if let Err(e) = response {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+        match oneshot_rx.await {
             Ok(mempool_tx) if !mempool_tx.storage_tx.is_empty() => {
                 break mempool_tx.storage_tx[0].clone();
             }

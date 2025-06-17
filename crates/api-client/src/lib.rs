@@ -1,4 +1,4 @@
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionHeader,
@@ -7,8 +7,8 @@ use irys_types::{
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
-use tracing::error;
 
+#[expect(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
 enum Method {
     GET,
     POST,
@@ -102,10 +102,6 @@ impl IrysApiClient {
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
-                error!(
-                    "API request failed with status: {}, message: {}",
-                    status, error_text
-                );
                 Err(eyre::eyre!(
                     "API request failed with status: {} - {}",
                     status,
@@ -143,10 +139,7 @@ impl ApiClient for IrysApiClient {
 
         match response {
             Ok(_) => Ok(()),
-            Err(e) => {
-                error!("Failed to post transaction: {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -177,10 +170,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(peer_response)) => Ok(peer_response),
             Ok(None) => Err(eyre::eyre!("No response from peer")),
-            Err(e) => {
-                error!("Failed to post version: {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -190,17 +180,9 @@ impl ApiClient for IrysApiClient {
         block_hash: H256,
     ) -> Result<Option<CombinedBlockHeader>> {
         let path = format!("/block/{}", block_hash.0.to_base58());
-        let response = self
-            .make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
-            .await;
-        match response {
-            Ok(Some(block)) => Ok(Some(block)),
-            Ok(None) => Ok(None),
-            Err(e) => {
-                error!("Failed to get block: {}", e);
-                Err(e)
-            }
-        }
+
+        self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
+            .await
     }
 
     async fn get_block_index(
@@ -208,7 +190,10 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         block_index_query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>> {
-        let path = "/block_index";
+        let path = format!(
+            "/block_index?height={}&limit={}",
+            block_index_query.height, block_index_query.limit
+        );
 
         let response = self
             .make_request::<Vec<BlockIndexItem>, _>(
@@ -221,10 +206,7 @@ impl ApiClient for IrysApiClient {
         match response {
             Ok(Some(block_index)) => Ok(block_index),
             Ok(None) => Ok(vec![]),
-            Err(e) => {
-                error!("Failed to get block index: {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -302,7 +284,7 @@ mod tests {
 
     /// Mock implementation of the API client for testing
     #[derive(Default, Clone)]
-    pub struct MockApiClient {
+    pub(crate) struct MockApiClient {
         pub expected_transactions: std::collections::HashMap<H256, IrysTransactionResponse>,
     }
 

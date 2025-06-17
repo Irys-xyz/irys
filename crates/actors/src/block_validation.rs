@@ -1,23 +1,35 @@
 use std::sync::Arc;
 
 use crate::{
+    block_discovery::get_commitment_tx_in_parallel,
     block_index_service::BlockIndexReadGuard,
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
+    services::ServiceSenders,
+    system_tx_generator::SystemTxGenerator,
 };
-use base58::ToBase58;
-use eyre::ensure;
+use alloy_consensus::Transaction as _;
+use alloy_eips::HashOrNumber;
+use base58::ToBase58 as _;
+use eyre::{ensure, OptionExt as _};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
+use irys_reth::alloy_rlp::Decodable as _;
+use irys_reth::system_tx::SystemTransaction;
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
-    DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
+    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
-use irys_vdf::vdf_state::VdfStepsReadGuard;
+use irys_vdf::state::VdfStateReadonly;
+use itertools::*;
 use openssl::sha;
+use reth::providers::TransactionsProvider as _;
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
@@ -27,8 +39,7 @@ pub async fn prevalidate_block(
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
-    steps_guard: VdfStepsReadGuard,
-    ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
@@ -38,11 +49,7 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None =>
-        // This should be impossible as block poa was generated in block_producer
-        {
-            return Err(eyre::eyre!("Missing PoA chunk to be pre validated"))
-        }
+        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
     };
 
     if block.chunk_hash != sha::sha256(&poa_chunk).into() {
@@ -91,14 +98,6 @@ pub async fn prevalidate_block(
         "solution_hash_is_valid",
     );
 
-    // Recall range check
-    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard)?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "recall_recall_range_is_valid",
-    );
-
     // We only check last_step_checkpoints during pre-validation
     let vdf_checkpoint_valid = async {
         last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
@@ -111,7 +110,7 @@ pub async fn prevalidate_block(
     };
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = async {
-        check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
+        check_valid_oracle_price(&block, &ema_service_sender).await?;
         debug!(
             block_hash = ?block.block_hash.0.to_base58(),
             ?block.height,
@@ -121,7 +120,7 @@ pub async fn prevalidate_block(
     };
     // Check that the EMA has been correctly calculated
     let ema_valid = async {
-        check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
+        check_valid_ema_calculation(&block, &ema_service_sender).await?;
         debug!(
             block_hash = ?block.block_hash.0.to_base58(),
             ?block.height,
@@ -142,6 +141,13 @@ pub async fn prevalidate_block(
         reward.amount == block.reward_amount,
         "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
     );
+
+    // After pre-validating a bunch of quick checks we validate the signature
+    // TODO: We may want to further check if the signer is a staked address
+    // this is a little more advanced though as it requires knowing what the
+    // commitment states looked like when this block was produced. For now
+    // we just accept any valid signature.
+    ensure!(block.is_signature_valid(), "block signature is not valid");
 
     Ok(())
 }
@@ -233,17 +239,17 @@ pub fn check_poa_data_expiration(
     partitions_guard: &PartitionAssignmentsReadGuard,
 ) -> eyre::Result<()> {
     // if is a data chunk
-    if poa.data_path.is_some() && poa.tx_path.is_some() && poa.ledger_id.is_some() {
-        if partitions_guard
+    if poa.data_path.is_some()
+        && poa.tx_path.is_some()
+        && poa.ledger_id.is_some()
+        && !partitions_guard
             .read()
             .data_partitions
-            .get(&poa.partition_hash)
-            .is_none()
-        {
-            return Err(eyre::eyre!(
-                "Invalid data PoA, partition hash is not a data partition, it may have expired"
-            ));
-        }
+            .contains_key(&poa.partition_hash)
+    {
+        return Err(eyre::eyre!(
+            "Invalid data PoA, partition hash is not a data partition, it may have expired"
+        ));
     };
     Ok(())
 }
@@ -296,10 +302,10 @@ pub fn solution_hash_is_valid(
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 /// Check recall range is valid
-pub fn recall_recall_range_is_valid(
+pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
-    steps_guard: &VdfStepsReadGuard,
+    steps_guard: &VdfStateReadonly,
 ) -> eyre::Result<()> {
     let num_recall_ranges_in_partition =
         irys_efficient_sampling::num_recall_ranges_in_partition(config);
@@ -326,7 +332,7 @@ pub fn recall_recall_range_is_valid(
 pub fn get_recall_range(
     step_num: u64,
     config: &ConsensusConfig,
-    steps_guard: &VdfStepsReadGuard,
+    steps_guard: &VdfStateReadonly,
     partition_hash: &H256,
 ) -> eyre::Result<usize> {
     let num_recall_ranges_in_partition =
@@ -343,6 +349,13 @@ pub fn get_recall_range(
 }
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
+#[tracing::instrument(skip_all, fields(
+    ?miner_address,
+    chunk_offset = ?poa.partition_chunk_offset,
+    partition_hash = ?poa.partition_hash,
+    entropy_packing_iterations = ?config.entropy_packing_iterations,
+    chunk_size = ?config.chunk_size
+), err)]
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
@@ -350,7 +363,7 @@ pub fn poa_is_valid(
     config: &ConsensusConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
-    debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
+    debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
         Some(chunk) => chunk.clone().into(),
         None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
@@ -468,6 +481,162 @@ pub fn poa_is_valid(
     Ok(())
 }
 
+/// Validates that the system transactions in the EVM block match the expected system transactions
+/// generated from the Irys block data.
+pub async fn system_transactions_are_valid(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    reth_adapter: &IrysRethNodeAdapter,
+    db: &DatabaseProvider,
+) -> eyre::Result<()> {
+    // pending work:
+    // the local reth node does not have access to the incoming evm block.
+    // the responsibility for providing this evm block data is on the CL (irys)
+    // we need to propagate ExecutioinPayload in Irys gossip, and provide it here.
+    // The interactoin with the reth node then becomes:
+    //
+    // todo: we need to validate the executeion paylad (check that no `withdrawls` are present)
+    // let engine_api = reth_adapter.inner.engine_http_client();
+    // let result = engine_api
+    //     .new_payload_v3(
+    //         execution_payload_v3,
+    //         vec![], // blob version hashes are empty
+    //         parent_irys_block_hash,
+    //     )
+    //     .await?;
+    // // todo if result.is_syncing() we need to postpone the validation and attempt later
+    // ensure!(result.is_valid());
+
+    // 1. Fetch EVM block transactions
+    let block_txs = reth_adapter
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(block.evm_block_hash))?
+        // todo add a test what happens with an invalid evm block
+        .ok_or_eyre("Block not found in reth")?;
+
+    // 2. Extract system transactions from the beginning of the block
+    let mut system_txs = Vec::new();
+    for tx in block_txs {
+        // Try to decode as system transaction
+        if let Ok(system_tx) = SystemTransaction::decode(&mut tx.input().as_ref()) {
+            let tx_signer = tx.into_signed().recover_signer()?;
+            ensure!(
+                block.miner_address == tx_signer,
+                "System tx signer is not the miner"
+            );
+            system_txs.push(system_tx);
+        } else {
+            // If we can't decode as system tx, we've reached the regular transactions
+            break;
+        }
+    }
+
+    // 3. Generate expected system transactions
+    let expected_txs =
+        generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
+
+    // 4. Validate they match
+    validate_system_transactions_match(system_txs.into_iter(), expected_txs.into_iter())
+}
+
+/// Generates expected system transactions by looking up required data from the database
+#[tracing::instrument(skip_all, err)]
+async fn generate_expected_system_transactions_from_db<'a>(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &'a IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<SystemTransaction>> {
+    // Look up previous block to get EVM hash
+    let prev_block = db
+        .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
+        .ok_or_eyre("Previous block not found")?;
+
+    // Look up commitment txs
+    let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
+
+    // Look up submit transaction headers
+    let _submit_ledger = block
+        .data_ledgers
+        .iter()
+        .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
+        .ok_or_eyre("Submit ledger not found")?;
+    // todo: read the data txs from db and mempool
+    let submit_txs = [];
+
+    let system_txs = SystemTxGenerator::new(
+        &block.height,
+        &block.reward_address,
+        &block.reward_amount,
+        &prev_block,
+    );
+    let system_txs = system_txs
+        .generate_all(&commitment_txs, &submit_txs)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(system_txs)
+}
+
+async fn extract_commitment_txs(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
+    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let commitment_txs = if is_epoch_block {
+        // IMPORTANT: on epoch blocks we don't genertae system txs for commitment txs
+        vec![]
+    } else {
+        match &block.system_ledgers[..] {
+            [ledger] => {
+                ensure!(
+                    ledger.ledger_id == SystemLedger::Commitment,
+                    "only commitment ledger supported"
+                );
+                // ledger
+
+                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                    .await?
+            }
+            [] => {
+                // this is valid as we can have a block that contains 0 system ledgers
+                vec![]
+            }
+            // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
+            [..] => eyre::bail!("Currently we support at most 1 system ledger per block"),
+        }
+    };
+    Ok(commitment_txs)
+}
+
+/// Validates that the actual system transactions match the expected ones
+#[tracing::instrument(skip_all, err)]
+fn validate_system_transactions_match(
+    actual: impl Iterator<Item = SystemTransaction>,
+    expected: impl Iterator<Item = SystemTransaction>,
+) -> eyre::Result<()> {
+    // Validate each expected system transaction
+    for (idx, data) in actual.zip_longest(expected).enumerate() {
+        let EitherOrBoth::Both(actual, expected) = data else {
+            // If either of the systxs is not present, it means it was not generated as `expected`
+            // or it was not it was not included in the block. either way - an error
+            tracing::warn!(?data, "system tx len mismatch");
+            eyre::bail!("actual and expected system txs lens differ");
+        };
+        ensure!(
+            actual == expected,
+            "System transaction mismatch at idx {}. expected {:?}, got {:?}",
+            idx,
+            expected,
+            actual
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -476,10 +645,12 @@ mod tests {
             EpochServiceActor, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
             NewEpochMessage,
         },
+        services::ServiceSenders,
         BlockFinalizedMessage,
     };
     use actix::{prelude::*, SystemRegistry};
 
+    use irys_config::StorageSubmodulesConfig;
     use irys_database::{add_genesis_commitments, BlockIndex};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
@@ -500,7 +671,7 @@ mod tests {
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
         pub consensus_config: ConsensusConfig,
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         pub node_config: NodeConfig,
     }
 
@@ -546,7 +717,11 @@ mod tests {
             BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let epoch_service = EpochServiceActor::new(&config);
+        let storage_submodules_config =
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+        let service_senders = ServiceSenders::new().0;
+        let epoch_service =
+            EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
@@ -569,12 +744,13 @@ mod tests {
             .await
             .unwrap();
 
-        let ledgers = ledgers_guard.read();
-        debug!("ledgers: {:?}", ledgers);
+        let partition_hash = {
+            let ledgers = ledgers_guard.read();
+            debug!("ledgers: {:?}", ledgers);
+            let sub_slots = ledgers.get_slots(DataLedger::Submit);
+            sub_slots[0].partitions[0]
+        };
 
-        let sub_slots = ledgers.get_slots(DataLedger::Submit);
-
-        let partition_hash = sub_slots[0].partitions[0];
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),
@@ -684,7 +860,11 @@ mod tests {
 
     async fn poa_test(
         context: &TestContext,
-        txs: &Vec<IrysTransaction>,
+        txs: &[IrysTransaction],
+        #[expect(
+            clippy::ptr_arg,
+            reason = "we need to clone this so it needs to be a Vec"
+        )]
         poa_chunk: &mut Vec<u8>,
         poa_tx_num: usize,
         poa_chunk_num: usize,

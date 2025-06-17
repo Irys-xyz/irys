@@ -57,7 +57,7 @@ impl Compact for GlobalChunkOffset {
     }
 
     fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let o = GlobalChunkOffset(U232::from_le_slice(buf));
+        let o = Self(U232::from_le_slice(buf));
         buf.advance(len);
         (o, buf)
     }

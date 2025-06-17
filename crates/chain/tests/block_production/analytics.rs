@@ -1,28 +1,28 @@
-use std::str::from_utf8;
-use std::time::Duration;
-
 use actix_http::StatusCode;
 use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind};
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::eip2718::Encodable2718 as _;
+use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
-use alloy_provider::Provider;
+use alloy_provider::Provider as _;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
+use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
+use k256::ecdsa::SigningKey;
+use rand::Rng as _;
+use reth::rpc::types::TransactionRequest;
+use std::str::from_utf8;
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing::info;
+
 use irys_types::NodeConfig;
 use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
-use rand::Rng;
+use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG};
 
 use crate::utils::mine_block;
 use crate::utils::IrysNodeTest;
-use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG};
-use k256::ecdsa::SigningKey;
-use reth::rpc::types::TransactionRequest;
-use reth_primitives::GenesisAccount;
-use tokio::time::sleep;
-use tracing::info;
 
 // network simulation test for analytics
 #[ignore]
@@ -64,11 +64,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
-    let _reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
@@ -89,7 +85,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     let generate_tx = |a: &IrysSigner| -> (IrysTransaction, Vec<u8>) {
         let data_size = rand::thread_rng().gen_range(1..=100);
-        let mut data_bytes = vec![0u8; data_size];
+        let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         let tx = a.create_transaction(data_bytes.clone(), None).unwrap();
@@ -119,9 +115,8 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .map(|a| {
             let signer: PrivateKeySigner = a.signer.clone().into();
             ProviderBuilder::new()
-                .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
-                .on_http(
+                .connect_http(
                     format!(
                         "http://127.0.0.1:{}/v1/execution-rpc",
                         node.node_ctx.config.node_config.http.bind_port
@@ -187,7 +182,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 let data_size = tx.header.data_size;
                 let min = chunk_node.min_byte_range;
                 let max = chunk_node.max_byte_range;
-                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
                 let chunk = UnpackedChunk {
                     data_root,
@@ -213,14 +208,14 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             }
 
             // create a new tx, upload *some* of it's chunks
-            (*tx, *data_bytes) = generate_tx(&a);
+            (*tx, *data_bytes) = generate_tx(a);
 
             *num_chunks_uploaded = simple_rng
                 .next_range((tx.chunks.len() + 1).try_into().unwrap())
                 .try_into()
                 .unwrap();
 
-            upload_header(&tx).await.unwrap();
+            upload_header(tx).await.unwrap();
 
             for (tx_chunk_offset, chunk_node) in
                 tx.chunks.iter().take(*num_chunks_uploaded).enumerate()
@@ -229,7 +224,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 let data_size = tx.header.data_size;
                 let min = chunk_node.min_byte_range;
                 let max = chunk_node.max_byte_range;
-                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+                let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
                 let chunk = UnpackedChunk {
                     data_root,

@@ -1,45 +1,40 @@
+use crate::utils::IrysNodeTest;
+use actix_http::StatusCode;
+use actix_web::test;
+use alloy_core::primitives::U256;
+use alloy_genesis::GenesisAccount;
+use base58::ToBase58 as _;
+use irys_actors::packing::wait_for_packing;
+use irys_packing::{unpack, PackingType, PACKING_TYPE};
+use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, UnpackedChunk,
+    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
+    UnpackedChunk,
 };
-use rand::Rng;
+use rand::Rng as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use actix_http::StatusCode;
-use alloy_core::primitives::U256;
-use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, ApiState};
-use irys_packing::{unpack, PackingType, PACKING_TYPE};
-
-use actix_web::{
-    middleware::Logger,
-    test,
-    web::{self, JsonConfig},
-    App,
-};
-use base58::ToBase58;
-use irys_types::TxChunkOffset;
-use reth_primitives::GenesisAccount;
-
-use crate::utils::IrysNodeTest;
-
 #[actix_web::test]
-async fn heavy_api_end_to_end_test_32b() {
+async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
+    initialize_tracing();
     if PACKING_TYPE == PackingType::CPU {
-        api_end_to_end_test(32).await;
+        api_end_to_end_test(32).await?;
     } else {
-        info!("C packing implementation do  not support chunk size different from CHUNK_SIZE");
+        info!("C packing implementation does not support chunk size different from CHUNK_SIZE");
     }
+    Ok(())
 }
 
 #[actix_web::test]
-async fn heavy_api_end_to_end_test_256kb() {
-    api_end_to_end_test(256 * 1024).await;
+async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
+    initialize_tracing();
+    api_end_to_end_test(256 * 1024).await?;
+    Ok(())
 }
 
-async fn api_end_to_end_test(chunk_size: usize) {
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let entropy_packing_iterations = 1_000;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
@@ -53,54 +48,21 @@ async fn api_end_to_end_test(chunk_size: usize) {
         },
     )]);
     let chain_id = config.consensus_config().chain_id;
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    // FIXME: The node startup already spins up an internal actix-web API service.
-    // Is there any reason for spawning another one here?
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+    node.node_ctx.start_mining().await?;
 
-    let app_state = ApiState {
-        ema_service: ema_tx,
-        reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node
-            .node_ctx
-            .reth_handle
-            .rpc_server_handle()
-            .http_url()
-            .unwrap(),
-        block_index: node.node_ctx.block_index_guard.clone(),
-        block_tree: node.node_ctx.block_tree_guard.clone(),
-        db: node.node_ctx.db.clone(),
-        mempool: node.node_ctx.actor_addresses.mempool.clone(),
-        peer_list: node.node_ctx.peer_list.clone(),
-        chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: config.into(),
-        sync_state: node.node_ctx.sync_state.clone(),
-    };
-
-    // Initialize the app
-    let app = test::init_service(
-        App::new()
-            .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
-            .app_data(web::Data::new(app_state))
-            .wrap(Logger::default())
-            .service(routes()),
-    )
-    .await;
+    let app = node.start_public_api().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
-    .await
-    .unwrap();
+    .await?;
 
     // Create 2.5 chunks worth of data *  fill the data with random bytes
     let data_size = chunk_size * 2_usize;
-    let mut data_bytes = vec![0u8; data_size];
+    let mut data_bytes = vec![0_u8; data_size];
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
@@ -116,7 +78,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         .set_json(&tx.header)
         .to_request();
 
-    info!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
+    info!("{}", serde_json::to_string_pretty(&tx.header)?);
 
     // Call the service
     let resp = test::call_service(&app, req).await;
@@ -132,7 +94,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[index].proof.to_vec());
+        let data_path = Base64(tx.proofs[index].proof.clone());
 
         let chunk = UnpackedChunk {
             data_root,
@@ -245,4 +207,6 @@ async fn api_end_to_end_test(chunk_size: usize) {
     );
 
     node.node_ctx.stop().await;
+
+    Ok(())
 }

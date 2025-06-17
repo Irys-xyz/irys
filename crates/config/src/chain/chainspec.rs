@@ -25,11 +25,10 @@ impl IrysChainSpecBuilder {
             ..IrysBlockHeader::new_mock_header()
         };
         Self {
-            reth_builder: ChainSpecBuilder {
-                chain: Some(config.consensus.reth.chain.clone()),
-                genesis: Some(config.consensus.reth.genesis.clone()),
-                hardforks: IRYS_TESTNET.hardforks.clone(),
-            },
+            reth_builder: ChainSpecBuilder::mainnet()
+                .chain(config.consensus.reth.chain)
+                .genesis(config.consensus.reth.genesis.clone())
+                .with_forks(IRYS_TESTNET.hardforks.clone()),
             genesis,
         }
     }
@@ -42,12 +41,6 @@ impl IrysChainSpecBuilder {
         //     &hex::decode("26deb95629271c51e1068e09733d9f71f438088ccc0541bfb7c886e0e4cee35a")
         //         .unwrap(),
         // ));
-        cs.genesis_hash = once_cell::sync::OnceCell::with_value(
-            reth_primitives::revm_primitives::B256::from_slice(
-                &hex::decode("f86f1062e7193b04459defeb16ad26efb492c857eb451aa8a09ea58f50eff501")
-                    .unwrap(),
-            ),
-        );
 
         genesis.evm_block_hash = cs.genesis_hash();
         debug!("EVM genesis block hash: {}", &genesis.evm_block_hash);

@@ -74,7 +74,7 @@ mod tests {
     use irys_primitives::Address;
     use irys_types::ConsensusConfig;
     use rand;
-    use rand::Rng;
+    use rand::Rng as _;
     use std::time::Instant;
 
     #[test]
@@ -83,7 +83,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
-        let mut partition_hash = [0u8; SHA_HASH_SIZE];
+        let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
         let now = Instant::now();
         let rust_hash = capacity_single::compute_seed_hash(
@@ -133,7 +133,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
-        let mut partition_hash = [0u8; SHA_HASH_SIZE];
+        let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
         let iterations = 1_000;
 

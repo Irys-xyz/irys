@@ -7,6 +7,7 @@ use actix_web::{
     HttpResponse,
 };
 
+use irys_p2p::PeerList as _;
 use irys_types::{
     parse_user_agent, AcceptedResponse, PeerListItem, PeerResponse, ProtocolVersion,
     RejectedResponse, RejectionReason, VersionRequest,
@@ -53,20 +54,19 @@ pub async fn post_version(
     let is_new_peer = !peers.iter().any(|peer| peer == &peer_address);
 
     // Only update if it's a new peer
-    if is_new_peer {
-        if state
+    if is_new_peer
+        && state
             .peer_list
             .add_peer(mining_addr, peer_list_entry)
             .await
             .is_err()
-        {
-            let response = PeerResponse::Rejected(RejectedResponse {
-                reason: RejectionReason::InternalError,
-                message: Some("Could not update peer list".to_string()),
-                retry_after: Some(5000),
-            });
-            return Ok(HttpResponse::ServiceUnavailable().json(response));
-        }
+    {
+        let response = PeerResponse::Rejected(RejectedResponse {
+            reason: RejectionReason::InternalError,
+            message: Some("Could not update peer list".to_string()),
+            retry_after: Some(5000),
+        });
+        return Ok(HttpResponse::ServiceUnavailable().json(response));
     }
 
     let node_name = version_request

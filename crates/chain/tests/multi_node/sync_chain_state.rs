@@ -1,5 +1,6 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
-use alloy_core::primitives::{ruint::aliases::U256, B256};
+use alloy_core::primitives::ruint::aliases::U256;
+use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{
@@ -9,75 +10,42 @@ use irys_chain::{
     IrysNodeCtx,
 };
 use irys_database::block_header_by_hash;
+use irys_primitives::IrysTxId;
 use irys_types::{
-    irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
-    NodeConfig, NodeMode, PeerAddress, RethPeerInfo, H256,
+    irys::IrysSigner, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
+    NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
-use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
-use reth::{payload::EthPayloadBuilderAttributes, rpc::types::engine::PayloadAttributes};
-use reth_db::Database;
-use reth_primitives::irys_primitives::IrysTxId;
-use reth_primitives::GenesisAccount;
-use std::{
-    collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use reth::rpc::eth::EthApiServer as _;
+use reth_db::Database as _;
+use std::{collections::HashMap, net::TcpListener};
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::{error, info, span, Level};
 
-pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
-    let attributes = PayloadAttributes {
-        timestamp,
-        prev_randao: B256::ZERO,
-        suggested_fee_recipient: Address::ZERO,
-        withdrawals: Some(vec![]),
-        parent_beacon_block_root: None, /* Some(B256::ZERO) */
-        shadows: None,
-    };
-    EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
-}
-
-#[actix_web::test]
-async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
+#[test_log::test(actix_web::test)]
+async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
-    let config = Config::new(NodeConfig::testnet());
-    let account1 = IrysSigner::random_signer(&config.consensus);
-    let genesis = start_genesis_node(&config.node_config, &account1).await;
+    let mut genesis_config = NodeConfig::testnet();
+    let peer_account = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_account]);
+
+    let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_config = genesis.testnet_peer_with_signer(&peer_account);
+    let peer1 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER1")
+        .await;
+    let peer2 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER2")
+        .await;
+
     tracing::info!(
         "peer info: {:?}",
         &genesis.node_ctx.config.node_config.reth_peer_info
     );
-    let genesis_peer_address = PeerAddress {
-        gossip: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.gossip.bind_ip,
-            genesis.node_ctx.config.node_config.gossip.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        api: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.http.bind_ip,
-            genesis.node_ctx.config.node_config.http.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        execution: genesis.node_ctx.config.node_config.reth_peer_info,
-    };
-
-    let (peer1, peer2) = start_peer_nodes(
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &account1,
-    )
-    .await;
 
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
@@ -88,33 +56,29 @@ async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
 
-    let mut genctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
-        genesis.node_ctx.reth_handle.clone().into(),
-    )
-    .await?;
-
-    let p1ctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
-        peer1.node_ctx.reth_handle.clone().into(),
-    )
-    .await?;
+    let mut genctx = genesis.node_ctx.reth_node_adapter.clone();
+    let p1ctx = peer1.node_ctx.reth_node_adapter.clone();
 
     // don't use if the reth service connect messages are used
     // genctx.connect(&mut p1ctx).await;
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
     let (block_hash, block_number) = {
-        let (payload, _) = genctx.advance_block(vec![], eth_payload_attributes).await?;
+        // make the node advance
+        let payload = genctx.advance_block_testing().await?;
+
         (payload.block().hash(), payload.block().number)
     };
 
-    genctx.assert_new_block2(block_hash, block_number).await?;
-
-    p1ctx
-        .engine_api
-        .update_forkchoice(block_hash, block_hash)
+    genctx
+        .assert_new_block_irys(block_hash, block_number)
         .await?;
 
-    p1ctx.assert_new_block2(block_hash, block_number).await?;
+    p1ctx.update_forkchoice(block_hash, block_hash).await?;
+
+    p1ctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
     // sleep(Duration::from_millis(2_000)).await;
 
@@ -139,41 +103,23 @@ async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
-    let config = Config::new(NodeConfig::testnet());
-    let account1 = IrysSigner::random_signer(&config.consensus);
-    let genesis = start_genesis_node(&config.node_config, &account1).await;
+    let mut genesis_config = NodeConfig::testnet();
+    let peer_account = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_account]);
 
-    let genesis_peer_address = PeerAddress {
-        gossip: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.gossip.bind_ip,
-            genesis.node_ctx.config.node_config.gossip.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        api: format!(
-            "{}:{}",
-            genesis.node_ctx.config.node_config.http.bind_ip,
-            genesis.node_ctx.config.node_config.http.bind_port
-        )
-        .parse()
-        .expect("valid SocketAddr expected"),
-        execution: genesis.node_ctx.config.node_config.reth_peer_info,
-    };
+    let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
 
-    let (peer1, peer2) = start_peer_nodes(
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &Config::new(NodeConfig {
-            trusted_peers: vec![genesis_peer_address],
-            ..NodeConfig::testnet()
-        }),
-        &account1,
-    )
-    .await;
+    let peer_config = genesis.testnet_peer_with_signer(&peer_account);
+    let peer1 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER1")
+        .await;
+    let peer2 = IrysNodeTest::new(peer_config.clone())
+        .start_with_name("PEER2")
+        .await;
 
     info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
@@ -184,89 +130,32 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
 
-    let mut genctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
-        genesis.node_ctx.reth_handle.clone().into(),
-    )
-    .await?;
-
-    let p1ctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
-        peer1.node_ctx.reth_handle.clone().into(),
-    )
-    .await?;
+    let mut genctx = genesis.node_ctx.reth_node_adapter.clone();
+    let p1ctx = peer1.node_ctx.reth_node_adapter.clone();
 
     // don't use if the reth service connect messages are used
     // genctx.connect(&mut p1ctx).await;
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
     let (block_hash, block_number) = {
-        let p1_latest = genctx
-            .rpc
-            .inner
-            .eth_api()
-            .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
-            .await
-            .unwrap()
-            .unwrap();
+        let built = genctx.advance_block_testing().await?;
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-
-        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
-            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-            prev_randao: B256::ZERO,
-            suggested_fee_recipient: Address::ZERO,
-            withdrawals: None,
-            parent_beacon_block_root: None,
-            shadows: None,
-        };
-
-        let (exec_payload, built, attrs) = genctx
-            .new_payload_irys2(p1_latest.header.hash, payload_attrs)
-            .await?;
-
-        let block_hash = genctx
-            .engine_api
-            .submit_payload(
-                built.clone(),
-                attrs.clone(),
-                PayloadStatusEnum::Valid,
-                vec![],
-            )
-            .await?;
-
-        // trigger forkchoice update via engine api to commit the block to the blockchain
-        genctx
-            .engine_api
-            .update_forkchoice(block_hash, block_hash)
-            .await?;
-
-        (
-            exec_payload
-                .execution_payload
-                .payload_inner
-                .payload_inner
-                .payload_inner
-                .block_hash,
-            exec_payload
-                .execution_payload
-                .payload_inner
-                .payload_inner
-                .payload_inner
-                .block_number,
-        )
+        (built.block().hash(), built.block().number)
     };
 
     // assert the block has been committed to the blockchain
-    genctx.assert_new_block2(block_hash, block_number).await?;
+    genctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
     // only send forkchoice update to second node
-    p1ctx
-        .engine_api
-        .update_forkchoice(block_hash, block_hash)
-        .await?;
+    p1ctx.update_forkchoice(block_hash, block_hash).await?;
 
     // expect second node advanced via p2p gossip
 
-    p1ctx.assert_new_block2(block_hash, block_number).await?;
+    p1ctx
+        .assert_new_block_irys(block_hash, block_number)
+        .await?;
 
     let a2 = p1ctx
         .rpc
@@ -292,7 +181,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
 /// TODO: Mine on peer2 and see if those blocks arrive at genesis via gossip
 #[test_log::test(actix_web::test)]
-async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
+async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // setup trusted peers connection data and configs for genesis and nodes
     let (
         testnet_config_genesis,
@@ -345,13 +234,11 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // this does not directly contribute to the test but does reduce resource usage during test run
     ctx_peer1_node
         .node_ctx
-        .actor_addresses
-        .set_mining(false)
+        .set_partition_mining(false)
         .expect("expect setting mining false on peer1");
     ctx_peer2_node
         .node_ctx
-        .actor_addresses
-        .set_mining(false)
+        .set_partition_mining(false)
         .expect("expect setting mining false on peer2");
 
     // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
@@ -624,6 +511,14 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
+fn get_available_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("Failed to bind to address")
+        .local_addr()
+        .expect("Failed to get local addr")
+        .port()
+}
+
 /// setup configs for genesis, peer1 and peer2 for e2e tests
 /// FIXME: hardcoded ports https://github.com/Irys-xyz/irys/issues/367
 fn init_configs() -> (
@@ -633,17 +528,28 @@ fn init_configs() -> (
     Vec<PeerAddress>,
     Vec<PeerAddress>,
 ) {
+    let http_port_genesis = get_available_port();
+    let gossip_port_genesis = get_available_port();
+
+    let http_port_peer1 = get_available_port();
+    let gossip_port_peer1 = get_available_port();
+
+    let http_port_peer2 = get_available_port();
+    let gossip_port_peer2 = get_available_port();
+
+    info!("Ports:\n genesis:http = {}\n genesis:gossip = {}\n peer1:http = {}\n peer1:gossip = {}\n peer2:http = {}\n peer2:gossip = {}", http_port_genesis, gossip_port_genesis, http_port_peer1, gossip_port_peer1, http_port_peer2, gossip_port_peer2);
+
     let mut testnet_config_genesis = NodeConfig {
         http: HttpConfig {
             public_ip: "127.0.0.1".to_string(),
-            public_port: 8078,
-            bind_port: 8078,
+            public_port: http_port_genesis,
+            bind_port: http_port_genesis,
             bind_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            public_port: 8079,
+            public_port: gossip_port_genesis,
             public_ip: "127.0.0.1".to_string(),
-            bind_port: 8079,
+            bind_port: gossip_port_genesis,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -657,16 +563,16 @@ fn init_configs() -> (
     let mut testnet_config_peer1 = NodeConfig {
         http: HttpConfig {
             // Use random port
-            bind_port: 0,
+            bind_port: http_port_peer1,
             // The same as bind port
-            public_port: 0,
+            public_port: http_port_peer1,
             bind_ip: "127.0.0.1".to_string(),
             public_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            public_port: 8083,
+            public_port: gossip_port_peer1,
             public_ip: "127.0.0.1".to_string(),
-            bind_port: 8083,
+            bind_port: gossip_port_peer1,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -675,19 +581,22 @@ fn init_configs() -> (
         )
         .expect("valid key"),
         mode: NodeMode::PeerSync,
+        reth: RethConfig {
+            use_random_ports: true,
+        },
         ..NodeConfig::testnet()
     };
     let mut testnet_config_peer2 = NodeConfig {
         http: HttpConfig {
-            bind_port: 0,
-            public_port: 0,
+            bind_port: http_port_peer2,
+            public_port: http_port_peer2,
             bind_ip: "127.0.0.1".to_string(),
             public_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            public_port: 8085,
+            public_port: gossip_port_peer2,
             public_ip: "127.0.0.1".to_string(),
-            bind_port: 8085,
+            bind_port: gossip_port_peer2,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -696,27 +605,46 @@ fn init_configs() -> (
         )
         .expect("valid key"),
         mode: NodeMode::PeerSync,
+        reth: RethConfig {
+            use_random_ports: true,
+        },
         ..NodeConfig::testnet()
     };
     let trusted_peers = vec![PeerAddress {
-        api: "127.0.0.1:8078".parse().expect("valid SocketAddr expected"),
-        gossip: "127.0.0.1:8079".parse().expect("valid SocketAddr expected"),
+        api: format!("127.0.0.1:{}", http_port_genesis)
+            .parse()
+            .expect("valid SocketAddr expected"),
+        gossip: format!("127.0.0.1:{}", gossip_port_genesis)
+            .parse()
+            .expect("valid SocketAddr expected"),
         execution: RethPeerInfo::default(),
     }];
     let genesis_trusted_peers = vec![
         PeerAddress {
-            api: "127.0.0.1:8078".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8079".parse().expect("valid SocketAddr expected"),
+            api: format!("127.0.0.1:{}", http_port_genesis)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("127.0.0.1:{}", gossip_port_genesis)
+                .parse()
+                .expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         },
         PeerAddress {
-            api: "127.0.0.1:8082".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8083".parse().expect("valid SocketAddr expected"),
+            api: format!("127.0.0.1:{}", http_port_peer1)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("127.0.0.1:{}", gossip_port_peer1)
+                .parse()
+                .expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         },
         PeerAddress {
-            api: "127.0.0.1:8084".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8085".parse().expect("valid SocketAddr expected"),
+            api: format!("127.0.0.1:{}", http_port_peer2)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("127.0.0.1:{}", gossip_port_peer2)
+                .parse()
+                .expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         },
     ];
@@ -733,11 +661,11 @@ fn init_configs() -> (
 }
 
 /// add a single account to the supplied node config
-fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner) -> () {
+fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner) {
     irys_node_config.consensus.extend_genesis_accounts(vec![(
         account.address(),
         GenesisAccount {
-            balance: U256::from(1000),
+            balance: U256::from(42_000_000_000_000_000_u64),
             ..Default::default()
         },
     )]);
@@ -748,13 +676,15 @@ async fn start_genesis_node(
     testnet_config_genesis: &NodeConfig,
     account: &IrysSigner, // account with balance at genesis
 ) -> IrysNodeTest<IrysNodeCtx> {
+    let span = span!(Level::DEBUG, "genesis");
+    let _enter = span.enter();
     // init genesis node
-    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone()).await;
+    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone());
     // add accounts with balances to genesis node
-    add_account_to_config(&mut genesis_node.cfg, &account);
+    add_account_to_config(&mut genesis_node.cfg, account);
     // start genesis node
-    let ctx_genesis_node = genesis_node.start().await;
-    ctx_genesis_node
+
+    genesis_node.start().await
 }
 
 /// start peer nodes with an account
@@ -763,12 +693,20 @@ async fn start_peer_nodes(
     testnet_config_peer2: &Config,
     account: &IrysSigner, // account with balance at genesis
 ) -> (IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>) {
-    let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone()).await;
-    add_account_to_config(&mut peer1_node.cfg, &account);
-    let ctx_peer1_node = peer1_node.start().await;
-    let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone()).await;
-    add_account_to_config(&mut peer2_node.cfg, &account);
-    let ctx_peer2_node = peer2_node.start().await;
+    let ctx_peer1_node = {
+        let span = span!(Level::DEBUG, "peer1");
+        let _enter = span.enter();
+        let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone());
+        add_account_to_config(&mut peer1_node.cfg, account);
+        peer1_node.start().await
+    };
+    let ctx_peer2_node = {
+        let span = span!(Level::DEBUG, "peer2");
+        let _enter = span.enter();
+        let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone());
+        add_account_to_config(&mut peer2_node.cfg, account);
+        peer2_node.start().await
+    };
     (ctx_peer1_node, ctx_peer2_node)
 }
 
@@ -784,7 +722,7 @@ async fn generate_test_transaction_and_add_to_block(
 ) -> HashMap<IrysTxId, irys_types::IrysTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
-    match node.create_submit_data_tx(&account, data_bytes).await {
+    match node.create_submit_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
         }
@@ -864,7 +802,7 @@ async fn poll_peer_list(
             .await
             .expect("valid PeerAddress");
         peer_list_items.sort(); //sort peer list so we have sane comparisons in asserts
-        if &trusted_peers == &peer_list_items {
+        if trusted_peers == peer_list_items {
             break;
         }
     }

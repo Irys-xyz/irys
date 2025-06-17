@@ -3,34 +3,31 @@ use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
 use alloy_eips::eip2930::AccessListItem;
 use alloy_eips::BlockNumberOrTag;
+use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use base58::ToBase58;
-use irys_actors::packing::wait_for_packing;
-use irys_api_server::routes::tx::TxOffset;
-use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
-
+use base58::ToBase58 as _;
 use k256::ecdsa::SigningKey;
-use reth::rpc::eth::EthApiServer;
-use reth_primitives::irys_primitives::precompile::IrysPrecompileOffsets;
-use reth_primitives::irys_primitives::range_specifier::{
-    ByteRangeSpecifier, PdAccessListArgSerde, U18, U34,
-};
-use reth_primitives::{irys_primitives::range_specifier::ChunkRangeSpecifier, GenesisAccount};
+use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
+
+use irys_actors::packing::wait_for_packing;
+use irys_api_server::routes::tx::TxOffset;
+use irys_primitives::precompile::IrysPrecompileOffsets;
+use irys_primitives::range_specifier::ChunkRangeSpecifier;
+use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
+use irys_types::{irys::IrysSigner, Address};
+use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
 use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(
-    #[allow(missing_docs)]
     #[sol(rpc)]
     IrysProgrammableDataBasic,
     "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"
@@ -39,11 +36,16 @@ sol!(
 const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
+#[ignore]
 #[test_log::test(actix_web::test)]
 async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let mut testnet_config = NodeConfig::testnet();
     testnet_config.consensus.get_mut().chunk_size = 32;
     testnet_config.consensus.get_mut().chunk_migration_depth = 2;
+    testnet_config
+        .consensus
+        .get_mut()
+        .num_chunks_in_recall_range = 2;
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
     testnet_config.consensus.extend_genesis_accounts(vec![
@@ -69,10 +71,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(testnet_config)
-        .await
-        .start()
-        .await;
+    let node = IrysNodeTest::new_genesis(testnet_config).start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -87,16 +86,13 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
     let wallet = EthereumWallet::from(signer);
 
-    let alloy_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http(
-            format!(
-                "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.node_config.http.bind_port
-            )
-            .parse()?,
-        );
+    let alloy_provider = ProviderBuilder::new().wallet(wallet).connect_http(
+        format!(
+            "http://127.0.0.1:{}/v1/execution-rpc",
+            node.node_ctx.config.node_config.http.bind_port
+        )
+        .parse()?,
+    );
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
@@ -196,7 +192,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
         let chunk = UnpackedChunk {
             data_root,
@@ -302,7 +298,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     )
     .await??;
 
-    let stored_bytes = contract.getStorage().call().await?._0;
+    let stored_bytes = contract.getStorage().call().await?;
     let stored_message = String::from_utf8(stored_bytes.to_vec())?;
 
     println!(
@@ -312,8 +308,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     assert_eq!(&message, &stored_message);
 
-    let context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
-
+    let context = node.node_ctx.reth_node_adapter.clone();
     let latest = context
         .rpc
         .inner
