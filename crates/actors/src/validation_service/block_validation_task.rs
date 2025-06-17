@@ -123,7 +123,7 @@ impl BlockValidationTask {
                     .service_inner
                     .config
                     .consensus
-                    .validation_height_diff_threshold
+                    .block_cache_depth
         } else {
             false
         }

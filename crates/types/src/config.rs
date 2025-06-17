@@ -142,10 +142,6 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
-
-    /// Maximum height difference between a block and canonical tip before validation exits
-    /// If (canonical_tip_height - block_height) > threshold, validation will exit early
-    pub validation_height_diff_threshold: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,7 +517,6 @@ impl ConsensusConfig {
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs: 10,
-            validation_height_diff_threshold: 50,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
@@ -904,7 +899,6 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        validation_height_diff_threshold = 50
         genesis_peer_discovery_timeout_millis = 10000
 
         [reth]
