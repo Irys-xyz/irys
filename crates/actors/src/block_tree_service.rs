@@ -746,7 +746,6 @@ fn get_ledger_tx_headers<T: DbTx>(
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct BlockTreeEntry {
     pub block_hash: BlockHash,

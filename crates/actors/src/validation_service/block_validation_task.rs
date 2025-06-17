@@ -118,12 +118,7 @@ impl BlockValidationTask {
 
         if let Some(tip_block) = block_tree.get_block(&tip_hash) {
             let height_diff = tip_block.height.saturating_sub(self.block.height);
-            height_diff
-                > self
-                    .service_inner
-                    .config
-                    .consensus
-                    .block_cache_depth
+            height_diff > self.service_inner.config.consensus.block_cache_depth
         } else {
             false
         }
