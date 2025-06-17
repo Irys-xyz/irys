@@ -88,7 +88,7 @@ pub async fn get_transaction_api(
     info!("Get tx by tx_id: {}", tx_id);
     get_transaction(&state, tx_id).await.map(web::Json)
 }
-// Helper function to retrieve IrysTransactionHeader from mdbx
+/// Helper function to retrieve IrysTransactionHeader from mdbx
 pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
@@ -168,6 +168,7 @@ pub async fn get_tx_local_start_offset(
     info!("Get tx data metadata by tx_id: {}", tx_id);
 
     // Only works for storage transaction header
+    // read storage tx from mempool or database
     let tx_header = get_storage_transaction(&state, tx_id)?;
     let ledger = DataLedger::try_from(tx_header.ledger_id).unwrap();
 

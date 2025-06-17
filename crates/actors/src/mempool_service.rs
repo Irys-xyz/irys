@@ -840,7 +840,7 @@ impl Inner {
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
         for txid in storage_tx_ids.iter() {
-            // Remove the data/storage tx from the pending valid_tx pool
+            // Remove the data tx from the pending valid_tx pool
             mempool_state_write_guard.valid_tx.remove(txid);
             mempool_state_write_guard.recent_valid_tx.remove(txid);
         }
