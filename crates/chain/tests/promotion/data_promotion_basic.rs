@@ -82,7 +82,7 @@ async fn heavy_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
-    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
+    let result = node.wait_for_migrated_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
     assert!(result.is_ok());
 

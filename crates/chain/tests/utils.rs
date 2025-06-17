@@ -492,9 +492,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
-    // FIXME: This fn does not guarantee the tx is "confirmed"
-    //        Essentially there is nothing in the fn that confirms the tx is in a block, simply that it is in the mdbx
-    pub async fn wait_for_confirmed_txs(
+    /// mine blocks until the txs are found in the block index, i.e. mdbx
+    pub async fn wait_for_migrated_txs(
         &self,
         mut unconfirmed_txs: Vec<IrysTransactionHeader>,
         seconds: usize,

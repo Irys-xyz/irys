@@ -174,7 +174,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .await;
 
     let expected_txs = vec![storage_tx.header.clone()];
-    let result = genesis_node.wait_for_confirmed_txs(expected_txs, 20).await;
+    let result = genesis_node.wait_for_migrated_txs(expected_txs, 20).await;
     assert!(result.is_ok());
 
     // Restart the node
