@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use crate::{
     ema_service::{EmaServiceMessage, NewBlockEmaResponse, PriceStatus},
     services::{ServiceReceivers, ServiceSenders},
+    CommitmentCache,
 };
 
 use super::{BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent};
@@ -76,7 +77,12 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
             block_hash = block.block_hash;
         }
         block_tree_cache
-            .add_common(block.block_hash, block, *state)
+            .add_common(
+                block.block_hash,
+                block,
+                Arc::new(CommitmentCache::default()),
+                *state,
+            )
             .unwrap();
     }
     let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
@@ -284,8 +290,13 @@ pub fn create_and_apply_fork(
             });
 
             // Add to block tree as validated but not yet canonical
-            tree.add_common(header.block_hash, &header, chain_state)
-                .unwrap();
+            tree.add_common(
+                header.block_hash,
+                &header,
+                Arc::new(CommitmentCache::default()),
+                chain_state,
+            )
+            .unwrap();
 
             new_fork_blocks.push(Arc::new(header));
         }
