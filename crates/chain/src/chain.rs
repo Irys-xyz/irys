@@ -410,6 +410,8 @@ impl IrysNode {
         genesis_block.diff = difficulty;
         genesis_block.timestamp = timestamp;
         genesis_block.last_diff_timestamp = timestamp;
+        genesis_block.last_epoch_hash =
+            H256::from_base58("6mZBRJGrxbYZsLLQqwZEFEAsdvNvx4Hd7RVVBAD69f7Y");
 
         // Add commitment transactions to genesis block
         add_genesis_commitments(&mut genesis_block, &self.config);
