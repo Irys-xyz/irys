@@ -93,6 +93,8 @@ pub enum InvalidDataError {
     ChunkInvalidDataSize,
     #[error("Invalid block: {0}")]
     InvalidBlock(String),
+    #[error("Invalid block signature")]
+    InvalidBlockSignature,
 }
 
 #[derive(Debug, Error, Clone)]
