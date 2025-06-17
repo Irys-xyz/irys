@@ -785,6 +785,8 @@ impl Inner {
         );
 
         let migrated_block = event.block;
+
+        // stage 1: move commitment transactions from tree to index
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
         let commitments = self
             .handle_get_commitment_tx_message(commitment_tx_ids)
@@ -803,7 +805,7 @@ impl Inner {
         }
         tx.inner.commit()?;
 
-        // move data transactions to index
+        // stage 2: move data transactions from tree to index
         let storage_tx_ids = migrated_block.get_storage_ledger_tx_ids();
         {
             let mut_tx = self
@@ -814,7 +816,11 @@ impl Inner {
                 })
                 .expect("expected to read/write to database");
 
-            let data_tx_headers = self.handle_get_data_tx_message(storage_tx_ids).await;
+            // FIXME: this next line is less efficicent than it needs to be?
+            //        why would we read mdbx txs when we are migrating?
+            let data_tx_headers = self
+                .handle_get_data_tx_message(storage_tx_ids.clone())
+                .await;
             for maybe_storage_tx_header in data_tx_headers {
                 if let Some(storage_tx_header) = maybe_storage_tx_header {
                     if let Err(err) = insert_tx_header(&mut_tx, &storage_tx_header) {
@@ -833,11 +839,8 @@ impl Inner {
 
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
-        for txid in migrated_block.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .iter()
-        {
-            // Remove the submit tx from the pending valid_tx pool
+        for txid in storage_tx_ids.iter() {
+            // Remove the data/storage tx from the pending valid_tx pool
             mempool_state_write_guard.valid_tx.remove(txid);
             mempool_state_write_guard.recent_valid_tx.remove(txid);
         }
@@ -1445,6 +1448,7 @@ impl Inner {
         }
     }
 
+    /// read specified commitment txs from mempool
     async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,

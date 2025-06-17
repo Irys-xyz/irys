@@ -18,7 +18,7 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
-use reth_db::Database as _;
+use reth_db::Database;
 use std::pin::pin;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
