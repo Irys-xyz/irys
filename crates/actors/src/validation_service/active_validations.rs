@@ -1,3 +1,17 @@
+//! Active validations management module.
+//!
+//! Priority-based concurrent validation task management using a three-tier system:
+//! 1. **CanonicalExtension**: Blocks extending canonical tip (highest priority)
+//! 2. **Canonical**: Blocks already on canonical chain (medium priority)
+//! 3. **Fork**: Alternative chain blocks (lowest priority)
+//!
+//! ## Implementation
+//! - Uses priority queue for deriving polling priorities
+//! - Non-blocking processing with `poll_immediate` for completion checks
+//! - Canonical extension detection walks parent chain to canonical tip
+//! - Lower block heights processed first within each priority tier
+//! - Completed tasks immediately removed to free resources
+
 use crate::block_tree_service::{BlockTreeCache, BlockTreeReadGuard, ChainState};
 use futures::future::poll_immediate;
 use irys_types::BlockHash;
@@ -426,10 +440,12 @@ mod tests {
         }
 
         // Expected: extensions first (21, 22), then forks (11, 12)
-        let expected_order = [(extension_blocks[0].0, BlockPriority::CanonicalExtension(21)),
+        let expected_order = [
+            (extension_blocks[0].0, BlockPriority::CanonicalExtension(21)),
             (extension_blocks[1].0, BlockPriority::CanonicalExtension(22)),
             (fork_blocks[0].0, BlockPriority::Fork(11)),
-            (fork_blocks[1].0, BlockPriority::Fork(12))];
+            (fork_blocks[1].0, BlockPriority::Fork(12)),
+        ];
 
         assert_eq!(actual_order.len(), expected_order.len());
         for (i, ((actual_hash, actual_priority), (expected_hash, expected_priority))) in
@@ -513,10 +529,11 @@ mod tests {
         // Setup canonical chain
         let block_tree_guard = setup_canonical_chain_scenario(30);
         let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
-
-        let tree = block_tree_guard.read();
-        let (chain, _) = tree.get_canonical_chain();
-
+        let chain = {
+            let tree = block_tree_guard.read();
+            let (chain, _) = tree.get_canonical_chain();
+            chain
+        };
         // Add mix of ready and pending futures
         let heights = [5, 10, 15, 20];
         let mut height_to_hash = HashMap::new();

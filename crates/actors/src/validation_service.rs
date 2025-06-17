@@ -1,13 +1,15 @@
 //! Validation service module.
 //!
-//! The validation service is responsible for validating blocks by:
-//! - Validating VDF (Verifiable Delay Function) steps
-//! - Validating recall range
-//! - Validating PoA (Proof of Access)
-//! - Validating that the generated system txs in the reth block
-//!   match the expected system txs from the irys block.
+//! Actor-based service for validating blockchain blocks through multi-stage processing:
+//! VDF verification, recall range validation, proof-of-access, and system transactions.
 //!
-//! The service supports concurrent validation tasks for improved performance.
+//! ## Flow
+//! 1. **VDF Validation**: Initial check using thread pool, fast-forward VDF state.
+//!     Always done immediately for every block that's provided.
+//! 2. **Task Creation**: Create BlockValidationTask, add to priority queue
+//! 3. **Parallel Validation**: Three concurrent stages (recall, POA, reth state)
+//! 4. **Parent Dependencies**: Wait for parent validation before reporting
+//!     results of a child block.
 
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::{
@@ -72,6 +74,7 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) reth_node_adapter: IrysRethNodeAdapter,
     /// Database provider for transaction lookups
     pub(crate) db: DatabaseProvider,
+    /// Block tree read guard to get access to the canonical chain
     pub(crate) block_tree_guard: BlockTreeReadGuard,
     /// Rayon thread pool that executes vdf steps   
     pub(crate) pool: rayon::ThreadPool,
@@ -205,12 +208,12 @@ impl ValidationServiceInner {
                 let block_hash = block.block_hash;
                 let block_height = block.height;
 
-                tracing::Span::current()
-                    .record("block_hash", tracing::field::display(&block_hash));
+                tracing::Span::current().record("block_hash", tracing::field::display(&block_hash));
                 tracing::Span::current().record("block_height", block_height);
 
-                debug!(?block_hash, ?block_height, "validating block");
+                debug!("validating block");
 
+                // if vdf is invalid, notify the block tree immediately
                 if let Err(_err) = self.clone().ensure_vdf_is_valid(&block).await {
                     // Notify the block tree service
                     if let Err(e) = self.service_senders.block_tree.send(
@@ -224,6 +227,7 @@ impl ValidationServiceInner {
                     return None;
                 }
 
+                // schedule validatoin task
                 let block_tree_guard = self.block_tree_guard.clone();
                 let task =
                     BlockValidationTask::new(block, block_hash, self.clone(), block_tree_guard);

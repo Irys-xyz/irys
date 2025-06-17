@@ -1,3 +1,17 @@
+//! Block validation task execution module.
+//!
+//! Handles individual block validation through a two-stage pipeline:
+//!
+//! ## Stage 1: Parallel Validation
+//! Three concurrent validation stages:
+//! - **Recall Range**: Async data recall and storage proof verification
+//! - **POA**: Blocking cryptographic proof-of-access validation
+//! - **System Transactions**: Async Reth integration validation
+//!
+//! ## Stage 2: Parent Dependency Resolution  
+//! After successful validation, tasks wait for parent block validation using
+//! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
+
 use crate::block_tree_service::{
     BlockState, BlockTreeReadGuard, BlockTreeServiceMessage, ChainState, ValidationResult,
 };

@@ -26,7 +26,7 @@ pub fn build_genesis_tree_with_n_blocks(
     (genesis_tree(&mut blocks), prices)
 }
 
-fn build_tree(init_height: u64, max_height: u64) -> (Vec<IrysBlockHeader>, Vec<PriceInfo>) {
+pub fn build_tree(init_height: u64, max_height: u64) -> (Vec<IrysBlockHeader>, Vec<PriceInfo>) {
     let blocks = (init_height..(max_height + init_height).saturating_add(1))
         .map(|height| {
             let mut header = IrysBlockHeader::new_mock_header();
@@ -83,11 +83,7 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
     BlockTreeReadGuard::new(block_tree_cache)
 }
 
-#[expect(
-    dead_code,
-    reason = "structs are held in-memory to prevent the `drop` to trigger"
-)]
-struct TestCtx {
+pub struct TestCtx {
     pub guard: BlockTreeReadGuard,
     pub config: Config,
     pub task_manager: TaskManager,
@@ -98,17 +94,17 @@ struct TestCtx {
 
 #[derive(Debug, Clone)]
 pub struct PriceInfo {
-    oracle: IrysTokenPrice,
-    ema: IrysTokenPrice,
+    pub oracle: IrysTokenPrice,
+    pub ema: IrysTokenPrice,
 }
 
 impl TestCtx {
-    fn setup(max_block_height: u64, config: Config) -> (Self, ServiceReceivers) {
+    pub fn setup(max_block_height: u64, config: Config) -> (Self, ServiceReceivers) {
         let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(max_block_height);
         Self::setup_with_tree(block_tree_guard, prices, config)
     }
 
-    async fn get_prices_for_new_block(
+    pub async fn get_prices_for_new_block(
         &self,
         height_of_new_block: u64,
         new_oracle_price: IrysTokenPrice,
@@ -125,7 +121,7 @@ impl TestCtx {
         rx.await.unwrap()
     }
 
-    async fn validate_ema_price(
+    pub async fn validate_ema_price(
         &self,
         block_height: u64,
         ema_price: IrysTokenPrice,
@@ -144,7 +140,7 @@ impl TestCtx {
         rx.await.unwrap()
     }
 
-    async fn validate_oracle_price(
+    pub async fn validate_oracle_price(
         &self,
         block_height: u64,
         oracle_price: IrysTokenPrice,
@@ -161,7 +157,7 @@ impl TestCtx {
         rx.await.unwrap()
     }
 
-    fn setup_with_tree(
+    pub fn setup_with_tree(
         block_tree_guard: BlockTreeReadGuard,
         prices: Vec<PriceInfo>,
         config: Config,
@@ -183,7 +179,7 @@ impl TestCtx {
         )
     }
 
-    async fn trigger_reorg(&self, event: ReorgEvent) {
+    pub async fn trigger_reorg(&self, event: ReorgEvent) {
         // Trigger reorg using the provided service senders
         let _ = self.service_senders.reorg_events.send(event);
         // Give the service time to process the reorg
@@ -192,7 +188,7 @@ impl TestCtx {
 }
 
 /// Creates a clean chain state without any forks for testing
-fn setup_chain_for_fork_test(max_height: u64) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
+pub fn setup_chain_for_fork_test(max_height: u64) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
     let mut blocks = Vec::new();
     let mut prices = Vec::new();
 
