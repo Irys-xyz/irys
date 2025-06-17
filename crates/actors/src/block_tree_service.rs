@@ -31,6 +31,9 @@ use tokio::{
 };
 use tracing::{debug, error, info};
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockTreeReadGuard {
@@ -762,7 +765,7 @@ pub struct BlockEntry {
 }
 
 /// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ChainState {
     /// Block is confirmed and part of the main chain
     Onchain,
@@ -775,7 +778,7 @@ pub enum ChainState {
 }
 
 /// Represents the validation state of a block, independent of its `ChainState`
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum BlockState {
     /// Initial state, validation not yet started
     Unknown,
