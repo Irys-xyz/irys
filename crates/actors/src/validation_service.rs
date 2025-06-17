@@ -128,6 +128,7 @@ impl ValidationService {
     }
 
     /// Main service loop
+    #[tracing::instrument(skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("starting validation service");
 
@@ -151,13 +152,11 @@ impl ValidationService {
                     match msg {
                         Some(msg) => {
                             // Transform message to validation future
-                            let Some((block_hash, fut)) =
-                                self.inner.clone().create_validation_future(msg).await
-                            else {
+                            let Some(task) = self.inner.clone().create_validation_future(msg).await else {
                                 // validation future was not created. The task failed during vdf validation
                                 continue;
                             };
-                            active_validations.push(block_hash, fut.boxed());
+                            active_validations.push(task.block_hash, task.execute().boxed());
                         }
                         None => {
                             // Channel closed
@@ -199,15 +198,19 @@ impl ValidationService {
 
 impl ValidationServiceInner {
     /// Handle incoming messages
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(block_hash, block_height))]
     async fn create_validation_future(
         self: Arc<Self>,
         msg: ValidationServiceMessage,
-    ) -> Option<(BlockHash, impl Future<Output = ()>)> {
+    ) -> Option<BlockValidationTask> {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
                 let block_hash = block.block_hash;
                 let block_height = block.height;
+
+                tracing::Span::current()
+                    .record("block_hash", &tracing::field::display(&block_hash));
+                tracing::Span::current().record("block_height", &block_height);
 
                 debug!(?block_hash, ?block_height, "validating block");
 
@@ -227,7 +230,7 @@ impl ValidationServiceInner {
                 let block_tree_guard = self.block_tree_guard.clone();
                 let task =
                     BlockValidationTask::new(block, block_hash, self.clone(), block_tree_guard);
-                Some((block_hash, task.execute()))
+                Some(task)
             }
         }
     }

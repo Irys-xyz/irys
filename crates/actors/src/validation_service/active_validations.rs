@@ -5,6 +5,7 @@ use priority_queue::PriorityQueue;
 use std::cmp::Reverse;
 use std::future::Future;
 use std::pin::Pin;
+use tracing::{debug, instrument};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum BlockPriority {
@@ -36,6 +37,7 @@ impl ActiveValidations {
     }
 
     /// Calculate the priority for a block based on its chain position and canonical status
+    #[instrument(skip_all, fields(block_hash = %block_hash))]
     pub(crate) fn calculate_priority(&self, block_hash: &BlockHash) -> Reverse<BlockPriority> {
         let block_tree = self.block_tree_guard.read();
 
@@ -84,12 +86,14 @@ impl ActiveValidations {
         false
     }
 
+    #[instrument(skip_all, fields(block_hash = %block_hash))]
     pub(crate) fn push(
         &mut self,
         block_hash: BlockHash,
         future: Pin<Box<dyn Future<Output = ()> + Send>>,
     ) {
         let priority = self.calculate_priority(&block_hash);
+        debug!("adding validation task with priority: {:?}", priority.0);
         self.futures.insert(block_hash, future);
         self.validations.push(block_hash, priority);
     }
@@ -104,6 +108,7 @@ impl ActiveValidations {
 
     /// Process completed validations and remove them from the active set
     /// returns `true` if any of the block validatoin tasks succeeded
+    #[instrument(skip_all, fields(active_count = self.len()))]
     pub(crate) async fn process_completed(&mut self) -> bool {
         let mut completed_blocks = Vec::new();
 
@@ -129,10 +134,15 @@ impl ActiveValidations {
 
         // Remove completed validations
         for block_hash in &completed_blocks {
+            debug!(block_hash = %block_hash, "validation task completed");
             self.validations.remove(block_hash);
             self.futures.remove(block_hash);
         }
-        !completed_blocks.is_empty()
+        let tasks_completed = !completed_blocks.is_empty();
+        if tasks_completed {
+            debug!(completed_count = completed_blocks.len(), remaining_count = self.len(), "processed completed validations");
+        }
+        tasks_completed
     }
 }
 

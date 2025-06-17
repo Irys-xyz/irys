@@ -9,12 +9,21 @@ use irys_types::{BlockHash, IrysBlockHeader};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument};
 
+/// Result of waiting for parent validation to complete
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParentValidationResult {
+    /// Parent validation is complete, task can proceed
+    Ready,
+    /// Task should be cancelled due to height difference from canonical tip
+    Cancelled,
+}
+
 /// Handles the execution of a single block validation task
 pub(crate) struct BlockValidationTask {
-    block: Arc<IrysBlockHeader>,
-    block_hash: BlockHash,
-    service_inner: Arc<ValidationServiceInner>,
-    block_tree_guard: BlockTreeReadGuard,
+    pub block: Arc<IrysBlockHeader>,
+    pub block_hash: BlockHash,
+    pub service_inner: Arc<ValidationServiceInner>,
+    pub block_tree_guard: BlockTreeReadGuard,
 }
 
 impl BlockValidationTask {
@@ -33,6 +42,7 @@ impl BlockValidationTask {
     }
 
     /// Execute the complete validation task
+    #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
     pub(crate) async fn execute(self) {
         let validation_result = self
             .validate_block()
@@ -41,9 +51,14 @@ impl BlockValidationTask {
 
         // If validation is successful, wait for parent to be validated before reporting
         if matches!(validation_result, ValidationResult::Valid) {
-            if !self.wait_for_parent_validation().await {
-                // Task was cancelled due to height difference
-                return;
+            match self.wait_for_parent_validation().await {
+                ParentValidationResult::Cancelled => {
+                    // Task was cancelled due to height difference
+                    return;
+                }
+                ParentValidationResult::Ready => {
+                    // Parent is ready, continue to report validation result
+                }
             }
         }
 
@@ -52,19 +67,16 @@ impl BlockValidationTask {
     }
 
     /// Wait for parent validation to complete
-    /// Returns false if the task should be cancelled due to height difference
-    async fn wait_for_parent_validation(&self) -> bool {
+    #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
+    async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
 
         loop {
             // Check if block height is too far behind canonical tip
             if self.should_exit_due_to_height_diff() {
-                debug!(
-                    ?self.block_hash,
-                    block_height = ?self.block.height,
-                    "exiting validation task - block too far behind canonical tip"
-                );
-                return false;
+                let _span = tracing::debug_span!("height_diff_exit", block_hash = %self.block_hash, block_height = %self.block.height).entered();
+                debug!("exiting validation task - block too far behind canonical tip");
+                return ParentValidationResult::Cancelled;
             }
 
             let Some(parent_chain_state) = self.get_parent_chain_state(&parent_hash) else {
@@ -82,7 +94,7 @@ impl BlockValidationTask {
             }
         }
 
-        true
+        ParentValidationResult::Ready
     }
 
     /// Check if the block should exit due to height difference from canonical tip
@@ -134,6 +146,7 @@ impl BlockValidationTask {
     }
 
     /// Perform block validation
+    #[tracing::instrument(skip_all, err, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
     async fn validate_block(&self) -> eyre::Result<ValidationResult> {
         let poa = self.block.poa.clone();
         let miner_address = self.block.miner_address;
@@ -146,17 +159,19 @@ impl BlockValidationTask {
                 &self.service_inner.vdf_state,
             )
             .await
-            .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
+            .inspect_err(|err| tracing::error!(?err, "recall range validation failed"))
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         }
-        .instrument(tracing::info_span!("recall range validation"));
+        .instrument(tracing::info_span!("recall_range_validation", block_hash = %self.block_hash, block_height = %self.block.height));
 
         // POA validation
         let poa_task = {
             let consensus_config = self.service_inner.config.consensus.clone();
             let block_index_guard = self.service_inner.block_index_guard.clone();
             let partitions_guard = self.service_inner.partition_assignments_guard.clone();
+            let block_hash = self.block_hash;
+            let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 poa_is_valid(
                     &poa,
@@ -165,10 +180,10 @@ impl BlockValidationTask {
                     &consensus_config,
                     &miner_address,
                 )
-                .inspect_err(|err| tracing::error!(?err, "poa is invalid"))
+                .inspect_err(|err| tracing::error!(?err, "poa validation failed"))
                 .map(|()| ValidationResult::Valid)
             })
-            .instrument(tracing::info_span!("poa task validation"))
+            .instrument(tracing::info_span!("poa_validation", block_hash = %block_hash, block_height = %block_height))
         };
         let poa_task = async move {
             let res = poa_task.await;
@@ -193,10 +208,11 @@ impl BlockValidationTask {
                 &self.service_inner.reth_node_adapter,
                 &self.service_inner.db,
             )
-            .instrument(tracing::info_span!("system transaction validation"))
+            .instrument(tracing::info_span!("system_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
             .await
-            .inspect_err(|err| tracing::error!(?err, "system transactions are invalid"))
+            .inspect_err(|err| tracing::error!(?err, "system transaction validation failed"))
             .map(|()| ValidationResult::Valid)
+            // todo update this once we have reth validation in place
             .unwrap_or(ValidationResult::Valid)
         };
 
@@ -206,9 +222,13 @@ impl BlockValidationTask {
 
         match (recall_result, poa_result, system_tx_result) {
             (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
+                tracing::debug!("block validation successful");
                 Ok(ValidationResult::Valid)
             }
-            _ => Ok(ValidationResult::Invalid),
+            _ => {
+                tracing::debug!("block validation failed");
+                Ok(ValidationResult::Invalid)
+            }
         }
     }
 }
