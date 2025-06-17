@@ -140,7 +140,11 @@ impl ActiveValidations {
         }
         let tasks_completed = !completed_blocks.is_empty();
         if tasks_completed {
-            debug!(completed_count = completed_blocks.len(), remaining_count = self.len(), "processed completed validations");
+            debug!(
+                completed_count = completed_blocks.len(),
+                remaining_count = self.len(),
+                "processed completed validations"
+            );
         }
         tasks_completed
     }
@@ -153,7 +157,7 @@ mod tests {
     use crate::block_tree_service::{BlockState, ChainState};
     use futures::future::{pending, ready};
     use irys_types::{IrysBlockHeader, H256};
-    use itertools::Itertools;
+    use itertools::Itertools as _;
     use std::collections::HashMap;
     use test_log::test;
     use tokio::time::{sleep, Duration};
@@ -169,7 +173,7 @@ mod tests {
     }
 
     /// Create a mock future that completes after a delay (unused but kept for potential future tests)
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn create_delayed_future(delay_ms: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(async move {
             sleep(Duration::from_millis(delay_ms)).await;
@@ -293,7 +297,7 @@ mod tests {
         }
 
         // Verify blocks come out in height order
-        let mut sorted_heights = heights.clone();
+        let mut sorted_heights = heights;
         sorted_heights.sort();
 
         let mut actual_order = Vec::new();
@@ -395,7 +399,7 @@ mod tests {
             )
         };
 
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
+        let mut active_validations = ActiveValidations::new(block_tree_guard);
 
         // Use the known block hashes from creation
         let fork_blocks = vec![
@@ -422,12 +426,10 @@ mod tests {
         }
 
         // Expected: extensions first (21, 22), then forks (11, 12)
-        let expected_order = vec![
-            (extension_blocks[0].0, BlockPriority::CanonicalExtension(21)),
+        let expected_order = [(extension_blocks[0].0, BlockPriority::CanonicalExtension(21)),
             (extension_blocks[1].0, BlockPriority::CanonicalExtension(22)),
             (fork_blocks[0].0, BlockPriority::Fork(11)),
-            (fork_blocks[1].0, BlockPriority::Fork(12)),
-        ];
+            (fork_blocks[1].0, BlockPriority::Fork(12))];
 
         assert_eq!(actual_order.len(), expected_order.len());
         for (i, ((actual_hash, actual_priority), (expected_hash, expected_priority))) in
@@ -516,7 +518,7 @@ mod tests {
         let (chain, _) = tree.get_canonical_chain();
 
         // Add mix of ready and pending futures
-        let heights = vec![5, 10, 15, 20];
+        let heights = [5, 10, 15, 20];
         let mut height_to_hash = HashMap::new();
 
         for (i, &height) in heights.iter().enumerate() {

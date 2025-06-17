@@ -76,7 +76,7 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
             block_hash = block.block_hash;
         }
         block_tree_cache
-            .add_common(block.block_hash, block, state.clone())
+            .add_common(block.block_hash, block, *state)
             .unwrap();
     }
     let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));

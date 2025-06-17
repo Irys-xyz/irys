@@ -10,32 +10,29 @@
 //! The service supports concurrent validation tasks for improved performance.
 
 use crate::block_tree_service::BlockTreeReadGuard;
-use crate::block_validation::{recall_recall_range_is_valid, system_transactions_are_valid};
 use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeServiceMessage, ValidationResult},
-    block_validation::poa_is_valid,
     epoch_service::PartitionAssignmentsReadGuard,
     services::ServiceSenders,
 };
 use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
 use eyre::ensure;
-use futures::FutureExt;
+use futures::FutureExt as _;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{app_state::DatabaseProvider, BlockHash, Config, IrysBlockHeader};
+use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
-use std::future::Future;
 use std::{pin::pin, sync::Arc};
 use tokio::{
     sync::mpsc::UnboundedReceiver,
     task::JoinHandle,
     time::{interval, Duration},
 };
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{debug, error, info, instrument, warn};
 
 mod active_validations;
 mod block_validation_task;
@@ -209,8 +206,8 @@ impl ValidationServiceInner {
                 let block_height = block.height;
 
                 tracing::Span::current()
-                    .record("block_hash", &tracing::field::display(&block_hash));
-                tracing::Span::current().record("block_height", &block_height);
+                    .record("block_hash", tracing::field::display(&block_hash));
+                tracing::Span::current().record("block_height", block_height);
 
                 debug!(?block_hash, ?block_height, "validating block");
 

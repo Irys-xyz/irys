@@ -7,7 +7,7 @@ use crate::block_validation::{
 use crate::validation_service::ValidationServiceInner;
 use irys_types::{BlockHash, IrysBlockHeader};
 use std::sync::Arc;
-use tracing::{debug, error, warn, Instrument};
+use tracing::{debug, error, warn, Instrument as _};
 
 /// Result of waiting for parent validation to complete
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +120,7 @@ impl BlockValidationTask {
         let block_tree = self.block_tree_guard.read();
         block_tree
             .get_block_and_status(parent_hash)
-            .map(|(_header, state)| state.clone())
+            .map(|(_header, state)| *state)
     }
 
     /// Check if the parent is ready for this block to be reported

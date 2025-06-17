@@ -958,7 +958,7 @@ impl BlockTreeCache {
         );
 
         if matches!(
-            self.blocks.get(&hash).map(|b| b.chain_state.clone()),
+            self.blocks.get(&hash).map(|b| b.chain_state),
             Some(ChainState::Onchain)
         ) {
             debug!(?hash, "already part of the main chian state");
@@ -994,7 +994,7 @@ impl BlockTreeCache {
         // Verify parent is validated
         ensure!(
             !matches!(
-                self.blocks.get(&prev_hash).map(|b| b.chain_state.clone()),
+                self.blocks.get(&prev_hash).map(|b| b.chain_state),
                 Some(ChainState::NotOnchain(_))
             ),
             "Previous block not validated"
