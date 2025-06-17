@@ -173,15 +173,11 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .post_storage_tx_without_gossip(H256::zero(), data, &signer)
         .await;
 
-    let expected_txs = vec![storage_tx.header.clone()];
-    let result = genesis_node.wait_for_migrated_txs(expected_txs, 20).await;
-    assert!(result.is_ok());
-
     // Restart the node
     tracing::info!("Restarting node");
     let restarted_node = genesis_node.stop().await.start().await;
 
-    // confirm the mempool tx have appeared back in the mempool after a restart
+    // confirm the mempool data tx have appeared back in the mempool after a restart
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let get_tx_msg = MempoolServiceMessage::GetDataTxs(vec![storage_tx.header.id], oneshot_tx);
     if let Err(err) = restarted_node
@@ -192,13 +188,28 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     {
         tracing::error!("error sending message to mempool: {:?}", err);
     }
-    let tx_from_mempool = oneshot_rx.await.expect("expected result");
-    assert!(tx_from_mempool
+    let data_tx_from_mempool = oneshot_rx.await.expect("expected result");
+    assert!(data_tx_from_mempool
         .first()
         .expect("expected a data tx")
         .is_some());
 
-    // TODO: once mempool does not write directly to db, confirm commitment txs appear back in mempool after restart
+    // confirm the commitment tx have appeared back in the mempool after a restart
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    let get_tx_msg = MempoolServiceMessage::GetCommitmentTxs {
+        commitment_tx_ids: vec![pledge_tx.id],
+        response: oneshot_tx,
+    };
+    if let Err(err) = restarted_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(get_tx_msg)
+    {
+        tracing::error!("error sending message to mempool: {:?}", err);
+    }
+    let commitment_tx_from_mempool = oneshot_rx.await.expect("expected result");
+    assert!(commitment_tx_from_mempool.get(&pledge_tx.id).is_some());
 
     restarted_node.stop().await;
 
