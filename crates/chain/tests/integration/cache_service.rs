@@ -198,7 +198,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     assert_eq!(*chunk_cache_count, 0_u64);
 
     // mine enough blocks to cause chunk migration
-    let _ = node.mine_block().await;
+    node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
+        .await?;
 
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
