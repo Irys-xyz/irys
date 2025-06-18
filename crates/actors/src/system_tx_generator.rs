@@ -1,10 +1,10 @@
 use eyre::Result;
 use irys_reth::system_tx::{
-    BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, SystemTransaction, TransactionPacket,
 };
 use irys_types::{
     Address, CommitmentTransaction, IrysBlockHeader, IrysTransactionCommon as _,
-    IrysTransactionHeader, H256,
+    IrysTransactionHeader,
 };
 use reth::revm::primitives::ruint::Uint;
 
@@ -45,9 +45,7 @@ impl<'a> SystemTxGenerator<'a> {
         &self,
     ) -> impl std::iter::Iterator<Item = Result<SystemTransaction>> {
         std::iter::once(Ok(SystemTransaction::new_v1(
-            *self.block_height,
-            H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-            TransactionPacket::BlockReward(BalanceIncrement {
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: (*self.reward_amount).into(),
                 target: *self.reward_address,
             }),
@@ -61,14 +59,13 @@ impl<'a> SystemTxGenerator<'a> {
     ) -> impl std::iter::Iterator<Item = Result<SystemTransaction>> + use<'a> {
         // create a storage fee system txs
         submit_txs.iter().map(move |tx| {
-            Ok(SystemTransaction::new_v1(
-                *self.block_height,
-                H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-                TransactionPacket::StorageFees(BalanceDecrement {
+            Ok(SystemTransaction::new_v1(TransactionPacket::StorageFees(
+                BalanceDecrement {
                     amount: Uint::from(tx.total_fee()),
                     target: tx.signer,
-                }),
-            ))
+                    irys_ref: tx.id.into(),
+                },
+            )))
         })
     }
 
@@ -86,53 +83,49 @@ impl<'a> SystemTxGenerator<'a> {
                     let amount = total_fee
                         .checked_add(commitment_value)
                         .ok_or_else(|| eyre::eyre!("Overflow when calculating stake amount"))?;
-                    Ok(SystemTransaction::new_v1(
-                        *self.block_height,
-                        H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-                        TransactionPacket::Stake(BalanceDecrement {
+                    Ok(SystemTransaction::new_v1(TransactionPacket::Stake(
+                        BalanceDecrement {
                             amount,
                             target: tx.signer,
-                        }),
-                    ))
+                            irys_ref: tx.id.into(),
+                        },
+                    )))
                 }
                 irys_primitives::CommitmentType::Pledge => {
                     let amount = total_fee
                         .checked_add(commitment_value)
                         .ok_or_else(|| eyre::eyre!("Overflow when calculating pledge amount"))?;
-                    Ok(SystemTransaction::new_v1(
-                        *self.block_height,
-                        H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-                        TransactionPacket::Pledge(BalanceDecrement {
+                    Ok(SystemTransaction::new_v1(TransactionPacket::Pledge(
+                        BalanceDecrement {
                             amount,
                             target: tx.signer,
-                        }),
-                    ))
+                            irys_ref: tx.id.into(),
+                        },
+                    )))
                 }
                 irys_primitives::CommitmentType::Unpledge => {
                     let amount = commitment_value
                         .checked_sub(total_fee)
                         .ok_or_else(|| eyre::eyre!("Underflow when calculating unpledge amount"))?;
-                    Ok(SystemTransaction::new_v1(
-                        *self.block_height,
-                        H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-                        TransactionPacket::Unpledge(BalanceIncrement {
+                    Ok(SystemTransaction::new_v1(TransactionPacket::Unpledge(
+                        BalanceIncrement {
                             amount,
                             target: tx.signer,
-                        }),
-                    ))
+                            irys_ref: tx.id.into(),
+                        },
+                    )))
                 }
                 irys_primitives::CommitmentType::Unstake => {
                     let amount = commitment_value
                         .checked_sub(total_fee)
                         .ok_or_else(|| eyre::eyre!("Underflow when calculating unstake amount"))?;
-                    Ok(SystemTransaction::new_v1(
-                        *self.block_height,
-                        H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-                        TransactionPacket::Unstake(BalanceIncrement {
+                    Ok(SystemTransaction::new_v1(TransactionPacket::Unstake(
+                        BalanceIncrement {
                             amount,
                             target: tx.signer,
-                        }),
-                    ))
+                            irys_ref: tx.id.into(),
+                        },
+                    )))
                 }
             }
         })
