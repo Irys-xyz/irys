@@ -36,11 +36,9 @@ use revm::database::PlainAccount;
 use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus, EvmStorageSlot};
-use revm::Database as _;
 use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
 
 // External crate imports - Other
-use tracing::error_span;
 
 use super::*;
 
@@ -163,9 +161,6 @@ where
         };
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing system transaction");
 
-        // Validate system tx metadata
-        self.validate_system_transaction_metadata(&system_tx, tx_envelope.hash())?;
-
         // Process the system transaction
         let (new_account_state, target) =
             self.process_system_transaction(&system_tx, tx_envelope.hash())?;
@@ -255,56 +250,6 @@ where
         Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
     >,
 {
-    /// Validates system transaction metadata (block height and parent hash)
-    fn validate_system_transaction_metadata(
-        &mut self,
-        system_tx: &SystemTransaction,
-        tx_hash: &FixedBytes<32>,
-    ) -> Result<(), BlockExecutionError> {
-        let block_number = self.inner.evm().block().number;
-        let block_hash = self
-            .inner
-            .evm_mut()
-            .db_mut()
-            .block_hash(block_number.saturating_sub(1))
-            .map_err(|_err| create_internal_error("could not retrieve block by this hash"))?;
-
-        let span = error_span!(
-            "system_tx_processing",
-            "parent_block_hash" = block_hash.to_string(),
-            "block_number" = block_number,
-            "allowed_parent_block_hash" = system_tx.parent_blockhash().to_string(),
-            "allowed_block_height" = system_tx.valid_for_block_height()
-        );
-        let _guard = span.enter();
-
-        // ensure that parent block hashes match.
-        // This check ensures that a system tx does not get executed for an off-case fork of the desired chain.
-        if system_tx.parent_blockhash() != block_hash {
-            tracing::error!(
-                "A system tx leaked into a block that was not approved by the system tx producer"
-            );
-            return Err(create_invalid_tx_error(
-                *tx_hash,
-                InvalidTransaction::PriorityFeeGreaterThanMaxFee,
-            ));
-        }
-
-        // ensure that block heights match.
-        // This ensures that the system tx does not leak into future blocks.
-        if system_tx.valid_for_block_height() != block_number {
-            tracing::error!(
-                "A system tx leaked into a block that was not approved by the system tx producer"
-            );
-            return Err(create_invalid_tx_error(
-                *tx_hash,
-                InvalidTransaction::PriorityFeeGreaterThanMaxFee,
-            ));
-        }
-
-        Ok(())
-    }
-
     /// Processes a system transaction and returns the new account state and target address
     fn process_system_transaction(
         &mut self,
@@ -317,7 +262,6 @@ where
         match system_tx {
             system_tx::SystemTransaction::V1 { packet, .. } => match packet {
                 system_tx::TransactionPacket::Unstake(balance_increment)
-                | system_tx::TransactionPacket::BlockReward(balance_increment)
                 | system_tx::TransactionPacket::Unpledge(balance_increment) => {
                     let log = Self::create_system_log(
                         balance_increment.target,
@@ -330,6 +274,28 @@ where
                     let target = balance_increment.target;
                     let (plain_account, execution_result, account_existed) =
                         self.handle_balance_increment(log, balance_increment);
+                    Ok((
+                        Ok((plain_account, execution_result, account_existed)),
+                        target,
+                    ))
+                }
+                system_tx::TransactionPacket::BlockReward(block_reward_increment) => {
+                    let log = Self::create_system_log(
+                        block_reward_increment.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(block_reward_increment.amount, 256),
+                            DynSolValue::Address(block_reward_increment.target),
+                        ],
+                    );
+                    let target = block_reward_increment.target;
+                    let balance_increment = system_tx::BalanceIncrement {
+                        amount: block_reward_increment.amount,
+                        target: block_reward_increment.target,
+                        irys_ref: alloy_primitives::FixedBytes::ZERO,
+                    };
+                    let (plain_account, execution_result, account_existed) =
+                        self.handle_balance_increment(log, &balance_increment);
                     Ok((
                         Ok((plain_account, execution_result, account_existed)),
                         target,

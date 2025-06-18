@@ -11,6 +11,7 @@ irys-primitives.workspace = true
 irys-api-client.workspace = true
 irys-database.workspace = true
 irys-vdf.workspace = true
+irys-reth-node-bridge.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
 tokio = { workspace = true }
@@ -26,6 +27,7 @@ actix-rt.workspace = true
 reth-tasks.workspace = true
 lru.workspace = true
 async-trait = "0.1"
+reth.workspace = true
 alloy-core.workspace = true
 
 [dev-dependencies]

@@ -1,3 +1,4 @@
+use crate::execution_payload_provider::{ExecutionPayloadProvider, RethPayloadProvider};
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
@@ -30,6 +31,7 @@ use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, warn};
 
 #[derive(Clone, Debug)]
@@ -249,6 +251,8 @@ impl Default for ApiClientStub {
     }
 }
 
+pub(crate) type PeerListMock = Addr<PeerListServiceWithClient<ApiClientStub, MockRethServiceActor>>;
+
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
     pub api_port: u16,
@@ -256,7 +260,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub db: DatabaseProvider,
     pub mining_address: Address,
     pub mempool_stub: MempoolStub,
-    pub peer_list: Addr<PeerListServiceWithClient<ApiClientStub, MockRethServiceActor>>,
+    pub peer_list: PeerListMock,
     pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
@@ -266,6 +270,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
+    pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
     pub config: Config,
 }
 
@@ -293,7 +298,10 @@ impl GossipServiceTestFixture {
         let gossip_port = random_free_port();
         let mut node_config = NodeConfig::testnet();
         node_config.base_directory = temp_dir.path().to_path_buf();
+        let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
+        node_config.mining_key = random_signer.signer;
         let config = Config::new(node_config);
+
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
@@ -329,13 +337,19 @@ impl GossipServiceTestFixture {
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
 
+        let mocked_execution_payloads = Arc::new(TokioRwLock::new(HashMap::new()));
+        let execution_payload_provider = ExecutionPayloadProvider::new(
+            peer_list.clone(),
+            RethPayloadProvider::Mock(mocked_execution_payloads),
+        );
+
         Self {
             // temp_dir,
             gossip_port,
             api_port,
             execution: RethPeerInfo::default(),
             db,
-            mining_address: Address::random(),
+            mining_address: config.node_config.miner_address(),
             mempool_stub,
             peer_list,
             // block_discovery_stub,
@@ -346,6 +360,7 @@ impl GossipServiceTestFixture {
             task_manager,
             task_executor,
             block_status_provider: block_status_provider_mock,
+            execution_payload_provider,
             config,
         }
     }
@@ -379,6 +394,7 @@ impl GossipServiceTestFixture {
         };
 
         let peer_list = self.peer_list.clone();
+        let execution_payload_provider = self.execution_payload_provider.clone();
 
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
@@ -391,6 +407,7 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 gossip_listener,
                 self.block_status_provider.clone(),
+                execution_payload_provider,
             )
             .expect("failed to run gossip service");
 
@@ -418,8 +435,8 @@ impl GossipServiceTestFixture {
         let peer = other.create_default_peer_entry();
 
         debug!(
-            "Adding peer {:?} to gossip service {:?}",
-            peer, self.gossip_port
+            "Adding peer {:?}: {:?} to gossip service {:?}",
+            other.mining_address, peer, self.gossip_port
         );
 
         self.peer_list
@@ -608,6 +625,12 @@ async fn handle_get_data(
             }
             GossipDataRequest::Transaction(transaction_hash) => {
                 warn!("Transaction request for hash {:?}", transaction_hash);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(false)
+            }
+            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+                warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)

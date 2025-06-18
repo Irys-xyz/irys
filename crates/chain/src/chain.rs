@@ -35,6 +35,7 @@ use irys_database::db::RethDbWrapper;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
+use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
     BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
     ServiceHandleWithShutdownSignal, SyncState,
@@ -912,6 +913,11 @@ impl IrysNode {
         let (peer_list_service, peer_list_arbiter) =
             init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
 
+        let execution_payload_provider = ExecutionPayloadProvider::new(
+            peer_list_service.clone(),
+            reth_node_adapter.clone().into(),
+        );
+
         // Spawn mempool service
         let _mempool_handle = MempoolService::spawn_service(
             task_exec,
@@ -948,6 +954,7 @@ impl IrysNode {
         let _handle = ValidationService::spawn_service(
             task_exec,
             block_index_guard.clone(),
+            block_tree_guard.clone(),
             partition_assignments_guard.clone(),
             vdf_state_readonly.clone(),
             &config,
@@ -986,6 +993,7 @@ impl IrysNode {
             irys_db.clone(),
             gossip_listener,
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
+            execution_payload_provider,
         )?;
 
         // set up the price oracle

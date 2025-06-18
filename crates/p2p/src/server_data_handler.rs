@@ -1,3 +1,4 @@
+use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, ScoreDecreaseReason};
 use crate::{
     block_pool::BlockPool,
@@ -16,8 +17,9 @@ use irys_actors::{
 use irys_api_client::ApiClient;
 use irys_types::{
     CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionResponse, UnpackedChunk, H256,
+    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
+use reth::rpc::types::engine::ExecutionPayload;
 use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, Span};
@@ -40,6 +42,7 @@ where
     pub sync_state: SyncState,
     /// Tracing span
     pub span: Span,
+    pub execution_payload_provider: ExecutionPayloadProvider<TPeerList>,
 }
 
 impl<M, B, A, P> Clone for GossipServerDataHandler<M, B, A, P>
@@ -59,6 +62,7 @@ where
             peer_list: self.peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: self.span.clone(),
+            execution_payload_provider: self.execution_payload_provider.clone(),
         }
     }
 }
@@ -407,6 +411,48 @@ where
         Ok(())
     }
 
+    pub(crate) async fn handle_execution_payload(
+        &self,
+        execution_payload_request: GossipRequest<ExecutionPayload>,
+    ) -> GossipResult<()> {
+        let execution_payload = execution_payload_request.data;
+        let evm_block_hash = execution_payload.block_hash();
+        let payload_already_seen_before = self
+            .cache
+            .seen_execution_payload_from_any_peer(&evm_block_hash)?;
+        let expecting_payload = self
+            .execution_payload_provider
+            .is_waiting_for_payload(&evm_block_hash)
+            .await;
+        let source_miner_address = execution_payload_request.miner_address;
+
+        // Record payload as seen from the source peer
+        self.cache.record_seen(
+            source_miner_address,
+            GossipCacheKey::ExecutionPayload(evm_block_hash),
+        )?;
+
+        if payload_already_seen_before && !expecting_payload {
+            debug!(
+                "Node {}: Execution payload for block {} already seen, and no service requested it to be fetched again, skipping",
+                self.gossip_client.mining_address,
+                evm_block_hash.0.to_base58()
+            );
+            return Ok(());
+        }
+
+        self.execution_payload_provider
+            .add_payload_to_cache(execution_payload)
+            .await;
+        debug!(
+            "Node {}: Execution payload for EVM block {} added to cache",
+            self.gossip_client.mining_address,
+            evm_block_hash.0.to_base58()
+        );
+
+        Ok(())
+    }
+
     async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
         self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
             GossipError::Internal(InternalGossipError::Unknown(format!(
@@ -418,22 +464,9 @@ where
 
     pub(crate) async fn handle_get_data(
         &self,
-        source_address: SocketAddr,
+        peer_info: &PeerListItem,
         request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<bool> {
-        let peer_list_item = self
-            .peer_list
-            .peer_by_mining_address(request.miner_address)
-            .await?;
-        let Some(peer_info) = peer_list_item else {
-            return Ok(false);
-        };
-        if source_address.ip() != peer_info.address.gossip.ip() {
-            return Err(GossipError::InvalidPeer(
-                "Requesting peer doesn't match the address of the source peer".to_string(),
-            ));
-        }
-
         match request.data {
             GossipDataRequest::Block(block_hash) => {
                 let block_result = self.block_pool.get_block_data(&block_hash).await;
@@ -445,7 +478,7 @@ where
                         match self
                             .gossip_client
                             .send_data_and_update_score(
-                                (&request.miner_address, &peer_info),
+                                (&request.miner_address, peer_info),
                                 &GossipData::Block(block),
                                 &self.peer_list,
                             )
@@ -462,6 +495,29 @@ where
                 }
             }
             GossipDataRequest::Transaction(_tx_hash) => Ok(false),
+            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+                let payload = self
+                    .execution_payload_provider
+                    .get_locally_stored_payload(&evm_block_hash)
+                    .await;
+
+                match payload {
+                    Some(payload) => self
+                        .gossip_client
+                        .send_data_and_update_score(
+                            (&request.miner_address, peer_info),
+                            &GossipData::ExecutionPayload(payload),
+                            &self.peer_list,
+                        )
+                        .await
+                        .map(|()| true)
+                        .map_err(|error| {
+                            error!("Failed to send execution payload to peer: {}", error);
+                            error
+                        }),
+                    None => Ok(false),
+                }
+            }
         }
     }
 }

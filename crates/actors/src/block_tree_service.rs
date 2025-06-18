@@ -31,6 +31,9 @@ use tokio::{
 };
 use tracing::{debug, error, info};
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockTreeReadGuard {
@@ -743,9 +746,6 @@ fn get_ledger_tx_headers<T: DbTx>(
     }
 }
 
-/// Number of blocks to retain in cache from chain head
-const BLOCK_CACHE_DEPTH: u64 = 50;
-
 #[derive(Debug, Clone)]
 pub struct BlockTreeEntry {
     pub block_hash: BlockHash,
@@ -773,6 +773,9 @@ pub struct BlockTreeCache {
 
     // Cache of longest chain: (block/tx pairs, count of non-onchain blocks)
     longest_chain_cache: (Vec<BlockTreeEntry>, usize),
+
+    // Consensus configuration containing cache depth
+    consensus_config: ConsensusConfig,
 }
 
 #[derive(Debug)]
@@ -785,7 +788,7 @@ pub struct BlockEntry {
 }
 
 /// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ChainState {
     /// Block is confirmed (by another block) and part of the main chain
     Onchain,
@@ -798,7 +801,7 @@ pub enum ChainState {
 }
 
 /// Represents the validation state of a block, independent of its `ChainState`
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum BlockState {
     /// Initial state, validation not yet started
     Unknown,
@@ -824,7 +827,7 @@ impl BlockTreeCache {
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
     // #[cfg(feature = "test-utils")]
-    pub fn new(genesis_block: &IrysBlockHeader) -> Self {
+    pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         let block_hash = genesis_block.block_hash;
         let solution_hash = genesis_block.solution_hash;
         let height = genesis_block.height;
@@ -863,13 +866,14 @@ impl BlockTreeCache {
             max_cumulative_difficulty: (cumulative_diff, block_hash),
             height_index,
             longest_chain_cache,
+            consensus_config,
         }
     }
 
     /// Restores the block tree cache from the database and `block_index` during startup.
     ///
     /// Rebuilds the block tree by iterating the `block_index` and loading the most recent blocks from
-    /// the database (up to `BLOCK_CACHE_DEPTH` blocks). For each block, it loads associated commitment
+    /// the database (up to `block_cache_depth` blocks). For each block, it loads associated commitment
     /// transactions and reconstructs the commitment snapshot for that block. The function also notifies
     /// the Reth service of the current chain tip.
     ///
@@ -899,7 +903,7 @@ impl BlockTreeCache {
 
             let start = block_index
                 .num_blocks()
-                .saturating_sub(BLOCK_CACHE_DEPTH - 1);
+                .saturating_sub(consensus_config.block_cache_depth - 1);
             let end = block_index.num_blocks();
             let start_block_hash = block_index.get_item(start).unwrap().block_hash;
             (start, end, start_block_hash)
@@ -924,6 +928,7 @@ impl BlockTreeCache {
             max_cumulative_difficulty: (start_block.cumulative_diff, start_block_hash),
             height_index: BTreeMap::new(),
             longest_chain_cache: (vec![entry], 0),
+            consensus_config: consensus_config.clone(),
         };
 
         // Initialize commitment snapshot and add start block
@@ -1091,7 +1096,7 @@ impl BlockTreeCache {
         );
 
         if matches!(
-            self.blocks.get(&hash).map(|b| b.chain_state.clone()),
+            self.blocks.get(&hash).map(|b| b.chain_state),
             Some(ChainState::Onchain)
         ) {
             debug!(?hash, "already part of the main chian state");
@@ -1137,7 +1142,7 @@ impl BlockTreeCache {
         // Verify parent is validated
         ensure!(
             !matches!(
-                self.blocks.get(&prev_hash).map(|b| b.chain_state.clone()),
+                self.blocks.get(&prev_hash).map(|b| b.chain_state),
                 Some(ChainState::NotOnchain(_))
             ),
             "Previous block not validated"
@@ -1238,7 +1243,7 @@ impl BlockTreeCache {
         let mut not_onchain_count = 0;
 
         let mut current = self.max_cumulative_difficulty.1;
-        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut blocks_to_collect = self.consensus_config.block_cache_depth;
         debug!(
             "updating canonical chain cache latest_cache_tip: {}",
             current
@@ -1252,7 +1257,7 @@ impl BlockTreeCache {
                     pairs.clear();
                     not_onchain_count = 0;
                     current = entry.block.previous_block_hash;
-                    blocks_to_collect = BLOCK_CACHE_DEPTH;
+                    blocks_to_collect = self.consensus_config.block_cache_depth;
                     continue;
                 }
 
@@ -1492,7 +1497,7 @@ impl BlockTreeCache {
         let mut prev_block = &current_entry.block;
         let mut depth_count = 0;
 
-        while prev_block.height > 0 && depth_count < BLOCK_CACHE_DEPTH {
+        while prev_block.height > 0 && depth_count < self.consensus_config.block_cache_depth {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
@@ -1670,7 +1675,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
     let canonical_chain = tokio::task::spawn_blocking(move || {
         let cache = tree.read();
 
-        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut blocks_to_collect = cache.consensus_config.block_cache_depth;
         let mut chain_cache = Vec::with_capacity(
             blocks_to_collect
                 .try_into()
@@ -1812,7 +1817,7 @@ mod tests {
         let comm_cache = Arc::new(CommitmentSnapshot::default());
 
         // Initialize block tree cache from `b1`
-        let mut cache = BlockTreeCache::new(&b1);
+        let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
 
         // Verify cache returns `None` for unknown hashes
         assert_eq!(cache.get_block(&H256::random()), None);
@@ -1847,7 +1852,7 @@ mod tests {
         b1_test.data_ledgers[DataLedger::Submit]
             .tx_ids
             .push(H256::random());
-        assert_matches!(cache.add_peer_block(&b1_test, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b1_test, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
@@ -1872,7 +1877,7 @@ mod tests {
 
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1888,7 +1893,7 @@ mod tests {
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -1920,10 +1925,10 @@ mod tests {
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
 
         println!(
             "b1:   {} cdiff: {} solution_hash: {}",
@@ -2054,16 +2059,16 @@ mod tests {
         // <Reset the cache>
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
-        let mut cache = BlockTreeCache::new(&b1);
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(_));
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(_));
+        let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
+        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_2, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2_2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2080,7 +2085,7 @@ mod tests {
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_3, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b2_3, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2100,7 +2105,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_eq!(
             cache.get_block_and_status(&b2_2.block_hash).unwrap(),
@@ -2123,14 +2128,14 @@ mod tests {
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b3, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b3, comm_cache.clone()), Ok(()));
         assert_matches!(
             cache.add_local_block(
                 &b3,
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(cache.mark_tip(&b3.block_hash), Ok(_));
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
@@ -2155,7 +2160,7 @@ mod tests {
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b4, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b4, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2287,9 +2292,9 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
@@ -2313,7 +2318,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
 
@@ -2356,7 +2361,7 @@ mod tests {
 
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
-        assert_matches!(cache.add_peer_block(&b14, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b14, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2438,7 +2443,7 @@ mod tests {
 
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
-        assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(()));
         assert_matches!(
             check_earliest_not_onchian(
                 &b14.block_hash,
@@ -2456,7 +2461,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(
             check_earliest_not_onchian(
@@ -2475,7 +2480,7 @@ mod tests {
 
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
-        assert_matches!(cache.add_peer_block(&b16, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b16, comm_cache.clone()), Ok(()));
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
             Ok(())
@@ -2525,9 +2530,9 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(_));
+        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
@@ -2559,7 +2564,7 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
         let b12 = extend_chain(random_block(U256::one()), &b11);
@@ -2569,7 +2574,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
@@ -2585,7 +2590,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
         assert_matches!(
             cache.add_local_block(
@@ -2593,7 +2598,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone()
             ),
-            Ok(_)
+            Ok(())
         );
 
         assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 1, &cache), Ok(()));
@@ -2609,7 +2614,7 @@ mod tests {
                 ChainState::Validated(BlockState::ValidBlock),
                 comm_cache
             ),
-            Ok(_)
+            Ok(())
         );
 
         assert_matches!(
