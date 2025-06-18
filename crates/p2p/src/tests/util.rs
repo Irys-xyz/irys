@@ -271,6 +271,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
     pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
+    pub config: Config,
 }
 
 #[derive(Debug, Clone)]
@@ -357,6 +358,7 @@ impl GossipServiceTestFixture {
             task_executor,
             block_status_provider: block_status_provider_mock,
             execution_payload_provider,
+            config,
         }
     }
 
@@ -441,16 +443,6 @@ impl GossipServiceTestFixture {
             })
             .await
             .expect("Adding peer failed");
-    }
-
-    pub(crate) async fn get_active_peers(&self) -> Vec<(Address, PeerListItem)> {
-        self.peer_list
-            .send(TopActivePeersRequest {
-                truncate: None,
-                exclude_peers: None,
-            })
-            .await
-            .expect("Adding peer failed")
     }
 
     /// # Panics

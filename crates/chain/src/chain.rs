@@ -26,8 +26,7 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{
-    ActorAddresses, CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage,
-    StorageModuleService,
+    ActorAddresses, EpochReplayData, GetCommitmentStateGuardMessage, StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -886,6 +885,7 @@ impl IrysNode {
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
+            commitment_state_guard.clone(),
             &config,
             &service_senders,
             reth_service_actor.clone(),
@@ -907,13 +907,6 @@ impl IrysNode {
             receivers.ema,
             &config,
             &service_senders,
-        );
-
-        // Spawn the CommitmentCache service
-        let _commitcache_handle = CommitmentCache::spawn_service(
-            task_exec,
-            receivers.commitments_cache,
-            commitment_state_guard.clone(),
         );
 
         // Spawn peer list service

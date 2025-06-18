@@ -1,6 +1,7 @@
 use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use core::time::Duration;
 use irys_actors::mempool_service::MempoolFacade as _;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
 };
@@ -296,6 +297,10 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
     debug!("Added transactions to ledger: {:?}", ledger.tx_ids);
     block.data_ledgers.push(ledger);
+    let signer = IrysSigner::random_signer(&fixture1.config.consensus);
+    signer
+        .sign_block_header(&mut block)
+        .expect("to sign block header");
 
     // Set up the mock API client to return the transactions
     fixture2.api_client_stub.txs.insert(tx1.id, tx1.clone());

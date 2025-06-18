@@ -1,6 +1,6 @@
 use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
 use crate::services::ServiceSenders;
-use crate::{CommitmentCacheMessage, CommitmentCacheStatus, CommitmentStateReadGuard};
+use crate::{CommitmentCacheStatus, CommitmentStateReadGuard};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -599,7 +599,7 @@ impl Inner {
             return Err(TxIngressError::InvalidAnchor);
         }
 
-        // Check pending commitments and cached commitments and active commitments
+        // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
         if commitment_status == CommitmentCacheStatus::Accepted {
             // Validate tx signature
@@ -653,30 +653,6 @@ impl Inner {
                         .expect("to process pending pledge for newly staked address");
                 }
             }
-
-            // // HACK HACK: in order for block discovery to validate incoming blocks
-            // // it needs to read commitment tx from the database. Ideally it should
-            // // be reading them from the mempool_service in memory cache, but we are
-            // // putting off that work until the actix mempool_service is rewritten as a
-            // // tokio service.
-            // match self.irys_db.update_eyre(|db_tx| {
-            //     irys_database::insert_commitment_tx(db_tx, &commitment_tx)?;
-            //     Ok(())
-            // }) {
-            //     Ok(()) => {
-            //         info!(
-            //             "Successfully stored commitment_tx in db {:?}",
-            //             commitment_tx.id.0.to_base58()
-            //         );
-            //     }
-            //     Err(db_error) => {
-            //         error!(
-            //             "Failed to store commitment_tx in db {:?}: {:?}",
-            //             commitment_tx.id.0.to_base58(),
-            //             db_error
-            //         );
-            //     }
-            // }
 
             // Gossip transaction
             self.service_senders
@@ -1218,11 +1194,15 @@ impl Inner {
 
         // Get a list of all recently confirmed commitment txids in the canonical chain
         let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
-        for entry in canonical {
-            // TODO: replace this with data from the canonical chain entry when block_tree refactors the tuple
-            let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
+        debug!(
+            "best_mempool_txs: current head height {}",
+            canonical.last().unwrap().height
+        );
 
-            // Remove any confirmed commitment tx
+        // TODO: This approach should be applied to storage TX and commitment TX should instead
+        // be checked for prior inclusion using the Commitment State and current Commitment Cache
+        for entry in canonical {
+            let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
                 for tx_id in &commitment_tx_ids.0 {
                     confirmed_commitments.insert(*tx_id);
@@ -1230,9 +1210,8 @@ impl Inner {
             }
         }
 
-        // Process commitments in priority order (stakes then pledges)
+        // Process commitments in the mempool in priority order (stakes then pledges)
         // This order ensures stake transactions are processed before pledges
-
         let mempool_state_guard = mempool_state.read().await;
 
         for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
@@ -1253,13 +1232,30 @@ impl Inner {
             // Select fundable commitments in fee-priority order
             for tx in sorted_commitments {
                 if confirmed_commitments.contains(&tx.id) {
-                    continue; // Skip already confirmed
+                    debug!(
+                        "best_mempool_txs: skipping already confirmed commitment tx {}",
+                        tx.id
+                    );
+                    continue; // Skip tx already confirmed in the canonical chain
                 }
                 if check_funding(&tx) {
+                    debug!("best_mempool_txs: adding commitment tx {}", tx.id);
                     commitment_tx.push(tx);
                 }
             }
         }
+
+        debug!(
+            "best_mempool_txs: confirmed_commitments\n {:#?}",
+            confirmed_commitments
+        );
+        debug!(
+            "best_mempool_txs: best commitments \n {:#?}",
+            commitment_tx
+                .iter()
+                .map(|t| (t.id, t.commitment_type))
+                .collect::<Vec<_>>()
+        );
 
         // Prepare storage transactions for inclusion after commitments
         let mut all_storage_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
@@ -1799,17 +1795,12 @@ impl Inner {
         }
 
         // For unstaked pledges, validate against cache and pending transactions
-        let commitment_cache = self.service_senders.commitment_cache.clone();
-        let commitment_tx_clone = commitment_tx.clone();
+        let commitment_cache = self
+            .block_tree_read_guard
+            .read()
+            .canonical_commitment_cache();
 
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
-            commitment_tx: commitment_tx_clone,
-            response: oneshot_tx,
-        });
-        let cache_status = oneshot_rx
-            .await
-            .expect("to receive CommitmentStatus from GetCommitmentStatus message");
+        let cache_status = commitment_cache.get_commitment_status(commitment_tx);
 
         // Reject unsupported commitment types
         if matches!(cache_status, CommitmentCacheStatus::Unsupported) {

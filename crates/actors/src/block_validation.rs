@@ -728,7 +728,7 @@ mod tests {
         let msg = NewEpochMessage {
             previous_epoch_block: None,
             epoch_block: arc_genesis.clone(),
-            commitments,
+            commitments: Arc::new(commitments),
         };
         match epoch_service_addr.send(msg).await {
             Ok(_) => info!("Genesis Epoch tasks complete."),
