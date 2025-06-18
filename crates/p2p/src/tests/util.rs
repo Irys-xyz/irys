@@ -298,7 +298,10 @@ impl GossipServiceTestFixture {
         let gossip_port = random_free_port();
         let mut node_config = NodeConfig::testnet();
         node_config.base_directory = temp_dir.path().to_path_buf();
+        let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
+        node_config.mining_key = random_signer.signer;
         let config = Config::new(node_config);
+
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
