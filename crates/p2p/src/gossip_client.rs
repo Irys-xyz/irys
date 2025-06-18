@@ -67,6 +67,13 @@ impl GossipClient {
                 )
                 .await?;
             }
+            GossipData::ExecutionPayload(execution_payload) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/execution_payload", peer.address.gossip),
+                    &execution_payload,
+                )
+                .await?;
+            }
         };
 
         Ok(())

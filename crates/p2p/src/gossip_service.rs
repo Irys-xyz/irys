@@ -9,6 +9,7 @@
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
 use crate::cache::GossipCacheKey;
+use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::PeerList;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
@@ -159,6 +160,7 @@ impl P2PService {
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
+        execution_payload_provider: ExecutionPayloadProvider<P>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -172,6 +174,7 @@ impl P2PService {
             block_discovery,
             self.sync_state.clone(),
             block_status_provider,
+            execution_payload_provider.clone(),
         );
 
         let server_data_handler = GossipServerDataHandler {
@@ -183,6 +186,7 @@ impl P2PService {
             peer_list: peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: Span::current(),
+            execution_payload_provider,
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 

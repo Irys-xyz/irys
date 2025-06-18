@@ -1,3 +1,4 @@
+use crate::execution_payload_provider::{ExecutionPayloadProvider, RethPayloadProvider};
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
@@ -24,12 +25,15 @@ use irys_types::{
     PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
+use reth::revm::primitives::B256;
+use reth::rpc::types::engine::ExecutionPayload;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, warn};
 
 #[derive(Clone, Debug)]
@@ -249,6 +253,8 @@ impl Default for ApiClientStub {
     }
 }
 
+pub(crate) type PeerListMock = Addr<PeerListServiceWithClient<ApiClientStub, MockRethServiceActor>>;
+
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
     pub api_port: u16,
@@ -256,7 +262,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub db: DatabaseProvider,
     pub mining_address: Address,
     pub mempool_stub: MempoolStub,
-    pub peer_list: Addr<PeerListServiceWithClient<ApiClientStub, MockRethServiceActor>>,
+    pub peer_list: PeerListMock,
     pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
@@ -266,6 +272,8 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
+    pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
+    pub mocked_execution_payloads: Arc<TokioRwLock<HashMap<B256, ExecutionPayload>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +336,12 @@ impl GossipServiceTestFixture {
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
 
+        let mocked_execution_payloads = Arc::new(TokioRwLock::new(HashMap::new()));
+        let execution_payload_provider = ExecutionPayloadProvider::new(
+            peer_list.clone(),
+            RethPayloadProvider::Mock(mocked_execution_payloads.clone()),
+        );
+
         Self {
             // temp_dir,
             gossip_port,
@@ -345,6 +359,8 @@ impl GossipServiceTestFixture {
             task_manager,
             task_executor,
             block_status_provider: block_status_provider_mock,
+            execution_payload_provider,
+            mocked_execution_payloads,
         }
     }
 
@@ -377,6 +393,7 @@ impl GossipServiceTestFixture {
         };
 
         let peer_list = self.peer_list.clone();
+        let execution_payload_provider = self.execution_payload_provider.clone();
 
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
@@ -389,6 +406,7 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 gossip_listener,
                 self.block_status_provider.clone(),
+                execution_payload_provider,
             )
             .expect("failed to run gossip service");
 
@@ -606,6 +624,12 @@ async fn handle_get_data(
             }
             GossipDataRequest::Transaction(transaction_hash) => {
                 warn!("Transaction request for hash {:?}", transaction_hash);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(false)
+            }
+            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+                warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)
