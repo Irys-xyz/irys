@@ -351,12 +351,16 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // Create a test block with transactions
-    let mut block = IrysBlockHeader::default();
+    let mut block = IrysBlockHeader::new_mock_header();
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
     block.data_ledgers.push(ledger);
+    let signer = IrysSigner::random_signer(&fixture1.config.consensus);
+    signer
+        .sign_block_header(&mut block)
+        .expect("to sign block header");
 
     // Set up the mock API client to return only one transaction
     fixture2.api_client_stub.txs.insert(tx1.id, tx1.clone());
@@ -396,11 +400,16 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     fixture2.add_peer(&fixture1).await;
 
     // Create a test block with transactions
-    let block = IrysBlockHeader {
+    let mut block = IrysBlockHeader {
         block_hash: BlockHash::random(),
         evm_block_hash: B256::random(),
         ..IrysBlockHeader::new_mock_header()
     };
+    let signer = IrysSigner::random_signer(&fixture1.config.consensus);
+    signer
+        .sign_block_header(&mut block)
+        .expect("to sign block header");
+
     let block_payload = ExecutionPayload::V1(ExecutionPayloadV1 {
         block_hash: block.evm_block_hash,
         parent_hash: Default::default(),
