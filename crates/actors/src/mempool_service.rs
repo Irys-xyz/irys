@@ -142,7 +142,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 /// Messages that the Mempool Service handler supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
-    /// Block Confirmed, remove confirmed txns from mempool
+    /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
     BlockConfirmed(Arc<IrysBlockHeader>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngestChunk(
@@ -693,6 +693,7 @@ impl Inner {
         Ok(())
     }
 
+    /// read publish txs from block. Overwrite copies in mempool with proof
     async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
