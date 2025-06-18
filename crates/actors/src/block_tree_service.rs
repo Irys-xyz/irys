@@ -234,9 +234,6 @@ impl BlockTreeServiceInner {
             }
         };
 
-        // Get all the transactions for the finalized block, error if not found
-        // TODO: Eventually abstract this for support of `n` ledgers
-        // FIXME this errors saying Failed to collect tx headers for Submit ledger: No tx header found for txid m1v5aJU1Sd1wt4ZLgmKX1HeUMYNB97BL9FGrXKXeTmx
         let submit_txs = self
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
             .await?;

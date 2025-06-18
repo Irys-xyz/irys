@@ -141,8 +141,6 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             .view(walk_all::<IngressProofs, _>)
             .unwrap()
             .unwrap();
-        tracing::error!(?ingress_proofs);
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         if ingress_proofs.len() == expected_proofs {
             break;
         }
