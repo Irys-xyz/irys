@@ -174,13 +174,14 @@ where
         }
 
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        if let Some(senders) = self.payload_senders.write().await.get_mut(evm_block_hash) {
-            senders.push(sender)
-        } else {
-            self.payload_senders
-                .write()
-                .await
-                .push(*evm_block_hash, vec![sender]);
+
+        {
+            let mut payload_senders = self.payload_senders.write().await;
+            if let Some(senders) = payload_senders.get_mut(evm_block_hash) {
+                senders.push(sender)
+            } else {
+                payload_senders.push(*evm_block_hash, vec![sender]);
+            }
         }
 
         self.request_payload_from_the_network(*evm_block_hash).await;
