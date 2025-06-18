@@ -1340,7 +1340,7 @@ impl Inner {
 
         // Validate the transaction signature
         // check the result and error handle
-        let _ = self.validate_signature(&tx).await;
+        self.validate_signature(&tx).await?;
 
         let mut mempool_state_write_guard = mempool_state.write().await;
         mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
