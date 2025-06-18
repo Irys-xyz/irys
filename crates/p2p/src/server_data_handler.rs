@@ -501,8 +501,8 @@ where
                     .get_locally_stored_payload(&evm_block_hash)
                     .await;
 
-                if let Some(payload) = payload {
-                    match self
+                match payload {
+                    Some(payload) => self
                         .gossip_client
                         .send_data_and_update_score(
                             (&request.miner_address, peer_info),
@@ -510,15 +510,12 @@ where
                             &self.peer_list,
                         )
                         .await
-                    {
-                        Ok(()) => Ok(true),
-                        Err(error) => {
+                        .map(|()| true)
+                        .map_err(|error| {
                             error!("Failed to send execution payload to peer: {}", error);
-                            Err(error)
-                        }
-                    }
-                } else {
-                    Ok(false)
+                            error
+                        }),
+                    None => Ok(false),
                 }
             }
         }
