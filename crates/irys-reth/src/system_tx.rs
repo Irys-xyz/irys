@@ -134,14 +134,6 @@ impl SystemTransaction {
             Self::V1 { packet, .. } => packet.topic(),
         }
     }
-
-    /// Get the encoded topic for this system transaction.
-    #[must_use]
-    pub fn encoded_topic(&self) -> [u8; 32] {
-        match self {
-            Self::V1 { packet, .. } => packet.encoded_topic(),
-        }
-    }
 }
 
 impl TransactionPacket {
@@ -156,45 +148,6 @@ impl TransactionPacket {
             Self::StorageFees(_) => (*STORAGE_FEES).into(),
             Self::Pledge(_) => (*PLEDGE).into(),
             Self::Unpledge(_) => (*UNPLEDGE).into(),
-        }
-    }
-
-    /// Get the encoded topic for this transaction packet.
-    #[must_use]
-    pub fn encoded_topic(&self) -> [u8; 32] {
-        match self {
-            Self::BlockReward(br) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(br.amount, 256),
-                    DynSolValue::Address(br.target),
-                ])
-                .abi_encode_packed()
-                .try_into()
-                .unwrap_or_default()
-            }
-            Self::Unstake(bi) | Self::Unpledge(bi) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(bi.amount, 256),
-                    DynSolValue::Address(bi.target),
-                    DynSolValue::FixedBytes(bi.irys_ref, 32),
-                ])
-                .abi_encode_packed()
-                .try_into()
-                .unwrap_or_default()
-            }
-            Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(bd.amount, 256),
-                    DynSolValue::Address(bd.target),
-                    DynSolValue::FixedBytes(bd.irys_ref, 32),
-                ])
-                .abi_encode_packed()
-                .try_into()
-                .unwrap_or_default()
-            }
         }
     }
 }
