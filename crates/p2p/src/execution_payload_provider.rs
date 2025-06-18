@@ -112,16 +112,13 @@ where
     }
 
     pub async fn add_payload_to_cache(&self, payload: ExecutionPayload) {
-        self.cache
-            .write()
-            .await
-            .payloads
-            .put(payload.block_hash(), payload.clone());
-        self.cache
-            .write()
-            .await
-            .payloads_currently_requested_from_the_network
-            .pop(&payload.block_hash());
+        {
+            let mut cache = self.cache.write().await;
+            cache.payloads.put(payload.block_hash(), payload.clone());
+            cache
+                .payloads_currently_requested_from_the_network
+                .pop(&payload.block_hash());
+        }
         if let Some(senders) = self
             .payload_senders
             .write()
