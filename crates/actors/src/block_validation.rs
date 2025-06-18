@@ -519,29 +519,31 @@ pub async fn system_transactions_are_valid(
     let mut expect_system_txs = true;
     let actual_system_txs = block_txs
         .into_iter()
-        .map(|tx| if expect_system_txs {
-            let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
-            let tx_signer = tx.into_signed().recover_signer()?;
-            let Ok(system_tx) = system_tx else {
-                // after reaching first non-system tx, we scan the rest of the
-                // txs to check if we don't have any stray system txs in there
-                expect_system_txs = false;
-                return Ok(None);
-            };
+        .map(|tx| {
+            if expect_system_txs {
+                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+                let tx_signer = tx.into_signed().recover_signer()?;
+                let Ok(system_tx) = system_tx else {
+                    // after reaching first non-system tx, we scan the rest of the
+                    // txs to check if we don't have any stray system txs in there
+                    expect_system_txs = false;
+                    return Ok(None);
+                };
 
-            ensure!(
-                block.miner_address == tx_signer,
-                "System tx signer is not the miner"
-            );
-            Ok(Some(system_tx))
-        } else {
-            // ensure that no other system txs are present in the block
-            let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
-            ensure!(
-                system_tx.is_err(),
-                "system tx injected in the middle of the block"
-            );
-            Ok(None)
+                ensure!(
+                    block.miner_address == tx_signer,
+                    "System tx signer is not the miner"
+                );
+                Ok(Some(system_tx))
+            } else {
+                // ensure that no other system txs are present in the block
+                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+                ensure!(
+                    system_tx.is_err(),
+                    "system tx injected in the middle of the block"
+                );
+                Ok(None)
+            }
         })
         .filter_map(std::result::Result::transpose);
 
