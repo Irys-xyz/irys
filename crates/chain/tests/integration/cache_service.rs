@@ -6,11 +6,14 @@ use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::get_cache_size;
-use irys_database::tables::CachedChunks;
+use irys_database::{
+    get_cache_size,
+    tables::{CachedChunks, IngressProofs},
+    walk_all,
+};
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, NodeConfig, TxChunkOffset, UnpackedChunk};
-use reth::providers::BlockReader as _;
+use reth_db::Database;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -20,6 +23,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().chunk_migration_depth = 2;
+    config.cache.cache_clean_lag = 50;
 
     let main_address = config.miner_address();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
@@ -47,6 +51,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     )
     .await?;
 
+    let app = node.start_public_api().await;
+
     let http_url = format!(
         "http://127.0.0.1:{}",
         node.node_ctx.config.node_config.http.bind_port
@@ -64,19 +70,22 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
 
+    // mine block 1 and confirm height is exactly what we need
+    node.mine_block().await?;
+    assert_eq!(node.get_height().await, 1_u64);
+
+    let block = node.get_block_by_height(node.get_height().await).await?;
+    let anchor = Some(block.block_hash);
+
     // create and sign a data tx
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
     let tx = account1
-        .create_transaction(data_bytes.clone(), None)
+        .create_transaction(data_bytes.clone(), anchor)
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
 
-    // mine block 1 and confirm height is exactly what we need
-    let _ = node.mine_block().await;
-    assert_eq!(node.get_height().await, 1_u64);
-
-    // post data/storage tx
+    // post data tx
     let resp = client
         .post(format!("{}/v1/tx", http_url))
         .send_json(&tx.header)
@@ -121,6 +130,25 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     })?;
 
     assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
+
+    // confirm that we have the right number of IngressProofs in mdbx table
+    let expected_proofs = 1;
+    let mut ingress_proofs = vec![];
+    for _ in 0..20 {
+        ingress_proofs = node
+            .node_ctx
+            .db
+            .view(walk_all::<IngressProofs, _>)
+            .unwrap()
+            .unwrap();
+        tracing::error!(?ingress_proofs);
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        if ingress_proofs.len() == expected_proofs {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(ingress_proofs.len(), expected_proofs);
 
     // wait for the chunks to migrate
     let id: String = tx.header.id.as_bytes().to_base58();
