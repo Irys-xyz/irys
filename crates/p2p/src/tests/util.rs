@@ -1,5 +1,5 @@
 use crate::execution_payload_provider::{ExecutionPayloadProvider, RethPayloadProvider};
-use crate::peer_list::{AddPeer, PeerListServiceWithClient};
+use crate::peer_list::{AddPeer, PeerListServiceWithClient, TopActivePeersRequest};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
@@ -25,8 +25,6 @@ use irys_types::{
     PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
-use reth::revm::primitives::B256;
-use reth::rpc::types::engine::ExecutionPayload;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -273,7 +271,6 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
     pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
-    pub mocked_execution_payloads: Arc<TokioRwLock<HashMap<B256, ExecutionPayload>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -339,7 +336,7 @@ impl GossipServiceTestFixture {
         let mocked_execution_payloads = Arc::new(TokioRwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadProvider::new(
             peer_list.clone(),
-            RethPayloadProvider::Mock(mocked_execution_payloads.clone()),
+            RethPayloadProvider::Mock(mocked_execution_payloads),
         );
 
         Self {
@@ -348,7 +345,7 @@ impl GossipServiceTestFixture {
             api_port,
             execution: RethPeerInfo::default(),
             db,
-            mining_address: Address::random(),
+            mining_address: config.node_config.miner_address(),
             mempool_stub,
             peer_list,
             // block_discovery_stub,
@@ -360,7 +357,6 @@ impl GossipServiceTestFixture {
             task_executor,
             block_status_provider: block_status_provider_mock,
             execution_payload_provider,
-            mocked_execution_payloads,
         }
     }
 
@@ -434,8 +430,8 @@ impl GossipServiceTestFixture {
         let peer = other.create_default_peer_entry();
 
         debug!(
-            "Adding peer {:?} to gossip service {:?}",
-            peer, self.gossip_port
+            "Adding peer {:?}: {:?} to gossip service {:?}",
+            other.mining_address, peer, self.gossip_port
         );
 
         self.peer_list
@@ -445,6 +441,16 @@ impl GossipServiceTestFixture {
             })
             .await
             .expect("Adding peer failed");
+    }
+
+    pub(crate) async fn get_active_peers(&self) -> Vec<(Address, PeerListItem)> {
+        self.peer_list
+            .send(TopActivePeersRequest {
+                truncate: None,
+                exclude_peers: None,
+            })
+            .await
+            .expect("Adding peer failed")
     }
 
     /// # Panics

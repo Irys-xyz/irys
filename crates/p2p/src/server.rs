@@ -21,7 +21,7 @@ use irys_types::{
 };
 use reth::rpc::types::engine::ExecutionPayload;
 use std::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub(crate) struct GossipServer<M, B, A, P>
@@ -113,7 +113,7 @@ where
                     }
                     Ok(peer)
                 } else {
-                    debug!("Miner address {} is not allowed", miner_address);
+                    warn!("Miner address {} is not allowed", miner_address);
                     Err(HttpResponse::Forbidden().finish())
                 }
             }
@@ -280,13 +280,15 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let Some(source_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest().finish();
+        let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address).await
+        {
+            Ok(peer_address) => peer_address,
+            Err(error_response) => return error_response,
         };
 
         match server
             .data_handler
-            .handle_get_data(source_addr, data_request.0)
+            .handle_get_data(&peer, data_request.0)
             .await
         {
             Ok(has_data) => HttpResponse::Ok().json(has_data),

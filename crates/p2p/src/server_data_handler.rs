@@ -16,7 +16,7 @@ use irys_actors::{
 use irys_api_client::ApiClient;
 use irys_types::{
     CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionResponse, UnpackedChunk, H256,
+    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
 use reth::rpc::types::engine::ExecutionPayload;
 use std::sync::Arc;
@@ -442,22 +442,9 @@ where
 
     pub(crate) async fn handle_get_data(
         &self,
-        source_address: SocketAddr,
+        peer_info: &PeerListItem,
         request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<bool> {
-        let peer_list_item = self
-            .peer_list
-            .peer_by_mining_address(request.miner_address)
-            .await?;
-        let Some(peer_info) = peer_list_item else {
-            return Ok(false);
-        };
-        if source_address.ip() != peer_info.address.gossip.ip() {
-            return Err(GossipError::InvalidPeer(
-                "Requesting peer doesn't match the address of the source peer".to_string(),
-            ));
-        }
-
         match request.data {
             GossipDataRequest::Block(block_hash) => {
                 let block_result = self.block_pool.get_block_data(&block_hash).await;
@@ -469,7 +456,7 @@ where
                         match self
                             .gossip_client
                             .send_data_and_update_score(
-                                (&request.miner_address, &peer_info),
+                                (&request.miner_address, peer_info),
                                 &GossipData::Block(block),
                                 &self.peer_list,
                             )
@@ -486,17 +473,17 @@ where
                 }
             }
             GossipDataRequest::Transaction(_tx_hash) => Ok(false),
-            GossipDataRequest::ExecutionPayload(block_hash) => {
+            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 let payload = self
                     .execution_payload_provider
-                    .get_locally_stored_payload(&block_hash)
+                    .get_locally_stored_payload(&evm_block_hash)
                     .await;
 
                 if let Some(payload) = payload {
                     match self
                         .gossip_client
                         .send_data_and_update_score(
-                            (&request.miner_address, &peer_info),
+                            (&request.miner_address, peer_info),
                             &GossipData::ExecutionPayload(payload),
                             &self.peer_list,
                         )
