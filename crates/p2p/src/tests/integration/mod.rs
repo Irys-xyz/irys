@@ -422,8 +422,6 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .add_payload_to_cache(block_payload.clone())
         .await;
 
-    debug!("{:?}", fixture1.get_active_peers().await);
-
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
