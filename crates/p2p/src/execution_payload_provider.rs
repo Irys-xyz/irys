@@ -65,12 +65,6 @@ impl RethPayloadProvider {
         let payload =
             <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
 
-        // let a = ctx
-        //     .inner
-        //     .add_ons_handle
-        //     .beacon_engine_handle
-        //     .new_payload(payload)
-        //     .await.ok()?;
         Some(payload.payload)
     }
 
@@ -123,6 +117,11 @@ where
             .await
             .payloads
             .put(payload.block_hash(), payload.clone());
+        self.cache
+            .write()
+            .await
+            .payloads_currently_requested_from_the_network
+            .pop(&payload.block_hash());
         if let Some(senders) = self
             .payload_senders
             .write()

@@ -269,15 +269,15 @@ where
     /// locally. This function spawns a new task to fire the request without waiting for the
     /// response.
     pub(crate) fn request_execution_payload(&self, evm_block_hash: B256) {
-        let execution_payload = self.execution_payload_provider.clone();
+        let execution_payload_provider = self.execution_payload_provider.clone();
         tokio::spawn(async move {
-            let is_payload_stored_locally = execution_payload
+            let is_payload_stored_locally = execution_payload_provider
                 .get_locally_stored_payload(&evm_block_hash)
                 .await
                 .is_some();
             if !is_payload_stored_locally {
                 debug!("Execution payload for block {:?} is not stored locally, requesting from the network", evm_block_hash);
-                execution_payload
+                execution_payload_provider
                     .request_payload_from_the_network(evm_block_hash)
                     .await;
             } else {
