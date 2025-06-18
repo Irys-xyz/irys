@@ -12,7 +12,7 @@ use irys_database::{
     walk_all,
 };
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth_db::Database;
 use std::time::Duration;
 use tokio::time::sleep;
