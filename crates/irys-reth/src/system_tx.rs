@@ -32,10 +32,6 @@ pub enum SystemTransaction {
     /// Version 1 system transaction format
     ///
     V1 {
-        /// The block height for which this system tx is valid.
-        valid_for_block_height: u64,
-        /// The parent block hash to ensure the tx is not replayed on forks.
-        parent_blockhash: FixedBytes<32>,
         /// The actual system transaction packet.
         packet: TransactionPacket,
     },
@@ -78,16 +74,8 @@ pub mod system_tx_topics {
 impl SystemTransaction {
     /// Create a new V1 system transaction
     #[must_use]
-    pub fn new_v1(
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-        packet: TransactionPacket,
-    ) -> Self {
-        Self::V1 {
-            valid_for_block_height,
-            parent_blockhash,
-            packet,
-        }
+    pub fn new_v1(packet: TransactionPacket) -> Self {
+        Self::V1 { packet }
     }
 
     /// Get the version of this system transaction
@@ -95,27 +83,6 @@ impl SystemTransaction {
     pub fn version(&self) -> u8 {
         match self {
             Self::V1 { .. } => SYSTEM_TX_VERSION_V1,
-        }
-    }
-
-    /// Get the block height for which this system tx is valid
-    #[must_use]
-    pub fn valid_for_block_height(&self) -> u64 {
-        match self {
-            Self::V1 {
-                valid_for_block_height,
-                ..
-            } => *valid_for_block_height,
-        }
-    }
-
-    /// Get the parent block hash
-    #[must_use]
-    pub fn parent_blockhash(&self) -> FixedBytes<32> {
-        match self {
-            Self::V1 {
-                parent_blockhash, ..
-            } => *parent_blockhash,
         }
     }
 
@@ -168,24 +135,14 @@ impl Encodable for SystemTransaction {
     fn length(&self) -> usize {
         1 + // version byte
         match self {
-            Self::V1 { valid_for_block_height, parent_blockhash, packet } => {
-                valid_for_block_height.length() +
-                parent_blockhash.length() +
-                packet.length()
-            }
+            Self::V1 { packet } => packet.length()
         }
     }
 
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
-            Self::V1 {
-                valid_for_block_height,
-                parent_blockhash,
-                packet,
-            } => {
+            Self::V1 { packet } => {
                 out.put_u8(SYSTEM_TX_VERSION_V1);
-                valid_for_block_height.encode(out);
-                parent_blockhash.encode(out);
                 packet.encode(out);
             }
         }
@@ -249,14 +206,8 @@ impl Decodable for SystemTransaction {
 
         match version {
             SYSTEM_TX_VERSION_V1 => {
-                let valid_for_block_height = u64::decode(buf)?;
-                let parent_blockhash = FixedBytes::<32>::decode(buf)?;
                 let packet = TransactionPacket::decode(buf)?;
-                Ok(Self::V1 {
-                    valid_for_block_height,
-                    parent_blockhash,
-                    packet,
-                })
+                Ok(Self::V1 { packet })
             }
             _ => Err(alloy_rlp::Error::Custom(
                 "Unknown system transaction version",
