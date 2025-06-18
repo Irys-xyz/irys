@@ -403,8 +403,8 @@ mod tests {
     use super::*;
 
     use crate::system_tx::{
-        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID,
-        UNSTAKE_ID,
+        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, SystemTransaction,
+        TransactionPacket, BLOCK_REWARD_ID, UNSTAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
