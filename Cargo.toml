@@ -424,7 +424,6 @@ bind_instead_of_map = "deny"
 bool_assert_comparison = "deny"
 cloned_instead_of_copied = "deny"
 explicit_into_iter_loop = "deny"
-ignored_unit_patterns = "deny"
 implicit_clone = "deny"
 inefficient_to_string = "deny"
 manual_instant_elapsed = "deny"
@@ -465,6 +464,7 @@ use_self = "deny"
 # deref_by_slicing = "deny" # reduces clarity
 # assertions_on_result_states = "deny" # keeping the asserts helps to improve test clarity
 # needless_collect = "deny" # reduces clarity
+# ignored_unit_patterns = "deny" # unnecessary & no findings
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]
