@@ -225,7 +225,7 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::CommitmentSnapshot;
+        use irys_database::CommitmentSnapshot;
 
         self.block_tree_read_guard
             .write()

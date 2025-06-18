@@ -5,7 +5,7 @@ use crate::{
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
-    CommitmentSnapshot, CommitmentSnapshotStatus, GetCommitmentStateGuardMessage,
+    GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -13,7 +13,7 @@ use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
-    SystemLedger,
+    CommitmentSnapshot, CommitmentSnapshotStatus, SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{

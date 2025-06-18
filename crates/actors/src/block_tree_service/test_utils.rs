@@ -3,6 +3,7 @@ use std::{
     time::SystemTime,
 };
 
+use irys_database::CommitmentSnapshot;
 use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysTokenPrice, H256};
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
@@ -10,7 +11,6 @@ use rust_decimal::Decimal;
 use crate::{
     ema_service::{EmaServiceMessage, NewBlockEmaResponse, PriceStatus},
     services::{ServiceReceivers, ServiceSenders},
-    CommitmentSnapshot,
 };
 
 use super::{BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent};

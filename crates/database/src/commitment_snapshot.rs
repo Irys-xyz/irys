@@ -1,10 +1,5 @@
-use crate::{block_index_service::BlockIndexReadGuard, CommitmentStateReadGuard};
-use irys_database::database;
 use irys_primitives::CommitmentType;
-use irys_types::{
-    Address, CommitmentTransaction, ConsensusConfig, DatabaseProvider, H256List, H256,
-};
-use reth_db::Database as _;
+use irys_types::{Address, CommitmentTransaction, H256List, H256};
 use std::collections::{BTreeMap, HashSet};
 use tracing::debug;
 
@@ -37,69 +32,6 @@ impl CommitmentSnapshot {
             }
         }
 
-        snapshot
-    }
-
-    /// Reconstructs the commitment snapshot for the current epoch by loading all commitment
-    /// transactions from blocks since the last epoch boundary.
-    ///
-    /// Iterates through all blocks from the first block after the most recent epoch block
-    /// up to the latest block, collecting and applying all commitment transactions to build
-    /// the current epoch's commitment state. This is typically used during startup or when
-    /// the commitment snapshot needs to be rebuilt from persistent storage.
-    ///
-    /// # Returns
-    /// Initialized commitment snapshot containing all commitments from the current epoch
-    pub fn current_epoch_commitments(
-        block_index_guard: BlockIndexReadGuard,
-        commitment_state_guard: CommitmentStateReadGuard,
-        db: DatabaseProvider,
-        consensus_config: &ConsensusConfig,
-    ) -> Self {
-        let num_blocks_in_epoch = consensus_config.epoch.num_blocks_in_epoch;
-        let block_index = block_index_guard.read();
-        let latest_item = block_index.get_latest_item();
-
-        let mut snapshot = Self::default();
-
-        if let Some(latest_item) = latest_item {
-            let tx = db.tx().unwrap();
-
-            let latest = database::block_header_by_hash(&tx, &latest_item.block_hash, false)
-                .unwrap()
-                .expect("block_index block to be in database");
-            let last_epoch_block_height = latest.height - (latest.height % num_blocks_in_epoch);
-
-            let start = last_epoch_block_height + 1;
-
-            // Loop though all the blocks starting with the first block following the last epoch block
-            for height in start..=latest.height {
-                // Query each block to see if they have commitment txids
-                let block_item = block_index.get_item(height).unwrap();
-                let block = database::block_header_by_hash(&tx, &block_item.block_hash, false)
-                    .unwrap()
-                    .expect("block_index block to be in database");
-
-                let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
-                if !commitment_tx_ids.is_empty() {
-                    // If so, retrieve the full commitment transactions
-                    for txid in commitment_tx_ids {
-                        let commitment_tx = database::commitment_tx_by_txid(&tx, &txid)
-                            .unwrap()
-                            .expect("commitment transactions to be in database");
-
-                        let is_staked_in_current_epoch =
-                            commitment_state_guard.is_staked(commitment_tx.signer);
-
-                        // Apply them to the commitment snapshot
-                        let _status =
-                            snapshot.add_commitment(&commitment_tx, is_staked_in_current_epoch);
-                    }
-                }
-            }
-        }
-
-        // Return the initialized commitment snapshot
         snapshot
     }
 

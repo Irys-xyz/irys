@@ -193,8 +193,8 @@ mod tests {
     use super::*;
     use crate::block_tree_service::test_utils::genesis_tree;
     use crate::block_tree_service::{BlockState, ChainState};
-    use crate::CommitmentSnapshot;
     use futures::future::{pending, ready};
+    use irys_database::CommitmentSnapshot;
     use irys_types::{IrysBlockHeader, H256};
     use itertools::Itertools as _;
     use std::collections::HashMap;

@@ -6,11 +6,11 @@ use assert_matches::assert_matches;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::{
-    packing::wait_for_packing, CommitmentSnapshotStatus, CommitmentStateReadGuard,
-    GetCommitmentStateGuardMessage, GetPartitionAssignmentsGuardMessage,
-    PartitionAssignmentsReadGuard,
+    packing::wait_for_packing, CommitmentStateReadGuard, GetCommitmentStateGuardMessage,
+    GetPartitionAssignmentsGuardMessage, PartitionAssignmentsReadGuard,
 };
 use irys_api_server::routes;
+use irys_database::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};

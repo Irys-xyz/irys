@@ -1,6 +1,6 @@
 use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
 use crate::services::ServiceSenders;
-use crate::{CommitmentSnapshotStatus, CommitmentStateReadGuard};
+use crate::CommitmentStateReadGuard;
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -12,7 +12,7 @@ use irys_database::{
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
     {insert_tx_header, tx_header_by_txid},
 };
-use irys_database::{insert_commitment_tx, SystemLedger};
+use irys_database::{insert_commitment_tx, CommitmentSnapshotStatus, SystemLedger};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};

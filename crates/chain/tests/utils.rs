@@ -13,6 +13,7 @@ use base58::ToBase58 as _;
 use futures::future::select;
 use irys_actors::block_tree_service::ReorgEvent;
 use irys_actors::mempool_service::MempoolTxs;
+use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
@@ -21,9 +22,9 @@ use irys_actors::{
     packing::wait_for_packing,
     SetTestBlocksRemainingMessage,
 };
-use irys_actors::{CommitmentSnapshotStatus, GetMinerPartitionAssignmentsMessage};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::CommitmentSnapshotStatus;
 use irys_database::{
     db::IrysDatabaseExt as _,
     tables::{IngressProofs, IrysBlockHeaders},

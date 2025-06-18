@@ -843,7 +843,7 @@ mod tests {
         PriceInfo, TestCtx,
     };
     use crate::block_tree_service::{get_canonical_chain, ChainState};
-    use crate::CommitmentSnapshot;
+    use irys_database::CommitmentSnapshot;
     use irys_types::{
         block_height_to_use_for_price, ConsensusConfig, ConsensusOptions, EmaConfig, NodeConfig,
         H256,
