@@ -16,14 +16,14 @@ use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth_db::Database;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().chunk_migration_depth = 2;
-    config.cache.cache_clean_lag = 50;
+    config.cache.cache_clean_lag = 5;
 
     let main_address = config.miner_address();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
