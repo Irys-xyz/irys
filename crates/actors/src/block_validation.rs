@@ -300,8 +300,7 @@ pub fn solution_hash_is_valid(
     }
 }
 
-/// Returns Ok if the provided `PoA` is valid, Err otherwise
-/// Check recall range is valid
+/// Returns Ok if the vdf recall range in the block is valid
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,

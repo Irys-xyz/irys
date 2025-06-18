@@ -948,6 +948,7 @@ impl IrysNode {
         let _handle = ValidationService::spawn_service(
             task_exec,
             block_index_guard.clone(),
+            block_tree_guard.clone(),
             partition_assignments_guard.clone(),
             vdf_state_readonly.clone(),
             &config,
