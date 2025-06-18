@@ -1,4 +1,4 @@
-use crate::utils::{mine_block, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
@@ -16,7 +16,7 @@ use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth_db::Database;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{debug, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
