@@ -433,8 +433,8 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .send(GossipData::Block(block.clone()))
         .expect("Failed to send block to service 2");
 
-    // Wait for service 2 to process the block and fetch transactions
-    tokio::time::sleep(Duration::from_millis(3000)).await;
+    // Wait for service 2 to process the block and receive the execution payload
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
