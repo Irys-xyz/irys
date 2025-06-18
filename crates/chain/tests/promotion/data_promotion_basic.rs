@@ -15,7 +15,6 @@ use tracing::debug;
 async fn heavy_data_promotion_test() {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
-    config.consensus.get_mut().chunk_migration_depth = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
     config.consensus.get_mut().num_partitions_per_slot = 1;
