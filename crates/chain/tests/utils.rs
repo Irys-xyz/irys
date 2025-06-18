@@ -532,6 +532,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// wait for data tx to be in mempool and it's IngressProofs to be in database
     pub async fn wait_for_ingress_proofs(
         &self,
         mut unconfirmed_promotions: Vec<H256>,
@@ -560,9 +561,13 @@ impl IrysNodeTest<IrysNodeCtx> {
                 })
                 .unwrap();
 
-            // Retrieve the transaction header from database
-            let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap();
-            if let Some(tx_header) = tx_header {
+            // Retrieve the transaction header from mempool or database
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
+            if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
                 //read its ingressproof(s)
                 if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
                     assert_eq!(proof.data_root, tx_header.data_root);
