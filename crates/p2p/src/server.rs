@@ -175,15 +175,14 @@ where
         let execution_payload_request = irys_execution_payload_json.0;
         let source_miner_address = execution_payload_request.miner_address;
 
-        match Self::check_peer(
+        if let Err(error_response) = Self::check_peer(
             &server.peer_list,
             &req,
             execution_payload_request.miner_address,
         )
         .await
         {
-            Ok(peer_address) => peer_address,
-            Err(error_response) => return error_response,
+            return error_response;
         };
 
         if let Err(error) = server
