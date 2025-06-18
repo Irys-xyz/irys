@@ -93,7 +93,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let _ = node.mine_block().await;
+    node.mine_block().await?;
     assert_eq!(node.get_height().await, 2_u64);
 
     // upload chunk(s)
@@ -156,7 +156,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let delay = Duration::from_secs(1);
 
     // now chunks have been posted. mine a block to get the publish ledger to be updated in the latest block
-    let _ = node.mine_block().await;
+    node.mine_block().await?;
 
     // wait for the first set of chunks to appear in the publish ledger
     let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
@@ -182,7 +182,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             }
             StatusCode::NOT_FOUND => {
                 sleep(delay).await;
-                let _ = node.mine_block().await;
+                node.mine_block().await?;
             }
             _ => {
                 panic!("unexpected status type from api end point")
