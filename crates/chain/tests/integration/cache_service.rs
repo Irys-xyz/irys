@@ -209,9 +209,10 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     // make sure we can read the chunks after migration
     let chunk_res = client
         .get(format!(
-            "{}/v1/chunk/ledger/0/{}",
+            "{}/v1/chunk/ledger/{}/{}",
             http_url,
-            start_offset.unwrap().data_start_offset
+            DataLedger::Publish as usize,
+            0_u64,
         ))
         .send()
         .await
