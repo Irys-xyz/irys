@@ -46,7 +46,7 @@ pub enum TransactionPacket {
     /// Unstake funds to an account (balance increment). Used for unstaking or protocol rewards.
     Unstake(BalanceIncrement),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
-    BlockReward(BalanceIncrement),
+    BlockReward(BlockRewardIncrement),
     /// Stake funds from an account (balance decrement). Used for staking operations.
     Stake(BalanceDecrement),
     /// Collect storage fees from an account (balance decrement). Must match storage usage.
@@ -163,11 +163,22 @@ impl TransactionPacket {
     #[must_use]
     pub fn encoded_topic(&self) -> [u8; 32] {
         match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => {
+            Self::BlockReward(br) => {
+                use alloy_dyn_abi::DynSolValue;
+                DynSolValue::Tuple(vec![
+                    DynSolValue::Uint(br.amount, 256),
+                    DynSolValue::Address(br.target),
+                ])
+                .abi_encode_packed()
+                .try_into()
+                .unwrap_or_default()
+            }
+            Self::Unstake(bi) | Self::Unpledge(bi) => {
                 use alloy_dyn_abi::DynSolValue;
                 DynSolValue::Tuple(vec![
                     DynSolValue::Uint(bi.amount, 256),
                     DynSolValue::Address(bi.target),
+                    DynSolValue::FixedBytes(bi.irys_ref, 32),
                 ])
                 .abi_encode_packed()
                 .try_into()
@@ -178,6 +189,7 @@ impl TransactionPacket {
                 DynSolValue::Tuple(vec![
                     DynSolValue::Uint(bd.amount, 256),
                     DynSolValue::Address(bd.target),
+                    DynSolValue::FixedBytes(bd.irys_ref, 32),
                 ])
                 .abi_encode_packed()
                 .try_into()
@@ -234,7 +246,8 @@ impl Encodable for SystemTransaction {
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => bi.length(),
+            Self::Unstake(bi) | Self::Unpledge(bi) => bi.length(),
+            Self::BlockReward(br) => br.length(),
             Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => bd.length(),
         }
     }
@@ -317,7 +330,7 @@ impl Decodable for TransactionPacket {
                 Ok(Self::Unstake(inner))
             }
             BLOCK_REWARD_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
+                let inner = BlockRewardIncrement::decode(buf)?;
                 Ok(Self::BlockReward(inner))
             }
             STAKE_ID => {
@@ -383,9 +396,11 @@ pub struct BalanceDecrement {
     pub amount: U256,
     /// Target account address.
     pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this system tx.
+    pub irys_ref: FixedBytes<32>,
 }
 
-/// Balance increment: used for block rewards and unstake system txs.
+/// Balance increment: used for unstake system txs.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -401,6 +416,30 @@ pub struct BalanceDecrement {
     arbitrary::Arbitrary,
 )]
 pub struct BalanceIncrement {
+    /// Amount to increment to the target account.
+    pub amount: U256,
+    /// Target account address.
+    pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this system tx.
+    pub irys_ref: FixedBytes<32>,
+}
+
+/// Block reward increment: used for block reward system txs (no irys_ref needed).
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    RlpEncodable,
+    RlpDecodable,
+    arbitrary::Arbitrary,
+)]
+pub struct BlockRewardIncrement {
     /// Amount to increment to the target account.
     pub amount: U256,
     /// Target account address.

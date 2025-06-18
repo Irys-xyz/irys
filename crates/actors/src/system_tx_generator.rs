@@ -1,6 +1,6 @@
 use eyre::Result;
 use irys_reth::system_tx::{
-    BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, SystemTransaction, TransactionPacket,
 };
 use irys_types::{
     Address, CommitmentTransaction, IrysBlockHeader, IrysTransactionCommon as _,
@@ -47,7 +47,7 @@ impl<'a> SystemTxGenerator<'a> {
         std::iter::once(Ok(SystemTransaction::new_v1(
             *self.block_height,
             H256::from_slice(&*self.parent_block.evm_block_hash).into(),
-            TransactionPacket::BlockReward(BalanceIncrement {
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: (*self.reward_amount).into(),
                 target: *self.reward_address,
             }),
@@ -67,6 +67,7 @@ impl<'a> SystemTxGenerator<'a> {
                 TransactionPacket::StorageFees(BalanceDecrement {
                     amount: Uint::from(tx.total_fee()),
                     target: tx.signer,
+                    irys_ref: tx.id.into(),
                 }),
             ))
         })
@@ -92,6 +93,7 @@ impl<'a> SystemTxGenerator<'a> {
                         TransactionPacket::Stake(BalanceDecrement {
                             amount,
                             target: tx.signer,
+                            irys_ref: tx.id.into(),
                         }),
                     ))
                 }
@@ -105,6 +107,7 @@ impl<'a> SystemTxGenerator<'a> {
                         TransactionPacket::Pledge(BalanceDecrement {
                             amount,
                             target: tx.signer,
+                            irys_ref: tx.id.into(),
                         }),
                     ))
                 }
@@ -118,6 +121,7 @@ impl<'a> SystemTxGenerator<'a> {
                         TransactionPacket::Unpledge(BalanceIncrement {
                             amount,
                             target: tx.signer,
+                            irys_ref: tx.id.into(),
                         }),
                     ))
                 }
@@ -131,6 +135,7 @@ impl<'a> SystemTxGenerator<'a> {
                         TransactionPacket::Unstake(BalanceIncrement {
                             amount,
                             target: tx.signer,
+                            irys_ref: tx.id.into(),
                         }),
                     ))
                 }

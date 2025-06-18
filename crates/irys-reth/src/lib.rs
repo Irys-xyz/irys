@@ -403,7 +403,7 @@ mod tests {
     use super::*;
 
     use crate::system_tx::{
-        BalanceDecrement, BalanceIncrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID,
+        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, SystemTransaction, TransactionPacket, BLOCK_REWARD_ID,
         UNSTAKE_ID,
     };
     use crate::test_utils::*;
@@ -558,7 +558,7 @@ mod tests {
             &SystemTransaction::new_v1(
                 1,
                 ctx.genesis_blockhash,
-                TransactionPacket::BlockReward(BalanceIncrement {
+                TransactionPacket::BlockReward(BlockRewardIncrement {
                     amount,
                     target: ctx.block_producer_a.address(),
                 }),
@@ -780,6 +780,7 @@ mod tests {
             TransactionPacket::Stake(BalanceDecrement {
                 amount: U256::ONE,
                 target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         );
         let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
@@ -837,6 +838,7 @@ mod tests {
             TransactionPacket::Stake(BalanceDecrement {
                 amount: decrement_amount,
                 target: ctx.normal_signer.address(),
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         );
         let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
@@ -1591,7 +1593,7 @@ mod tests {
         let block_reward_tx = SystemTransaction::new_v1(
             1,
             ctx.genesis_blockhash,
-            TransactionPacket::BlockReward(BalanceIncrement {
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: initial_funding,
                 target: target_address,
             }),
@@ -1609,6 +1611,7 @@ mod tests {
             TransactionPacket::Pledge(BalanceDecrement {
                 amount: pledge_amount,
                 target: target_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         );
         let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
@@ -1646,7 +1649,7 @@ mod tests {
         let block_reward_tx = SystemTransaction::new_v1(
             1,
             ctx.genesis_blockhash,
-            TransactionPacket::BlockReward(BalanceIncrement {
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: initial_balance_amount,
                 target: target_address,
             }),
@@ -1664,6 +1667,7 @@ mod tests {
             TransactionPacket::Unpledge(BalanceIncrement {
                 amount: unpledge_amount,
                 target: target_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         );
         let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
@@ -1701,7 +1705,7 @@ mod tests {
         let block_reward_tx = SystemTransaction::new_v1(
             1,
             ctx.genesis_blockhash,
-            TransactionPacket::BlockReward(BalanceIncrement {
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: initial_funding,
                 target: target_address,
             }),
@@ -1809,6 +1813,7 @@ mod tests {
             TransactionPacket::Unpledge(BalanceIncrement {
                 amount: unpledge_amount,
                 target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         );
         let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
@@ -1858,6 +1863,7 @@ mod tests {
             TransactionPacket::Pledge(BalanceDecrement {
                 amount: U256::ONE,
                 target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         );
         let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
@@ -2370,6 +2376,7 @@ pub mod test_utils {
             TransactionPacket::Unstake(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         )
     }
@@ -2383,7 +2390,7 @@ pub mod test_utils {
         SystemTransaction::new_v1(
             valid_for_block_height,
             parent_blockhash,
-            TransactionPacket::BlockReward(system_tx::BalanceIncrement {
+            TransactionPacket::BlockReward(system_tx::BlockRewardIncrement {
                 amount: U256::ONE,
                 target: address,
             }),
@@ -2402,6 +2409,7 @@ pub mod test_utils {
             TransactionPacket::Stake(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         )
     }
@@ -2418,6 +2426,7 @@ pub mod test_utils {
             TransactionPacket::StorageFees(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         )
     }
@@ -2434,6 +2443,7 @@ pub mod test_utils {
             TransactionPacket::Pledge(system_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         )
     }
@@ -2450,6 +2460,7 @@ pub mod test_utils {
             TransactionPacket::Unpledge(system_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         )
     }

@@ -317,7 +317,6 @@ where
         match system_tx {
             system_tx::SystemTransaction::V1 { packet, .. } => match packet {
                 system_tx::TransactionPacket::Unstake(balance_increment)
-                | system_tx::TransactionPacket::BlockReward(balance_increment)
                 | system_tx::TransactionPacket::Unpledge(balance_increment) => {
                     let log = Self::create_system_log(
                         balance_increment.target,
@@ -330,6 +329,28 @@ where
                     let target = balance_increment.target;
                     let (plain_account, execution_result, account_existed) =
                         self.handle_balance_increment(log, balance_increment);
+                    Ok((
+                        Ok((plain_account, execution_result, account_existed)),
+                        target,
+                    ))
+                }
+                system_tx::TransactionPacket::BlockReward(block_reward_increment) => {
+                    let log = Self::create_system_log(
+                        block_reward_increment.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(block_reward_increment.amount, 256),
+                            DynSolValue::Address(block_reward_increment.target),
+                        ],
+                    );
+                    let target = block_reward_increment.target;
+                    let balance_increment = system_tx::BalanceIncrement {
+                        amount: block_reward_increment.amount,
+                        target: block_reward_increment.target,
+                        irys_ref: alloy_primitives::FixedBytes::ZERO,
+                    };
+                    let (plain_account, execution_result, account_existed) =
+                        self.handle_balance_increment(log, &balance_increment);
                     Ok((
                         Ok((plain_account, execution_result, account_existed)),
                         target,
