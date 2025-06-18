@@ -121,7 +121,7 @@ impl ActiveValidations {
     }
 
     /// Process completed validations and remove them from the active set
-    /// returns `true` if any of the block validatoin tasks succeeded
+    /// returns `true` if any of the block validation tasks succeeded
     #[instrument(skip_all, fields(active_count = self.len()))]
     pub(crate) async fn process_completed(&mut self) -> bool {
         let mut completed_blocks = Vec::new();

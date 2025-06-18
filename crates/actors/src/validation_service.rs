@@ -241,7 +241,7 @@ impl ValidationServiceInner {
                     return None;
                 }
 
-                // schedule validatoin task
+                // schedule validation task
                 let block_tree_guard = self.block_tree_guard.clone();
                 let task =
                     BlockValidationTask::new(block, block_hash, self.clone(), block_tree_guard);
