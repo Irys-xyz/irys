@@ -22,7 +22,7 @@ use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
-    tables::IngressProofs, tx_header_by_txid, SystemLedger,
+    tables::IngressProofs, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_system_tx;

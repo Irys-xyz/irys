@@ -2,9 +2,7 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::routes::tx::TxOffset;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{
     get_cache_size,
@@ -15,8 +13,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth_db::Database;
 use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
@@ -148,45 +145,12 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     }
     assert_eq!(ingress_proofs.len(), expected_proofs);
 
-    // wait for the chunks to migrate
-    let id: String = tx.header.id.as_bytes().to_base58();
-    let mut start_offset = None;
-    let delay = Duration::from_secs(1);
-
     // now chunks have been posted. mine a block to get the publish ledger to be updated in the latest block
     node.mine_block().await?;
 
     // wait for the first set of chunks to appear in the publish ledger
     let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
     assert!(result.is_ok());
-
-    for attempt in 1..20 {
-        let mut response = client
-            .get(format!(
-                "{}/v1/tx/{}/local/data_start_offset",
-                http_url, &id
-            ))
-            .send()
-            .await
-            .unwrap();
-
-        match response.status() {
-            StatusCode::OK => {
-                let res: TxOffset = response.json().await.unwrap();
-                debug!("start offset: {:?}", &res);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
-                start_offset = Some(res);
-                break;
-            }
-            StatusCode::NOT_FOUND => {
-                sleep(delay).await;
-                node.mine_block().await?;
-            }
-            _ => {
-                panic!("unexpected status type from api end point")
-            }
-        }
-    }
 
     // confirm that we no longer have any CachedChunks in mdbx table
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
