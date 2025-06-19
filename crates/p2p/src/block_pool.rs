@@ -6,7 +6,8 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
-    BlockHash, DatabaseProvider, GossipData, GossipExecutionPayloadData, IrysBlockHeader,
+    BlockHash, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
+    IrysBlockHeader,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -52,7 +53,7 @@ where
     block_status_provider: BlockStatusProvider,
     execution_payload_provider: ExecutionPayloadProvider<P>,
 
-    gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipData>,
+    gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
 }
 
 #[derive(Clone, Debug)]
@@ -171,7 +172,7 @@ where
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
-        gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipData>,
+        gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
     ) -> Self {
         Self {
             db,
@@ -292,8 +293,9 @@ where
                         return;
                     }
                 };
-                if let Err(err) = gossip_broadcast_sender.send(GossipData::ExecutionPayload(
-                    GossipExecutionPayloadData::new(evm_block_hash, evm_block),
+                if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
+                    GossipCacheKey::ExecutionPayload(evm_block_hash),
+                    GossipData::ExecutionPayload(evm_block),
                 )) {
                     error!(
                         "Failed to broadcast execution payload for block {:?}: {:?}",

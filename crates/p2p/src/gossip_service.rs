@@ -8,7 +8,6 @@
 )]
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
-use crate::cache::GossipCacheKey;
 use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::PeerList;
 use crate::server_data_handler::GossipServerDataHandler;
@@ -24,7 +23,7 @@ use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem};
+use irys_types::{Address, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
@@ -107,8 +106,8 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    broadcast_data_receiver: Option<UnboundedReceiver<GossipData>>,
-    broadcast_data_sender: UnboundedSender<GossipData>,
+    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
+    broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
@@ -129,8 +128,8 @@ impl P2PService {
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
         mining_address: Address,
-        broadcast_data_receiver: UnboundedReceiver<GossipData>,
-        broadcast_data_sender: UnboundedSender<GossipData>,
+        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
+        broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -222,7 +221,11 @@ impl P2PService {
         Ok(gossip_service_handle)
     }
 
-    async fn broadcast_data<P>(&self, data: &GossipData, peer_list: &P) -> GossipResult<()>
+    async fn broadcast_data<P>(
+        &self,
+        broadcast_message: &GossipBroadcastMessage,
+        peer_list: &P,
+    ) -> GossipResult<()>
     where
         P: PeerList,
     {
@@ -231,7 +234,10 @@ impl P2PService {
             return Ok(());
         }
 
-        debug!("Broadcasting data to peers: {}", data.data_type_and_id());
+        debug!(
+            "Broadcasting data to peers: {}",
+            broadcast_message.data_type_and_id()
+        );
 
         // Get all active peers except the source
         let mut peers: Vec<(Address, PeerListItem)> = peer_list
@@ -248,7 +254,7 @@ impl P2PService {
 
         while !peers.is_empty() {
             // Remove peers that seen the data since the last iteration
-            let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
+            let peers_that_seen_data = self.cache.peers_that_have_seen(&broadcast_message.key)?;
             peers.retain(|(peer_miner_address, _peer)| {
                 !peers_that_seen_data.contains(peer_miner_address)
             });
@@ -275,7 +281,7 @@ impl P2PService {
                         .client
                         .send_data_and_update_score(
                             (peer_miner_address, peer_entry),
-                            data,
+                            &broadcast_message.data,
                             peer_list,
                         )
                         .await
@@ -289,7 +295,7 @@ impl P2PService {
                     // Record as seen anyway, so we don't rebroadcast to them
                     if let Err(error) = self
                         .cache
-                        .record_seen(*peer_miner_address, GossipCacheKey::from(data))
+                        .record_seen(*peer_miner_address, broadcast_message.key)
                     {
                         error!(
                             "Failed to record data in cache for peer {}: {}",
@@ -344,7 +350,7 @@ fn spawn_cache_pruning_task(
 }
 
 fn spawn_broadcast_task<P>(
-    mut mempool_data_receiver: UnboundedReceiver<GossipData>,
+    mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     service: P2PService,
     task_executor: &TaskExecutor,
     peer_list: P,

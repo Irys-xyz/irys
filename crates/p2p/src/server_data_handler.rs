@@ -2,7 +2,7 @@ use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, ScoreDecreaseReason};
 use crate::{
     block_pool::BlockPool,
-    cache::{GossipCache, GossipCacheKey},
+    cache::GossipCache,
     sync::SyncState,
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
@@ -16,8 +16,9 @@ use irys_actors::{
 };
 use irys_api_client::ApiClient;
 use irys_types::{
-    CommitmentTransaction, GossipData, GossipExecutionPayloadData, GossipRequest, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    CommitmentTransaction, GossipCacheKey, GossipData, GossipExecutionPayloadData, GossipRequest,
+    IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk,
+    H256,
 };
 use std::sync::Arc;
 use tracing::log::warn;
@@ -524,10 +525,7 @@ where
                         .gossip_client
                         .send_data_and_update_score(
                             (&request.miner_address, peer_info),
-                            &GossipData::ExecutionPayload(GossipExecutionPayloadData::new(
-                                evm_block_hash,
-                                evm_block,
-                            )),
+                            &GossipData::ExecutionPayload(evm_block),
                             &self.peer_list,
                         )
                         .await

@@ -139,7 +139,7 @@ where
     ) -> Option<Block> {
         if let Some(payload) = self.cache.write().await.payloads.get(evm_block_hash) {
             match payload.clone().try_into_block() {
-                Ok(block) => return Some(block),
+                Ok(evm_block) => return Some(evm_block),
                 Err(e) => {
                     error!(
                         "Failed to convert execution payload to block: {:?}, error: {:?}",
@@ -148,18 +148,18 @@ where
                 }
             }
         }
-        if let Some(payload) = self.reth_payload_provider.evm_block(*evm_block_hash).await {
-            return Some(payload);
+        if let Some(evm_block) = self.reth_payload_provider.evm_block(*evm_block_hash).await {
+            return Some(evm_block);
         }
         None
     }
 
     pub async fn get_locally_stored_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        if let Some(payload) = self.cache.write().await.payloads.get(evm_block_hash) {
-            return Some(payload.clone());
+        if let Some(execution_data) = self.cache.write().await.payloads.get(evm_block_hash) {
+            return Some(execution_data.clone());
         }
-        if let Some(block) = self.reth_payload_provider.evm_block(*evm_block_hash).await {
-            let sealed_block = block.seal_slow();
+        if let Some(evm_block) = self.reth_payload_provider.evm_block(*evm_block_hash).await {
+            let sealed_block = evm_block.seal_slow();
             let execution_data =
                 <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
             return Some(execution_data);
@@ -181,8 +181,8 @@ where
     /// let evm_block_hash = irys_block.evm_block_hash;
     /// ```
     pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        if let Some(payload) = self.get_locally_stored_payload(evm_block_hash).await {
-            return Some(payload);
+        if let Some(execution_data) = self.get_locally_stored_payload(evm_block_hash).await {
+            return Some(execution_data);
         }
 
         let (sender, receiver) = tokio::sync::oneshot::channel();

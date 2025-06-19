@@ -30,8 +30,8 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionLedger,
-    GossipData, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData,
-    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
+    GossipBroadcastMessage, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader,
+    PoaData, Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -602,11 +602,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
                 }
 
-                let execution_payload_gossip_data = GossipData::from(eth_built_payload.block().clone());
+                let execution_payload_gossip_data = GossipBroadcastMessage::from(eth_built_payload.block().clone());
                 if let Err(payload_broadcast_error) = gossip_broadcast_bus.send(execution_payload_gossip_data) {
                     error!("Failed to broadcast execution payload: {:?}", payload_broadcast_error);
                 }
-                // TODO: send payload broadcast message here
             }
             result
         })

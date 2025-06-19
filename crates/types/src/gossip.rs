@@ -1,4 +1,7 @@
-use crate::{CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
+use crate::{
+    BlockHash, ChunkPathHash, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
+    IrysTransactionId, UnpackedChunk,
+};
 use alloy_primitives::{Address, B256};
 use base58::ToBase58 as _;
 use reth::builder::Block as _;
@@ -39,21 +42,103 @@ impl GossipExecutionPayloadData {
     }
 }
 
+pub struct GossipBroadcastMessage {
+    pub key: GossipCacheKey,
+    pub data: GossipData,
+}
+
+impl GossipBroadcastMessage {
+    pub fn new(key: GossipCacheKey, data: GossipData) -> Self {
+        Self { key, data }
+    }
+
+    pub fn data_type_and_id(&self) -> String {
+        self.data.data_type_and_id()
+    }
+}
+
+impl From<SealedBlock<Block>> for GossipBroadcastMessage {
+    fn from(sealed_block: SealedBlock<Block>) -> Self {
+        let key = GossipCacheKey::sealed_evm_block(&sealed_block);
+        let value = GossipData::from(sealed_block);
+        Self::new(key, value)
+    }
+}
+
+impl From<UnpackedChunk> for GossipBroadcastMessage {
+    fn from(chunk: UnpackedChunk) -> Self {
+        let key = GossipCacheKey::chunk(&chunk);
+        let value = GossipData::Chunk(chunk);
+        Self::new(key, value)
+    }
+}
+
+impl From<IrysTransactionHeader> for GossipBroadcastMessage {
+    fn from(transaction: IrysTransactionHeader) -> Self {
+        let key = GossipCacheKey::transaction(&transaction);
+        let value = GossipData::Transaction(transaction);
+        Self::new(key, value)
+    }
+}
+
+impl From<CommitmentTransaction> for GossipBroadcastMessage {
+    fn from(commitment_tx: CommitmentTransaction) -> Self {
+        let key = GossipCacheKey::commitment_transaction(&commitment_tx);
+        let value = GossipData::CommitmentTransaction(commitment_tx);
+        Self::new(key, value)
+    }
+}
+
+impl From<IrysBlockHeader> for GossipBroadcastMessage {
+    fn from(block: IrysBlockHeader) -> Self {
+        let key = GossipCacheKey::irys_block(&block);
+        let value = GossipData::Block(block);
+        Self::new(key, value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GossipCacheKey {
+    Chunk(ChunkPathHash),
+    Transaction(IrysTransactionId),
+    Block(BlockHash),
+    ExecutionPayload(B256),
+}
+
+impl GossipCacheKey {
+    pub fn chunk(chunk: &UnpackedChunk) -> Self {
+        Self::Chunk(chunk.chunk_path_hash())
+    }
+
+    pub fn transaction(transaction: &IrysTransactionHeader) -> Self {
+        Self::Transaction(transaction.id)
+    }
+
+    pub fn commitment_transaction(commitment_tx: &CommitmentTransaction) -> Self {
+        Self::Transaction(commitment_tx.id)
+    }
+
+    pub fn irys_block(block: &IrysBlockHeader) -> Self {
+        Self::Block(block.block_hash)
+    }
+
+    pub fn sealed_evm_block(sealed_block: &SealedBlock<Block>) -> Self {
+        Self::ExecutionPayload(sealed_block.hash())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipData {
     Chunk(UnpackedChunk),
     Transaction(IrysTransactionHeader),
     CommitmentTransaction(CommitmentTransaction),
     Block(IrysBlockHeader),
-    ExecutionPayload(GossipExecutionPayloadData),
+    ExecutionPayload(Block),
 }
 
 impl From<SealedBlock<Block>> for GossipData {
     fn from(sealed_block: SealedBlock<Block>) -> Self {
-        Self::ExecutionPayload(GossipExecutionPayloadData::new(
-            sealed_block.hash(),
-            sealed_block.into_block(),
-        ))
+        Self::ExecutionPayload(sealed_block.into_block())
     }
 }
 
@@ -74,8 +159,8 @@ impl GossipData {
             }
             Self::ExecutionPayload(execution_payload_data) => {
                 format!(
-                    "execution payload for EVM block {:?}",
-                    execution_payload_data.stored_hash()
+                    "execution payload for EVM block number {:?}",
+                    execution_payload_data.number
                 )
             }
         }

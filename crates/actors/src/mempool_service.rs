@@ -18,9 +18,9 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
-    validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot, GossipData,
-    IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, IrysTransactionId,
-    MempoolConfig, TxChunkOffset, H256, U256,
+    validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot,
+    GossipBroadcastMessage, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader,
+    IrysTransactionId, MempoolConfig, TxChunkOffset, H256, U256,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -657,7 +657,7 @@ impl Inner {
             // Gossip transaction
             self.service_senders
                 .gossip_broadcast
-                .send(GossipData::CommitmentTransaction(commitment_tx.clone()))
+                .send(GossipBroadcastMessage::from(commitment_tx.clone()))
                 .expect("Failed to send gossip data");
         } else if commitment_status == CommitmentSnapshotStatus::Unstaked {
             // For unstaked pledges, we cache them in a 2-level LRU structure:
@@ -1130,9 +1130,9 @@ impl Inner {
         drop(mempool_state_guard);
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
-        let gossip_data = GossipData::Chunk(chunk);
+        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
 
-        if let Err(error) = gossip_sender.send(gossip_data) {
+        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
             tracing::error!("Failed to send gossip data: {:?}", error);
         }
 
@@ -1439,8 +1439,12 @@ impl Inner {
         }
 
         // Gossip transaction
-        let gossip_data = GossipData::Transaction(tx.clone());
-        if let Err(error) = self.service_senders.gossip_broadcast.send(gossip_data) {
+        let gossip_broadcast_message = GossipBroadcastMessage::from(tx.clone());
+        if let Err(error) = self
+            .service_senders
+            .gossip_broadcast
+            .send(gossip_broadcast_message)
+        {
             tracing::error!("Failed to send gossip data: {:?}", error);
         }
 
