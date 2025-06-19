@@ -673,6 +673,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
+    /// wait for tx to appear in the mempool or be found in the database
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,

@@ -80,9 +80,9 @@ async fn heavy_data_promotion_test() {
         assert_eq!(status, StatusCode::OK);
     }
 
-    // Wait for all the transactions to be confirmed
+    // Wait for all the transactions to be in the index
     let result = node.wait_for_migrated_txs(unconfirmed_tx, 20).await;
-    // Verify all transactions are confirmed
+    // Verify all transactions are in the index
     assert!(result.is_ok());
 
     // ==============================

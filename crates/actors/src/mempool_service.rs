@@ -180,7 +180,7 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-    /// Get IrysTransactionHeader
+    /// Get IrysTransactionHeader from mempool or mdbx
     GetDataTxs(
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
