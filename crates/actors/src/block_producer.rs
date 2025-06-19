@@ -222,19 +222,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
 
                 // Loop though all the pending tx to see which haven't been promoted
-                for txid in &publish_txids {
-                    let tx_header = match get_data_tx_in_parallel(vec![*txid], &service_senders.mempool, &db).await {
-                        Ok(headers) if headers.len() == 1 => headers.into_iter().next().unwrap(),
-                        Ok(_) => {
-                            error!("No transaction header found or multiple headers returned for txid: {}", txid);
-                            continue;
-                        }
-                        Err(e) => {
-                            error!("Error fetching transaction header for txid {}: {}", txid, e);
-                            continue;
-                        }
-                    };
-
+                let tx_headers = get_data_tx_in_parallel(publish_txids, &service_senders.mempool, &db).await.unwrap_or(vec![]);
+                for tx_header in &tx_headers {
                     // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
                     if tx_header.ingress_proofs.is_none() {
                         // Get the proof
