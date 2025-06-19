@@ -380,12 +380,8 @@ impl BlockTreeServiceInner {
             }
         }
 
-        if self
-            .send_storage_finalized_message(finalized_hash)
-            .await
-            .is_err()
-        {
-            error!("Unable to send block finalized message");
+        if let Err(e) = self.send_storage_finalized_message(finalized_hash).await {
+            error!("Unable to send block finalized message: {:?}", e);
         }
     }
 
