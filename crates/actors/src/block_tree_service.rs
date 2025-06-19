@@ -520,6 +520,10 @@ impl BlockTreeServiceInner {
             ValidationResult::Invalid => {
                 // Do nothing - TODO probably remove from cache
                 error!("{} INVALID BLOCK", block_hash.0.to_base58());
+                let mut cache = self.cache.write().unwrap();
+                let _ = cache
+                    .remove_block(&block_hash)
+                    .inspect_err(|err| tracing::error!(?err));
             }
             ValidationResult::Valid => {
                 let binding = self.cache.clone();
