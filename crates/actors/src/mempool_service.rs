@@ -786,6 +786,7 @@ impl Inner {
         );
 
         let migrated_block = event.block;
+        let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
 
         // stage 1: move commitment transactions from tree to index
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
@@ -807,8 +808,7 @@ impl Inner {
         tx.inner.commit()?;
 
         // stage 2: move submit transactions from tree to index
-        let submit_tx_ids: Vec<H256> = migrated_block
-            .get_data_ledger_tx_ids()
+        let submit_tx_ids: Vec<H256> = data_ledger_txs
             .get(&DataLedger::Submit)
             .unwrap()
             .iter()
@@ -845,8 +845,7 @@ impl Inner {
         }
 
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
-        let publish_tx_ids: Vec<H256> = migrated_block
-            .get_data_ledger_tx_ids()
+        let publish_tx_ids: Vec<H256> = data_ledger_txs
             .get(&DataLedger::Publish)
             .unwrap()
             .iter()
