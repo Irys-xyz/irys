@@ -125,8 +125,8 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
 #[derive(Debug)]
 pub struct MempoolState {
-    /// Temporary mempool stubs - will replace with proper data models - `DMac`
-    valid_tx: BTreeMap<H256, IrysTransactionHeader>,
+    /// valid submit txs
+    valid_submit_ledger_tx: BTreeMap<H256, IrysTransactionHeader>,
     valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     invalid_tx: Vec<H256>,
@@ -537,7 +537,7 @@ impl Inner {
 
         for tx in txs {
             // if data tx exists in mempool
-            if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+            if let Some(tx_header) = mempool_state_guard.valid_submit_ledger_tx.get(&tx) {
                 found_txs.push(Some(tx_header.clone()));
                 continue;
             }
@@ -738,7 +738,7 @@ impl Inner {
                 let mempool_state = &self.mempool_state.clone();
                 let mut mempool_state_write_guard = mempool_state.write().await;
                 mempool_state_write_guard
-                    .valid_tx
+                    .valid_submit_ledger_tx
                     .insert(tx_header.id, tx_header.clone());
                 mempool_state_write_guard
                     .recent_valid_tx
@@ -888,7 +888,9 @@ impl Inner {
         let mut mempool_state_write_guard = mempool_state.write().await;
         for txid in submit_tx_ids.iter() {
             // Remove the data tx from the pending valid_tx pool
-            mempool_state_write_guard.valid_tx.remove(txid);
+            mempool_state_write_guard
+                .valid_submit_ledger_tx
+                .remove(txid);
             mempool_state_write_guard.recent_valid_tx.remove(txid);
         }
         drop(mempool_state_write_guard);
@@ -1288,12 +1290,16 @@ impl Inner {
         );
 
         // Prepare data transactions for inclusion after commitments
-        let mut all_data_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
+        let mut submit_ledger_txs: Vec<_> = mempool_state_guard
+            .valid_submit_ledger_tx
+            .values()
+            .cloned()
+            .collect();
 
         drop(mempool_state_guard);
 
         // Sort data transactions by fee (highest first) to maximize revenue
-        all_data_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+        submit_ledger_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
@@ -1308,7 +1314,7 @@ impl Inner {
 
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
-        for tx in all_data_txs {
+        for tx in submit_ledger_txs {
             if check_funding(&tx) {
                 submit_tx.push(tx);
                 if submit_tx.len() >= max_txs {
@@ -1410,7 +1416,9 @@ impl Inner {
         self.validate_signature(&tx).await?;
 
         let mut mempool_state_write_guard = mempool_state.write().await;
-        mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
+        mempool_state_write_guard
+            .valid_submit_ledger_tx
+            .insert(tx.id, tx.clone());
         mempool_state_write_guard.recent_valid_tx.insert(tx.id);
         drop(mempool_state_write_guard);
 
@@ -1492,7 +1500,10 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         #[expect(clippy::if_same_then_else, reason = "readability")]
-        if mempool_state_guard.valid_tx.contains_key(&txid) {
+        if mempool_state_guard
+            .valid_submit_ledger_tx
+            .contains_key(&txid)
+        {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
             Ok(true)
@@ -1732,9 +1743,12 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         // Get any IrysTransaction from the valid storage txs
-        mempool_state_guard.valid_tx.values().for_each(|tx| {
-            hash_map.insert(tx.id, tx.clone());
-        });
+        mempool_state_guard
+            .valid_submit_ledger_tx
+            .values()
+            .for_each(|tx| {
+                hash_map.insert(tx.id, tx.clone());
+            });
 
         hash_map
     }
@@ -1947,7 +1961,7 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
-        valid_tx: BTreeMap::new(),
+        valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),
         recent_valid_tx: HashSet::new(),
