@@ -812,7 +812,7 @@ impl Inner {
             .get(&DataLedger::Submit)
             .unwrap()
             .iter()
-            .cloned()
+            .copied()
             .collect();
         {
             let mut_tx = self
@@ -850,7 +850,7 @@ impl Inner {
             .get(&DataLedger::Publish)
             .unwrap()
             .iter()
-            .cloned()
+            .copied()
             .collect();
         {
             let mut_tx = self
