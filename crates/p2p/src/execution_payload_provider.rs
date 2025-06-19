@@ -7,7 +7,7 @@ use reth::core::primitives::SealedBlock;
 use reth::primitives::{Block, Header, Receipt, Transaction};
 use reth::revm::primitives::B256;
 use reth::rpc::api::EthApiClient;
-use reth::rpc::types::engine::ExecutionPayload;
+use reth::rpc::types::engine::ExecutionData;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -20,13 +20,13 @@ const PAYLOAD_RECEIVERS_CAPACITY: usize = 1000;
 const PAYLOAD_REQUESTS_CACHE_CAPACITY: usize = 1000;
 
 #[derive(Debug, Clone)]
-pub enum RethPayloadProvider {
+pub enum RethBlockProvider {
     IrysRethAdapter(IrysRethNodeAdapter),
     #[cfg(test)]
-    Mock(Arc<RwLock<HashMap<B256, ExecutionPayload>>>),
+    Mock(Arc<RwLock<HashMap<B256, Block>>>),
 }
 
-impl RethPayloadProvider {
+impl RethBlockProvider {
     pub fn new(irys_reth_node_adapter: IrysRethNodeAdapter) -> Self {
         Self::IrysRethAdapter(irys_reth_node_adapter)
     }
@@ -48,7 +48,7 @@ impl RethPayloadProvider {
             Self::IrysRethAdapter(adapter) => &adapter.reth_node,
             #[cfg(test)]
             Self::Mock(_) => {
-                return self.payload_mock(evm_block_hash).await;
+                return self.evm_block_mock(evm_block_hash).await;
             }
         };
 
@@ -65,21 +65,17 @@ impl RethPayloadProvider {
     }
 
     #[cfg(test)]
-    pub async fn payload_mock(&self, evm_block_hash: B256) -> Option<Block> {
+    pub async fn evm_block_mock(&self, evm_block_hash: B256) -> Option<Block> {
         if let Self::Mock(payloads) = self {
             let payloads = payloads.read().await;
-            payloads
-                .get(&evm_block_hash)
-                .cloned()?
-                .try_into_block()
-                .ok()
+            payloads.get(&evm_block_hash).cloned()
         } else {
             panic!("Tried to get payload from mock provider, but it is not a mock provider");
         }
     }
 }
 
-impl From<IrysRethNodeAdapter> for RethPayloadProvider {
+impl From<IrysRethNodeAdapter> for RethBlockProvider {
     fn from(irys_adapter: IrysRethNodeAdapter) -> Self {
         Self::new(irys_adapter)
     }
@@ -88,9 +84,8 @@ impl From<IrysRethNodeAdapter> for RethPayloadProvider {
 #[derive(Clone, Debug)]
 pub struct ExecutionPayloadProvider<TPeerList: PeerList> {
     cache: Arc<RwLock<ExecutionPayloadCache>>,
-    reth_payload_provider: RethPayloadProvider,
-    payload_senders:
-        Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<ExecutionPayload>>>>>,
+    reth_payload_provider: RethBlockProvider,
+    payload_senders: Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<ExecutionData>>>>>,
     peer_list: TPeerList,
 }
 
@@ -98,7 +93,7 @@ impl<TPeerList> ExecutionPayloadProvider<TPeerList>
 where
     TPeerList: PeerList,
 {
-    pub fn new(peer_list: TPeerList, reth_payload_provider: RethPayloadProvider) -> Self {
+    pub fn new(peer_list: TPeerList, reth_payload_provider: RethBlockProvider) -> Self {
         Self {
             cache: Arc::new(RwLock::new(ExecutionPayloadCache {
                 payloads: LruCache::new(NonZeroUsize::new(PAYLOAD_CACHE_CAPACITY).expect("payload capacity is not a non-zero usize")),
@@ -115,18 +110,17 @@ where
         let evm_block_hash = sealed_block.hash();
         let execution_data =
             <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
-        let payload = execution_data.payload;
         {
             debug!("Adding execution payload to cache: {:?}", evm_block_hash);
             let mut cache = self.cache.write().await;
-            cache.payloads.put(evm_block_hash, payload.clone());
+            cache.payloads.put(evm_block_hash, execution_data.clone());
             cache
                 .payloads_currently_requested_from_the_network
                 .pop(&evm_block_hash);
         }
         if let Some(senders) = self.payload_senders.write().await.pop(&evm_block_hash) {
             for sender in senders {
-                if let Err(returned_payload) = sender.send(payload.clone()) {
+                if let Err(returned_payload) = sender.send(execution_data.clone()) {
                     warn!(
                         "Failed to send execution payload to receiver: {:?}",
                         returned_payload.block_hash()
@@ -160,10 +154,7 @@ where
         None
     }
 
-    pub async fn get_locally_stored_payload(
-        &self,
-        evm_block_hash: &B256,
-    ) -> Option<ExecutionPayload> {
+    pub async fn get_locally_stored_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
         if let Some(payload) = self.cache.write().await.payloads.get(evm_block_hash) {
             return Some(payload.clone());
         }
@@ -171,7 +162,7 @@ where
             let sealed_block = block.seal_slow();
             let execution_data =
                 <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
-            return Some(execution_data.payload);
+            return Some(execution_data);
         }
         None
     }
@@ -189,7 +180,7 @@ where
     /// let irys_block = IrysBlockHeader::new_mock_header();
     /// let evm_block_hash = irys_block.evm_block_hash;
     /// ```
-    pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionPayload> {
+    pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
         if let Some(payload) = self.get_locally_stored_payload(evm_block_hash).await {
             return Some(payload);
         }
@@ -246,6 +237,6 @@ where
 
 #[derive(Debug)]
 struct ExecutionPayloadCache {
-    payloads: LruCache<B256, ExecutionPayload>,
+    payloads: LruCache<B256, ExecutionData>,
     payloads_currently_requested_from_the_network: LruCache<B256, ()>,
 }

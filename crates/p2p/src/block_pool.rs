@@ -278,11 +278,11 @@ where
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
         tokio::spawn(async move {
-            if let Some(payload) = execution_payload_provider
+            if let Some(execution_data) = execution_payload_provider
                 .wait_for_payload(&evm_block_hash)
                 .await
             {
-                let block = match payload.try_into_block() {
+                let evm_block = match execution_data.try_into_block() {
                     Ok(block) => block,
                     Err(e) => {
                         error!(
@@ -293,7 +293,7 @@ where
                     }
                 };
                 if let Err(err) = gossip_broadcast_sender.send(GossipData::ExecutionPayload(
-                    GossipExecutionPayloadData::new(evm_block_hash, block),
+                    GossipExecutionPayloadData::new(evm_block_hash, evm_block),
                 )) {
                     error!(
                         "Failed to broadcast execution payload for block {:?}: {:?}",

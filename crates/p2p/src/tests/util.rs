@@ -1,4 +1,4 @@
-use crate::execution_payload_provider::{ExecutionPayloadProvider, RethPayloadProvider};
+use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
@@ -340,7 +340,7 @@ impl GossipServiceTestFixture {
         let mocked_execution_payloads = Arc::new(TokioRwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadProvider::new(
             peer_list.clone(),
-            RethPayloadProvider::Mock(mocked_execution_payloads),
+            RethBlockProvider::Mock(mocked_execution_payloads),
         );
 
         Self {

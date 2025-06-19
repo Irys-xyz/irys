@@ -425,7 +425,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .sign_block_header(&mut block)
         .expect("to sign block header");
 
-    let block_payload = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block.clone()).payload;
+    let block_execution_data = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block.clone());
     fixture1
         .execution_payload_provider
         .add_payload_to_cache(sealed_block.clone())
@@ -456,13 +456,14 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
 
     assert_eq!(local_block, evm_block);
 
-    let local_payload = fixture2
+    let local_execution_data = fixture2
         .execution_payload_provider
         .get_locally_stored_payload(&block.evm_block_hash)
         .await
         .expect("to get execution payload stored on peer 1 from peer 2");
 
-    assert_eq!(local_payload, block_payload);
+    // We compare the payloads because the execution data doesn't implement `PartialEq` directly
+    assert_eq!(local_execution_data.payload, block_execution_data.payload);
 
     Ok(())
 }
