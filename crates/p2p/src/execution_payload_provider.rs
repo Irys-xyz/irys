@@ -64,25 +64,14 @@ impl RethPayloadProvider {
             serde_json::Value,
         >::block_by_hash(&rpc, evm_block_hash, true)
         .await
-        .unwrap()
-        .unwrap();
+        .inspect_err(|err| tracing::error!(?err))
+        .ok()??;
 
         let evm_block = <irys_reth::EthPrimitives as NodePrimitives>::Block::from(evm_block);
-        let sealed_block = evm_block.clone().seal_unchecked(evm_block_hash);
-        let sealed_block__low = evm_block.clone().seal_slow();
-        tracing::error!(uncheckde_hash= ?sealed_block.hash(), slow = ? sealed_block__low.hash(), ?evm_block_hash);
+        let sealed_block = evm_block.seal_unchecked(evm_block_hash);
 
         let payload =
             <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
-        tracing::error!(?payload.sidecar);
-        // let expected_hash = payload.block_hash();
-
-        // First parse the block
-        // let sealed_block = payload
-        //     .payload
-        //     .try_into_block_with_sidecar(payload.sidecar)
-        //     .unwrap()
-        //     .seal_slow();
 
         Some(payload)
     }

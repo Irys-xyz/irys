@@ -492,7 +492,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let payload = reth_node_adapter
                 .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, system_txs)
                 .await?;
-            tracing::error!(block_prod_block_hash = ? payload.block().hash(), parent_block_root =? prev_block_header.block_hash);
 
             // trigger forkchoice update via engine api to commit the block to the blockchain
             reth_node_adapter

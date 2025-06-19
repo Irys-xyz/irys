@@ -9,8 +9,11 @@ use crate::{
     services::ServiceSenders,
     system_tx_generator::SystemTxGenerator,
 };
-use alloy_consensus::{EthereumTxEnvelope, Transaction as _};
-use alloy_eips::HashOrNumber;
+use alloy_consensus::Transaction as _;
+use alloy_eips::{
+    eip7685::{Requests, RequestsOrHash},
+    HashOrNumber,
+};
 use alloy_rpc_types_engine::ExecutionData;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
@@ -31,10 +34,9 @@ use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
+use reth::revm::primitives::B256;
 use reth::rpc::types::engine::ExecutionPayload;
-use reth::{api::Block, revm::primitives::B256};
 use reth::{providers::TransactionsProvider as _, rpc::api::EngineApiClient};
-use reth_ethereum_primitives::TransactionSigned;
 use tracing::{debug, info};
 
 /// Trait for providing execution payloads for block validation
@@ -510,11 +512,6 @@ pub async fn system_transactions_are_valid(
 
     let engine_api_client = reth_adapter.inner.engine_http_client();
     let ExecutionData { payload, sidecar } = payload;
-    // First parse the block
-    let sealed_block = payload
-        .clone()
-        .try_into_block_with_sidecar::<TransactionSigned>(&sidecar)?
-        .seal_slow();
 
     let ExecutionPayload::V3(payload) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
@@ -524,10 +521,18 @@ pub async fn system_transactions_are_valid(
         "withdrawals must always be empty"
     );
 
+    let versioned_hashes = sidecar
+        .versioned_hashes()
+        .ok_or_eyre("version hashes must be present")?
+        .to_vec();
     loop {
-        tracing::error!(hash = ?payload.payload_inner.payload_inner.block_hash, ?block.previous_block_hash, sidecar_hash =? sealed_block.hash());
         let payload = engine_api_client
-            .new_payload_v3(payload.clone(), vec![], block.previous_block_hash.into())
+            .new_payload_v4(
+                payload.clone(),
+                versioned_hashes.clone(),
+                block.previous_block_hash.into(),
+                RequestsOrHash::Requests(Requests::new(vec![])),
+            )
             .await?;
         match payload.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
