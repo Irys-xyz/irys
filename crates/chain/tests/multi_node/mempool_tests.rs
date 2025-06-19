@@ -194,22 +194,11 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .expect("expected a data tx")
         .is_some());
 
-    // confirm the commitment tx have appeared back in the mempool after a restart
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let get_tx_msg = MempoolServiceMessage::GetCommitmentTxs {
-        commitment_tx_ids: vec![pledge_tx.id],
-        response: oneshot_tx,
-    };
-    if let Err(err) = restarted_node
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(get_tx_msg)
-    {
-        tracing::error!("error sending message to mempool: {:?}", err);
-    }
-    let commitment_tx_from_mempool = oneshot_rx.await.expect("expected result");
-    assert!(commitment_tx_from_mempool.get(&pledge_tx.id).is_some());
+    // confirm the commitment tx has appeared back in the mempool after a restart
+    let result = restarted_node
+        .wait_for_mempool_commitment_txs(vec![pledge_tx.id], 10)
+        .await;
+    assert!(result.is_ok());
 
     restarted_node.stop().await;
 
