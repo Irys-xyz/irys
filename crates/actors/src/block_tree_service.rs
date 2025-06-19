@@ -645,8 +645,7 @@ impl BlockTreeServiceInner {
         }
     }
 
-    /// Fetches full transaction headers from a ledger in a block.
-    /// Returns None if any headers are missing or on DB errors.
+    /// Fetches full transaction headers from mempool using the txids from a ledger in a block
     async fn get_data_ledger_tx_headers_from_mempool(
         &self,
         block_header: &IrysBlockHeader,
