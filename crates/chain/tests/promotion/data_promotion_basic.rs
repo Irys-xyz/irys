@@ -81,7 +81,7 @@ async fn heavy_data_promotion_test() {
     }
 
     // Wait for all the transactions to be in the index
-    let result = node.wait_for_migrated_txs(unconfirmed_tx, 20).await;
+    let result = node.wait_for_migrated_txs(unconfirmed_tx, 10).await;
     // Verify all transactions are in the index
     assert!(result.is_ok());
 
