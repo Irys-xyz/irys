@@ -823,7 +823,7 @@ impl Inner {
                 })
                 .expect("expected to read/write to database");
 
-            // FIXME: this next line is less efficent than it needs to be?
+            // FIXME: this next line is less efficient than it needs to be?
             //        why would we read mdbx txs when we are migrating?
             let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
             data_tx_headers
