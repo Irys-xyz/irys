@@ -579,7 +579,7 @@ async fn generate_expected_system_transactions_from_db<'a>(
         .ok_or_eyre("Submit ledger not found")?;
 
     // Lookup storage/data txs
-    let submit_txs = extract_storage_txs(config, service_senders, block, db).await?;
+    let submit_txs = extract_data_txs(config, service_senders, block, db).await?;
 
     let system_txs = SystemTxGenerator::new(
         &block.height,
@@ -626,14 +626,14 @@ async fn extract_commitment_txs(
     Ok(commitment_txs)
 }
 
-async fn extract_storage_txs(
+async fn extract_data_txs(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
-    let storage_txs = if is_epoch_block {
+    let data_txs = if is_epoch_block {
         // IMPORTANT: on epoch blocks we don't generate system txs for commitment txs
         vec![]
     } else {
@@ -652,7 +652,7 @@ async fn extract_storage_txs(
             ),
         }
     };
-    Ok(storage_txs)
+    Ok(data_txs)
 }
 
 /// Validates that the actual system transactions match the expected ones

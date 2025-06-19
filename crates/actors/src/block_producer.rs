@@ -303,9 +303,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(Some(BlockId::Hash(prev_block_header.evm_block_hash.into())), tx)).expect("to send MempoolServiceMessage");
             let submit_txs = rx.await.expect("to receive txns");
 
-            let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);
+            let submit_chunks_added = calculate_chunks_added(&submit_txs.data_tx, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
-            let submit_txids = submit_txs.storage_tx.iter().map(|h| h.id).collect::<Vec<H256>>();
+            let submit_txids = submit_txs.data_tx.iter().map(|h| h.id).collect::<Vec<H256>>();
 
             // Commitment Transactions
             let block_height = prev_block_header.height + 1;
@@ -466,7 +466,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let local_signer = LocalSigner::from(config.irys_signer().signer);
             // Generate expected system transactions using shared logic
             let system_txs = SystemTxGenerator::new(&block_height, &config.node_config.reward_address, &reward_amount.amount, &prev_block_header);
-            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx)
+            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.data_tx)
                 .map(|tx_result| {
                     let tx = tx_result?;
                     let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
@@ -538,7 +538,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     // Term Submit Ledger
                     DataTransactionLedger {
                         ledger_id: DataLedger::Submit.into(),
-                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs.storage_tx).0,
+                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs.data_tx).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),

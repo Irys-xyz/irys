@@ -130,7 +130,7 @@ pub struct MempoolState {
     valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     invalid_tx: Vec<H256>,
-    /// Tracks recent valid txids from either storage or commitment
+    /// Tracks recent valid txids from either data or commitment
     recent_valid_tx: HashSet<H256>,
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
@@ -164,7 +164,7 @@ pub enum MempoolServiceMessage {
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
-    /// Confirm data/storage tx exists in mempool or database
+    /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// validate and process an incoming IrysTransactionHeader
     IngestDataTx(
@@ -442,7 +442,7 @@ impl TxReadError {
 #[derive(Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
-    pub storage_tx: Vec<IrysTransactionHeader>,
+    pub data_tx: Vec<IrysTransactionHeader>,
 }
 
 /// Generates an ingress proof for a specific `data_root`
@@ -1183,7 +1183,7 @@ impl Inner {
             canonical.last().unwrap().height
         );
 
-        // TODO: This approach should be applied to storage TX and commitment TX should instead
+        // TODO: This approach should be applied to data TX and commitment TX should instead
         // be checked for prior inclusion using the Commitment State and current Commitment Snapshot
         for entry in canonical {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
@@ -1241,16 +1241,16 @@ impl Inner {
                 .collect::<Vec<_>>()
         );
 
-        // Prepare storage transactions for inclusion after commitments
-        let mut all_storage_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
+        // Prepare data transactions for inclusion after commitments
+        let mut all_data_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
 
         drop(mempool_state_guard);
 
-        // Sort storage transactions by fee (highest first) to maximize revenue
-        all_storage_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+        // Sort data transactions by fee (highest first) to maximize revenue
+        all_data_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
-        // Apply block size constraint and funding checks to storage transactions
-        let mut storage_tx = Vec::new();
+        // Apply block size constraint and funding checks to data transactions
+        let mut data_tx = Vec::new();
         let max_txs = self
             .config
             .node_config
@@ -1260,12 +1260,12 @@ impl Inner {
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
 
-        // Select storage transactions in fee-priority order, respecting funding limits
+        // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
-        for tx in all_storage_txs {
+        for tx in all_data_txs {
             if check_funding(&tx) {
-                storage_tx.push(tx);
-                if storage_tx.len() >= max_txs {
+                data_tx.push(tx);
+                if data_tx.len() >= max_txs {
                     break;
                 }
             }
@@ -1274,7 +1274,7 @@ impl Inner {
         // Return selected transactions grouped by type
         MempoolTxs {
             commitment_tx,
-            storage_tx,
+            data_tx,
         }
     }
 
