@@ -16,9 +16,10 @@ use base58::ToBase58 as _;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
-    Address, CommitmentTransaction, GossipExecutionPayloadData, GossipRequest, IrysBlockHeader,
-    IrysTransactionHeader, PeerListItem, UnpackedChunk,
+    Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
+    PeerListItem, UnpackedChunk,
 };
+use reth::primitives::Block;
 use std::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
@@ -168,7 +169,7 @@ where
 
     async fn handle_execution_payload(
         server: Data<Self>,
-        irys_execution_payload_json: web::Json<GossipRequest<GossipExecutionPayloadData>>,
+        irys_execution_payload_json: web::Json<GossipRequest<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         let evm_block_request = irys_execution_payload_json.0;

@@ -16,10 +16,11 @@ use irys_actors::{
 };
 use irys_api_client::ApiClient;
 use irys_types::{
-    CommitmentTransaction, GossipCacheKey, GossipData, GossipExecutionPayloadData, GossipRequest,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk,
-    H256,
+    CommitmentTransaction, GossipCacheKey, GossipData, GossipRequest, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
+use reth::builder::Block as _;
+use reth::primitives::Block;
 use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, Span};
@@ -413,25 +414,11 @@ where
 
     pub(crate) async fn handle_execution_payload(
         &self,
-        execution_payload_request: GossipRequest<GossipExecutionPayloadData>,
+        execution_payload_request: GossipRequest<Block>,
     ) -> GossipResult<()> {
         let source_miner_address = execution_payload_request.miner_address;
-        let execution_payload_data = execution_payload_request.data;
-        let sealed_block = match execution_payload_data.seal_and_verify_hash() {
-            Some(block) => block,
-            None => {
-                if let Err(peer_list_error) = self
-                    .peer_list
-                    .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData)
-                    .await
-                {
-                    error!("Failed to decrease peer score: {:?}", peer_list_error);
-                }
-                return Err(GossipError::InvalidData(
-                    InvalidDataError::ExecutionPayloadHashMismatch,
-                ));
-            }
-        };
+        let evm_block = execution_payload_request.data;
+        let sealed_block = evm_block.seal_slow();
 
         let evm_block_hash = sealed_block.hash();
         let payload_already_seen_before = self

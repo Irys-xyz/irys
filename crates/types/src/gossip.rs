@@ -4,44 +4,11 @@ use crate::{
 };
 use alloy_primitives::{Address, B256};
 use base58::ToBase58 as _;
-use reth::builder::Block as _;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GossipExecutionPayloadData {
-    pub evm_block_hash: B256,
-    pub evm_block: Block,
-}
-
-impl GossipExecutionPayloadData {
-    pub fn new(evm_block_hash: B256, evm_block: Block) -> Self {
-        Self {
-            evm_block_hash,
-            evm_block,
-        }
-    }
-
-    pub fn stored_hash(&self) -> B256 {
-        self.evm_block_hash
-    }
-
-    pub fn seal_and_verify_hash(self) -> Option<SealedBlock<Block>> {
-        let sealed_block = self.evm_block.seal_slow();
-        if self.evm_block_hash == sealed_block.hash() {
-            Some(sealed_block)
-        } else {
-            tracing::warn!(
-                "Execution payload hash mismatch: expected {}, got {}",
-                self.evm_block_hash,
-                sealed_block.hash()
-            );
-            None
-        }
-    }
-}
-
+#[derive(Clone, Debug)]
 pub struct GossipBroadcastMessage {
     pub key: GossipCacheKey,
     pub data: GossipData,
