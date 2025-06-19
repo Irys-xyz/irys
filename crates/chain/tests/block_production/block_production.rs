@@ -207,6 +207,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     // check irys DB for built block
     let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+    tokio::time::sleep(Duration::from_secs(3)).await;
     node.stop().await;
 
     Ok(())

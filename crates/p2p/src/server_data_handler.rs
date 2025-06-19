@@ -8,6 +8,7 @@ use crate::{
     GossipClient, GossipError, GossipResult,
 };
 use alloy_core::primitives::keccak256;
+use alloy_rpc_types::engine::ExecutionData;
 use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{
@@ -413,7 +414,7 @@ where
 
     pub(crate) async fn handle_execution_payload(
         &self,
-        execution_payload_request: GossipRequest<ExecutionPayload>,
+        execution_payload_request: GossipRequest<ExecutionData>,
     ) -> GossipResult<()> {
         let execution_payload = execution_payload_request.data;
         let evm_block_hash = execution_payload.block_hash();

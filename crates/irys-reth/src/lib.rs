@@ -21,6 +21,7 @@ use alloy_primitives::{Address, TxKind, U256};
 pub use alloy_rlp;
 use alloy_rlp::{Decodable as _, Encodable as _};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
+pub use reth::primitives::EthPrimitives;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
@@ -29,7 +30,7 @@ use reth::{
         PayloadBuilderConfig as _,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
-    primitives::{EthPrimitives, InvalidTransactionError, SealedBlock},
+    primitives::{InvalidTransactionError, SealedBlock},
     providers::{
         providers::ProviderFactoryBuilder, CanonStateSubscriptions as _, EthStorage,
         StateProviderFactory,

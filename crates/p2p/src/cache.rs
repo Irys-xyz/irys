@@ -40,7 +40,7 @@ impl From<&GossipData> for GossipCacheKey {
             GossipData::CommitmentTransaction(comm_tx) => Self::Transaction(comm_tx.id),
             GossipData::Block(block) => Self::Block(block.block_hash),
             GossipData::ExecutionPayload(payload) => {
-                Self::ExecutionPayload(payload.as_v1().block_hash)
+                Self::ExecutionPayload(payload.payload.as_v1().block_hash)
             }
         }
     }
@@ -170,7 +170,7 @@ impl GossipCache {
                     .read()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 payloads
-                    .get(&payload.as_v1().block_hash)
+                    .get(&payload.payload.as_v1().block_hash)
                     .cloned()
                     .unwrap_or_default()
             }

@@ -9,8 +9,9 @@ use crate::{
     services::ServiceSenders,
     system_tx_generator::SystemTxGenerator,
 };
-use alloy_consensus::Transaction as _;
+use alloy_consensus::{EthereumTxEnvelope, Transaction as _};
 use alloy_eips::HashOrNumber;
+use alloy_rpc_types_engine::ExecutionData;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt};
@@ -30,9 +31,10 @@ use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::revm::primitives::B256;
 use reth::rpc::types::engine::ExecutionPayload;
+use reth::{api::Block, revm::primitives::B256};
 use reth::{providers::TransactionsProvider as _, rpc::api::EngineApiClient};
+use reth_ethereum_primitives::TransactionSigned;
 use tracing::{debug, info};
 
 /// Trait for providing execution payloads for block validation
@@ -40,7 +42,7 @@ use tracing::{debug, info};
 pub trait PayloadProvider: Clone + Send + Sync + 'static {
     /// Waits for the execution payload to arrive over gossip. This method will first check the local
     /// cache, then try to retrieve the payload from the network if it is not found locally.
-    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionPayload>;
+    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData>;
 }
 
 /// Full pre-validation steps for a block
@@ -507,6 +509,13 @@ pub async fn system_transactions_are_valid(
         .ok_or_eyre("reth execute payload never arrived")?;
 
     let engine_api_client = reth_adapter.inner.engine_http_client();
+    let ExecutionData { payload, sidecar } = payload;
+    // First parse the block
+    let sealed_block = payload
+        .clone()
+        .try_into_block_with_sidecar::<TransactionSigned>(&sidecar)?
+        .seal_slow();
+
     let ExecutionPayload::V3(payload) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
     };
@@ -514,7 +523,9 @@ pub async fn system_transactions_are_valid(
         payload.withdrawals().is_empty(),
         "withdrawals must always be empty"
     );
+
     loop {
+        tracing::error!(hash = ?payload.payload_inner.payload_inner.block_hash, ?block.previous_block_hash, sidecar_hash =? sealed_block.hash());
         let payload = engine_api_client
             .new_payload_v3(payload.clone(), vec![], block.previous_block_hash.into())
             .await?;

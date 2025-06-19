@@ -1,7 +1,7 @@
 use crate::{CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
 use alloy_primitives::Address;
 use base58::ToBase58 as _;
-use reth::rpc::types::engine::ExecutionPayload;
+use reth::rpc::types::engine::{ExecutionData, ExecutionPayload};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,7 +10,7 @@ pub enum GossipData {
     Transaction(IrysTransactionHeader),
     CommitmentTransaction(CommitmentTransaction),
     Block(IrysBlockHeader),
-    ExecutionPayload(ExecutionPayload),
+    ExecutionPayload(ExecutionData),
 }
 
 impl GossipData {
@@ -31,7 +31,7 @@ impl GossipData {
             Self::ExecutionPayload(execution_payload) => {
                 format!(
                     "execution payload for block {}",
-                    execution_payload.as_v1().block_hash
+                    execution_payload.payload.as_v1().block_hash
                 )
             }
         }

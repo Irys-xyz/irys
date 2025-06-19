@@ -104,12 +104,7 @@ semver = { version = "1.0", features = ["serde"] }
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"
-tracing-subscriber = { version = "0.3", default-features = false, features = [
-  "env-filter",
-  "fmt",
-  "json",
-  "ansi",
-] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"] }
 tempfile = "3"
 csv = "1"
 jsonrpsee = "0.24"
@@ -129,15 +124,8 @@ revm = { version = "24.0.1", default-features = false }
 
 alloy-dyn-abi = "1.1.0"
 alloy-evm = { version = "0.10", default-features = false }
-alloy-primitives = { version = "1.1.0", default-features = false, features = [
-  "map-foldhash",
-  "arbitrary",
-  "rlp",
-  "getrandom",
-] }
-alloy-rlp = { version = "0.3.10", default-features = false, features = [
-  "core-net",
-] }
+alloy-primitives = { version = "1.1.0", default-features = false, features = ["map-foldhash", "arbitrary", "rlp", "getrandom"] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
 alloy-sol-macro = { version = "1.1.0", default-features = false }
 alloy-sol-types = { version = "1.1.0", default-features = false }
 alloy-consensus = { version = "1.0.9", default-features = false }
@@ -149,9 +137,7 @@ revm-primitives = "19"
 revm-interpreter = "19"
 alloy-network = { version = "1.0.9", default-features = false }
 alloy-provider = { version = "1.0.9", default-features = false }
-alloy-rpc-types = { version = "1.0.9", features = [
-  "eth",
-], default-features = false }
+alloy-rpc-types = { version = "1.0.9", features = ["eth"], default-features = false }
 alloy-rpc-types-eth = { version = "1.0.9", default-features = false }
 alloy-rpc-types-engine = { version = "1.0.9", default-features = false }
 alloy-signer = { version = "1.0.9", default-features = false }
@@ -413,8 +399,8 @@ correctness = { priority = -4, level = "deny" }
 restriction = { priority = -5, level = "allow" } # cherry pick
 style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
-pedantic = { priority = -8, level = "allow" }    # cherry pick
-nursery = { priority = -9, level = "allow" }     # cherry pick
+pedantic = { priority = -8, level = "allow" } # cherry pick
+nursery = { priority = -9, level = "allow" } # cherry pick
 
 module_inception = "allow"
 doc-overindented-list-items = "allow"
@@ -486,7 +472,7 @@ ignored = ["modular-bitfield", "test-fuzz"]
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
 [workspace.metadata.typos]
 default.extend-ignore-re = [
-  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$", # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
 files.extend-exclude = ["ext/*", "fixtures/*"]
