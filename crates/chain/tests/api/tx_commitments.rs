@@ -328,7 +328,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
 
     genesis_node.mine_blocks(num_blocks_in_epoch).await?;
 
-    peer_node
+    let _block_hash = peer_node
         .wait_until_height(num_blocks_in_epoch as u64, seconds_to_wait)
         .await?;
     let block = peer_node

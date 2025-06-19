@@ -3,6 +3,7 @@ use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
+use irys_actors::block_tree_service::ChainState;
 use irys_actors::mempool_service::TxIngressError;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
@@ -18,7 +19,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::utils::{mine_block, AddTxError, IrysNodeTest};
+use crate::utils::{
+    mine_block, mine_block_and_wait_for_validation, read_block_from_state, AddTxError,
+    BlockValidationOutcome, IrysNodeTest,
+};
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -140,6 +144,9 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
+    // Collect block hashes as we mine
+    let mut block_hashes = Vec::new();
+
     for i in 1..10 {
         info!("manually producing block {}", i);
         let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
@@ -156,9 +163,30 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
         // check irys DB for built block
         let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+
+        // Collect block hash for later verification
+        block_hashes.push(block.block_hash);
+
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
     }
+
+    // Verify all collected blocks are on-chain
+    for (idx, hash) in block_hashes.iter().enumerate() {
+        let state = read_block_from_state(&node.node_ctx, hash).await;
+        assert_eq!(
+            state,
+            BlockValidationOutcome::StoredOnNode(ChainState::Onchain),
+            "Block {} with hash {:?} should be on-chain",
+            idx + 1,
+            hash
+        );
+
+        // Also verify the block can be retrieved from the database
+        let db_block = node.get_block_by_hash(hash).unwrap();
+        assert_eq!(db_block.height, (idx + 1) as u64);
+    }
+
     node.stop().await;
     Ok(())
 }
@@ -170,8 +198,16 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     node.node_ctx.start_mining().await?;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
+    // Collect block hashes as we mine
+    let mut block_hashes = Vec::new();
+
     for i in 1..10 {
-        node.wait_until_height(i + 1, 60).await?;
+        let block_hash = node.wait_until_height(i + 1, 60).await?;
+        let state = read_block_from_state(&node.node_ctx, &block_hash).await;
+        assert_eq!(
+            state,
+            BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
+        );
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
@@ -181,7 +217,27 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
         let db_irys_block = node.get_block_by_height(i).await.unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+
+        // Collect block hash for later verification
+        block_hashes.push(db_irys_block.block_hash);
     }
+
+    // Verify all collected blocks are on-chain
+    for (idx, hash) in block_hashes.iter().enumerate() {
+        let state = read_block_from_state(&node.node_ctx, hash).await;
+        assert_eq!(
+            state,
+            BlockValidationOutcome::StoredOnNode(ChainState::Onchain),
+            "Block {} with hash {:?} should be on-chain",
+            idx + 1,
+            hash
+        );
+
+        // Also verify the block can be retrieved from the database
+        let db_block = node.get_block_by_hash(hash).unwrap();
+        assert_eq!(db_block.height, (idx + 1) as u64);
+    }
+
     node.stop().await;
     Ok(())
 }
@@ -190,7 +246,11 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
+    let (block, _, outcome) = mine_block_and_wait_for_validation(&node.node_ctx).await?;
+    assert_eq!(
+        outcome,
+        BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
+    );
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
@@ -345,21 +405,6 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
             .block_by_hash(block.evm_block_hash)?
             .unwrap();
         let new_ts = reth_block.header.timestamp as u128;
-
-        // on every block *after* genesis, validate the reward shadow
-        if let Some(old_ts) = prev_ts {
-            // expected reward according to the protocol's reward curve
-            let _expected_reward = node
-                .node_ctx
-                .reward_curve
-                .reward_between(old_ts, new_ts)
-                .unwrap();
-            // todo
-            // assert!(
-            //     reward_shadow_found,
-            //     "BlockReward shadow transaction not found in receipts"
-            // );
-        }
 
         // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);

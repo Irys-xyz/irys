@@ -60,7 +60,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     assert_eq!(peer_assignments.len(), 1);
 
     // Wait for the peer to receive & process the epoch block
-    peer_node.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer_node.wait_until_height(2, seconds_to_wait).await?;
     peer_node.wait_for_packing(seconds_to_wait).await;
 
     // Verify that the peer has the same view of its own assignments
@@ -77,7 +77,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     peer_node.mine_block().await?;
 
     // Validate the genesis node processes the peers blocks without errors
-    genesis_node.wait_until_height(4, seconds_to_wait).await?;
+    let _block_hash = genesis_node.wait_until_height(4, seconds_to_wait).await?;
 
     // Mine one more block on the genesis_node to make sure reth state is syncing
     genesis_node.mine_block().await?;

@@ -13,7 +13,7 @@ async fn heavy_test_wait_until_height() {
     let steps = 2;
     let seconds = 60;
     irys_node.node_ctx.start_mining().await.unwrap();
-    irys_node
+    let _block_hash = irys_node
         .wait_until_height(height + steps, seconds)
         .await
         .unwrap();

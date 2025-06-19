@@ -86,8 +86,8 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(peer2_assignments.len(), 1);
 
     // Wait for the peers to receive & process the epoch block
-    peer1_node.wait_until_height(2, seconds_to_wait).await?;
-    peer2_node.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer1_node.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer2_node.wait_until_height(2, seconds_to_wait).await?;
 
     // Wait for them to pack their storage modules with the partition_hashes
     peer1_node.wait_for_packing(seconds_to_wait).await;
@@ -166,7 +166,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(peer1_block_after.block_hash, peer1_block.block_hash);
     assert_eq!(peer2_block_after.block_hash, peer2_block.block_hash);
 
-    genesis_node.wait_until_height(3, seconds_to_wait).await?;
+    let _block_hash = genesis_node.wait_until_height(3, seconds_to_wait).await?;
     let genesis_block = genesis_node.get_block_by_height(3).await?;
 
     debug!(

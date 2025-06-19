@@ -10,8 +10,10 @@ use actix_web::{
 use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
+use eyre::OptionExt;
 use futures::future::select;
-use irys_actors::block_tree_service::ReorgEvent;
+use irys_actors::block_tree_service::{BlockState, ChainState, ReorgEvent};
+
 use irys_actors::mempool_service::MempoolTxs;
 use irys_actors::GetMinerPartitionAssignmentsMessage;
 use irys_actors::{
@@ -433,35 +435,34 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         target_height: u64,
         max_seconds: usize,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<H256> {
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
 
-        while get_canonical_chain(self.node_ctx.block_tree_guard.clone())
-            .await
-            .unwrap()
-            .0
-            .last()
-            .unwrap()
-            .height
-            < target_height
-            && retries < max_retries
-        {
+        loop {
+            let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+                .await
+                .unwrap();
+            let latest_block = canonical_chain.0.last().unwrap();
+
+            if latest_block.height >= target_height {
+                info!(
+                    "reached height {} after {} retries",
+                    target_height, &retries
+                );
+                return Ok(latest_block.block_hash);
+            }
+
+            if retries >= max_retries {
+                return Err(eyre::eyre!(
+                    "Failed to reach target height {} after {} retries",
+                    target_height,
+                    retries
+                ));
+            }
+
             sleep(Duration::from_secs(1)).await;
             retries += 1;
-        }
-        if retries == max_retries {
-            Err(eyre::eyre!(
-                "Failed to reach target height {} after {} retries",
-                target_height,
-                retries
-            ))
-        } else {
-            info!(
-                "reached height {} after {} retries",
-                target_height, &retries
-            );
-            Ok(())
         }
     }
 
@@ -653,7 +654,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
         self.node_ctx.start_mining().await?;
-        self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
+        let _block_hash = self
+            .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
             .actor_addresses
@@ -1106,6 +1108,63 @@ pub async fn mine_block(
         .block_producer
         .send(SolutionFoundMessage(poa_solution.clone()))
         .await?
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockValidationOutcome {
+    StoredOnNode(ChainState),
+    Discarded,
+}
+
+pub async fn mine_block_and_wait_for_validation(
+    node_ctx: &IrysNodeCtx,
+) -> eyre::Result<(
+    Arc<IrysBlockHeader>,
+    EthBuiltPayload,
+    BlockValidationOutcome,
+)> {
+    let (block, reth_payload) = mine_block(node_ctx)
+        .await?
+        .ok_or_eyre("block not returned")?;
+    let block_hash = &block.block_hash;
+    let res = read_block_from_state(node_ctx, block_hash).await;
+
+    Ok((block, reth_payload, res))
+}
+
+pub async fn read_block_from_state(
+    node_ctx: &IrysNodeCtx,
+    block_hash: &H256,
+) -> BlockValidationOutcome {
+    let mut was_validation_scheduled = false;
+
+    for _ in 0..1000 {
+        let read = node_ctx.block_tree_guard.read();
+        let mut result = read
+            .get_block_and_status(block_hash)
+            .into_iter()
+            .map(|(_, state)| *state);
+        let result = result.next();
+
+        let Some(chain_state) = result else {
+            // If we previously saw "validation scheduled" and now block status is None,
+            // it means the block was discarded
+            if was_validation_scheduled {
+                return BlockValidationOutcome::Discarded;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            continue;
+        };
+        match chain_state {
+            ChainState::NotOnchain(BlockState::ValidationScheduled)
+            | ChainState::Validated(BlockState::ValidationScheduled) => {
+                was_validation_scheduled = true;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            _ => return BlockValidationOutcome::StoredOnNode(chain_state),
+        }
+    }
+    BlockValidationOutcome::Discarded
 }
 
 /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
