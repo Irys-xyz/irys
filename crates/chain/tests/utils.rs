@@ -518,8 +518,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Retrieve the transaction header from database
             if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
-                assert_eq!(*tx, header);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
+                // the proofs may be added to the tx during promotion
+                // and so we cant do a direct comparison
+                // we can however check some key fields are equal
+                assert_eq!(tx.id, header.id);
+                assert_eq!(tx.anchor, header.anchor);
+                tracing::info!("Transaction was retrieved ok after {} attempts", attempt);
                 unconfirmed_txs.pop();
             };
             drop(ro_tx);
