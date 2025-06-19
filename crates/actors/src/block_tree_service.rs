@@ -12,7 +12,7 @@ use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context as _};
 use futures::future::Either;
-use irys_database::{block_header_by_hash, database, db::IrysDatabaseExt as _, SystemLedger};
+use irys_database::{block_header_by_hash, SystemLedger};
 use irys_types::{
     Address, BlockHash, Config, ConsensusConfig, DataLedger, DatabaseProvider, H256List,
     IrysBlockHeader, IrysTransactionHeader, H256, U256,
@@ -234,48 +234,12 @@ impl BlockTreeServiceInner {
             }
         };
 
-        let migration_depth = self.consensus_config.chunk_migration_depth as usize;
-
-        // in the test case of migration depth being set as low as 1, it becomes necessary to check the index for the txs
-        // with a deptch higher than 1, the txs should still be in the mempool at this point
-        let submit_txs = if migration_depth >= 1 {
-            let mut found_txs = vec![];
-            for tx_id in block_header.data_ledgers[DataLedger::Submit]
-                .tx_ids
-                .0
-                .clone()
-            {
-                if let Some(tx_header) = self
-                    .db
-                    .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))?
-                {
-                    found_txs.push(tx_header.clone());
-                };
-            }
-            found_txs
-        } else {
-            self.get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
-                .await?
-        };
-        let publish_txs = if migration_depth >= 1 {
-            let mut found_txs = vec![];
-            for tx_id in block_header.data_ledgers[DataLedger::Publish]
-                .tx_ids
-                .0
-                .clone()
-            {
-                if let Some(tx_header) = self
-                    .db
-                    .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))?
-                {
-                    found_txs.push(tx_header.clone());
-                };
-            }
-            found_txs
-        } else {
-            self.get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
-                .await?
-        };
+        let submit_txs = self
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
+            .await?;
+        let publish_txs = self
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
+            .await?;
 
         let mut all_txs = vec![];
         all_txs.extend(publish_txs);

@@ -8,9 +8,9 @@ use futures::future::BoxFuture;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
-    insert_tx_header,
     submodule::get_data_size_by_data_root,
     tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
+    {insert_tx_header, tx_header_by_txid},
 };
 use irys_database::{insert_commitment_tx, SystemLedger};
 use irys_primitives::CommitmentType;
@@ -113,7 +113,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process ChunkIngressMessage")
     }
 
-    // checks mempool
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
@@ -165,7 +164,7 @@ pub enum MempoolServiceMessage {
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
-    /// Confirm data tx exists in mempool
+    /// Confirm data/storage tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// validate and process an incoming IrysTransactionHeader
     IngestDataTx(
@@ -181,7 +180,7 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-    /// Get IrysTransactionHeader from mempool
+    /// Get IrysTransactionHeader from mempool or mdbx
     GetDataTxs(
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
@@ -527,7 +526,7 @@ pub fn generate_ingress_proof(
 }
 
 impl Inner {
-    /// check the mempool data transaction
+    /// check the mempool and mdbx for data transaction
     async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
@@ -542,7 +541,14 @@ impl Inner {
                 found_txs.push(Some(tx_header.clone()));
                 continue;
             }
-            // not found in mempool
+            // if data tx exists in mdbx
+            if let Ok(read_tx) = self.read_tx() {
+                if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
+                    found_txs.push(Some(tx_header.clone()));
+                    continue;
+                }
+            }
+            // not found anywhere
             found_txs.push(None);
         }
 
@@ -1126,8 +1132,6 @@ impl Inner {
         let mut confirmed_commitments = HashSet::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
-        let mut confirmed_data_submit_txs = HashSet::new();
-        let mut confirmed_data_publish_txs = HashSet::new();
 
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
@@ -1219,25 +1223,8 @@ impl Inner {
 
         // Prepare storage transactions for inclusion after commitments
         let mut all_storage_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
+
         drop(mempool_state_guard);
-
-        // Get a list of all recently confirmed data txids in the canonical chain
-        let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
-        for entry in canonical {
-            // TODO: replace this with data from the canonical chain entry when block_tree refactors the tuple
-            let data_submit_tx_ids = entry.data_ledgers[&DataLedger::Submit].0.clone();
-            let data_publish_tx_ids = entry.data_ledgers[&DataLedger::Publish].0.clone();
-
-            // Remove any confirmed submit tx
-            for tx_id in &data_submit_tx_ids {
-                confirmed_data_submit_txs.insert(*tx_id);
-            }
-
-            // Remove any confirmed publish tx
-            for tx_id in &data_publish_tx_ids {
-                confirmed_data_publish_txs.insert(*tx_id);
-            }
-        }
 
         // Sort storage transactions by fee (highest first) to maximize revenue
         all_storage_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
@@ -1256,15 +1243,6 @@ impl Inner {
         // Select storage transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in all_storage_txs {
-            if confirmed_data_publish_txs.contains(&tx.id) {
-                continue; // Skip already confirmed publish tx
-            }
-            if confirmed_data_submit_txs.contains(&tx.id) {
-                // if we have no proofs then it's still a submit tx
-                if tx.ingress_proofs.is_none() {
-                    continue; // Skip already confirmed submit tx
-                }
-            }
             if check_funding(&tx) {
                 storage_tx.push(tx);
                 if storage_tx.len() >= max_txs {
@@ -1442,7 +1420,7 @@ impl Inner {
             .any(|tx| tx.id == commitment_tx_id))
     }
 
-    /// checks only the mempool
+    /// checks mempool and mdbx
     async fn handle_data_tx_exists_message(&self, txid: H256) -> Result<bool, TxReadError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
@@ -1456,8 +1434,18 @@ impl Inner {
             // Still has it, just invalid
             Ok(true)
         } else {
-            // not found in mempool
-            Ok(false)
+            drop(mempool_state_guard);
+            let read_tx = self.read_tx();
+
+            if read_tx.is_err() {
+                Err(TxReadError::DatabaseError)
+            } else {
+                Ok(
+                    tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
+                        .map_err(|_| TxReadError::DatabaseError)?
+                        .is_some(),
+                )
+            }
         }
     }
 
