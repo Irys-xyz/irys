@@ -1,5 +1,5 @@
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_discovery::{get_data_tx_in_parallel, BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
@@ -224,12 +224,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 // Loop though all the pending tx to see which haven't been promoted
                 for txid in &publish_txids {
-                    let tx_header = match tx_header_by_txid(&read_tx, txid) {
-                        Ok(Some(header)) => header,
-                        Ok(None) => {
-                            error!("No transaction header found for txid: {}", txid);
+                    let tx_header = match get_data_tx_in_parallel(vec![*txid], &service_senders.mempool, &db).await {
+                        Ok(headers) if headers.len() == 1 => headers.into_iter().next().unwrap(),
+                        Ok(_) => {
+                            error!("No transaction header found or multiple headers returned for txid: {}", txid);
                             continue;
-                        },
+                        }
                         Err(e) => {
                             error!("Error fetching transaction header for txid {}: {}", txid, e);
                             continue;
