@@ -279,20 +279,11 @@ where
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
         tokio::spawn(async move {
-            if let Some(execution_data) = execution_payload_provider
-                .wait_for_payload(&evm_block_hash)
+            if let Some(sealed_block) = execution_payload_provider
+                .wait_for_sealed_block(&evm_block_hash)
                 .await
             {
-                let evm_block = match execution_data.try_into_block() {
-                    Ok(block) => block,
-                    Err(e) => {
-                        error!(
-                            "Failed to convert execution payload to block for block {:?}: {:?}",
-                            evm_block_hash, e
-                        );
-                        return;
-                    }
-                };
+                let evm_block = sealed_block.into_block();
                 if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
                     GossipCacheKey::ExecutionPayload(evm_block_hash),
                     GossipData::ExecutionPayload(evm_block),

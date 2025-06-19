@@ -442,8 +442,11 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .send(GossipBroadcastMessage::from(block.clone()))
         .expect("Failed to send block to service 2");
 
-    // Wait for service 2 to process the block and receive the execution payload
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Wait for service 2 to process the block and receive the execution payload with a timeout of 10 seconds
+    fixture2
+        .execution_payload_provider
+        .test_observe_sealed_block_arrival(block.evm_block_hash, Duration::from_secs(10))
+        .await;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
@@ -453,17 +456,22 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .get_locally_stored_evm_block(&block.evm_block_hash)
         .await
         .expect("to get execution payload stored on peer 1 from peer 2");
-
     assert_eq!(local_block, evm_block);
 
-    let local_execution_data = fixture2
+    let local_sealed_block = fixture2
         .execution_payload_provider
-        .get_locally_stored_payload(&block.evm_block_hash)
+        .get_locally_stored_sealed_block(&block.evm_block_hash)
         .await
         .expect("to get execution payload stored on peer 1 from peer 2");
+    assert_eq!(local_sealed_block, evm_block.seal_slow());
 
+    let payload = fixture2
+        .execution_payload_provider
+        .wait_for_payload(&block.evm_block_hash)
+        .await
+        .expect("to wait for execution payload");
     // We compare the payloads because the execution data doesn't implement `PartialEq` directly
-    assert_eq!(local_execution_data.payload, block_execution_data.payload);
+    assert_eq!(payload.payload, block_execution_data.payload);
 
     Ok(())
 }

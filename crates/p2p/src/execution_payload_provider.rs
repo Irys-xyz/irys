@@ -12,6 +12,7 @@ use reth::rpc::types::engine::ExecutionData;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use tokio::sync::oneshot::Receiver;
 use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
@@ -85,7 +86,8 @@ impl From<IrysRethNodeAdapter> for RethBlockProvider {
 pub struct ExecutionPayloadProvider<TPeerList: PeerList> {
     cache: Arc<RwLock<ExecutionPayloadCache>>,
     reth_payload_provider: RethBlockProvider,
-    payload_senders: Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<ExecutionData>>>>>,
+    payload_senders:
+        Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<SealedBlock<Block>>>>>>,
     peer_list: TPeerList,
 }
 
@@ -108,22 +110,20 @@ where
 
     pub async fn add_payload_to_cache(&self, sealed_block: SealedBlock<Block>) {
         let evm_block_hash = sealed_block.hash();
-        let execution_data =
-            <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
         {
             debug!("Adding execution payload to cache: {:?}", evm_block_hash);
             let mut cache = self.cache.write().await;
-            cache.payloads.put(evm_block_hash, execution_data.clone());
+            cache.payloads.put(evm_block_hash, sealed_block.clone());
             cache
                 .payloads_currently_requested_from_the_network
                 .pop(&evm_block_hash);
         }
         if let Some(senders) = self.payload_senders.write().await.pop(&evm_block_hash) {
             for sender in senders {
-                if let Err(returned_payload) = sender.send(execution_data.clone()) {
+                if let Err(returned_payload) = sender.send(sealed_block.clone()) {
                     warn!(
                         "Failed to send execution payload to receiver: {:?}",
-                        returned_payload.block_hash()
+                        returned_payload.hash()
                     );
                 }
             }
@@ -137,34 +137,31 @@ where
         &self,
         evm_block_hash: &B256,
     ) -> Option<Block> {
-        if let Some(payload) = self.cache.write().await.payloads.get(evm_block_hash) {
-            match payload.clone().try_into_block() {
-                Ok(evm_block) => return Some(evm_block),
-                Err(e) => {
-                    error!(
-                        "Failed to convert execution payload to block: {:?}, error: {:?}",
-                        evm_block_hash, e
-                    );
-                }
-            }
+        if let Some(sealed_block) = self.cache.write().await.payloads.get(evm_block_hash) {
+            Some(sealed_block.clone_block())
+        } else {
+            self.reth_payload_provider.evm_block(*evm_block_hash).await
         }
-        if let Some(evm_block) = self.reth_payload_provider.evm_block(*evm_block_hash).await {
-            return Some(evm_block);
-        }
-        None
     }
 
-    pub async fn get_locally_stored_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        if let Some(execution_data) = self.cache.write().await.payloads.get(evm_block_hash) {
-            return Some(execution_data.clone());
+    pub async fn get_locally_stored_sealed_block(
+        &self,
+        evm_block_hash: &B256,
+    ) -> Option<SealedBlock<Block>> {
+        let maybe_sealed = {
+            let mut cache = self.cache.write().await;
+            cache.payloads.get(evm_block_hash).cloned()
+        };
+
+        if let Some(s) = maybe_sealed {
+            Some(s)
+        } else {
+            let block = self
+                .reth_payload_provider
+                .evm_block(*evm_block_hash)
+                .await?;
+            Some(block.seal_slow())
         }
-        if let Some(evm_block) = self.reth_payload_provider.evm_block(*evm_block_hash).await {
-            let sealed_block = evm_block.seal_slow();
-            let execution_data =
-                <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
-            return Some(execution_data);
-        }
-        None
     }
 
     /// Waits for the execution payload to arrive over gossip. This method will first check the local
@@ -181,26 +178,21 @@ where
     /// let evm_block_hash = irys_block.evm_block_hash;
     /// ```
     pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        if let Some(execution_data) = self.get_locally_stored_payload(evm_block_hash).await {
-            return Some(execution_data);
+        self.wait_for_sealed_block(evm_block_hash).await.map(|sealed_block| {
+            <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block)
+        })
+    }
+
+    /// Same as [ExecutionPayloadProvider::wait_for_payload], but returns the sealed block instead
+    /// of the execution data.
+    pub async fn wait_for_sealed_block(&self, evm_block_hash: &B256) -> Option<SealedBlock<Block>> {
+        if let Some(sealed_block) = self.get_locally_stored_sealed_block(evm_block_hash).await {
+            return Some(sealed_block);
         }
 
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-
-        {
-            let mut payload_senders = self.payload_senders.write().await;
-            if let Some(senders) = payload_senders.get_mut(evm_block_hash) {
-                senders.push(sender)
-            } else {
-                payload_senders.push(*evm_block_hash, vec![sender]);
-            }
-        }
-
+        let receiver = self.block_receiver(*evm_block_hash).await;
         self.request_payload_from_the_network(*evm_block_hash).await;
-
-        let payload = receiver.await.ok()?;
-
-        Some(payload)
+        receiver.await.ok()
     }
 
     pub async fn request_payload_from_the_network(&self, evm_block_hash: B256) {
@@ -233,10 +225,42 @@ where
             .payloads_currently_requested_from_the_network
             .contains(evm_block_hash)
     }
+
+    async fn block_receiver(&self, evm_block_hash: B256) -> Receiver<SealedBlock<Block>> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+
+        let mut senders = self.payload_senders.write().await;
+        if let Some(senders) = senders.get_mut(&evm_block_hash) {
+            senders.push(sender);
+        } else {
+            senders.push(evm_block_hash, vec![sender]);
+        }
+
+        receiver
+    }
+
+    #[cfg(test)]
+    pub async fn test_observe_sealed_block_arrival(
+        &self,
+        evm_block_hash: B256,
+        timeout: std::time::Duration,
+    ) {
+        if self
+            .get_locally_stored_sealed_block(&evm_block_hash)
+            .await
+            .is_none()
+        {
+            let receiver = self.block_receiver(evm_block_hash).await;
+            tokio::time::timeout(timeout, receiver)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 }
 
 #[derive(Debug)]
 struct ExecutionPayloadCache {
-    payloads: LruCache<B256, ExecutionData>,
+    payloads: LruCache<B256, SealedBlock<Block>>,
     payloads_currently_requested_from_the_network: LruCache<B256, ()>,
 }
