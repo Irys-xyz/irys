@@ -48,7 +48,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     )
     .await?;
 
-    let app = node.start_public_api().await;
+    node.start_public_api().await;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
