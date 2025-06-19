@@ -145,28 +145,24 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     }
     assert_eq!(ingress_proofs.len(), expected_proofs);
 
-    // now chunks have been posted. mine a block to get the publish ledger to be updated in the latest block
-    node.mine_block().await?;
+    // now chunks have been posted. mine some blocks to get the publish ledger to be updated in the latest block
+    node.mine_blocks(3).await?;
 
-    // wait for the first set of chunks to appear in the publish ledger
-    let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
-    assert!(result.is_ok());
-
-    // confirm that we no longer have any CachedChunks in mdbx table
+    // confirm that we have one entry in CachedChunks mdbx table
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;
-
-    assert_eq!(*chunk_cache_count, 0_u64);
+    assert_eq!(*chunk_cache_count, 1_u64);
 
     // mine enough blocks to cause chunk migration
     node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
         .await?;
 
+    // confirm that we no longer see an entry in CachedChunks mdbx table
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;
-    assert_eq!(*chunk_cache_count, 0);
+    assert_eq!(*chunk_cache_count, 0_u64);
 
     // make sure we can read the chunks after migration
     let chunk_res = client
