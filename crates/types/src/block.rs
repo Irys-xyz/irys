@@ -253,20 +253,6 @@ impl IrysBlockHeader {
         }
         data_txids
     }
-
-    /// get both submit and publish storage ledger txs from blocks data ledger
-    pub fn get_storage_ledger_tx_ids(&self) -> Vec<H256> {
-        // Because of a circular dependency the types crate can't import the DataLedger enum
-        // DataLedger::Publish = 0, DataLedger::Submit = 1,
-        let storage_txids = self
-            .data_ledgers
-            .iter()
-            .filter(|l| l.ledger_id == 0 || l.ledger_id == 1)
-            .flat_map(|l| l.tx_ids.0.iter().copied())
-            .collect::<Vec<_>>();
-
-        storage_txids
-    }
 }
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval

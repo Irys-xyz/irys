@@ -806,8 +806,14 @@ impl Inner {
         }
         tx.inner.commit()?;
 
-        // stage 2: move data transactions from tree to index
-        let storage_tx_ids = migrated_block.get_storage_ledger_tx_ids();
+        // stage 2: move submit transactions from tree to index
+        let submit_tx_ids: Vec<H256> = migrated_block
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::Submit)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
         {
             let mut_tx = self
                 .irys_db
@@ -817,30 +823,70 @@ impl Inner {
                 })
                 .expect("expected to read/write to database");
 
-            // FIXME: this next line is less efficicent than it needs to be?
+            // FIXME: this next line is less efficent than it needs to be?
             //        why would we read mdbx txs when we are migrating?
-            let data_tx_headers = self
-                .handle_get_data_tx_message(storage_tx_ids.clone())
-                .await;
-            for maybe_storage_tx_header in data_tx_headers {
-                if let Some(storage_tx_header) = maybe_storage_tx_header {
-                    if let Err(err) = insert_tx_header(&mut_tx, &storage_tx_header) {
-                        error!(
-                            "Could not insert transaction header - txid: {} err: {}",
-                            storage_tx_header.id, err
-                        );
+            let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
+            data_tx_headers
+                .into_iter()
+                .for_each(|maybe_header| match maybe_header {
+                    Some(ref header) => {
+                        if let Err(err) = insert_tx_header(&mut_tx, header) {
+                            error!(
+                                "Could not insert transaction header - txid: {} err: {}",
+                                header.id, err
+                            );
+                        }
                     }
-                } else {
-                    error!("Could not find transaction header in mempool");
-                }
-            }
+                    None => {
+                        error!("Could not find transaction header in mempool");
+                    }
+                });
+            mut_tx.commit().expect("expect to commit to database");
+        }
 
+        // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
+        let publish_tx_ids: Vec<H256> = migrated_block
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::Publish)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        {
+            let mut_tx = self
+                .irys_db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            let publish_tx_headers = self
+                .handle_get_data_tx_message(publish_tx_ids.clone())
+                .await;
+            publish_tx_headers
+                .into_iter()
+                .for_each(|maybe_header| match maybe_header {
+                    Some(ref header) => {
+                        // When a block was confirmed, handle_block_confirmed_message() updates the mempool submit tx headers with ingress proofs
+                        // this means the header includes the proofs when we now insert (overwrite existing entry) into the database
+                        if let Err(err) = insert_tx_header(&mut_tx, header) {
+                            error!(
+                                "Could not insert transaction header - txid: {} err: {}",
+                                header.id, err
+                            );
+                        }
+                    }
+                    None => {
+                        error!("Could not find transaction header in mempool");
+                    }
+                });
             mut_tx.commit().expect("expect to commit to database");
         }
 
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
-        for txid in storage_tx_ids.iter() {
+        for txid in submit_tx_ids.iter() {
             // Remove the data tx from the pending valid_tx pool
             mempool_state_write_guard.valid_tx.remove(txid);
             mempool_state_write_guard.recent_valid_tx.remove(txid);
