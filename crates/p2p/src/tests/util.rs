@@ -374,7 +374,7 @@ impl GossipServiceTestFixture {
         mpsc::UnboundedSender<GossipData>,
     ) {
         let (internal_message_bus, rx) = tokio::sync::mpsc::unbounded_channel::<GossipData>();
-        let gossip_service = P2PService::new(self.mining_address, rx);
+        let gossip_service = P2PService::new(self.mining_address, rx, internal_message_bus.clone());
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()

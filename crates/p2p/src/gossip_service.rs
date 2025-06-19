@@ -29,7 +29,7 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -107,7 +107,8 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    mempool_data_receiver: Option<UnboundedReceiver<GossipData>>,
+    broadcast_data_receiver: Option<UnboundedReceiver<GossipData>>,
+    broadcast_data_sender: UnboundedSender<GossipData>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
@@ -129,6 +130,7 @@ impl P2PService {
     pub fn new(
         mining_address: Address,
         broadcast_data_receiver: UnboundedReceiver<GossipData>,
+        broadcast_data_sender: UnboundedSender<GossipData>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -138,7 +140,8 @@ impl P2PService {
         Self {
             client,
             cache,
-            mempool_data_receiver: Some(broadcast_data_receiver),
+            broadcast_data_receiver: Some(broadcast_data_receiver),
+            broadcast_data_sender,
             sync_state: SyncState::new(true),
         }
     }
@@ -175,6 +178,7 @@ impl P2PService {
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
+            self.broadcast_data_sender.clone(),
         );
 
         let server_data_handler = GossipServerDataHandler {
@@ -194,7 +198,7 @@ impl P2PService {
         let server_handle = server.handle();
 
         let mempool_data_receiver =
-            self.mempool_data_receiver
+            self.broadcast_data_receiver
                 .take()
                 .ok_or(GossipError::Internal(
                     InternalGossipError::BroadcastReceiverShutdown,

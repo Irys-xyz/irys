@@ -5,7 +5,9 @@ use crate::SyncState;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader};
+use irys_types::{
+    BlockHash, DatabaseProvider, GossipData, GossipExecutionPayloadData, IrysBlockHeader,
+};
 use lru::LruCache;
 use reth::revm::primitives::B256;
 use std::num::NonZeroUsize;
@@ -49,6 +51,8 @@ where
 
     block_status_provider: BlockStatusProvider,
     execution_payload_provider: ExecutionPayloadProvider<P>,
+
+    gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipData>,
 }
 
 #[derive(Clone, Debug)]
@@ -167,6 +171,7 @@ where
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
+        gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipData>,
     ) -> Self {
         Self {
             db,
@@ -176,6 +181,7 @@ where
             sync_state,
             block_status_provider,
             execution_payload_provider,
+            gossip_broadcast_sender,
         }
     }
 
@@ -235,7 +241,7 @@ where
             );
 
             // Request the execution payload for the block if it is not already stored locally
-            self.request_execution_payload(block_header.evm_block_hash);
+            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash);
 
             self.sync_state
                 .mark_processed(current_block_height as usize);
@@ -266,25 +272,39 @@ where
     }
 
     /// Requests the execution payload for the given EVM block hash if it is not already stored
-    /// locally. This function spawns a new task to fire the request without waiting for the
-    /// response.
-    pub(crate) fn request_execution_payload(&self, evm_block_hash: B256) {
+    /// locally. After that, it waits for the payload to arrive and broadcasts it.
+    /// This function spawns a new task to fire the request without waiting for the response.
+    pub(crate) fn handle_execution_payload_for_prevalidated_block(&self, evm_block_hash: B256) {
         let execution_payload_provider = self.execution_payload_provider.clone();
+        let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
         tokio::spawn(async move {
-            let is_payload_stored_locally = execution_payload_provider
-                .get_locally_stored_evm_block(&evm_block_hash)
+            if let Some(payload) = execution_payload_provider
+                .wait_for_payload(&evm_block_hash)
                 .await
-                .is_some();
-            if !is_payload_stored_locally {
-                debug!("Execution payload for block {:?} is not stored locally, requesting from the network", evm_block_hash);
-                execution_payload_provider
-                    .request_payload_from_the_network(evm_block_hash)
-                    .await;
-            } else {
-                debug!(
-                    "Execution payload for block {:?} is already stored locally",
-                    evm_block_hash
-                );
+            {
+                let block = match payload.try_into_block() {
+                    Ok(block) => block,
+                    Err(e) => {
+                        error!(
+                            "Failed to convert execution payload to block for block {:?}: {:?}",
+                            evm_block_hash, e
+                        );
+                        return;
+                    }
+                };
+                if let Err(err) = gossip_broadcast_sender.send(GossipData::ExecutionPayload(
+                    GossipExecutionPayloadData::new(evm_block_hash, block),
+                )) {
+                    error!(
+                        "Failed to broadcast execution payload for block {:?}: {:?}",
+                        evm_block_hash, err
+                    );
+                } else {
+                    debug!(
+                        "Execution payload for block {:?} has been broadcasted",
+                        evm_block_hash
+                    );
+                }
             }
         });
     }

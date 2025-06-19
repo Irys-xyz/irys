@@ -171,6 +171,8 @@ async fn should_process_block() {
         execution_payload_provider,
     } = MockedServices::new(&config).await;
 
+    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
     let sync_state = SyncState::new(false);
     let service = BlockPool::new(
         db.clone(),
@@ -179,6 +181,7 @@ async fn should_process_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
+        gossip_broadcast_sender,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
@@ -277,6 +280,8 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("can't send message to peer list");
 
     let sync_state = SyncState::new(false);
+    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
 
     let block_pool = BlockPool::new(
         db.clone(),
@@ -285,6 +290,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
+        gossip_broadcast_sender,
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
@@ -340,6 +346,9 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false);
+    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
+
     let block_pool = BlockPool::new(
         db.clone(),
         peer_addr,
@@ -347,6 +356,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider,
+        gossip_broadcast_sender,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -433,6 +443,9 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         .expect("can't send message to peer list");
 
     let sync_state = SyncState::new(false);
+    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
+
     let block_pool = BlockPool::new(
         db.clone(),
         peer_addr,
@@ -440,6 +453,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
+        gossip_broadcast_sender,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
