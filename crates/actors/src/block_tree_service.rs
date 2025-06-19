@@ -651,7 +651,8 @@ impl BlockTreeServiceInner {
 
         if received.len() != data_tx_ids.len() {
             return Err(eyre::eyre!(
-                "Mismatch in tx count: expected {}, got {}",
+                "Mismatch in {:?} tx count: expected {}, got {}",
+                ledger,
                 data_tx_ids.len(),
                 received.len()
             ));
