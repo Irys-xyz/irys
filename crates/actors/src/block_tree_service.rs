@@ -13,8 +13,7 @@ use base58::ToBase58 as _;
 use eyre::{ensure, Context as _};
 use futures::future::Either;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, CommitmentSnapshot,
-    SystemLedger,
+    block_header_by_hash, commitment_tx_by_txid, CommitmentSnapshot, SystemLedger,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
@@ -552,38 +551,12 @@ impl BlockTreeServiceInner {
                          );
                         } else {
                             debug!(
-                            "\u{001b}[32mNo new tip found {}, current tip {} cdiff: {} height: {}\u{001b}[0m",
-                            block_hash,
-                            old_tip_block.block_hash,
-                            old_tip_block.cumulative_diff,
-                            old_tip_block.height
-                        );
-                    }
-                    return;
-                };
-
-                // if the old tip isn't in the fork_blocks, it's a reorg
-                let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
-
-                // Get block info before mutable operations
-                let block_entry = cache.blocks.get(&block_hash).unwrap();
-                let arc_block = Arc::new(block_entry.block.clone());
-
-                // Now do mutable operations
-                if cache.mark_tip(&block_hash).is_ok() {
-                    if is_reorg {
-                        let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
-                        orphaned_blocks.push(&old_tip_block);
-
-                        let fork_hash = orphaned_blocks.first().unwrap().block_hash;
-                        let fork_block = cache.get_block(&fork_hash).unwrap();
-                        let fork_height = fork_block.height;
-
-                        // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
-                        let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
-                        for block in &orphaned_blocks {
-                            let entry = make_block_tree_entry(block);
-                            old_canonical.push(entry);
+                                "\u{001b}[32mNo new tip found {}, current tip {} cdiff: {} height: {}\u{001b}[0m",
+                                block_hash,
+                                old_tip_block.block_hash,
+                                old_tip_block.cumulative_diff,
+                                old_tip_block.height
+                            );
                         }
                         return;
                     };
@@ -608,7 +581,7 @@ impl BlockTreeServiceInner {
                             // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
                             let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
                             for block in &orphaned_blocks {
-                                let entry = make_chain_cache_entry(block);
+                                let entry = make_block_tree_entry(block);
                                 old_canonical.push(entry);
                             }
                             let new_canonical = cache.get_canonical_chain();
@@ -791,38 +764,6 @@ pub fn prune_chains_at_ancestor(
 pub enum ValidationResult {
     Valid,
     Invalid,
-}
-
-
-/// Number of blocks to retain in cache from chain head
-const BLOCK_CACHE_DEPTH: u64 = 50;
-
-/// Fetches full transaction headers from a ledger in a block.
-/// Returns None if any headers are missing or on DB errors.
-fn get_ledger_tx_headers<T: DbTx>(
-    tx: &T,
-    block_header: &IrysBlockHeader,
-    ledger: DataLedger,
-) -> Option<Vec<IrysTransactionHeader>> {
-    match block_header.data_ledgers[ledger]
-        .tx_ids
-        .iter()
-        .map(|txid| {
-            let opt = tx_header_by_txid(tx, txid)
-                .map_err(|e| eyre::eyre!("Failed to get tx header: {}", e))?;
-            opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-        })
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(txs) => Some(txs),
-        Err(e) => {
-            error!(
-                "Failed to collect tx headers for {:?} ledger: {}",
-                ledger, e
-            );
-            None
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
