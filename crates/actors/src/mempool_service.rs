@@ -442,7 +442,7 @@ impl TxReadError {
 #[derive(Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
-    pub data_tx: Vec<IrysTransactionHeader>,
+    pub submit_tx: Vec<IrysTransactionHeader>,
 }
 
 /// Generates an ingress proof for a specific `data_root`
@@ -1250,7 +1250,7 @@ impl Inner {
         all_data_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
         // Apply block size constraint and funding checks to data transactions
-        let mut data_tx = Vec::new();
+        let mut submit_tx = Vec::new();
         let max_txs = self
             .config
             .node_config
@@ -1264,8 +1264,8 @@ impl Inner {
         // and maximum transaction count per block
         for tx in all_data_txs {
             if check_funding(&tx) {
-                data_tx.push(tx);
-                if data_tx.len() >= max_txs {
+                submit_tx.push(tx);
+                if submit_tx.len() >= max_txs {
                     break;
                 }
             }
@@ -1274,7 +1274,7 @@ impl Inner {
         // Return selected transactions grouped by type
         MempoolTxs {
             commitment_tx,
-            data_tx,
+            submit_tx,
         }
     }
 

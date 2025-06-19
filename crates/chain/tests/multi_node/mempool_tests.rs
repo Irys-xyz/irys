@@ -554,7 +554,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_previous = rx.await?;
     // previous block does not have the fund tx, the tx should not be present
     assert_eq!(
-        best_previous.data_tx.len(),
+        best_previous.submit_tx.len(),
         0,
         "there should not be a storage tx (lack of funding due to changed parent EVM block)"
     );
@@ -569,7 +569,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_current = rx.await?;
     // latest block has the fund tx, so it should be present
     assert_eq!(
-        best_current.data_tx.len(),
+        best_current.submit_tx.len(),
         1,
         "There should be a storage tx"
     );
@@ -597,7 +597,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_current = rx.await?;
 
     assert_eq!(
-        best_current.data_tx.len(),
+        best_current.submit_tx.len(),
         0,
         "There shouldn't be a storage tx"
     );
