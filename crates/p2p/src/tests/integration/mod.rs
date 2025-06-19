@@ -5,6 +5,8 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
 };
+use reth::revm::primitives::B256;
+use reth::rpc::types::engine::{ExecutionPayload, ExecutionPayloadV1};
 use tracing::debug;
 
 #[actix_web::test]
@@ -349,12 +351,16 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // Create a test block with transactions
-    let mut block = IrysBlockHeader::default();
+    let mut block = IrysBlockHeader::new_mock_header();
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
     block.data_ledgers.push(ledger);
+    let signer = IrysSigner::random_signer(&fixture1.config.consensus);
+    signer
+        .sign_block_header(&mut block)
+        .expect("to sign block header");
 
     // Set up the mock API client to return only one transaction
     fixture2.api_client_stub.txs.insert(tx1.id, tx1.clone());
@@ -381,6 +387,74 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
+    let mut fixture1 = GossipServiceTestFixture::new().await;
+    let mut fixture2 = GossipServiceTestFixture::new().await;
+
+    fixture1.add_peer(&fixture2).await;
+    fixture2.add_peer(&fixture1).await;
+
+    // Create a test block with transactions
+    let mut block = IrysBlockHeader {
+        block_hash: BlockHash::random(),
+        evm_block_hash: B256::random(),
+        ..IrysBlockHeader::new_mock_header()
+    };
+    let signer = IrysSigner::random_signer(&fixture1.config.consensus);
+    signer
+        .sign_block_header(&mut block)
+        .expect("to sign block header");
+
+    let block_payload = ExecutionPayload::V1(ExecutionPayloadV1 {
+        block_hash: block.evm_block_hash,
+        parent_hash: Default::default(),
+        fee_recipient: Default::default(),
+        state_root: Default::default(),
+        receipts_root: Default::default(),
+        logs_bloom: Default::default(),
+        prev_randao: Default::default(),
+        block_number: 0,
+        gas_limit: 0,
+        gas_used: 0,
+        timestamp: 0,
+        extra_data: Default::default(),
+        base_fee_per_gas: Default::default(),
+        transactions: vec![],
+    });
+    fixture1
+        .execution_payload_provider
+        .add_payload_to_cache(block_payload.clone())
+        .await;
+
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
+
+    // Waiting a little for the service to initialize
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Send block from service 1 to service 2
+    gossip_service1_message_bus
+        .send(GossipData::Block(block.clone()))
+        .expect("Failed to send block to service 2");
+
+    // Wait for service 2 to process the block and receive the execution payload
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
+
+    let execution_payload = fixture2
+        .execution_payload_provider
+        .get_locally_stored_payload(&block.evm_block_hash)
+        .await
+        .expect("to get execution payload stored on peer 1 from peer 2");
+
+    assert_eq!(execution_payload, block_payload);
 
     Ok(())
 }

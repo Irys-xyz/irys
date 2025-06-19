@@ -300,8 +300,7 @@ pub fn solution_hash_is_valid(
     }
 }
 
-/// Returns Ok if the provided `PoA` is valid, Err otherwise
-/// Check recall range is valid
+/// Returns Ok if the vdf recall range in the block is valid
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
@@ -517,28 +516,43 @@ pub async fn system_transactions_are_valid(
         .ok_or_eyre("Block not found in reth")?;
 
     // 2. Extract system transactions from the beginning of the block
-    let mut system_txs = Vec::new();
-    for tx in block_txs {
-        // Try to decode as system transaction
-        if let Ok(system_tx) = SystemTransaction::decode(&mut tx.input().as_ref()) {
-            let tx_signer = tx.into_signed().recover_signer()?;
-            ensure!(
-                block.miner_address == tx_signer,
-                "System tx signer is not the miner"
-            );
-            system_txs.push(system_tx);
-        } else {
-            // If we can't decode as system tx, we've reached the regular transactions
-            break;
-        }
-    }
+    let mut expect_system_txs = true;
+    let actual_system_txs = block_txs
+        .into_iter()
+        .map(|tx| {
+            if expect_system_txs {
+                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+                let tx_signer = tx.into_signed().recover_signer()?;
+                let Ok(system_tx) = system_tx else {
+                    // after reaching first non-system tx, we scan the rest of the
+                    // txs to check if we don't have any stray system txs in there
+                    expect_system_txs = false;
+                    return Ok(None);
+                };
+
+                ensure!(
+                    block.miner_address == tx_signer,
+                    "System tx signer is not the miner"
+                );
+                Ok(Some(system_tx))
+            } else {
+                // ensure that no other system txs are present in the block
+                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+                ensure!(
+                    system_tx.is_err(),
+                    "system tx injected in the middle of the block"
+                );
+                Ok(None)
+            }
+        })
+        .filter_map(std::result::Result::transpose);
 
     // 3. Generate expected system transactions
     let expected_txs =
         generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
 
     // 4. Validate they match
-    validate_system_transactions_match(system_txs.into_iter(), expected_txs.into_iter())
+    validate_system_transactions_match(actual_system_txs, expected_txs.into_iter())
 }
 
 /// Generates expected system transactions by looking up required data from the database
@@ -644,7 +658,7 @@ async fn extract_storage_txs(
 /// Validates that the actual system transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
 fn validate_system_transactions_match(
-    actual: impl Iterator<Item = SystemTransaction>,
+    actual: impl Iterator<Item = eyre::Result<SystemTransaction>>,
     expected: impl Iterator<Item = SystemTransaction>,
 ) -> eyre::Result<()> {
     // Validate each expected system transaction
@@ -655,6 +669,7 @@ fn validate_system_transactions_match(
             tracing::warn!(?data, "system tx len mismatch");
             eyre::bail!("actual and expected system txs lens differ");
         };
+        let actual = actual?;
         ensure!(
             actual == expected,
             "System transaction mismatch at idx {}. expected {:?}, got {:?}",
@@ -758,7 +773,7 @@ mod tests {
         let msg = NewEpochMessage {
             previous_epoch_block: None,
             epoch_block: arc_genesis.clone(),
-            commitments,
+            commitments: Arc::new(commitments),
         };
         match epoch_service_addr.send(msg).await {
             Ok(_) => info!("Genesis Epoch tasks complete."),

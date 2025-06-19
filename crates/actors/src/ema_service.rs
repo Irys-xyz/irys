@@ -689,7 +689,7 @@ mod price_cache_context {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::{block_tree_service::ChainState, ema_service::tests::genesis_tree};
+        use crate::block_tree_service::ChainState;
         use rstest::rstest;
 
         #[test_log::test(tokio::test)]
@@ -710,7 +710,7 @@ mod price_cache_context {
             #[case] height_current_ema_predecessor: u64,
         ) {
             // setup
-            use crate::block_tree_service::BlockState;
+            use crate::block_tree_service::{test_utils::genesis_tree, BlockState};
             let interval = 10;
             let threshold = height_latest_block / 2;
             let mut blocks = (0..=height_latest_block)
@@ -753,8 +753,8 @@ mod price_cache_context {
         #[cfg(test)]
         mod from_canonical_chain_subset_tests {
             use super::*;
+            use crate::block_tree_service::test_utils::genesis_tree;
             use crate::block_tree_service::BlockState;
-            use crate::ema_service::tests::genesis_tree;
             use rstest::rstest;
 
             /// Parameterized test for from_canonical_chain_subset with varying chain_length, max_height,
@@ -778,7 +778,6 @@ mod price_cache_context {
                 #[case] height_exp_pricing: u64,
             ) {
                 // Setup
-
                 let blocks_in_interval = 10;
                 let max_confirmed_height = height_chain_max / 2;
                 let mut blocks = (0..=height_chain_max)
@@ -839,347 +838,29 @@ mod price_cache_context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_tree_service::{get_canonical_chain, BlockTreeCache, ChainState, ReorgEvent};
-    use irys_types::{
-        block_height_to_use_for_price, storage_pricing::TOKEN_SCALE, ConsensusConfig,
-        ConsensusOptions, EmaConfig, NodeConfig, H256,
+    use crate::block_tree_service::test_utils::{
+        build_tree, create_and_apply_fork, deterministic_price, setup_chain_for_fork_test,
+        PriceInfo, TestCtx,
     };
-    use reth::tasks::TaskManager;
+    use crate::block_tree_service::{get_canonical_chain, ChainState};
+    use irys_database::CommitmentSnapshot;
+    use irys_types::{
+        block_height_to_use_for_price, ConsensusConfig, ConsensusOptions, EmaConfig, NodeConfig,
+        H256,
+    };
+
     use rstest::rstest;
-    use rust_decimal::Decimal;
-    use std::sync::{Arc, RwLock};
-    use std::time::SystemTime;
+
     use test_log::test;
 
-    pub(crate) fn build_genesis_tree_with_n_blocks(
-        max_block_height: u64,
-    ) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
-        let (blocks, prices) = build_tree(0, max_block_height);
-        let mut blocks = blocks
-            .into_iter()
-            .map(|block| (block, ChainState::Onchain))
-            .collect::<Vec<_>>();
-        assert_eq!(blocks.last().unwrap().0.height, max_block_height);
-        (genesis_tree(&mut blocks), prices)
-    }
-
-    fn build_tree(init_height: u64, max_height: u64) -> (Vec<IrysBlockHeader>, Vec<PriceInfo>) {
-        let blocks = (init_height..(max_height + init_height).saturating_add(1))
-            .map(|height| {
-                let mut header = IrysBlockHeader::new_mock_header();
-                header.height = height;
-                // add a random constant to the price to differentiate it from the height
-                header.oracle_irys_price = deterministic_price(height);
-                header.ema_irys_price = deterministic_price(height);
-                header
-            })
-            .collect::<Vec<_>>();
-        let prices = blocks
-            .iter()
-            .map(|block| PriceInfo {
-                oracle: block.oracle_irys_price,
-                ema: block.ema_irys_price,
-            })
-            .collect::<Vec<_>>();
-        (blocks, prices)
-    }
-
-    pub(crate) fn deterministic_price(height: u64) -> IrysTokenPrice {
-        let amount = TOKEN_SCALE + IrysTokenPrice::token(Decimal::from(height)).unwrap().amount;
-
-        IrysTokenPrice::new(amount)
-    }
-
-    pub(crate) fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
-        let mut block_hash = if blocks[0].0.block_hash == H256::default() {
-            H256::random()
-        } else {
-            blocks[0].0.block_hash
-        };
-        let mut iter = blocks.iter_mut();
-        let genesis_block = &mut (iter.next().unwrap()).0;
-        genesis_block.block_hash = block_hash;
-        genesis_block.cumulative_diff = 0.into();
-
-        let mut block_tree_cache = BlockTreeCache::new(genesis_block);
-        block_tree_cache.mark_tip(&block_hash).unwrap();
-        for (block, state) in iter {
-            block.previous_block_hash = block_hash;
-            block.cumulative_diff = block.height.into();
-            if block.block_hash == H256::default() {
-                block_hash = H256::random();
-                block.block_hash = block_hash;
-            } else {
-                block_hash = block.block_hash;
-            }
-            block_tree_cache
-                .add_common(block.block_hash, block, state.clone())
-                .unwrap();
-        }
-        let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
-        BlockTreeReadGuard::new(block_tree_cache)
-    }
-
-    #[expect(
-        dead_code,
-        reason = "structs are held in-memory to prevent the `drop` to trigger"
-    )]
-    struct TestCtx {
-        guard: BlockTreeReadGuard,
-        config: Config,
-        task_manager: TaskManager,
-        task_executor: TaskExecutor,
-        service_senders: ServiceSenders,
-        prices: Vec<PriceInfo>,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct PriceInfo {
-        oracle: IrysTokenPrice,
-        ema: IrysTokenPrice,
-    }
-
-    impl TestCtx {
-        fn setup(max_block_height: u64, config: Config) -> Self {
-            let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(max_block_height);
-            let task_manager = TaskManager::new(tokio::runtime::Handle::current());
-            let task_executor = task_manager.executor();
-            let (service_senders, recv) = ServiceSenders::new();
-            let _handle = EmaService::spawn_service(
-                &task_executor,
-                block_tree_guard.clone(),
-                recv.ema,
-                &config,
-                &service_senders,
-            );
-            Self {
-                guard: block_tree_guard,
-                config,
-                task_manager,
-                task_executor,
-                service_senders,
-                prices,
-            }
-        }
-
-        async fn get_prices_for_new_block(
-            &self,
-            height_of_new_block: u64,
-            new_oracle_price: IrysTokenPrice,
-        ) -> eyre::Result<NewBlockEmaResponse> {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.service_senders
-                .ema
-                .send(EmaServiceMessage::GetPriceDataForNewBlock {
-                    height_of_new_block,
-                    response: tx,
-                    oracle_price: new_oracle_price,
-                })
-                .unwrap();
-            rx.await.unwrap()
-        }
-
-        async fn validate_ema_price(
-            &self,
-            block_height: u64,
-            ema_price: IrysTokenPrice,
-            oracle_price: IrysTokenPrice,
-        ) -> eyre::Result<PriceStatus> {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.service_senders
-                .ema
-                .send(EmaServiceMessage::ValidateEmaPrice {
-                    response: tx,
-                    block_height,
-                    ema_price,
-                    oracle_price,
-                })
-                .unwrap();
-            rx.await.unwrap()
-        }
-
-        async fn validate_oracle_price(
-            &self,
-            block_height: u64,
-            oracle_price: IrysTokenPrice,
-        ) -> eyre::Result<PriceStatus> {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.service_senders
-                .ema
-                .send(EmaServiceMessage::ValidateOraclePrice {
-                    response: tx,
-                    block_height,
-                    oracle_price,
-                })
-                .unwrap();
-            rx.await.unwrap()
-        }
-
-        fn setup_with_tree(
-            block_tree_guard: BlockTreeReadGuard,
-            prices: Vec<PriceInfo>,
-            config: Config,
-        ) -> Self {
-            let task_manager = TaskManager::new(tokio::runtime::Handle::current());
-            let task_executor = task_manager.executor();
-            let (service_senders, service_rx) = ServiceSenders::new();
-            let _handle = EmaService::spawn_service(
-                &task_executor,
-                block_tree_guard.clone(),
-                service_rx.ema,
-                &config,
-                &service_senders,
-            );
-
-            Self {
-                guard: block_tree_guard,
-                config,
-                task_manager,
-                service_senders,
-                task_executor,
-                prices,
-            }
-        }
-
-        async fn trigger_reorg(&self, event: ReorgEvent) {
-            // Trigger reorg using the provided service senders
-            let _ = self.service_senders.reorg_events.send(event);
-            // Give the service time to process the reorg
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-    }
-
-    /// Creates a clean chain state without any forks for testing
-    fn setup_chain_for_fork_test(max_height: u64) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
-        let mut blocks = Vec::new();
-        let mut prices = Vec::new();
-
-        // Build linear chain without any forks
-        let mut last_hash = H256::default();
-        for height in 0..=max_height {
-            let mut header = IrysBlockHeader::new_mock_header();
-            header.height = height;
-            header.oracle_irys_price = deterministic_price(height);
-            header.ema_irys_price = deterministic_price(height);
-            header.block_hash = H256::random();
-            header.previous_block_hash = last_hash;
-            last_hash = header.block_hash;
-
-            prices.push(PriceInfo {
-                oracle: header.oracle_irys_price,
-                ema: header.ema_irys_price,
-            });
-
-            blocks.push((header, ChainState::Onchain));
-        }
-
-        let block_tree_guard = genesis_tree(&mut blocks);
-        (block_tree_guard, prices)
-    }
-
-    /// Adds fork to an existing block tree after EMA service initialization
-    /// Returns (ReorgEvent, Vec<PriceInfo>) where the Vec contains all prices from genesis to the tip of the new fork
-    fn create_and_apply_fork(
-        block_tree_guard: &BlockTreeReadGuard,
-        fork_height: u64,
-        common_ancestor_height: u64,
-    ) -> (ReorgEvent, Vec<PriceInfo>) {
-        // Get the fork parent block
-        let fork_parent = {
-            let tree = block_tree_guard.read();
-            let (chain, _) = tree.get_canonical_chain();
-            let fork_parent_hash = chain
-                .iter()
-                .find(|entry| entry.height == common_ancestor_height)
-                .map(|entry| entry.block_hash)
-                .expect("Fork height should exist in chain");
-
-            let block = tree.get_block(&fork_parent_hash).unwrap();
-            Arc::new(block.clone())
-        };
-
-        let fork_parent_hash = fork_parent.block_hash;
-
-        // Collect all prices from genesis to fork point first
-        let mut fork_prices = Vec::new();
-        {
-            let tree = block_tree_guard.read();
-            let (chain, _) = tree.get_canonical_chain();
-
-            // Collect prices from genesis (height 0) up to and including the fork point
-            for entry in chain.iter() {
-                if entry.height <= common_ancestor_height {
-                    let block = tree.get_block(&entry.block_hash).unwrap();
-                    fork_prices.push(PriceInfo {
-                        oracle: block.oracle_irys_price,
-                        ema: block.ema_irys_price,
-                    });
-                }
-            }
-        }
-
-        // Create new fork blocks with higher difficulty
-        let mut new_fork_blocks = Vec::new();
-        let mut last_hash = fork_parent_hash;
-
-        {
-            let mut tree = block_tree_guard.write();
-            for height in (common_ancestor_height + 1)..=fork_height {
-                let mut header = IrysBlockHeader::new_mock_header();
-                header.height = height;
-                header.previous_block_hash = last_hash;
-                // Use different prices to distinguish from old fork
-                header.oracle_irys_price = deterministic_price(header.height + 100);
-                header.ema_irys_price = deterministic_price(header.height + 100);
-                header.block_hash = H256::random();
-                // Much higher difficulty to ensure it becomes canonical
-                header.cumulative_diff = (height + fork_height).into();
-                last_hash = header.block_hash;
-
-                // Collect the price info for this fork block
-                fork_prices.push(PriceInfo {
-                    oracle: header.oracle_irys_price,
-                    ema: header.ema_irys_price,
-                });
-
-                // Add to block tree as validated but not yet canonical
-                tree.add_common(
-                    header.block_hash,
-                    &header,
-                    ChainState::Validated(crate::block_tree_service::BlockState::ValidBlock),
-                )
-                .unwrap();
-
-                new_fork_blocks.push(Arc::new(header));
-            }
-
-            // Mark the new tip as the canonical chain
-            let is_new_tip = tree
-                .mark_tip(&new_fork_blocks.last().unwrap().block_hash)
-                .unwrap();
-            assert!(is_new_tip);
-        }
-
-        let new_tip = new_fork_blocks.last().unwrap().block_hash;
-
-        let data = block_tree_guard.read();
-        assert_eq!(
-            data.get_canonical_chain().0.len(),
-            (fork_height + 1) as usize
+    fn spawn_ema(ctx: &TestCtx, rx: UnboundedReceiver<EmaServiceMessage>) {
+        let _handle = EmaService::spawn_service(
+            &ctx.task_executor,
+            ctx.guard.clone(),
+            rx,
+            &ctx.config,
+            &ctx.service_senders,
         );
-
-        // Create reorg event
-        let reorg_event = ReorgEvent {
-            // ema service does not read this data
-            old_fork: Arc::new(vec![]),
-            // ema service does not read this data
-            new_fork: Arc::new(vec![]),
-            fork_parent,
-            new_tip,
-            timestamp: SystemTime::now(),
-        };
-
-        (reorg_event, fork_prices)
     }
 
     #[test(tokio::test)]
@@ -1194,7 +875,7 @@ mod tests {
     #[timeout(std::time::Duration::from_millis(100))]
     async fn get_current_ema(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
         // setup
-        let ctx = TestCtx::setup(
+        let (ctx, rxs) = TestCtx::setup(
             max_block_height,
             Config::new(NodeConfig {
                 consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1206,20 +887,17 @@ mod tests {
                 ..NodeConfig::testnet()
             }),
         );
-        dbg!("here");
+        spawn_ema(&ctx, rxs.ema);
         let desired_block_price = &ctx.prices[price_block_idx];
 
-        dbg!("here");
         // action
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.service_senders
             .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
-        dbg!("here");
         let response = rx.await.unwrap();
 
-        dbg!("here");
         // assert
         assert_eq!(response, desired_block_price.ema);
         assert!(!ctx.service_senders.ema.is_closed());
@@ -1227,6 +905,8 @@ mod tests {
     }
 
     mod get_ema_for_next_adjustment_period {
+        use crate::block_tree_service::test_utils::genesis_tree;
+
         use super::*;
         use irys_types::storage_pricing::Amount;
         use rust_decimal_macros::dec;
@@ -1245,7 +925,7 @@ mod tests {
                 }),
                 ..NodeConfig::testnet()
             });
-            let ctx = TestCtx::setup_with_tree(
+            let (ctx, rxs) = TestCtx::setup_with_tree(
                 genesis_tree(&mut [(
                     IrysBlockHeader {
                         height: 0,
@@ -1261,6 +941,7 @@ mod tests {
                 }],
                 config,
             );
+            spawn_ema(&ctx, rxs.ema);
             let new_oracle_price = Amount::token(dec!(1.01)).unwrap();
 
             // action - get EMA for new block
@@ -1296,7 +977,7 @@ mod tests {
         async fn first_and_second_adjustment_period(#[case] max_height: u64) {
             // prepare
             let price_adjustment_interval = 10;
-            let ctx = TestCtx::setup(
+            let (ctx, rxs) = TestCtx::setup(
                 max_height,
                 Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1308,6 +989,8 @@ mod tests {
                     ..NodeConfig::testnet()
                 }),
             );
+            spawn_ema(&ctx, rxs.ema);
+
             let new_oracle_price = deterministic_price(max_height);
 
             // action
@@ -1347,7 +1030,7 @@ mod tests {
             // prepare
             let price_adjustment_interval = 10;
             let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();
-            let ctx = TestCtx::setup(
+            let (ctx, rxs) = TestCtx::setup(
                 max_height,
                 Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1360,6 +1043,8 @@ mod tests {
                     ..NodeConfig::testnet()
                 }),
             );
+            spawn_ema(&ctx, rxs.ema);
+
             let price_oracle_latest = ctx.prices.last().unwrap().clone().oracle;
             let mul_outside_of_range = Amount::percentage(dec!(0.101)).unwrap();
             let oracle_prices: &[IrysTokenPrice] = &[
@@ -1410,7 +1095,7 @@ mod tests {
         ) {
             // prepare
             let price_adjustment_interval = 10;
-            let ctx = TestCtx::setup(
+            let (ctx, rxs) = TestCtx::setup(
                 max_height,
                 Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1422,6 +1107,7 @@ mod tests {
                     ..NodeConfig::testnet()
                 }),
             );
+            spawn_ema(&ctx, rxs.ema);
 
             // action
             let new_block_height = max_height + 1;
@@ -1465,7 +1151,7 @@ mod tests {
         ) {
             // prepare
             let price_adjustment_interval = 10;
-            let ctx = TestCtx::setup(
+            let (ctx, rxs) = TestCtx::setup(
                 max_block_height,
                 Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1477,6 +1163,7 @@ mod tests {
                     ..NodeConfig::testnet()
                 }),
             );
+            spawn_ema(&ctx, rxs.ema);
 
             // action
             let oracle_price = deterministic_price(max_block_height);
@@ -1496,7 +1183,7 @@ mod tests {
         // Setup
         let block_count = 3;
         let price_adjustment_interval = 10;
-        let ctx = TestCtx::setup(
+        let (ctx, rxs) = TestCtx::setup(
             block_count,
             Config::new(NodeConfig {
                 consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1508,6 +1195,7 @@ mod tests {
                 ..NodeConfig::testnet()
             }),
         );
+        spawn_ema(&ctx, rxs.ema);
 
         // Send shutdown signal
         tokio::task::spawn_blocking(|| {
@@ -1539,7 +1227,7 @@ mod tests {
         // Setup
         let initial_block_count = 10;
         let price_adjustment_interval = 10;
-        let ctx = TestCtx::setup(
+        let (ctx, rxs) = TestCtx::setup(
             initial_block_count,
             Config::new(NodeConfig {
                 consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1551,6 +1239,7 @@ mod tests {
                 ..NodeConfig::testnet()
             }),
         );
+        spawn_ema(&ctx, rxs.ema);
 
         // setup -- generate new blocks to be added
         let (chain, ..) = get_canonical_chain(ctx.guard.clone()).await.unwrap();
@@ -1571,8 +1260,13 @@ mod tests {
                 block.cumulative_diff = block.height.into();
                 latest_block_hash = H256::random();
                 block.block_hash = latest_block_hash;
-                tree.add_common(block.block_hash, &block, ChainState::Onchain)
-                    .unwrap();
+                tree.add_common(
+                    block.block_hash,
+                    &block,
+                    Arc::new(CommitmentSnapshot::default()),
+                    ChainState::Onchain,
+                )
+                .unwrap();
             }
             drop(tree)
         };
@@ -1617,7 +1311,8 @@ mod tests {
         });
 
         // Step 2: Initialize EMA service with clean block tree (no forks)
-        let ctx = TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
+        let (ctx, rxs) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
+        spawn_ema(&ctx, rxs.ema);
 
         // Get initial EMA price before creating fork
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1635,7 +1330,8 @@ mod tests {
 
         // Step 3: Now create fork on the block tree after EMA service is initialized
         // Fork from height 10, creating a new chain that ends at height 14
-        let (reorg_event, _fork_prices) = create_and_apply_fork(&block_tree_guard, 14, 10);
+        let (reorg_event, _fork_prices) =
+            create_and_apply_fork(&block_tree_guard, 14, 10, ChainState::Onchain);
 
         // Step 4: Trigger reorg
         ctx.trigger_reorg(reorg_event).await;
@@ -1681,7 +1377,8 @@ mod tests {
         });
 
         // Step 2: Initialize EMA service with clean block tree (no forks)
-        let ctx = TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
+        let (ctx, rxs) = TestCtx::setup_with_tree(block_tree_guard.clone(), prices.clone(), config);
+        spawn_ema(&ctx, rxs.ema);
 
         // Verify initial state crosses multiple EMA intervals
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1705,7 +1402,8 @@ mod tests {
 
         // Step 3: Create fork with height 30 (crossing multiple EMA intervals)
         // Fork from height 15, creating a new chain that ends at height 30
-        let (reorg_event, fork_prices) = create_and_apply_fork(&block_tree_guard, 30, 15);
+        let (reorg_event, fork_prices) =
+            create_and_apply_fork(&block_tree_guard, 30, 15, ChainState::Onchain);
 
         // Step 4: Trigger reorg
         ctx.trigger_reorg(reorg_event).await;

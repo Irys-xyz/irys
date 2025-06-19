@@ -1,4 +1,5 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
+use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
@@ -6,6 +7,7 @@ use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader};
 use lru::LruCache;
+use reth::revm::primitives::B256;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -46,6 +48,7 @@ where
     sync_state: SyncState,
 
     block_status_provider: BlockStatusProvider,
+    execution_payload_provider: ExecutionPayloadProvider<P>,
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +166,7 @@ where
         block_discovery: B,
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
+        execution_payload_provider: ExecutionPayloadProvider<P>,
     ) -> Self {
         Self {
             db,
@@ -171,6 +175,7 @@ where
             block_discovery,
             sync_state,
             block_status_provider,
+            execution_payload_provider,
         }
     }
 
@@ -228,6 +233,10 @@ where
                 "Block pool: Block {:?} has been processed",
                 current_block_hash
             );
+
+            // Request the execution payload for the block if it is not already stored locally
+            self.request_execution_payload(block_header.evm_block_hash);
+
             self.sync_state
                 .mark_processed(current_block_height as usize);
             self.blocks_cache
@@ -254,6 +263,30 @@ where
 
         self.request_parent_block_to_be_gossiped(block_header.previous_block_hash)
             .await
+    }
+
+    /// Requests the execution payload for the given EVM block hash if it is not already stored
+    /// locally. This function spawns a new task to fire the request without waiting for the
+    /// response.
+    pub(crate) fn request_execution_payload(&self, evm_block_hash: B256) {
+        let execution_payload_provider = self.execution_payload_provider.clone();
+        tokio::spawn(async move {
+            let is_payload_stored_locally = execution_payload_provider
+                .get_locally_stored_payload(&evm_block_hash)
+                .await
+                .is_some();
+            if !is_payload_stored_locally {
+                debug!("Execution payload for block {:?} is not stored locally, requesting from the network", evm_block_hash);
+                execution_payload_provider
+                    .request_payload_from_the_network(evm_block_hash)
+                    .await;
+            } else {
+                debug!(
+                    "Execution payload for block {:?} is already stored locally",
+                    evm_block_hash
+                );
+            }
+        });
     }
 
     pub(crate) async fn is_block_processing_or_processed(

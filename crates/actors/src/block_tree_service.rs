@@ -6,16 +6,19 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockFinalizedMessage,
+    BlockFinalizedMessage, CommitmentStateReadGuard,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context as _};
 use futures::future::Either;
-use irys_database::{block_header_by_hash, SystemLedger};
+use irys_database::{
+    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, CommitmentSnapshot,
+    SystemLedger,
+};
 use irys_types::{
-    Address, BlockHash, Config, ConsensusConfig, DataLedger, DatabaseProvider, H256List,
-    IrysBlockHeader, IrysTransactionHeader, H256, U256,
+    Address, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DatabaseProvider, H256List, IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database as _;
@@ -30,6 +33,9 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, error, info};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
@@ -63,6 +69,7 @@ pub enum BlockTreeServiceMessage {
     },
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
+        commitment_txs: Arc<Vec<CommitmentTransaction>>,
         response: oneshot::Sender<eyre::Result<()>>,
     },
     BlockValidationFinished {
@@ -88,6 +95,8 @@ pub struct BlockTreeServiceInner {
     pub miner_address: Address,
     /// Read view of the `block_index`
     pub block_index_guard: BlockIndexReadGuard,
+    /// Read only view of the current epoch's commitments
+    pub commitment_state_guard: CommitmentStateReadGuard,
     /// Global storage config
     pub consensus_config: ConsensusConfig,
     /// Channels for communicating with the services
@@ -119,6 +128,7 @@ impl BlockTreeService {
         rx: UnboundedReceiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
+        commitment_state_guard: CommitmentStateReadGuard,
         config: &Config,
         service_senders: &ServiceSenders,
         reth_service_actor: Addr<RethServiceActor>,
@@ -128,13 +138,18 @@ impl BlockTreeService {
         let consensus_config = config.node_config.consensus_config();
         let service_senders = service_senders.clone();
         let system = System::current();
+        let bi_guard = block_index_guard;
+        let cs_guard = commitment_state_guard;
+
         exec.spawn_critical_with_graceful_shutdown_signal(
             "BlockTree Service",
             |shutdown| async move {
-                let cache = BlockTreeCache::initialize_from_list(
-                    block_index_guard.clone(),
+                let cache = BlockTreeCache::restore_from_db(
+                    bi_guard.clone(),
+                    cs_guard.clone(),
                     reth_service_actor.clone(),
                     db.clone(),
+                    consensus_config.clone(),
                 );
 
                 let block_tree_service = Self {
@@ -144,7 +159,8 @@ impl BlockTreeService {
                         db,
                         cache: Arc::new(RwLock::new(cache)),
                         miner_address,
-                        block_index_guard,
+                        block_index_guard: bi_guard,
+                        commitment_state_guard: cs_guard,
                         consensus_config,
                         service_senders,
                         reth_service_actor,
@@ -202,8 +218,12 @@ impl BlockTreeServiceInner {
                 let guard = BlockTreeReadGuard::new(self.cache.clone());
                 let _ = response.send(guard);
             }
-            BlockTreeServiceMessage::BlockPreValidated { block, response } => {
-                let result = self.on_block_prevalidated(block).await;
+            BlockTreeServiceMessage::BlockPreValidated {
+                block,
+                commitment_txs,
+                response,
+            } => {
+                let result = self.on_block_prevalidated(block, commitment_txs).await;
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::BlockValidationFinished {
@@ -386,28 +406,20 @@ impl BlockTreeServiceInner {
     }
 
     /// Handles pre-validated blocks received from the validation service.
-    ///
-    /// The handling differs based on whether the block was produced locally:
-    /// - For locally mined blocks: Added as `BlockState::Unknown` to allow chain extension
-    ///   while validation is pending
-    /// - For peer blocks: Added normally via `add_block`
-    ///
-    /// After adding the block, it's scheduled for full validation and the previous
-    /// block is marked for storage finalization.
-    async fn on_block_prevalidated(&mut self, block: Arc<IrysBlockHeader>) -> eyre::Result<()> {
+    async fn on_block_prevalidated(
+        &mut self,
+        block: Arc<IrysBlockHeader>,
+        commitment_txs: Arc<Vec<CommitmentTransaction>>,
+    ) -> eyre::Result<()> {
         let miner_address = self.miner_address;
         let ema_service = self.service_senders.ema.clone();
-
         let block_hash = &block.block_hash;
 
-        // Scope the cache lock so it's dropped before the await
         let should_update_ema = {
             let mut cache = self.cache.write().expect("cache lock poisoned");
 
-            //  Do we already have this block
-            let existing = cache.get_block(block_hash);
-            if let Some(existing) = existing {
-                // TODO: block_discovery should not be sending us blocks we already know about >_<
+            // Early return if block already exists
+            if let Some(existing) = cache.get_block(block_hash) {
                 debug!(
                     "on_block_prevalidated: {} at height: {} already in block_tree",
                     existing.block_hash, existing.height
@@ -415,19 +427,38 @@ impl BlockTreeServiceInner {
                 return Ok(());
             }
 
-            // Handle block addition differently based on origin
+            // Get previous block's commitment snapshot
+            let prev_commitment_snapshot = cache
+                .blocks
+                .get(&block.previous_block_hash)
+                .expect("previous block to be in block tree")
+                .commitment_snapshot
+                .clone();
+
+            // Create commitment snapshot for this block
+            let commitment_snapshot = create_commitment_snapshot_for_block(
+                &block,
+                &commitment_txs,
+                &prev_commitment_snapshot,
+                &self.consensus_config,
+                &self.commitment_state_guard,
+            );
+
+            // Add block based on origin (local vs peer)
             let add_result = if block.miner_address == miner_address {
-                // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
-                // extension while full validation is still pending. This prevents blocking
-                // new block production while validation completes.
-                cache.add_validated_block((*block).clone(), BlockState::Unknown)
+                cache.add_local_block(
+                    &block,
+                    ChainState::Validated(BlockState::Unknown),
+                    commitment_snapshot,
+                )
             } else {
-                // For blocks from peers: Add via standard path requiring validation
-                cache.add_block(&block)
+                cache.add_peer_block(&block, commitment_snapshot)
             };
 
-            if add_result.is_ok() {
-                // Schedule block for full validation regardless of origin
+            if add_result.is_err() {
+                false
+            } else {
+                // Schedule validation and mark as scheduled
                 self.service_senders
                     .validation_service
                     .send(ValidationServiceMessage::ValidateBlock {
@@ -435,26 +466,23 @@ impl BlockTreeServiceInner {
                     })
                     .context("validation service unreachable!")?;
 
-                // Update block state to reflect scheduled validation
                 if cache
                     .mark_block_as_validation_scheduled(block_hash)
                     .is_err()
                 {
                     error!("Unable to mark block as ValidationScheduled");
                 }
+
                 debug!(
                     "scheduling block for validation: {} height: {}",
                     block_hash, block.height
                 );
                 true
-            } else {
-                false
             }
-        }; // cache lock is dropped here
+        };
 
-        // Only update EMA if block was successfully added
+        // Update EMA if block was successfully added
         if should_update_ema {
-            // block until EMA service is updated
             let (tx, rx) = tokio::sync::oneshot::channel();
             ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
             rx.await?;
@@ -530,6 +558,32 @@ impl BlockTreeServiceInner {
                             old_tip_block.cumulative_diff,
                             old_tip_block.height
                         );
+                    }
+                    return;
+                };
+
+                // if the old tip isn't in the fork_blocks, it's a reorg
+                let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
+
+                // Get block info before mutable operations
+                let block_entry = cache.blocks.get(&block_hash).unwrap();
+                let arc_block = Arc::new(block_entry.block.clone());
+
+                // Now do mutable operations
+                if cache.mark_tip(&block_hash).is_ok() {
+                    if is_reorg {
+                        let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
+                        orphaned_blocks.push(&old_tip_block);
+
+                        let fork_hash = orphaned_blocks.first().unwrap().block_hash;
+                        let fork_block = cache.get_block(&fork_hash).unwrap();
+                        let fork_height = fork_block.height;
+
+                        // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
+                        let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
+                        for block in &orphaned_blocks {
+                            let entry = make_block_tree_entry(block);
+                            old_canonical.push(entry);
                         }
                         return;
                     };
@@ -662,7 +716,7 @@ impl BlockTreeServiceInner {
     }
 }
 
-fn make_chain_cache_entry(block: &IrysBlockHeader) -> BlockTreeEntry {
+fn make_block_tree_entry(block: &IrysBlockHeader) -> BlockTreeEntry {
     // DataLedgers
     let mut data_ledgers = BTreeMap::new();
 
@@ -739,8 +793,37 @@ pub enum ValidationResult {
     Invalid,
 }
 
+
 /// Number of blocks to retain in cache from chain head
 const BLOCK_CACHE_DEPTH: u64 = 50;
+
+/// Fetches full transaction headers from a ledger in a block.
+/// Returns None if any headers are missing or on DB errors.
+fn get_ledger_tx_headers<T: DbTx>(
+    tx: &T,
+    block_header: &IrysBlockHeader,
+    ledger: DataLedger,
+) -> Option<Vec<IrysTransactionHeader>> {
+    match block_header.data_ledgers[ledger]
+        .tx_ids
+        .iter()
+        .map(|txid| {
+            let opt = tx_header_by_txid(tx, txid)
+                .map_err(|e| eyre::eyre!("Failed to get tx header: {}", e))?;
+            opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(txs) => Some(txs),
+        Err(e) => {
+            error!(
+                "Failed to collect tx headers for {:?} ledger: {}",
+                ledger, e
+            );
+            None
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BlockTreeEntry {
@@ -769,6 +852,9 @@ pub struct BlockTreeCache {
 
     // Cache of longest chain: (block/tx pairs, count of non-onchain blocks)
     longest_chain_cache: (Vec<BlockTreeEntry>, usize),
+
+    // Consensus configuration containing cache depth
+    consensus_config: ConsensusConfig,
 }
 
 #[derive(Debug)]
@@ -777,23 +863,24 @@ pub struct BlockEntry {
     chain_state: ChainState,
     timestamp: SystemTime,
     children: HashSet<H256>,
+    commitment_snapshot: Arc<CommitmentSnapshot>,
 }
 
 /// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ChainState {
-    /// Block is confirmed and part of the main chain
+    /// Block is confirmed (by another block) and part of the main chain
     Onchain,
-    /// Block is validated but may not be on the main chain
-    /// For locally produced blocks, can have `ValidationScheduled` `BlockState`
-    /// while maintaining `ChainState` validity
+    /// Block is Validated but may not be on the main chain
+    /// Locally produced blocks can have `BlockState::ValidationScheduled`
+    /// while maintaining `ChainState::Validated`
     Validated(BlockState),
-    /// Block exists but is awaiting block validation
+    /// Block exists but is not conformed by any other block
     NotOnchain(BlockState),
 }
 
 /// Represents the validation state of a block, independent of its `ChainState`
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum BlockState {
     /// Initial state, validation not yet started
     Unknown,
@@ -816,25 +903,30 @@ pub enum TipChangeResult {
 
 impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
-    /// on-chain and set as the tip.
-    #[must_use]
-    pub fn new(block: &IrysBlockHeader) -> Self {
-        let block_hash = block.block_hash;
-        let solution_hash = block.solution_hash;
-        let height = block.height;
-        let cumulative_diff = block.cumulative_diff;
+    /// on-chain and set as the tip. Only used in testing that doesn't intersect
+    /// the commitment snapshot so it stubs one out
+    // #[cfg(feature = "test-utils")]
+    pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
+        let block_hash = genesis_block.block_hash;
+        let solution_hash = genesis_block.solution_hash;
+        let height = genesis_block.height;
+        let cumulative_diff = genesis_block.cumulative_diff;
 
         let mut blocks = HashMap::new();
         let mut solutions = HashMap::new();
         let mut height_index = BTreeMap::new();
 
+        // Create a dummy commitment snapshot
+        let snapshot = Arc::new(CommitmentSnapshot::default());
+
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
         let block_entry = BlockEntry {
-            block: block.clone(),
+            block: genesis_block.clone(),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
+            commitment_snapshot: snapshot,
         };
 
         // Initialize all indices
@@ -843,7 +935,7 @@ impl BlockTreeCache {
         height_index.insert(height, HashSet::from([block_hash]));
 
         // Initialize longest chain cache to contain the genesis block
-        let entry = make_chain_cache_entry(block);
+        let entry = make_block_tree_entry(genesis_block);
         let longest_chain_cache = (vec![(entry)], 0);
 
         Self {
@@ -853,56 +945,150 @@ impl BlockTreeCache {
             max_cumulative_difficulty: (cumulative_diff, block_hash),
             height_index,
             longest_chain_cache,
+            consensus_config,
         }
     }
 
-    /// Initializes the cache from a list of validated blocks.
-    /// The most recent block in the list is marked as the tip.
-    /// The input blocks must be sorted in descending order, from newest to oldest.
-    pub fn initialize_from_list(
+    /// Restores the block tree cache from the database and `block_index` during startup.
+    ///
+    /// Rebuilds the block tree by iterating the `block_index` and loading the most recent blocks from
+    /// the database (up to `block_cache_depth` blocks). For each block, it loads associated commitment
+    /// transactions and reconstructs the commitment snapshot for that block. The function also notifies
+    /// the Reth service of the current chain tip.
+    ///
+    /// ## Arguments
+    /// * `block_index_guard` - Read guard for accessing the block index
+    /// * `commitment_state_guard` - Read guard for checking staking status of a signer during commitment processing
+    /// * `reth_service_actor` - Actor handle for sending fork choice updates to Reth
+    /// * `db` - Database provider for querying block and transaction data
+    /// * `consensus_config` - Consensus configuration including epoch settings
+    ///
+    /// ## Returns
+    /// Fully initialized block tree cache ready for use
+    ///
+    /// ## Panics
+    /// Panics if the block index is empty or if database queries fail unexpectedly
+    pub fn restore_from_db(
         block_index_guard: BlockIndexReadGuard,
+        commitment_state_guard: CommitmentStateReadGuard,
         reth_service_actor: Addr<RethServiceActor>,
         db: DatabaseProvider,
+        consensus_config: ConsensusConfig,
     ) -> Self {
-        let block_index = block_index_guard.read();
-        assert!(block_index.num_blocks() > 0, "Block list must not be empty");
+        // Extract block range and start block info
+        let (start, end, start_block_hash) = {
+            let block_index = block_index_guard.read();
+            assert!(block_index.num_blocks() > 0, "Block list must not be empty");
 
-        //block_index.print_items();
+            let start = block_index
+                .num_blocks()
+                .saturating_sub(consensus_config.block_cache_depth - 1);
+            let end = block_index.num_blocks();
+            let start_block_hash = block_index.get_item(start).unwrap().block_hash;
+            (start, end, start_block_hash)
+        };
 
         let tx = db.tx().unwrap();
-
-        let start = block_index
-            .num_blocks()
-            .saturating_sub(BLOCK_CACHE_DEPTH - 1);
-        let end = block_index.num_blocks();
-
-        // Initialize cache with the start block
-        let start_block_hash = block_index.get_item(start).unwrap().block_hash;
         let start_block = block_header_by_hash(&tx, &start_block_hash, false)
             .unwrap()
             .unwrap();
+
         debug!(
             "block tree start block - hash: {} height: {}",
-            start_block_hash.0.to_base58(),
-            start_block.height
+            start_block_hash, start_block.height
         );
-        let mut cache = Self::new(&start_block);
 
-        // Add remaining blocks
+        // Initialize cache with start block
+        let entry = make_block_tree_entry(&start_block);
+        let mut block_tree_cache = Self {
+            blocks: HashMap::new(),
+            solutions: HashMap::new(),
+            tip: start_block_hash,
+            max_cumulative_difficulty: (start_block.cumulative_diff, start_block_hash),
+            height_index: BTreeMap::new(),
+            longest_chain_cache: (vec![entry], 0),
+            consensus_config: consensus_config.clone(),
+        };
+
+        // Initialize commitment snapshot and add start block
+        let mut commitment_snapshot = current_epoch_commitments(
+            block_index_guard.clone(),
+            commitment_state_guard.clone(),
+            db.clone(),
+            &consensus_config,
+        );
+
+        let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
+        let block_entry = BlockEntry {
+            block: start_block.clone(),
+            chain_state: ChainState::Onchain,
+            timestamp: SystemTime::now(),
+            children: HashSet::new(),
+            commitment_snapshot: arc_commitment_snapshot.clone(),
+        };
+
+        block_tree_cache
+            .blocks
+            .insert(start_block_hash, block_entry);
+        block_tree_cache
+            .solutions
+            .insert(start_block.solution_hash, HashSet::from([start_block_hash]));
+        block_tree_cache
+            .height_index
+            .insert(start_block.height, HashSet::from([start_block_hash]));
+
+        let mut prev_commitment_snapshot = arc_commitment_snapshot;
+
+        // Process remaining blocks
         for block_height in (start + 1)..end {
-            let block_hash = block_index.get_item(block_height).unwrap().block_hash;
+            let block_hash = {
+                let block_index = block_index_guard.read();
+                block_index.get_item(block_height).unwrap().block_hash
+            };
+
             let block = block_header_by_hash(&tx, &block_hash, false)
                 .unwrap()
                 .unwrap();
 
-            cache
-                .add_validated_block(block, BlockState::ValidBlock)
+            // Load commitment transactions (from DB during startup)
+            let commitment_txs =
+                load_commitment_transactions(&block, &db).expect("to load transactions from db");
+
+            // Create commitment snapshot for this block
+            let arc_commitment_snapshot = create_commitment_snapshot_for_block(
+                &block,
+                &commitment_txs,
+                &prev_commitment_snapshot,
+                &consensus_config,
+                &commitment_state_guard,
+            );
+
+            // Update commitment snapshot with new commitments if it's not an epoch block
+            if block.height % consensus_config.epoch.num_blocks_in_epoch != 0 {
+                for commitment_tx in &commitment_txs {
+                    let is_staked_in_current_epoch =
+                        commitment_state_guard.is_staked(commitment_tx.signer);
+                    commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
+                }
+            }
+
+            prev_commitment_snapshot = arc_commitment_snapshot.clone();
+            block_tree_cache
+                .add_local_block(
+                    &block,
+                    ChainState::Validated(BlockState::ValidBlock),
+                    arc_commitment_snapshot,
+                )
                 .unwrap();
         }
 
-        let tip_hash = block_index.get_latest_item().unwrap().block_hash;
-        cache.mark_tip(&tip_hash).unwrap();
+        // Set tip and notify reth service
+        let tip_hash = {
+            let block_index = block_index_guard.read();
+            block_index.get_latest_item().unwrap().block_hash
+        };
 
+        block_tree_cache.mark_tip(&tip_hash).unwrap();
         reth_service_actor
             .try_send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Irys(tip_hash),
@@ -910,14 +1096,16 @@ impl BlockTreeCache {
                 finalized_hash: None,
             })
             .expect("could not send message to `RethServiceActor`");
-        cache
+
+        block_tree_cache
     }
 
     pub fn add_common(
         &mut self,
         hash: BlockHash,
         block: &IrysBlockHeader,
-        status: ChainState,
+        commitment_snapshot: Arc<CommitmentSnapshot>,
+        chain_state: ChainState,
     ) -> eyre::Result<()> {
         let prev_hash = block.previous_block_hash;
 
@@ -954,9 +1142,10 @@ impl BlockTreeCache {
             hash,
             BlockEntry {
                 block: block.clone(),
-                chain_state: status,
+                chain_state,
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
+                commitment_snapshot,
             },
         );
 
@@ -964,7 +1153,20 @@ impl BlockTreeCache {
         Ok(())
     }
 
-    pub fn add_block(&mut self, block: &IrysBlockHeader) -> eyre::Result<()> {
+    /// Adds a block received from a peer to the block tree.
+    ///
+    /// Peer blocks undergo strict validation before acceptance:
+    /// 1. **Full validation sequence** - Full validation rules must be run and pass
+    /// 2. **Confirmation required** - Block must be confirmed by another block building on it
+    /// 3. **Block Index Migration** - Only then is the block added to the block_index
+    ///
+    /// This differs from locally produced blocks, which can be added with more
+    /// flexible validation states to facilitate chain progress for local mining and initialization.
+    pub fn add_peer_block(
+        &mut self,
+        block: &IrysBlockHeader,
+        commitment_snapshot: Arc<CommitmentSnapshot>,
+    ) -> eyre::Result<()> {
         let hash = block.block_hash;
 
         debug!(
@@ -973,29 +1175,39 @@ impl BlockTreeCache {
         );
 
         if matches!(
-            self.blocks.get(&hash).map(|b| b.chain_state.clone()),
+            self.blocks.get(&hash).map(|b| b.chain_state),
             Some(ChainState::Onchain)
         ) {
             debug!(?hash, "already part of the main chian state");
             return Ok(());
         }
-        self.add_common(hash, block, ChainState::NotOnchain(BlockState::Unknown))
+        self.add_common(
+            hash,
+            block,
+            commitment_snapshot,
+            ChainState::NotOnchain(BlockState::Unknown),
+        )
     }
 
-    /// Adds a validated block to the cache.
+    /// Adds a locally cached or produced block to the block tree.
     ///
-    /// During development, this function allows flexibility in the validation state
-    /// of locally produced blocks. While blocks received from peers must have a
-    /// `BlockState::ValidBlock` before being considered part of the longest chain,
-    /// blocks produced by the local node can be added as `ChainState::Validated`
-    /// but have have their `BlockState` overridden.This enables the node to
-    /// continue building the chain while still performing complete validation
-    /// checks, helping catch any validation errors during development without
-    /// halting chain progress of the local node.
-    pub fn add_validated_block(
+    /// Local blocks have more flexible validation requirements than peer blocks:
+    /// - **Peer blocks**: Must reach `BlockState::ValidBlock` before joining the canonical chain
+    /// - **Local blocks**: Can be added as `ChainState::Validated` with any `BlockState` override
+    ///
+    /// This flexibility allows the local node to:
+    /// - Continue building the chain while full validation runs in parallel
+    /// - Skip full validation for locally produced blocks entirely
+    ///
+    /// # Parameters
+    /// - Block must be locally produced (not received from peers)
+    /// - Can specify any `ChainState` and `BlockState` regardless of actual validation status
+    /// - Commitment snapshot reference for the block
+    pub fn add_local_block(
         &mut self,
-        block: IrysBlockHeader,
-        block_state: BlockState,
+        block: &IrysBlockHeader,
+        chain_state: ChainState,
+        commitment_snapshot: Arc<CommitmentSnapshot>,
     ) -> eyre::Result<()> {
         let hash = block.block_hash;
         let prev_hash = block.previous_block_hash;
@@ -1009,13 +1221,13 @@ impl BlockTreeCache {
         // Verify parent is validated
         ensure!(
             !matches!(
-                self.blocks.get(&prev_hash).map(|b| b.chain_state.clone()),
+                self.blocks.get(&prev_hash).map(|b| b.chain_state),
                 Some(ChainState::NotOnchain(_))
             ),
             "Previous block not validated"
         );
 
-        self.add_common(hash, &block, ChainState::Validated(block_state))
+        self.add_common(hash, block, commitment_snapshot, chain_state)
     }
 
     /// Helper function to delete a single block without recursion
@@ -1110,7 +1322,7 @@ impl BlockTreeCache {
         let mut not_onchain_count = 0;
 
         let mut current = self.max_cumulative_difficulty.1;
-        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut blocks_to_collect = self.consensus_config.block_cache_depth;
         debug!(
             "updating canonical chain cache latest_cache_tip: {}",
             current
@@ -1124,13 +1336,13 @@ impl BlockTreeCache {
                     pairs.clear();
                     not_onchain_count = 0;
                     current = entry.block.previous_block_hash;
-                    blocks_to_collect = BLOCK_CACHE_DEPTH;
+                    blocks_to_collect = self.consensus_config.block_cache_depth;
                     continue;
                 }
 
                 ChainState::Onchain => {
                     // Include OnChain blocks in pairs
-                    let chain_cache_entry = make_chain_cache_entry(&entry.block);
+                    let chain_cache_entry = make_block_tree_entry(&entry.block);
                     pairs.push(chain_cache_entry);
 
                     if blocks_to_collect == 0 {
@@ -1141,7 +1353,7 @@ impl BlockTreeCache {
 
                 // For Validated or other NotOnchain states
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
-                    let chain_cache_entry = make_chain_cache_entry(&entry.block);
+                    let chain_cache_entry = make_block_tree_entry(&entry.block);
                     pairs.push(chain_cache_entry);
                     not_onchain_count += 1;
 
@@ -1292,6 +1504,30 @@ impl BlockTreeCache {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
+    pub fn canonical_commitment_snapshot(&self) -> Arc<CommitmentSnapshot> {
+        let head_entry = self
+            .longest_chain_cache
+            .0
+            .last()
+            .expect("at least one block in the longest chain");
+
+        self.blocks
+            .get(&head_entry.block_hash)
+            .expect("commitment snapshot for block")
+            .commitment_snapshot
+            .clone()
+    }
+
+    pub fn get_commitment_snapshot(
+        &self,
+        block_hash: &BlockHash,
+    ) -> eyre::Result<Arc<CommitmentSnapshot>> {
+        match self.blocks.get(block_hash) {
+            Some(entry) => Ok(entry.commitment_snapshot.clone()),
+            None => Err(eyre::eyre!("Block not found: {}", block_hash)),
+        }
+    }
+
     /// Returns the current possible set of candidate hashes for a given height.
     pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
         self.height_index.get(&height)
@@ -1332,7 +1568,7 @@ impl BlockTreeCache {
     /// Finds the earliest not validated block, walking back the chain
     /// until finding a validated block, reaching block height 0, or exceeding cache depth
     #[must_use]
-    pub fn get_earliest_not_onchain<'a>(
+    fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockEntry,
     ) -> Option<(&'a BlockEntry, Vec<&'a IrysBlockHeader>, SystemTime)> {
@@ -1340,7 +1576,7 @@ impl BlockTreeCache {
         let mut prev_block = &current_entry.block;
         let mut depth_count = 0;
 
-        while prev_block.height > 0 && depth_count < BLOCK_CACHE_DEPTH {
+        while prev_block.height > 0 && depth_count < self.consensus_config.block_cache_depth {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
@@ -1518,7 +1754,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
     let canonical_chain = tokio::task::spawn_blocking(move || {
         let cache = tree.read();
 
-        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut blocks_to_collect = cache.consensus_config.block_cache_depth;
         let mut chain_cache = Vec::with_capacity(
             blocks_to_collect
                 .try_into()
@@ -1580,6 +1816,135 @@ pub async fn get_block(
     Ok(res)
 }
 
+/// Reconstructs the commitment snapshot for the current epoch by loading all commitment
+/// transactions from blocks since the last epoch boundary.
+///
+/// Iterates through all blocks from the first block after the most recent epoch block
+/// up to the latest block, collecting and applying all commitment transactions to build
+/// the current epoch's commitment state. This is typically used during startup or when
+/// the commitment snapshot needs to be rebuilt from persistent storage.
+///
+/// # Returns
+/// Initialized commitment snapshot containing all commitments from the current epoch
+pub fn current_epoch_commitments(
+    block_index_guard: BlockIndexReadGuard,
+    commitment_state_guard: CommitmentStateReadGuard,
+    db: DatabaseProvider,
+    consensus_config: &ConsensusConfig,
+) -> CommitmentSnapshot {
+    let num_blocks_in_epoch = consensus_config.epoch.num_blocks_in_epoch;
+    let block_index = block_index_guard.read();
+    let latest_item = block_index.get_latest_item();
+
+    let mut snapshot = CommitmentSnapshot::default();
+
+    if let Some(latest_item) = latest_item {
+        let tx = db.tx().unwrap();
+
+        let latest = block_header_by_hash(&tx, &latest_item.block_hash, false)
+            .unwrap()
+            .expect("block_index block to be in database");
+        let last_epoch_block_height = latest.height - (latest.height % num_blocks_in_epoch);
+
+        let start = last_epoch_block_height + 1;
+
+        // Loop though all the blocks starting with the first block following the last epoch block
+        for height in start..=latest.height {
+            // Query each block to see if they have commitment txids
+            let block_item = block_index.get_item(height).unwrap();
+            let block = block_header_by_hash(&tx, &block_item.block_hash, false)
+                .unwrap()
+                .expect("block_index block to be in database");
+
+            let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+            if !commitment_tx_ids.is_empty() {
+                // If so, retrieve the full commitment transactions
+                for txid in commitment_tx_ids {
+                    let commitment_tx = commitment_tx_by_txid(&tx, &txid)
+                        .unwrap()
+                        .expect("commitment transactions to be in database");
+
+                    let is_staked_in_current_epoch =
+                        commitment_state_guard.is_staked(commitment_tx.signer);
+
+                    // Apply them to the commitment snapshot
+                    let _status =
+                        snapshot.add_commitment(&commitment_tx, is_staked_in_current_epoch);
+                }
+            }
+        }
+    }
+
+    // Return the initialized commitment snapshot
+    snapshot
+}
+
+/// Creates a new commitment snapshot for the given block based on commitment transactions
+/// and the previous commitment snapshot.
+///
+/// ## Behavior
+/// - Returns a fresh empty snapshot if this is an epoch block (height divisible by num_blocks_in_epoch)
+/// - Returns a clone of the previous snapshot if no commitment transactions are present in the new block
+/// - Otherwise, creates a new commitment snapshot by adding all commitment transactions to a copy of the
+/// previous snapshot
+///
+/// ## Arguments
+/// * `block` - The block header to create a commitment snapshot for
+/// * `commitment_txs` - Slice of commitment transactions to process for this block (should match txids in the block)
+/// * `prev_commitment_snapshot` - The commitment snapshot from the previous block
+/// * `consensus_config` - Configuration containing epoch settings
+/// * `commitment_state_guard` - Read guard for checking staking status of transaction signers
+///
+/// # Returns
+/// Arc-wrapped commitment snapshot for the new block
+fn create_commitment_snapshot_for_block(
+    block: &IrysBlockHeader,
+    commitment_txs: &[CommitmentTransaction],
+    prev_commitment_snapshot: &Arc<CommitmentSnapshot>,
+    consensus_config: &ConsensusConfig,
+    commitment_state_guard: &CommitmentStateReadGuard,
+) -> Arc<CommitmentSnapshot> {
+    let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
+
+    if is_epoch_block {
+        return Arc::new(CommitmentSnapshot::default());
+    }
+
+    if commitment_txs.is_empty() {
+        return prev_commitment_snapshot.clone();
+    }
+
+    let mut new_commitment_snapshot = (**prev_commitment_snapshot).clone();
+    for commitment_tx in commitment_txs {
+        let is_staked_in_current_epoch = commitment_state_guard.is_staked(commitment_tx.signer);
+        new_commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
+    }
+    Arc::new(new_commitment_snapshot)
+}
+
+/// Loads commitment transactions from the database for the given block's commitment ledger transaction IDs.
+fn load_commitment_transactions(
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+    if commitment_tx_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Startup: query database directly
+    let mut txs = Vec::new();
+    let db_tx = db.tx().expect("to create a read only tx for the db");
+    for tx_id in &commitment_tx_ids {
+        if let Some(header) =
+            commitment_tx_by_txid(&db_tx, tx_id).expect("to retrieve tx header from db")
+        {
+            txs.push(header);
+        }
+    }
+    Ok(txs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1590,8 +1955,11 @@ mod tests {
     async fn test_block_cache() {
         let b1 = random_block(U256::from(0));
 
+        // For the purposes of these tests, the block cache will not track transaction headers
+        let comm_cache = Arc::new(CommitmentSnapshot::default());
+
         // Initialize block tree cache from `b1`
-        let mut cache = BlockTreeCache::new(&b1);
+        let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
 
         // Verify cache returns `None` for unknown hashes
         assert_eq!(cache.get_block(&H256::random()), None);
@@ -1626,7 +1994,7 @@ mod tests {
         b1_test.data_ledgers[DataLedger::Submit]
             .tx_ids
             .push(H256::random());
-        assert_matches!(cache.add_block(&b1_test), Ok(()));
+        assert_matches!(cache.add_peer_block(&b1_test, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
@@ -1651,7 +2019,7 @@ mod tests {
 
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
-        assert_matches!(cache.add_block(&b2), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1667,7 +2035,7 @@ mod tests {
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        assert_matches!(cache.add_block(&b2), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -1699,10 +2067,10 @@ mod tests {
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
-        assert_matches!(cache.add_block(&b2), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
-        assert_matches!(cache.add_block(&b1_2), Ok(()));
+        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
 
         println!(
             "b1:   {} cdiff: {} solution_hash: {}",
@@ -1833,16 +2201,16 @@ mod tests {
         // <Reset the cache>
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
-        let mut cache = BlockTreeCache::new(&b1);
-        assert_matches!(cache.add_block(&b1_2), Ok(()));
-        assert_matches!(cache.add_block(&b2), Ok(()));
+        let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
+        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
-        assert_matches!(cache.add_block(&b2_2), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2_2, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1859,7 +2227,7 @@ mod tests {
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
-        assert_matches!(cache.add_block(&b2_3), Ok(()));
+        assert_matches!(cache.add_peer_block(&b2_3, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1874,7 +2242,11 @@ mod tests {
 
         // Now b2_2->b2->b1 are validated.
         assert_matches!(
-            cache.add_validated_block(b2_2.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b2_2,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache.clone()
+            ),
             Ok(())
         );
         assert_eq!(
@@ -1898,9 +2270,13 @@ mod tests {
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
-        assert_matches!(cache.add_block(&b3), Ok(()));
+        assert_matches!(cache.add_peer_block(&b3, comm_cache.clone()), Ok(()));
         assert_matches!(
-            cache.add_validated_block(b3.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b3,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache.clone()
+            ),
             Ok(())
         );
         assert_matches!(cache.mark_tip(&b3.block_hash), Ok(_));
@@ -1926,7 +2302,7 @@ mod tests {
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
-        assert_matches!(cache.add_block(&b4), Ok(()));
+        assert_matches!(cache.add_peer_block(&b4, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2058,9 +2434,9 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_block(&b12), Ok(()));
+        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
@@ -2079,7 +2455,11 @@ mod tests {
         println!("tip: {} before mark_tip()", cache.tip);
 
         assert_matches!(
-            cache.add_validated_block(b13.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b13,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache.clone()
+            ),
             Ok(())
         );
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
@@ -2123,7 +2503,7 @@ mod tests {
 
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
-        assert_matches!(cache.add_block(&b14), Ok(()));
+        assert_matches!(cache.add_peer_block(&b14, comm_cache.clone()), Ok(()));
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2205,7 +2585,7 @@ mod tests {
 
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
-        assert_matches!(cache.add_block(&b15), Ok(()));
+        assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(()));
         assert_matches!(
             check_earliest_not_onchian(
                 &b14.block_hash,
@@ -2218,7 +2598,11 @@ mod tests {
 
         // Validate b14
         assert_matches!(
-            cache.add_validated_block(b14.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b14,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache.clone()
+            ),
             Ok(())
         );
         assert_matches!(
@@ -2238,7 +2622,7 @@ mod tests {
 
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
-        assert_matches!(cache.add_block(&b16), Ok(()));
+        assert_matches!(cache.add_peer_block(&b16, comm_cache.clone()), Ok(()));
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
             Ok(())
@@ -2288,9 +2672,9 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_block(&b12), Ok(()));
+        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
@@ -2300,7 +2684,11 @@ mod tests {
 
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
-            cache.add_validated_block(b12.clone(), BlockState::ValidationScheduled),
+            cache.add_local_block(
+                &b12,
+                ChainState::Validated(BlockState::ValidationScheduled),
+                comm_cache.clone()
+            ),
             Ok(())
         );
         assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(()));
@@ -2318,12 +2706,16 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTreeCache::new(&b11);
+        let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_validated_block(b12.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b12,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache.clone()
+            ),
             Ok(())
         );
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
@@ -2335,11 +2727,19 @@ mod tests {
         let b13b = extend_chain(random_block(U256::from(2)), &b12);
 
         assert_matches!(
-            cache.add_validated_block(b13a.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b13a,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache.clone()
+            ),
             Ok(())
         );
         assert_matches!(
-            cache.add_validated_block(b13b.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b13b,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache.clone()
+            ),
             Ok(())
         );
 
@@ -2351,7 +2751,11 @@ mod tests {
         // extend the fork to make it canonical
         let b14b = extend_chain(random_block(U256::from(3)), &b13b);
         assert_matches!(
-            cache.add_validated_block(b14b.clone(), BlockState::ValidBlock),
+            cache.add_local_block(
+                &b14b,
+                ChainState::Validated(BlockState::ValidBlock),
+                comm_cache
+            ),
             Ok(())
         );
 

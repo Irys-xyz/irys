@@ -24,6 +24,7 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::CommitmentSnapshotStatus;
 use irys_database::{
     db::IrysDatabaseExt as _,
     tables::{IngressProofs, IrysBlockHeaders},
@@ -675,6 +676,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.mine_blocks(num_blocks).await?;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         Ok(())
+    }
+
+    pub fn get_commitment_snapshot_status(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> CommitmentSnapshotStatus {
+        let commitment_snapshot = self
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_commitment_snapshot();
+
+        commitment_snapshot.get_commitment_status(commitment_tx)
     }
 
     /// wait for tx to appear in the mempool or be found in the database

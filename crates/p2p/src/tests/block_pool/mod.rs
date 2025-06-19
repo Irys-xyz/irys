@@ -1,4 +1,5 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
+use crate::execution_payload_provider::{ExecutionPayloadProvider, RethPayloadProvider};
 use crate::peer_list::PeerListServiceWithClient;
 use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
 use crate::{BlockStatusProvider, PeerList as _, SyncState};
@@ -114,6 +115,9 @@ struct MockedServices {
     block_discovery_stub: BlockDiscoveryStub,
     peer_list_service_addr: Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
     db: DatabaseProvider,
+    execution_payload_provider: ExecutionPayloadProvider<
+        Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
+    >,
 }
 
 impl MockedServices {
@@ -142,12 +146,15 @@ impl MockedServices {
             reth_addr,
         );
         let peer_addr = peer_list_service.start();
+        let execution_payload_provider =
+            ExecutionPayloadProvider::new(peer_addr.clone(), RethPayloadProvider::new_mock());
 
         Self {
             block_status_provider_mock,
             block_discovery_stub,
             peer_list_service_addr: peer_addr,
             db,
+            execution_payload_provider,
         }
     }
 }
@@ -161,6 +168,7 @@ async fn should_process_block() {
         block_discovery_stub,
         peer_list_service_addr: peer_addr,
         db,
+        execution_payload_provider,
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false);
@@ -170,6 +178,7 @@ async fn should_process_block() {
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
+        execution_payload_provider.clone(),
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
@@ -245,6 +254,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_discovery_stub,
         peer_list_service_addr: peer_addr,
         db,
+        execution_payload_provider,
     } = MockedServices::new(&config).await;
 
     // Set the mock client to return block2 when requested
@@ -274,6 +284,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
+        execution_payload_provider.clone(),
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
@@ -325,6 +336,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         block_discovery_stub,
         peer_list_service_addr: peer_addr,
         db,
+        execution_payload_provider,
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false);
@@ -334,6 +346,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
+        execution_payload_provider,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -389,6 +402,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_discovery_stub,
         peer_list_service_addr: peer_addr,
         db,
+        execution_payload_provider,
     } = MockedServices::new(&config).await;
 
     let gossip_server = FakeGossipServer::new();
@@ -425,6 +439,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_discovery_stub.clone(),
         sync_state,
         block_status_provider_mock.clone(),
+        execution_payload_provider.clone(),
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);

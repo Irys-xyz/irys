@@ -1,8 +1,8 @@
 use crate::block_pool::BlockPoolError;
 use crate::peer_list::PeerListFacadeError;
-use base58::ToBase58 as _;
 use irys_actors::mempool_service::TxIngressError;
 use irys_types::{BlockHash, H256};
+use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;
@@ -119,6 +119,7 @@ pub type GossipResult<T> = Result<T, GossipError>;
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequest {
+    ExecutionPayload(B256),
     Block(BlockHash),
     Transaction(H256),
 }
@@ -126,9 +127,12 @@ pub enum GossipDataRequest {
 impl Debug for GossipDataRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(hash) => write!(f, "block {:?}", hash.0.to_base58()),
+            Self::Block(hash) => write!(f, "block {:?}", hash),
             Self::Transaction(hash) => {
-                write!(f, "transaction {:?}", hash.0.to_base58())
+                write!(f, "transaction {:?}", hash)
+            }
+            Self::ExecutionPayload(block_hash) => {
+                write!(f, "execution payload for block {:?}", block_hash)
             }
         }
     }

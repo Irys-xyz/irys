@@ -19,8 +19,9 @@ use irys_types::{
     Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
     PeerListItem, UnpackedChunk,
 };
+use reth::rpc::types::engine::ExecutionPayload;
 use std::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub(crate) struct GossipServer<M, B, A, P>
@@ -112,7 +113,7 @@ where
                     }
                     Ok(peer)
                 } else {
-                    debug!("Miner address {} is not allowed", miner_address);
+                    warn!("Miner address {} is not allowed", miner_address);
                     Err(HttpResponse::Forbidden().finish())
                 }
             }
@@ -163,6 +164,38 @@ where
             "Node {:?}: Started handling block and returned ok response to the peer",
             this_node_id
         );
+        HttpResponse::Ok().finish()
+    }
+
+    async fn handle_execution_payload(
+        server: Data<Self>,
+        irys_execution_payload_json: web::Json<GossipRequest<ExecutionPayload>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let execution_payload_request = irys_execution_payload_json.0;
+        let source_miner_address = execution_payload_request.miner_address;
+
+        if let Err(error_response) = Self::check_peer(
+            &server.peer_list,
+            &req,
+            execution_payload_request.miner_address,
+        )
+        .await
+        {
+            return error_response;
+        };
+
+        if let Err(error) = server
+            .data_handler
+            .handle_execution_payload(execution_payload_request)
+            .await
+        {
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+            error!("Failed to send transaction: {}", error);
+            return HttpResponse::InternalServerError().finish();
+        }
+
+        debug!("Gossip execution payload handled");
         HttpResponse::Ok().finish()
     }
 
@@ -246,13 +279,15 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let Some(source_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest().finish();
+        let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address).await
+        {
+            Ok(peer_address) => peer_address,
+            Err(error_response) => return error_response,
         };
 
         match server
             .data_handler
-            .handle_get_data(source_addr, data_request.0)
+            .handle_get_data(&peer, data_request.0)
             .await
         {
             Ok(has_data) => HttpResponse::Ok().json(has_data),
@@ -283,6 +318,10 @@ where
                         .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
                         .route("/chunk", web::post().to(Self::handle_chunk))
                         .route("/block", web::post().to(Self::handle_block))
+                        .route(
+                            "/execution_payload",
+                            web::post().to(Self::handle_execution_payload),
+                        )
                         .route("/get_data", web::post().to(Self::handle_get_data))
                         .route("/health", web::get().to(Self::handle_health_check)),
                 )

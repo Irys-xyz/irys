@@ -26,8 +26,7 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{
-    ActorAddresses, CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage,
-    StorageModuleService,
+    ActorAddresses, EpochReplayData, GetCommitmentStateGuardMessage, StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -36,6 +35,7 @@ use irys_database::db::RethDbWrapper;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
+use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
     BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
     ServiceHandleWithShutdownSignal, SyncState,
@@ -885,6 +885,7 @@ impl IrysNode {
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
+            commitment_state_guard.clone(),
             &config,
             &service_senders,
             reth_service_actor.clone(),
@@ -908,16 +909,14 @@ impl IrysNode {
             &service_senders,
         );
 
-        // Spawn the CommitmentCache service
-        let _commitcache_handle = CommitmentCache::spawn_service(
-            task_exec,
-            receivers.commitments_cache,
-            commitment_state_guard.clone(),
-        );
-
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) =
             init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
+
+        let execution_payload_provider = ExecutionPayloadProvider::new(
+            peer_list_service.clone(),
+            reth_node_adapter.clone().into(),
+        );
 
         // Spawn mempool service
         let _mempool_handle = MempoolService::spawn_service(
@@ -955,6 +954,7 @@ impl IrysNode {
         let _handle = ValidationService::spawn_service(
             task_exec,
             block_index_guard.clone(),
+            block_tree_guard.clone(),
             partition_assignments_guard.clone(),
             vdf_state_readonly.clone(),
             &config,
@@ -993,6 +993,7 @@ impl IrysNode {
             irys_db.clone(),
             gossip_listener,
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
+            execution_payload_provider,
         )?;
 
         // set up the price oracle

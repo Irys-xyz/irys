@@ -32,10 +32,6 @@ pub enum SystemTransaction {
     /// Version 1 system transaction format
     ///
     V1 {
-        /// The block height for which this system tx is valid.
-        valid_for_block_height: u64,
-        /// The parent block hash to ensure the tx is not replayed on forks.
-        parent_blockhash: FixedBytes<32>,
         /// The actual system transaction packet.
         packet: TransactionPacket,
     },
@@ -46,7 +42,7 @@ pub enum TransactionPacket {
     /// Unstake funds to an account (balance increment). Used for unstaking or protocol rewards.
     Unstake(BalanceIncrement),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
-    BlockReward(BalanceIncrement),
+    BlockReward(BlockRewardIncrement),
     /// Stake funds from an account (balance decrement). Used for staking operations.
     Stake(BalanceDecrement),
     /// Collect storage fees from an account (balance decrement). Must match storage usage.
@@ -78,16 +74,8 @@ pub mod system_tx_topics {
 impl SystemTransaction {
     /// Create a new V1 system transaction
     #[must_use]
-    pub fn new_v1(
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-        packet: TransactionPacket,
-    ) -> Self {
-        Self::V1 {
-            valid_for_block_height,
-            parent_blockhash,
-            packet,
-        }
+    pub fn new_v1(packet: TransactionPacket) -> Self {
+        Self::V1 { packet }
     }
 
     /// Get the version of this system transaction
@@ -95,27 +83,6 @@ impl SystemTransaction {
     pub fn version(&self) -> u8 {
         match self {
             Self::V1 { .. } => SYSTEM_TX_VERSION_V1,
-        }
-    }
-
-    /// Get the block height for which this system tx is valid
-    #[must_use]
-    pub fn valid_for_block_height(&self) -> u64 {
-        match self {
-            Self::V1 {
-                valid_for_block_height,
-                ..
-            } => *valid_for_block_height,
-        }
-    }
-
-    /// Get the parent block hash
-    #[must_use]
-    pub fn parent_blockhash(&self) -> FixedBytes<32> {
-        match self {
-            Self::V1 {
-                parent_blockhash, ..
-            } => *parent_blockhash,
         }
     }
 
@@ -134,14 +101,6 @@ impl SystemTransaction {
             Self::V1 { packet, .. } => packet.topic(),
         }
     }
-
-    /// Get the encoded topic for this system transaction.
-    #[must_use]
-    pub fn encoded_topic(&self) -> [u8; 32] {
-        match self {
-            Self::V1 { packet, .. } => packet.encoded_topic(),
-        }
-    }
 }
 
 impl TransactionPacket {
@@ -156,33 +115,6 @@ impl TransactionPacket {
             Self::StorageFees(_) => (*STORAGE_FEES).into(),
             Self::Pledge(_) => (*PLEDGE).into(),
             Self::Unpledge(_) => (*UNPLEDGE).into(),
-        }
-    }
-
-    /// Get the encoded topic for this transaction packet.
-    #[must_use]
-    pub fn encoded_topic(&self) -> [u8; 32] {
-        match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(bi.amount, 256),
-                    DynSolValue::Address(bi.target),
-                ])
-                .abi_encode_packed()
-                .try_into()
-                .unwrap_or_default()
-            }
-            Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(bd.amount, 256),
-                    DynSolValue::Address(bd.target),
-                ])
-                .abi_encode_packed()
-                .try_into()
-                .unwrap_or_default()
-            }
         }
     }
 }
@@ -203,24 +135,14 @@ impl Encodable for SystemTransaction {
     fn length(&self) -> usize {
         1 + // version byte
         match self {
-            Self::V1 { valid_for_block_height, parent_blockhash, packet } => {
-                valid_for_block_height.length() +
-                parent_blockhash.length() +
-                packet.length()
-            }
+            Self::V1 { packet } => packet.length()
         }
     }
 
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
-            Self::V1 {
-                valid_for_block_height,
-                parent_blockhash,
-                packet,
-            } => {
+            Self::V1 { packet } => {
                 out.put_u8(SYSTEM_TX_VERSION_V1);
-                valid_for_block_height.encode(out);
-                parent_blockhash.encode(out);
                 packet.encode(out);
             }
         }
@@ -234,7 +156,8 @@ impl Encodable for SystemTransaction {
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => bi.length(),
+            Self::Unstake(bi) | Self::Unpledge(bi) => bi.length(),
+            Self::BlockReward(br) => br.length(),
             Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => bd.length(),
         }
     }
@@ -283,14 +206,8 @@ impl Decodable for SystemTransaction {
 
         match version {
             SYSTEM_TX_VERSION_V1 => {
-                let valid_for_block_height = u64::decode(buf)?;
-                let parent_blockhash = FixedBytes::<32>::decode(buf)?;
                 let packet = TransactionPacket::decode(buf)?;
-                Ok(Self::V1 {
-                    valid_for_block_height,
-                    parent_blockhash,
-                    packet,
-                })
+                Ok(Self::V1 { packet })
             }
             _ => Err(alloy_rlp::Error::Custom(
                 "Unknown system transaction version",
@@ -317,7 +234,7 @@ impl Decodable for TransactionPacket {
                 Ok(Self::Unstake(inner))
             }
             BLOCK_REWARD_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
+                let inner = BlockRewardIncrement::decode(buf)?;
                 Ok(Self::BlockReward(inner))
             }
             STAKE_ID => {
@@ -383,9 +300,11 @@ pub struct BalanceDecrement {
     pub amount: U256,
     /// Target account address.
     pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this system tx.
+    pub irys_ref: FixedBytes<32>,
 }
 
-/// Balance increment: used for block rewards and unstake system txs.
+/// Balance increment: used for unstake system txs.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -401,6 +320,30 @@ pub struct BalanceDecrement {
     arbitrary::Arbitrary,
 )]
 pub struct BalanceIncrement {
+    /// Amount to increment to the target account.
+    pub amount: U256,
+    /// Target account address.
+    pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this system tx.
+    pub irys_ref: FixedBytes<32>,
+}
+
+/// Block reward increment: used for block reward system txs (no irys_ref needed).
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    RlpEncodable,
+    RlpDecodable,
+    arbitrary::Arbitrary,
+)]
+pub struct BlockRewardIncrement {
     /// Amount to increment to the target account.
     pub amount: U256,
     /// Target account address.

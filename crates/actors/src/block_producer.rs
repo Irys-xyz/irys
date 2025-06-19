@@ -8,7 +8,6 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     system_tx_generator::SystemTxGenerator,
-    CommitmentCacheMessage,
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
@@ -311,41 +310,50 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Commitment Transactions
             let block_height = prev_block_header.height + 1;
             let is_epoch_block = block_height % config.consensus.epoch.num_blocks_in_epoch == 0;
+            debug!("get_best_mempool_txs for block height: {} returned: {:#?}", block_height, submit_txs.commitment_tx.iter().map(|t| t.id).collect::<Vec<_>>());
 
-            // Construct commitment ledger based on block type (epoch vs regular)
-
-            let commitment_ledger;
+            // Build commitment ledger differently for epoch blocks vs regular blocks
             let commitment_txs_to_bill: &[CommitmentTransaction];
+            let commitment_ledger ;
             if is_epoch_block {
-                // In epoch blocks: collect and reference all previously validated commitments
-                // from the current epoch without re-inserting them into the database
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = service_senders.commitment_cache.send(CommitmentCacheMessage::GetEpochCommitments { response: tx });
+                // === EPOCH BLOCK: Rollup all commitments from the current epoch ===
+                // Epoch blocks don't add new commitments - they summarize all commitments
+                // that were validated throughout the epoch into a single rollup entry
+                let entry = block_tree_guard.read().get_commitment_snapshot(&prev.block_hash);
 
-                // Get the commitments and create a new H256List with their IDs
-                let commitments = rx.await.expect("to receive epoch commitments");
-                let mut txids = H256List::new();
+                if let Ok(entry) = entry {
+                    let mut txids = H256List::new();
+                    let commitments = entry.get_epoch_commitments();
 
-                for tx in commitments.iter() {
-                    debug!("Epoch block includes commitment: {}", tx.id.0.to_base58());
-                    txids.push(tx.id);
+                    // Collect all commitment transaction IDs from the epoch
+                    for tx in commitments.iter() {
+                        txids.push(tx.id);
+                    }
+
+                    debug!("Producing epoch block at height {} with commitments rollup tx {:#?}",block_height, txids);
+
+                    commitment_ledger = SystemTransactionLedger {
+                        ledger_id: SystemLedger::Commitment.into(),
+                        tx_ids: txids
+                    };
+
+                     // IMPORTANT: On epoch blocks we don't bill the user for system txs
+                    commitment_txs_to_bill = &[];
+                } else {
+                     return Err(eyre!("Could not find commitment snapshot for current epoch"))
                 }
-
-                commitment_ledger = SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: txids
-                };
-                // IMPORTANT: On epoch blocks we don't bill the user for system txs
-                commitment_txs_to_bill = &[];
             } else {
-                // In regular blocks: process new commitment transactions
-                // from the mempool and create a ledger entry referencing them
+                // === REGULAR BLOCK: Process new commitment transactions ===
+                // Regular blocks add fresh commitment transactions from the mempool
+                // and create ledger entries that reference these new commitments
                 let mut txids = H256List::new();
+
+                 // Add each new commitment transaction to the ledger
                 submit_txs.commitment_tx.iter().for_each(|ctx| {
                     txids.push(ctx.id);
                 });
-
-                commitment_ledger = SystemTransactionLedger {
+                debug!("Producing block at height {} with commitment tx {:#?}",block_height, txids);
+                 commitment_ledger = SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: txids
                 };
