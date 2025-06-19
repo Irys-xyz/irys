@@ -120,49 +120,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         //====================================
-        // Publish ledger TX Validation
-        //------------------------------------
-        // 1. Validate the proof
-        // 2. Validate the transaction
-        // 3. Update the local tx headers index so include the ingress- proof.
-        //    This keeps the transaction from getting re-promoted each block.
-        //    (this last step performed in mempool after the block is confirmed)
-        let publish_txs = match new_block_header.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
-                opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(txs) => txs,
-            Err(e) => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!("Failed to collect publish tx headers: {}", e))
-                });
-            }
-        };
-
-        if !publish_txs.is_empty() {
-            let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
-                Some(proofs) => proofs,
-                None => {
-                    return Box::pin(async move { Err(eyre::eyre!("Ingress proofs missing")) });
-                }
-            };
-
-            // Pre-Validate the ingress-proof by verifying the signature
-            for (i, tx_header) in publish_txs.iter().enumerate() {
-                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                    return Box::pin(async move {
-                        Err(eyre::eyre!("Invalid ingress proof signature: {}", e))
-                    });
-                }
-            }
-        }
-
-        //====================================
         // Block header pre-validation
         //------------------------------------
         let block_index_guard2 = self.block_index_guard.clone();
@@ -222,6 +179,54 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             if submit_txs.len() != submit_tx_ids_to_check.len() {
                 return Err(eyre::eyre!("Failed to collect submit tx headers"));
+            }
+
+            //====================================
+            // Publish ledger TX Validation
+            //------------------------------------
+            // 1. Validate the proof
+            // 2. Validate the transaction
+            // 3. Update the local tx headers index to include the ingress-proof.
+            //    This keeps the transaction from getting re-promoted each block.
+            //    (this last step performed in mempool after the block is confirmed)
+
+            let publish_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Publish]
+                .tx_ids
+                .0
+                .clone();
+
+            let (tx, rx) = oneshot::channel();
+            mempool.send(MempoolServiceMessage::GetDataTxs(
+                publish_tx_ids_to_check.clone(),
+                tx,
+            ))?;
+
+            let publish_txs = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<IrysTransactionHeader>>();
+
+            if publish_txs.len() != publish_tx_ids_to_check.len() {
+                return Err(eyre::eyre!("Failed to collect publish tx headers"));
+            }
+
+            if !publish_txs.is_empty() {
+                let publish_proofs =
+                    match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
+                        Some(proofs) => proofs,
+                        None => {
+                            return Err(eyre::eyre!("Ingress proofs missing"));
+                        }
+                    };
+
+                // Pre-Validate the ingress-proof by verifying the signature
+                for (i, tx_header) in publish_txs.iter().enumerate() {
+                    if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                        return Err(eyre::eyre!("Invalid ingress proof signature: {}", e));
+                    }
+                }
             }
 
             //====================================
