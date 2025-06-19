@@ -16,10 +16,9 @@ use base58::ToBase58 as _;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
-    Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
-    PeerListItem, UnpackedChunk,
+    Address, CommitmentTransaction, GossipExecutionPayloadData, GossipRequest, IrysBlockHeader,
+    IrysTransactionHeader, PeerListItem, UnpackedChunk,
 };
-use reth::rpc::types::engine::ExecutionPayload;
 use std::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
@@ -169,25 +168,21 @@ where
 
     async fn handle_execution_payload(
         server: Data<Self>,
-        irys_execution_payload_json: web::Json<GossipRequest<ExecutionPayload>>,
+        irys_execution_payload_json: web::Json<GossipRequest<GossipExecutionPayloadData>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let execution_payload_request = irys_execution_payload_json.0;
-        let source_miner_address = execution_payload_request.miner_address;
+        let evm_block_request = irys_execution_payload_json.0;
+        let source_miner_address = evm_block_request.miner_address;
 
-        if let Err(error_response) = Self::check_peer(
-            &server.peer_list,
-            &req,
-            execution_payload_request.miner_address,
-        )
-        .await
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, evm_block_request.miner_address).await
         {
             return error_response;
         };
 
         if let Err(error) = server
             .data_handler
-            .handle_execution_payload(execution_payload_request)
+            .handle_execution_payload(evm_block_request)
             .await
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;

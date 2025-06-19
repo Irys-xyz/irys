@@ -8,6 +8,7 @@ use core::time::Duration;
 use irys_types::{Address, BlockHash, ChunkPathHash, GossipData, IrysTransactionId, H256};
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
+use std::hash::Hash;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -39,9 +40,7 @@ impl From<&GossipData> for GossipCacheKey {
             GossipData::Transaction(transaction) => Self::Transaction(transaction.id),
             GossipData::CommitmentTransaction(comm_tx) => Self::Transaction(comm_tx.id),
             GossipData::Block(block) => Self::Block(block.block_hash),
-            GossipData::ExecutionPayload(payload) => {
-                Self::ExecutionPayload(payload.as_v1().block_hash)
-            }
+            GossipData::ExecutionPayload(payload) => Self::ExecutionPayload(payload.evm_block_hash),
         }
     }
 }
@@ -170,7 +169,7 @@ impl GossipCache {
                     .read()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 payloads
-                    .get(&payload.as_v1().block_hash)
+                    .get(&payload.evm_block_hash)
                     .cloned()
                     .unwrap_or_default()
             }

@@ -5,8 +5,8 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
 };
-use reth::revm::primitives::B256;
-use reth::rpc::types::engine::{ExecutionPayload, ExecutionPayloadV1};
+use reth::builder::Block as _;
+use reth::primitives::{Block, BlockBody, Header};
 use tracing::debug;
 
 #[actix_web::test]
@@ -399,10 +399,25 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
+    let evm_block = Block {
+        header: Header {
+            parent_hash: Default::default(),
+            number: 1,
+            gas_limit: 10,
+            gas_used: 10,
+            timestamp: 10,
+            extra_data: Default::default(),
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        },
+        body: BlockBody::default(),
+    };
+    let sealed_block = evm_block.clone().seal_slow();
+
     // Create a test block with transactions
     let mut block = IrysBlockHeader {
         block_hash: BlockHash::random(),
-        evm_block_hash: B256::random(),
+        evm_block_hash: sealed_block.hash(),
         ..IrysBlockHeader::new_mock_header()
     };
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
@@ -410,25 +425,10 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .sign_block_header(&mut block)
         .expect("to sign block header");
 
-    let block_payload = ExecutionPayload::V1(ExecutionPayloadV1 {
-        block_hash: block.evm_block_hash,
-        parent_hash: Default::default(),
-        fee_recipient: Default::default(),
-        state_root: Default::default(),
-        receipts_root: Default::default(),
-        logs_bloom: Default::default(),
-        prev_randao: Default::default(),
-        block_number: 0,
-        gas_limit: 0,
-        gas_used: 0,
-        timestamp: 0,
-        extra_data: Default::default(),
-        base_fee_per_gas: Default::default(),
-        transactions: vec![],
-    });
+    let block_payload = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block.clone()).payload;
     fixture1
         .execution_payload_provider
-        .add_payload_to_cache(block_payload.clone())
+        .add_payload_to_cache(sealed_block.clone())
         .await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
@@ -448,13 +448,21 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     service1_handle.stop().await?;
     service2_handle.stop().await?;
 
-    let execution_payload = fixture2
+    let local_block = fixture2
+        .execution_payload_provider
+        .get_locally_stored_evm_block(&block.evm_block_hash)
+        .await
+        .expect("to get execution payload stored on peer 1 from peer 2");
+
+    assert_eq!(local_block, evm_block);
+
+    let local_payload = fixture2
         .execution_payload_provider
         .get_locally_stored_payload(&block.evm_block_hash)
         .await
         .expect("to get execution payload stored on peer 1 from peer 2");
 
-    assert_eq!(execution_payload, block_payload);
+    assert_eq!(local_payload, block_payload);
 
     Ok(())
 }

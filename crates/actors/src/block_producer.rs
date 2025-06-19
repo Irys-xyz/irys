@@ -30,8 +30,8 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionLedger,
-    H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
-    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
+    GossipData, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData,
+    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -163,6 +163,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             reth_node_adapter,
             ..
         } = self.clone();
+
+        let gossip_broadcast_bus = service_senders.gossip_broadcast.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -583,7 +585,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 finalized_hash: None,
             }).await??;
 
-
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
@@ -593,13 +594,19 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             Ok(Some((block.clone(), payload)))
         }
         .into_actor(self)
-        .map(|result, actor, _ctx| {
+        .map(move |result, actor, _ctx| {
             // Only decrement blocks_remaining_for_test when a block is successfully produced
-            if let Ok(Some(_)) = &result {
+            if let Ok(Some((_irys_block_header, eth_built_payload))) = &result {
                 // If blocks_remaining_for_test is Some, decrement it by 1
                 if let Some(remaining) = actor.blocks_remaining_for_test {
                     actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
                 }
+
+                let execution_payload_gossip_data = GossipData::from(eth_built_payload.block().clone());
+                if let Err(payload_broadcast_error) = gossip_broadcast_bus.send(execution_payload_gossip_data) {
+                    error!("Failed to broadcast execution payload: {:?}", payload_broadcast_error);
+                }
+                // TODO: send payload broadcast message here
             }
             result
         })

@@ -16,10 +16,9 @@ use irys_actors::{
 };
 use irys_api_client::ApiClient;
 use irys_types::{
-    CommitmentTransaction, GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    CommitmentTransaction, GossipData, GossipExecutionPayloadData, GossipRequest, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
-use reth::rpc::types::engine::ExecutionPayload;
 use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, Span};
@@ -413,10 +412,27 @@ where
 
     pub(crate) async fn handle_execution_payload(
         &self,
-        execution_payload_request: GossipRequest<ExecutionPayload>,
+        execution_payload_request: GossipRequest<GossipExecutionPayloadData>,
     ) -> GossipResult<()> {
-        let execution_payload = execution_payload_request.data;
-        let evm_block_hash = execution_payload.block_hash();
+        let source_miner_address = execution_payload_request.miner_address;
+        let execution_payload_data = execution_payload_request.data;
+        let sealed_block = match execution_payload_data.seal_and_verify_hash() {
+            Some(block) => block,
+            None => {
+                if let Err(peer_list_error) = self
+                    .peer_list
+                    .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData)
+                    .await
+                {
+                    error!("Failed to decrease peer score: {:?}", peer_list_error);
+                }
+                return Err(GossipError::InvalidData(
+                    InvalidDataError::ExecutionPayloadHashMismatch,
+                ));
+            }
+        };
+
+        let evm_block_hash = sealed_block.hash();
         let payload_already_seen_before = self
             .cache
             .seen_execution_payload_from_any_peer(&evm_block_hash)?;
@@ -424,7 +440,6 @@ where
             .execution_payload_provider
             .is_waiting_for_payload(&evm_block_hash)
             .await;
-        let source_miner_address = execution_payload_request.miner_address;
 
         // Record payload as seen from the source peer
         self.cache.record_seen(
@@ -434,20 +449,19 @@ where
 
         if payload_already_seen_before && !expecting_payload {
             debug!(
-                "Node {}: Execution payload for block {} already seen, and no service requested it to be fetched again, skipping",
+                "Node {}: Execution payload for EVM block {:?} already seen, and no service requested it to be fetched again, skipping",
                 self.gossip_client.mining_address,
-                evm_block_hash.0.to_base58()
+                evm_block_hash
             );
             return Ok(());
         }
 
         self.execution_payload_provider
-            .add_payload_to_cache(execution_payload)
+            .add_payload_to_cache(sealed_block)
             .await;
         debug!(
-            "Node {}: Execution payload for EVM block {} added to cache",
-            self.gossip_client.mining_address,
-            evm_block_hash.0.to_base58()
+            "Node {}: Execution payload for EVM block {:?} have been added to the cache",
+            self.gossip_client.mining_address, evm_block_hash
         );
 
         Ok(())
@@ -496,17 +510,24 @@ where
             }
             GossipDataRequest::Transaction(_tx_hash) => Ok(false),
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
-                let payload = self
+                debug!(
+                    "Node {}: Handling execution payload request for block {:?}",
+                    self.gossip_client.mining_address, evm_block_hash
+                );
+                let maybe_evm_block = self
                     .execution_payload_provider
-                    .get_locally_stored_payload(&evm_block_hash)
+                    .get_locally_stored_evm_block(&evm_block_hash)
                     .await;
 
-                match payload {
-                    Some(payload) => self
+                match maybe_evm_block {
+                    Some(evm_block) => self
                         .gossip_client
                         .send_data_and_update_score(
                             (&request.miner_address, peer_info),
-                            &GossipData::ExecutionPayload(payload),
+                            &GossipData::ExecutionPayload(GossipExecutionPayloadData::new(
+                                evm_block_hash,
+                                evm_block,
+                            )),
                             &self.peer_list,
                         )
                         .await

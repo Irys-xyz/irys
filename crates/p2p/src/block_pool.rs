@@ -272,7 +272,7 @@ where
         let execution_payload_provider = self.execution_payload_provider.clone();
         tokio::spawn(async move {
             let is_payload_stored_locally = execution_payload_provider
-                .get_locally_stored_payload(&evm_block_hash)
+                .get_locally_stored_evm_block(&evm_block_hash)
                 .await
                 .is_some();
             if !is_payload_stored_locally {
