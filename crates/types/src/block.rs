@@ -250,9 +250,8 @@ impl IrysBlockHeader {
             .data_ledgers
             .iter()
             .filter(|l| l.ledger_id == 0 || l.ledger_id == 1)
-            .flat_map(|l| l.tx_ids.0.iter().cloned())
+            .flat_map(|l| l.tx_ids.0.iter().copied())
             .collect::<Vec<_>>();
-
 
         storage_txids
     }
