@@ -961,6 +961,7 @@ impl IrysNode {
             &service_senders,
             reth_node_adapter.clone(),
             irys_db.clone(),
+            execution_payload_provider.clone(),
             receivers.validation_service,
         );
 

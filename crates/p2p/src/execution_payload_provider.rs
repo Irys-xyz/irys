@@ -1,5 +1,7 @@
 use crate::types::GossipDataRequest;
 use crate::PeerList;
+use async_trait::async_trait;
+use irys_actors::block_validation::PayloadProvider;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
 use reth::builder::Block as _;
@@ -217,6 +219,16 @@ where
             .await
             .payloads_currently_requested_from_the_network
             .contains(evm_block_hash)
+    }
+}
+
+#[async_trait]
+impl<TPeerList> PayloadProvider for ExecutionPayloadProvider<TPeerList>
+where
+    TPeerList: PeerList,
+{
+    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionPayload> {
+        self.wait_for_payload(evm_block_hash).await
     }
 }
 

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     block_discovery::get_commitment_tx_in_parallel,
@@ -11,8 +11,9 @@ use crate::{
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::HashOrNumber;
+use async_trait::async_trait;
 use base58::ToBase58 as _;
-use eyre::{ensure, OptionExt as _};
+use eyre::{ensure, OptionExt};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
@@ -29,8 +30,18 @@ use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::providers::TransactionsProvider as _;
+use reth::revm::primitives::B256;
+use reth::rpc::types::engine::ExecutionPayload;
+use reth::{providers::TransactionsProvider as _, rpc::api::EngineApiClient};
 use tracing::{debug, info};
+
+/// Trait for providing execution payloads for block validation
+#[async_trait]
+pub trait PayloadProvider: Clone + Send + Sync + 'static {
+    /// Waits for the execution payload to arrive over gossip. This method will first check the local
+    /// cache, then try to retrieve the payload from the network if it is not found locally.
+    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionPayload>;
+}
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -488,24 +499,44 @@ pub async fn system_transactions_are_valid(
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
+    payload_provider: impl PayloadProvider,
 ) -> eyre::Result<()> {
-    // pending work:
-    // the local reth node does not have access to the incoming evm block.
-    // the responsibility for providing this evm block data is on the CL (irys)
-    // we need to propagate ExecutioinPayload in Irys gossip, and provide it here.
-    // The interactoin with the reth node then becomes:
-    //
-    // todo: we need to validate the executeion paylad (check that no `withdrawls` are present)
-    // let engine_api = reth_adapter.inner.engine_http_client();
-    // let result = engine_api
-    //     .new_payload_v3(
-    //         execution_payload_v3,
-    //         vec![], // blob version hashes are empty
-    //         parent_irys_block_hash,
-    //     )
-    //     .await?;
-    // // todo if result.is_syncing() we need to postpone the validation and attempt later
-    // ensure!(result.is_valid());
+    let payload = payload_provider
+        .wait_for_payload(&block.evm_block_hash)
+        .await
+        .ok_or_eyre("reth execute payload never arrived")?;
+
+    let engine_api_client = reth_adapter.inner.engine_http_client();
+    let ExecutionPayload::V3(payload) = payload else {
+        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+    };
+    ensure!(
+        payload.withdrawals().is_empty(),
+        "withdrawals must always be empty"
+    );
+    loop {
+        let payload = engine_api_client
+            .new_payload_v3(payload.clone(), vec![], block.previous_block_hash.into())
+            .await?;
+        match payload.status {
+            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
+                return Err(eyre::Report::msg(validation_error))
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
+                tracing::debug!("syncing extra blocks to validate payload");
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
+                tracing::info!("reth payload already known & is valid");
+                break;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
+                tracing::info!("accepted a side-chain (fork) payload");
+                break;
+            }
+        }
+    }
 
     // 1. Fetch EVM block transactions
     let block_txs = reth_adapter
@@ -600,7 +631,7 @@ async fn extract_commitment_txs(
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
     let commitment_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't genertae system txs for commitment txs
+        // IMPORTANT: on epoch blocks we don't generate system txs for commitment txs
         vec![]
     } else {
         match &block.system_ledgers[..] {

@@ -16,7 +16,7 @@ use crate::block_tree_service::{
     BlockState, BlockTreeReadGuard, BlockTreeServiceMessage, ChainState, ValidationResult,
 };
 use crate::block_validation::{
-    poa_is_valid, recall_recall_range_is_valid, system_transactions_are_valid,
+    poa_is_valid, recall_recall_range_is_valid, system_transactions_are_valid, PayloadProvider,
 };
 use crate::validation_service::ValidationServiceInner;
 use irys_types::{BlockHash, IrysBlockHeader};
@@ -33,18 +33,18 @@ enum ParentValidationResult {
 }
 
 /// Handles the execution of a single block validation task
-pub(crate) struct BlockValidationTask {
+pub(crate) struct BlockValidationTask<T: PayloadProvider> {
     pub block: Arc<IrysBlockHeader>,
     pub block_hash: BlockHash,
-    pub service_inner: Arc<ValidationServiceInner>,
+    pub service_inner: Arc<ValidationServiceInner<T>>,
     pub block_tree_guard: BlockTreeReadGuard,
 }
 
-impl BlockValidationTask {
+impl<T: PayloadProvider> BlockValidationTask<T> {
     pub(crate) fn new(
         block: Arc<IrysBlockHeader>,
         block_hash: BlockHash,
-        service_inner: Arc<ValidationServiceInner>,
+        service_inner: Arc<ValidationServiceInner<T>>,
         block_tree_guard: BlockTreeReadGuard,
     ) -> Self {
         Self {
@@ -216,13 +216,13 @@ impl BlockValidationTask {
                 block,
                 &self.service_inner.reth_node_adapter,
                 &self.service_inner.db,
+                self.service_inner.execution_payload_provider.clone(),
             )
             .instrument(tracing::info_span!("system_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "system transaction validation failed"))
             .map(|()| ValidationResult::Valid)
-            // todo update this once we have reth validation in place
-            .unwrap_or(ValidationResult::Valid)
+            .unwrap_or(ValidationResult::Invalid)
         };
 
         // Wait for all three tasks to complete

@@ -15,6 +15,7 @@ use crate::block_tree_service::BlockTreeReadGuard;
 use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeServiceMessage, ReorgEvent, ValidationResult},
+    block_validation::PayloadProvider,
     epoch_service::PartitionAssignmentsReadGuard,
     services::ServiceSenders,
 };
@@ -47,8 +48,7 @@ pub enum ValidationServiceMessage {
 }
 
 /// Main validation service structure
-#[derive(Debug)]
-pub struct ValidationService {
+pub struct ValidationService<T: PayloadProvider> {
     /// Graceful shutdown handle
     shutdown: GracefulShutdown,
     /// Message receiver
@@ -56,12 +56,11 @@ pub struct ValidationService {
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
     /// Inner service logic
-    inner: Arc<ValidationServiceInner>,
+    inner: Arc<ValidationServiceInner<T>>,
 }
 
 /// Inner service structure containing business logic
-#[derive(Debug)]
-pub(crate) struct ValidationServiceInner {
+pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
     /// Read only view of the block index
     pub(crate) block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
@@ -80,9 +79,11 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) block_tree_guard: BlockTreeReadGuard,
     /// Rayon thread pool that executes vdf steps   
     pub(crate) pool: rayon::ThreadPool,
+    /// Execution payload provider for system transaction validation
+    pub(crate) execution_payload_provider: T,
 }
 
-impl ValidationService {
+impl<T: PayloadProvider> ValidationService<T> {
     /// Spawn a new validation service
     pub fn spawn_service(
         exec: &TaskExecutor,
@@ -94,6 +95,7 @@ impl ValidationService {
         service_senders: &ServiceSenders,
         reth_node_adapter: IrysRethNodeAdapter,
         db: DatabaseProvider,
+        execution_payload_provider: T,
         rx: UnboundedReceiver<ValidationServiceMessage>,
     ) -> JoinHandle<()> {
         let config = config.clone();
@@ -120,6 +122,7 @@ impl ValidationService {
                         block_tree_guard,
                         reth_node_adapter,
                         db,
+                        execution_payload_provider,
                     }),
                 };
 
@@ -210,13 +213,13 @@ impl ValidationService {
     }
 }
 
-impl ValidationServiceInner {
+impl<T: PayloadProvider> ValidationServiceInner<T> {
     /// Handle incoming messages
     #[instrument(skip_all, fields(block_hash, block_height))]
     async fn create_validation_future(
         self: Arc<Self>,
         msg: ValidationServiceMessage,
-    ) -> Option<BlockValidationTask> {
+    ) -> Option<BlockValidationTask<T>> {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
                 let block_hash = block.block_hash;
