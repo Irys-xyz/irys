@@ -578,8 +578,8 @@ async fn generate_expected_system_transactions_from_db<'a>(
         .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
         .ok_or_eyre("Submit ledger not found")?;
 
-    // Lookup storage/data txs
-    let submit_txs = extract_data_txs(config, service_senders, block, db).await?;
+    // Lookup submit txs
+    let submit_txs = extract_data_txs(service_senders, block, db).await?;
 
     let system_txs = SystemTxGenerator::new(
         &block.height,
@@ -627,29 +627,22 @@ async fn extract_commitment_txs(
 }
 
 async fn extract_data_txs(
-    config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
-    let data_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't generate system txs for commitment txs
-        vec![]
-    } else {
-        match &block.data_ledgers[..] {
-            [publish_ledger, submit_ledger] => {
-                // ledger
-                let mut tx_ids = publish_ledger.tx_ids.0.clone();
-                tx_ids.extend(submit_ledger.tx_ids.0.clone());
-                get_data_tx_in_parallel(tx_ids, &service_senders.mempool, db).await?
-            }
-            [] => eyre::bail!(
-                "Currently we support exactly 1 submit and 1 publish data ledger per block"
-            ),
-            [..] => eyre::bail!(
-                "Currently we support exactly 1 submit and 1 publish data ledger per block"
-            ),
+    let data_txs = match &block.data_ledgers[..] {
+        [publish_ledger, submit_ledger] => {
+            // ledger
+            let mut tx_ids = publish_ledger.tx_ids.0.clone();
+            tx_ids.extend(submit_ledger.tx_ids.0.clone());
+            get_data_tx_in_parallel(tx_ids, &service_senders.mempool, db).await?
+        }
+        [] => {
+            eyre::bail!("Currently we support exactly 1 submit and 1 publish data ledger per block")
+        }
+        [..] => {
+            eyre::bail!("Currently we support exactly 1 submit and 1 publish data ledger per block")
         }
     };
     Ok(data_txs)
