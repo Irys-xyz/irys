@@ -899,6 +899,16 @@ impl Inner {
         }
         drop(mempool_state_write_guard);
 
+        // add block to index
+        self.irys_db
+            .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))
+            .unwrap();
+        // Remove migrated block from mempool cache
+        {
+            let mut state = self.mempool_state.write().await;
+            state.prevalidated_blocks.remove(&migrated_block.block_hash);
+        }
+
         Ok(())
     }
 
