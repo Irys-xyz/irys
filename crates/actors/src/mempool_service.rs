@@ -135,6 +135,8 @@ pub struct MempoolState {
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
+    /// pre-validated blocks that have passed pre-validation in discovery service
+    prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -1960,6 +1962,7 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
+        prevalidated_blocks: HashMap::new(),
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),
