@@ -756,8 +756,6 @@ impl Inner {
             }
         }
 
-        info!("Removing confirmed tx - Block height: {}", block.height,);
-
         Ok(())
     }
 
