@@ -1,5 +1,5 @@
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_discovery::{get_data_tx_in_parallel, BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
@@ -21,7 +21,7 @@ use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
-    tables::IngressProofs, tx_header_by_txid, SystemLedger,
+    tables::IngressProofs, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_system_tx;
@@ -222,19 +222,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
 
                 // Loop though all the pending tx to see which haven't been promoted
-                for txid in &publish_txids {
-                    let tx_header = match tx_header_by_txid(&read_tx, txid) {
-                        Ok(Some(header)) => header,
-                        Ok(None) => {
-                            error!("No transaction header found for txid: {}", txid);
-                            continue;
-                        },
-                        Err(e) => {
-                            error!("Error fetching transaction header for txid {}: {}", txid, e);
-                            continue;
-                        }
-                    };
-
+                let tx_headers = get_data_tx_in_parallel(publish_txids, &service_senders.mempool, &db).await.unwrap_or(vec![]);
+                for tx_header in &tx_headers {
                     // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
                     if tx_header.ingress_proofs.is_none() {
                         // Get the proof
@@ -303,9 +292,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             service_senders.mempool.send(MempoolServiceMessage::GetBestMempoolTxs(Some(BlockId::Hash(prev_block_header.evm_block_hash.into())), tx)).expect("to send MempoolServiceMessage");
             let submit_txs = rx.await.expect("to receive txns");
 
-            let submit_chunks_added = calculate_chunks_added(&submit_txs.storage_tx, config.consensus.chunk_size);
+            let submit_chunks_added = calculate_chunks_added(&submit_txs.submit_tx, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
-            let submit_txids = submit_txs.storage_tx.iter().map(|h| h.id).collect::<Vec<H256>>();
+            let submit_txids = submit_txs.submit_tx.iter().map(|h| h.id).collect::<Vec<H256>>();
 
             // Commitment Transactions
             let block_height = prev_block_header.height + 1;
@@ -466,7 +455,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let local_signer = LocalSigner::from(config.irys_signer().signer);
             // Generate expected system transactions using shared logic
             let system_txs = SystemTxGenerator::new(&block_height, &config.node_config.reward_address, &reward_amount.amount, &prev_block_header);
-            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.storage_tx)
+            let system_txs = system_txs.generate_all(commitment_txs_to_bill, &submit_txs.submit_tx)
                 .map(|tx_result| {
                     let tx = tx_result?;
                     let mut tx_raw = compose_system_tx(config.consensus.chain_id, &tx);
@@ -539,7 +528,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     // Term Submit Ledger
                     DataTransactionLedger {
                         ledger_id: DataLedger::Submit.into(),
-                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs.storage_tx).0,
+                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs.submit_tx).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),

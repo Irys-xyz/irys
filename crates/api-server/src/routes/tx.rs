@@ -5,7 +5,10 @@ use actix_web::{
     HttpResponse, Result,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
+use irys_actors::{
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    mempool_service::{MempoolServiceMessage, TxIngressError},
+};
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
@@ -83,9 +86,9 @@ pub async fn get_transaction_api(
 ) -> Result<Json<IrysTransactionResponse>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
-    get_transaction(&state, tx_id).map(web::Json)
+    get_transaction(&state, tx_id).await.map(web::Json)
 }
-// Helper function to retrieve IrysTransactionHeader
+/// Helper function to retrieve IrysTransactionHeader from mdbx
 pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
@@ -102,7 +105,7 @@ pub fn get_storage_transaction(
     })
 }
 
-// Helper function to retrieve CommitmentTransaction
+// Helper function to retrieve CommitmentTransaction from mdbx
 pub fn get_commitment_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
@@ -120,18 +123,33 @@ pub fn get_commitment_transaction(
 }
 
 // Combined function to get either type of transaction
-pub fn get_transaction(
+// it can retrieve both data or commitment txs
+// from either mempool or mdbx
+pub async fn get_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
 ) -> Result<IrysTransactionResponse, ApiError> {
-    get_storage_transaction(state, tx_id)
-        .map(IrysTransactionResponse::Storage)
-        .or_else(|err| match err {
-            ApiError::ErrNoId { .. } => {
-                get_commitment_transaction(state, tx_id).map(IrysTransactionResponse::Commitment)
-            }
-            other => Err(other),
-        })
+    let vec = vec![tx_id];
+    if let Ok(mut result) =
+        get_commitment_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
+    {
+        if let Some(tx) = result.pop() {
+            return Ok(IrysTransactionResponse::Commitment(tx));
+        }
+    };
+
+    if let Ok(mut result) =
+        get_data_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
+    {
+        if let Some(tx) = result.pop() {
+            return Ok(IrysTransactionResponse::Storage(tx));
+        }
+    };
+
+    Err(ApiError::ErrNoId {
+        id: tx_id.to_string(),
+        err: "id not found".to_string(),
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +168,7 @@ pub async fn get_tx_local_start_offset(
     info!("Get tx data metadata by tx_id: {}", tx_id);
 
     // Only works for storage transaction header
+    // read storage tx from mempool or database
     let tx_header = get_storage_transaction(&state, tx_id)?;
     let ledger = DataLedger::try_from(tx_header.ledger_id).unwrap();
 

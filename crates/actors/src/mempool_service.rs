@@ -125,12 +125,12 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
 #[derive(Debug)]
 pub struct MempoolState {
-    /// Temporary mempool stubs - will replace with proper data models - `DMac`
-    valid_tx: BTreeMap<H256, IrysTransactionHeader>,
+    /// valid submit txs
+    valid_submit_ledger_tx: BTreeMap<H256, IrysTransactionHeader>,
     valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     invalid_tx: Vec<H256>,
-    /// Tracks recent valid txids from either storage or commitment
+    /// Tracks recent valid txids from either data or commitment
     recent_valid_tx: HashSet<H256>,
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
@@ -142,7 +142,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 /// Messages that the Mempool Service handler supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
-    /// Block Confirmed, remove confirmed txns from mempool
+    /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
     BlockConfirmed(Arc<IrysBlockHeader>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngestChunk(
@@ -164,7 +164,7 @@ pub enum MempoolServiceMessage {
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
-    /// Confirm data/storage tx exists in mempool or database
+    /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// validate and process an incoming IrysTransactionHeader
     IngestDataTx(
@@ -180,7 +180,7 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-    /// Get IrysTransactionHeader
+    /// Get IrysTransactionHeader from mempool or mdbx
     GetDataTxs(
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
@@ -442,7 +442,7 @@ impl TxReadError {
 #[derive(Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
-    pub storage_tx: Vec<IrysTransactionHeader>,
+    pub submit_tx: Vec<IrysTransactionHeader>,
 }
 
 /// Generates an ingress proof for a specific `data_root`
@@ -537,7 +537,7 @@ impl Inner {
 
         for tx in txs {
             // if data tx exists in mempool
-            if let Some(tx_header) = mempool_state_guard.valid_tx.get(&tx) {
+            if let Some(tx_header) = mempool_state_guard.valid_submit_ledger_tx.get(&tx) {
                 found_txs.push(Some(tx_header.clone()));
                 continue;
             }
@@ -693,35 +693,17 @@ impl Inner {
         Ok(())
     }
 
+    /// read publish txs from block. Overwrite copies in mempool with proof
     async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
-        let mempool_state = &self.mempool_state.clone();
-        let mut mempool_state_write_guard = mempool_state.write().await;
-        for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-            // Remove the submit tx from the pending valid_tx pool
-            mempool_state_write_guard.valid_tx.remove(txid);
-            mempool_state_write_guard.recent_valid_tx.remove(txid);
-        }
-        drop(mempool_state_write_guard);
-
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
-        // Loop though the promoted transactions and remove their ingress proofs
-        // from the mempool. In the future on a multi node network we may keep
-        // ingress proofs around longer to account for re-orgs, but for now
-        // we just remove them.
-        // FIXME: Note above about re-orgs!
+        // FIXME: Loop though the promoted transactions and insert their ingress proofs
+        // into the mempool. In the future on a multi node network we may keep
+        // ingress proofs around longer
         if !published_txids.is_empty() {
-            let mut_tx = self
-                .irys_db
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .expect("expected to read/write to database");
-
             for (i, txid) in block.data_ledgers[DataLedger::Publish]
                 .tx_ids
                 .0
@@ -729,14 +711,15 @@ impl Inner {
                 .enumerate()
             {
                 // Retrieve the promoted transactions header
-                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => {
+                let tx_headers_result = self.handle_get_data_tx_message(vec![*txid]).await;
+                let mut tx_header = match tx_headers_result.as_slice() {
+                    [Some(header)] => header.clone(),
+                    [None] => {
                         error!("No transaction header found for txid: {}", txid);
                         continue;
                     }
-                    Err(e) => {
-                        error!("Error fetching transaction header for txid {}: {}", txid, e);
+                    _ => {
+                        error!("Unexpected number of txids. Error fetching transaction header for txid: {}", txid);
                         continue;
                     }
                 };
@@ -750,19 +733,20 @@ impl Inner {
                 let proof = proofs.0[i].clone();
                 tx_header.ingress_proofs = Some(proof);
 
-                // Update the header record in the database to include the ingress
-                // proof, indicating it is promoted
-                if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
-                    error!(
-                        "Could not update transactions with ingress proofs - txid: {} err: {}",
-                        txid, err
-                    );
-                }
+                // Update the header record in the mempool to include the ingress
+                // proof, indicating it is promoted.
+                let mempool_state = &self.mempool_state.clone();
+                let mut mempool_state_write_guard = mempool_state.write().await;
+                mempool_state_write_guard
+                    .valid_submit_ledger_tx
+                    .insert(tx_header.id, tx_header.clone());
+                mempool_state_write_guard
+                    .recent_valid_tx
+                    .insert(tx_header.id);
+                drop(mempool_state_write_guard);
 
                 info!("Promoted tx:\n{:?}", tx_header);
             }
-
-            mut_tx.commit().expect("expect to commit to database");
         }
 
         info!("Removing confirmed tx - Block height: {}", block.height,);
@@ -802,6 +786,9 @@ impl Inner {
         );
 
         let migrated_block = event.block;
+        let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
+
+        // stage 1: move commitment transactions from tree to index
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
         let commitments = self
             .handle_get_commitment_tx_message(commitment_tx_ids)
@@ -820,8 +807,13 @@ impl Inner {
         }
         tx.inner.commit()?;
 
-        // move data transactions to index
-        let storage_tx_ids = migrated_block.get_storage_ledger_tx_ids();
+        // stage 2: move submit transactions from tree to index
+        let submit_tx_ids: Vec<H256> = data_ledger_txs
+            .get(&DataLedger::Submit)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
         {
             let mut_tx = self
                 .irys_db
@@ -831,31 +823,73 @@ impl Inner {
                 })
                 .expect("expected to read/write to database");
 
-            let data_tx_headers = self.handle_get_data_tx_message(storage_tx_ids).await;
-            for maybe_storage_tx_header in data_tx_headers {
-                if let Some(storage_tx_header) = maybe_storage_tx_header {
-                    if let Err(err) = insert_tx_header(&mut_tx, &storage_tx_header) {
-                        error!(
-                            "Could not insert transaction header - txid: {} err: {}",
-                            storage_tx_header.id, err
-                        );
+            // FIXME: this next line is less efficient than it needs to be?
+            //        why would we read mdbx txs when we are migrating?
+            let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
+            data_tx_headers
+                .into_iter()
+                .for_each(|maybe_header| match maybe_header {
+                    Some(ref header) => {
+                        if let Err(err) = insert_tx_header(&mut_tx, header) {
+                            error!(
+                                "Could not insert transaction header - txid: {} err: {}",
+                                header.id, err
+                            );
+                        }
                     }
-                } else {
-                    error!("Could not find transaction header in mempool");
-                }
-            }
+                    None => {
+                        error!("Could not find transaction header in mempool");
+                    }
+                });
+            mut_tx.commit().expect("expect to commit to database");
+        }
 
+        // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
+        let publish_tx_ids: Vec<H256> = data_ledger_txs
+            .get(&DataLedger::Publish)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        {
+            let mut_tx = self
+                .irys_db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .expect("expected to read/write to database");
+
+            let publish_tx_headers = self
+                .handle_get_data_tx_message(publish_tx_ids.clone())
+                .await;
+            publish_tx_headers
+                .into_iter()
+                .for_each(|maybe_header| match maybe_header {
+                    Some(ref header) => {
+                        // When a block was confirmed, handle_block_confirmed_message() updates the mempool submit tx headers with ingress proofs
+                        // this means the header includes the proofs when we now insert (overwrite existing entry) into the database
+                        if let Err(err) = insert_tx_header(&mut_tx, header) {
+                            error!(
+                                "Could not insert transaction header - txid: {} err: {}",
+                                header.id, err
+                            );
+                        }
+                    }
+                    None => {
+                        error!("Could not find transaction header in mempool");
+                    }
+                });
             mut_tx.commit().expect("expect to commit to database");
         }
 
         let mempool_state = &self.mempool_state.clone();
         let mut mempool_state_write_guard = mempool_state.write().await;
-        for txid in migrated_block.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .iter()
-        {
-            // Remove the submit tx from the pending valid_tx pool
-            mempool_state_write_guard.valid_tx.remove(txid);
+        for txid in submit_tx_ids.iter() {
+            // Remove the data tx from the pending valid_tx pool
+            mempool_state_write_guard
+                .valid_submit_ledger_tx
+                .remove(txid);
             mempool_state_write_guard.recent_valid_tx.remove(txid);
         }
         drop(mempool_state_write_guard);
@@ -942,8 +976,6 @@ impl Inner {
             );
             return Err(ChunkIngressError::InvalidDataSize);
         }
-
-        let mempool_state_guard = mempool_state.read().await;
 
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
@@ -1127,7 +1159,6 @@ impl Inner {
                 .unwrap();
             });
         }
-        drop(mempool_state_guard);
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
         let gossip_data = GossipData::Chunk(chunk);
@@ -1199,7 +1230,7 @@ impl Inner {
             canonical.last().unwrap().height
         );
 
-        // TODO: This approach should be applied to storage TX and commitment TX should instead
+        // TODO: This approach should be applied to data TX and commitment TX should instead
         // be checked for prior inclusion using the Commitment State and current Commitment Snapshot
         for entry in canonical {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
@@ -1257,16 +1288,20 @@ impl Inner {
                 .collect::<Vec<_>>()
         );
 
-        // Prepare storage transactions for inclusion after commitments
-        let mut all_storage_txs: Vec<_> = mempool_state_guard.valid_tx.values().cloned().collect();
+        // Prepare data transactions for inclusion after commitments
+        let mut submit_ledger_txs: Vec<_> = mempool_state_guard
+            .valid_submit_ledger_tx
+            .values()
+            .cloned()
+            .collect();
 
         drop(mempool_state_guard);
 
-        // Sort storage transactions by fee (highest first) to maximize revenue
-        all_storage_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+        // Sort data transactions by fee (highest first) to maximize revenue
+        submit_ledger_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
 
-        // Apply block size constraint and funding checks to storage transactions
-        let mut storage_tx = Vec::new();
+        // Apply block size constraint and funding checks to data transactions
+        let mut submit_tx = Vec::new();
         let max_txs = self
             .config
             .node_config
@@ -1276,12 +1311,12 @@ impl Inner {
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
 
-        // Select storage transactions in fee-priority order, respecting funding limits
+        // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
-        for tx in all_storage_txs {
+        for tx in submit_ledger_txs {
             if check_funding(&tx) {
-                storage_tx.push(tx);
-                if storage_tx.len() >= max_txs {
+                submit_tx.push(tx);
+                if submit_tx.len() >= max_txs {
                     break;
                 }
             }
@@ -1290,7 +1325,7 @@ impl Inner {
         // Return selected transactions grouped by type
         MempoolTxs {
             commitment_tx,
-            storage_tx,
+            submit_tx,
         }
     }
 
@@ -1377,22 +1412,18 @@ impl Inner {
 
         // Validate the transaction signature
         // check the result and error handle
-        let _ = self.validate_signature(&tx).await;
+        self.validate_signature(&tx).await?;
 
         let mut mempool_state_write_guard = mempool_state.write().await;
-        mempool_state_write_guard.valid_tx.insert(tx.id, tx.clone());
+        mempool_state_write_guard
+            .valid_submit_ledger_tx
+            .insert(tx.id, tx.clone());
         mempool_state_write_guard.recent_valid_tx.insert(tx.id);
         drop(mempool_state_write_guard);
 
         // Cache the data_root in the database
         match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, &tx)?;
-            // TODO: tx headers should not immediately be added to the database
-            // this is a work around until the mempool can persist its state
-            // during shutdown. Currently this has the potential to create
-            // orphaned tx headers in the database with expired anchors and
-            // not linked to any blocks.
-            irys_database::insert_tx_header(db_tx, &tx)?;
             Ok(())
         }) {
             Ok(()) => {
@@ -1468,7 +1499,10 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         #[expect(clippy::if_same_then_else, reason = "readability")]
-        if mempool_state_guard.valid_tx.contains_key(&txid) {
+        if mempool_state_guard
+            .valid_submit_ledger_tx
+            .contains_key(&txid)
+        {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
             Ok(true)
@@ -1491,6 +1525,7 @@ impl Inner {
         }
     }
 
+    /// read specified commitment txs from mempool
     async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
@@ -1707,9 +1742,12 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         // Get any IrysTransaction from the valid storage txs
-        mempool_state_guard.valid_tx.values().for_each(|tx| {
-            hash_map.insert(tx.id, tx.clone());
-        });
+        mempool_state_guard
+            .valid_submit_ledger_tx
+            .values()
+            .for_each(|tx| {
+                hash_map.insert(tx.id, tx.clone());
+            });
 
         hash_map
     }
@@ -1922,7 +1960,7 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
-        valid_tx: BTreeMap::new(),
+        valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),
         recent_valid_tx: HashSet::new(),

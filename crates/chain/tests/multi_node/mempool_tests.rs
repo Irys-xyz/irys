@@ -173,15 +173,11 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .post_storage_tx_without_gossip(H256::zero(), data, &signer)
         .await;
 
-    let expected_txs = vec![storage_tx.header.clone()];
-    let result = genesis_node.wait_for_confirmed_txs(expected_txs, 20).await;
-    assert!(result.is_ok());
-
     // Restart the node
     tracing::info!("Restarting node");
     let restarted_node = genesis_node.stop().await.start().await;
 
-    // confirm the mempool tx have appeared back in the mempool after a restart
+    // confirm the mempool data tx have appeared back in the mempool after a restart
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let get_tx_msg = MempoolServiceMessage::GetDataTxs(vec![storage_tx.header.id], oneshot_tx);
     if let Err(err) = restarted_node
@@ -192,13 +188,17 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     {
         tracing::error!("error sending message to mempool: {:?}", err);
     }
-    let tx_from_mempool = oneshot_rx.await.expect("expected result");
-    assert!(tx_from_mempool
+    let data_tx_from_mempool = oneshot_rx.await.expect("expected result");
+    assert!(data_tx_from_mempool
         .first()
         .expect("expected a data tx")
         .is_some());
 
-    // TODO: once mempool does not write directly to db, confirm commitment txs appear back in mempool after restart
+    // confirm the commitment tx has appeared back in the mempool after a restart
+    let result = restarted_node
+        .wait_for_mempool_commitment_txs(vec![pledge_tx.id], 10)
+        .await;
+    assert!(result.is_ok());
 
     restarted_node.stop().await;
 
@@ -543,7 +543,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_previous = rx.await?;
     // previous block does not have the fund tx, the tx should not be present
     assert_eq!(
-        best_previous.storage_tx.len(),
+        best_previous.submit_tx.len(),
         0,
         "there should not be a storage tx (lack of funding due to changed parent EVM block)"
     );
@@ -558,7 +558,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_current = rx.await?;
     // latest block has the fund tx, so it should be present
     assert_eq!(
-        best_current.storage_tx.len(),
+        best_current.submit_tx.len(),
         1,
         "There should be a storage tx"
     );
@@ -586,7 +586,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_current = rx.await?;
 
     assert_eq!(
-        best_current.storage_tx.len(),
+        best_current.submit_tx.len(),
         0,
         "There shouldn't be a storage tx"
     );

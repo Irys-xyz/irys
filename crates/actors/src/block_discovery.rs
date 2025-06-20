@@ -9,7 +9,6 @@ use crate::{
 };
 use actix::prelude::*;
 use async_trait::async_trait;
-use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
@@ -123,77 +122,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         //====================================
-        // Submit ledger TX validation
-        //------------------------------------
-        // Get all the submit ledger transactions for the new block, error if not found
-        // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
-        // If they are in our mempool and validated we know they are real, if not we have
-        // to retrieve and validate them from the block producer.
-        // TODO: in the future we'll retrieve the missing transactions from the block
-        // producer and validate them.
-        let submit_txs = match new_block_header.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
-                opt.ok_or_else(|| {
-                    eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(txs) => txs,
-            Err(e) => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!("Failed to collect submit tx headers: {}", e))
-                });
-            }
-        };
-
-        //====================================
-        // Publish ledger TX Validation
-        //------------------------------------
-        // 1. Validate the proof
-        // 2. Validate the transaction
-        // 3. Update the local tx headers index so include the ingress- proof.
-        //    This keeps the transaction from getting re-promoted each block.
-        //    (this last step performed in mempool after the block is confirmed)
-        let publish_txs = match new_block_header.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                let opt = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))?;
-                opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(txs) => txs,
-            Err(e) => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!("Failed to collect publish tx headers: {}", e))
-                });
-            }
-        };
-
-        if !publish_txs.is_empty() {
-            let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
-                Some(proofs) => proofs,
-                None => {
-                    return Box::pin(async move { Err(eyre::eyre!("Ingress proofs missing")) });
-                }
-            };
-
-            // Pre-Validate the ingress-proof by verifying the signature
-            for (i, tx_header) in publish_txs.iter().enumerate() {
-                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                    return Box::pin(async move {
-                        Err(eyre::eyre!("Invalid ingress proof signature: {}", e))
-                    });
-                }
-            }
-        }
-
-        //====================================
         // Block header pre-validation
         //------------------------------------
         let block_index_guard2 = self.block_index_guard.clone();
@@ -217,11 +145,90 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
-        // let mempool_config = self.config.consensus.mempool.clone();
-
+        let mempool = self.service_senders.mempool.clone();
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
+
+            //====================================
+            // Submit ledger TX validation
+            //------------------------------------
+            // Get all the submit ledger transactions for the new block, error if not found
+            // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
+            // If they are in our mempool and validated we know they are real, if not we have
+            // to retrieve and validate them from the block producer.
+            // TODO: in the future we'll retrieve the missing transactions from the block
+            // producer and validate them.
+
+            let submit_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Submit]
+                .tx_ids
+                .0
+                .clone();
+
+            let (tx, rx) = oneshot::channel();
+            mempool.send(MempoolServiceMessage::GetDataTxs(
+                submit_tx_ids_to_check.clone(),
+                tx,
+            ))?;
+
+            let submit_txs = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<IrysTransactionHeader>>();
+
+            if submit_txs.len() != submit_tx_ids_to_check.len() {
+                return Err(eyre::eyre!("Failed to collect submit tx headers"));
+            }
+
+            //====================================
+            // Publish ledger TX Validation
+            //------------------------------------
+            // 1. Validate the proof
+            // 2. Validate the transaction
+            // 3. Update the local tx headers index to include the ingress-proof.
+            //    This keeps the transaction from getting re-promoted each block.
+            //    (this last step performed in mempool after the block is confirmed)
+
+            let publish_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Publish]
+                .tx_ids
+                .0
+                .clone();
+
+            let (tx, rx) = oneshot::channel();
+            mempool.send(MempoolServiceMessage::GetDataTxs(
+                publish_tx_ids_to_check.clone(),
+                tx,
+            ))?;
+
+            let publish_txs = rx
+                .await
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<IrysTransactionHeader>>();
+
+            if publish_txs.len() != publish_tx_ids_to_check.len() {
+                return Err(eyre::eyre!("Failed to collect publish tx headers"));
+            }
+
+            if !publish_txs.is_empty() {
+                let publish_proofs =
+                    match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
+                        Some(proofs) => proofs,
+                        None => {
+                            return Err(eyre::eyre!("Ingress proofs missing"));
+                        }
+                    };
+
+                // Pre-Validate the ingress-proof by verifying the signature
+                for (i, tx_header) in publish_txs.iter().enumerate() {
+                    if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                        return Err(eyre::eyre!("Invalid ingress proof signature: {}", e));
+                    }
+                }
+            }
 
             //====================================
             // Commitment ledger TX Validation
@@ -509,15 +516,15 @@ pub async fn get_commitment_tx_in_parallel(
     }
 }
 
-/// Get all data/storage transactions from the mempool and database
+/// Get all data transactions from the mempool and database
 pub async fn get_data_tx_in_parallel(
-    storage_tx_ids: Vec<IrysTransactionId>,
+    data_tx_ids: Vec<IrysTransactionId>,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<IrysTransactionHeader>> {
-    let tx_ids_clone = storage_tx_ids.clone();
+    let tx_ids_clone = data_tx_ids.clone();
 
-    // Set up a function to query the mempool for storage transactions
+    // Set up a function to query the mempool for data transactions
     let mempool_future = {
         let tx_ids = tx_ids_clone.clone();
         async move {
@@ -536,7 +543,7 @@ pub async fn get_data_tx_in_parallel(
 
     // Set up a function to query the database for commitment transactions
     let db_future = {
-        let tx_ids = storage_tx_ids.clone();
+        let tx_ids = data_tx_ids.clone();
         let db_ref = db.clone();
         async move {
             let db_tx = db_ref.tx()?;
@@ -566,10 +573,10 @@ pub async fn get_data_tx_in_parallel(
     );
 
     // Combine results, preferring mempool
-    let mut headers = Vec::with_capacity(storage_tx_ids.len());
+    let mut headers = Vec::with_capacity(data_tx_ids.len());
     let mut missing = Vec::new();
 
-    for tx_id in storage_tx_ids {
+    for tx_id in data_tx_ids {
         if let Some(header) = mempool_map.get(&tx_id) {
             headers.push(header.clone());
         } else if let Some(header) = db_map.get(&tx_id) {

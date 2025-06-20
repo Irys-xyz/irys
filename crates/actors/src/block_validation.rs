@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    block_discovery::get_commitment_tx_in_parallel,
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_index_service::BlockIndexReadGuard,
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
@@ -624,8 +624,17 @@ async fn generate_expected_system_transactions_from_db<'a>(
         .iter()
         .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
         .ok_or_eyre("Submit ledger not found")?;
-    // todo: read the data txs from db and mempool
-    let submit_txs = [];
+
+    // Lookup submit txs
+    let submit_tx_ids: Vec<H256> = block
+        .get_data_ledger_tx_ids()
+        .get(&DataLedger::Submit)
+        .unwrap()
+        .iter()
+        .copied()
+        .collect();
+
+    let submit_txs = get_data_tx_in_parallel(submit_tx_ids, &service_senders.mempool, db).await?;
 
     let system_txs = SystemTxGenerator::new(
         &block.height,
@@ -682,7 +691,7 @@ fn validate_system_transactions_match(
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
             // If either of the systxs is not present, it means it was not generated as `expected`
-            // or it was not it was not included in the block. either way - an error
+            // or it was not included in the block. either way - an error
             tracing::warn!(?data, "system tx len mismatch");
             eyre::bail!("actual and expected system txs lens differ");
         };

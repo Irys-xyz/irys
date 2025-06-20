@@ -494,9 +494,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
-    // FIXME: This fn does not guarantee the tx is "confirmed"
-    //        Essentially there is nothing in the fn that confirms the tx is in a block, simply that it is in the mdbx
-    pub async fn wait_for_confirmed_txs(
+    /// mine blocks until the txs are found in the block index, i.e. mdbx
+    pub async fn wait_for_migrated_txs(
         &self,
         mut unconfirmed_txs: Vec<IrysTransactionHeader>,
         seconds: usize,
@@ -521,8 +520,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Retrieve the transaction header from database
             if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
-                assert_eq!(*tx, header);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
+                // the proofs may be added to the tx during promotion
+                // and so we cant do a direct comparison
+                // we can however check some key fields are equal
+                assert_eq!(tx.id, header.id);
+                assert_eq!(tx.anchor, header.anchor);
+                tracing::info!("Transaction was retrieved ok after {} attempts", attempt);
                 unconfirmed_txs.pop();
             };
             drop(ro_tx);
@@ -535,6 +538,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// wait for data tx to be in mempool and it's IngressProofs to be in database
     pub async fn wait_for_ingress_proofs(
         &self,
         mut unconfirmed_promotions: Vec<H256>,
@@ -563,9 +567,13 @@ impl IrysNodeTest<IrysNodeCtx> {
                 })
                 .unwrap();
 
-            // Retrieve the transaction header from database
-            let tx_header = tx_header_by_txid(&ro_tx, txid).unwrap();
-            if let Some(tx_header) = tx_header {
+            // Retrieve the transaction header from mempool or database
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
+            if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
                 //read its ingressproof(s)
                 if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
                     assert_eq!(proof.data_root, tx_header.data_root);
@@ -685,6 +693,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_snapshot.get_commitment_status(commitment_tx)
     }
 
+    /// wait for tx to appear in the mempool or be found in the database
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -839,6 +848,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         account.sign_transaction(tx).map_err(AddTxError::CreateTx)
     }
 
+    /// read storage tx from mbdx i.e. block index
     pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
         match self
             .node_ctx
@@ -849,6 +859,58 @@ impl IrysNodeTest<IrysNodeCtx> {
             Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
             Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
         }
+    }
+
+    /// read storage tx from mempool
+    pub async fn get_storage_tx_header_from_mempool(
+        &self,
+        tx_id: &H256,
+    ) -> eyre::Result<IrysTransactionHeader> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx);
+        if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
+            tracing::error!(
+                "API Failed to deliver MempoolServiceMessage::GetDataTxs: {:?}",
+                err
+            );
+        }
+        let mempool_response = oneshot_rx.await.expect(
+            "to receive IrysTransactionResponse from MempoolServiceMessage::GetDataTxs message",
+        );
+        let maybe_mempool_tx = mempool_response.first();
+        if let Some(result) = maybe_mempool_tx {
+            if let Some(tx) = result {
+                return Ok(tx.clone());
+            }
+        }
+        Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
+    }
+
+    /// read commitment tx from mempool
+    pub async fn get_commitment_tx_from_mempool(
+        &self,
+        tx_id: &H256,
+    ) -> eyre::Result<CommitmentTransaction> {
+        // try to get commitment tx from mempool
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs {
+            commitment_tx_ids: vec![*tx_id],
+            response: oneshot_tx,
+        };
+        if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
+            tracing::error!(
+                "API Failed to deliver MempoolServiceMessage::GetCommitmentTxs: {:?}",
+                err
+            );
+        }
+        let mempool_response = oneshot_rx.await.expect(
+            "to receive IrysTransactionResponse from MempoolServiceMessage::GetCommitmentTxs message",
+        );
+        let maybe_mempool_tx = mempool_response.get(&tx_id);
+        if let Some(tx) = maybe_mempool_tx {
+            return Ok(tx.clone());
+        }
+        Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
     pub fn get_block_by_height_on_chain(

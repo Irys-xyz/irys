@@ -1,25 +1,26 @@
-use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::routes::tx::TxOffset;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::get_cache_size;
-use irys_database::tables::CachedChunks;
+use irys_database::{
+    get_cache_size,
+    tables::{CachedChunks, IngressProofs},
+    walk_all,
+};
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
-use reth::providers::BlockReader as _;
+use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
+use reth_db::Database;
 use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().chunk_migration_depth = 2;
+    config.cache.cache_clean_lag = 5;
 
     let main_address = config.miner_address();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
@@ -39,14 +40,15 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(config);
-    let node = node.start().await;
+    let node = IrysNodeTest::new_genesis(config).start().await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await?;
+
+    node.start_public_api().await;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
@@ -62,55 +64,34 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .send()
         .await
         .unwrap();
-
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
 
+    // mine block 1 and confirm height is exactly what we need
+    node.mine_block().await?;
+    assert_eq!(node.get_height().await, 1_u64);
+
+    let block = node.get_block_by_height(node.get_height().await).await?;
+    let anchor = Some(block.block_hash);
+
+    // create and sign a data tx
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
-    // post a tx, mine a block
     let tx = account1
-        .create_transaction(data_bytes.clone(), None)
+        .create_transaction(data_bytes.clone(), anchor)
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
 
-    // post tx header
+    // post data tx
     let resp = client
         .post(format!("{}/v1/tx", http_url))
         .send_json(&tx.header)
         .await
         .unwrap();
-
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let id: String = tx.header.id.as_bytes().to_base58();
-    let mut tx_header_fut = Box::pin(async {
-        let delay = Duration::from_secs(1);
-        // sleep(delay).await;
-        // println!("slept");
-        for attempt in 1..20 {
-            let mut response = client
-                .get(format!("{}/v1/tx/{}", http_url, &id))
-                .send()
-                .await
-                .unwrap();
-
-            if response.status() == StatusCode::OK {
-                let result: IrysTransactionHeader = response.json().await.unwrap();
-                assert_eq!(&tx.header, &result);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
-                break;
-            }
-            sleep(delay).await;
-        }
-    });
-
-    future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut tx_header_fut,
-        Duration::from_millis(500),
-    )
-    .await?;
+    node.mine_block().await?;
+    assert_eq!(node.get_height().await, 2_u64);
 
     // upload chunk(s)
     for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
@@ -131,7 +112,6 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         };
 
         // Make a POST request with JSON payload
-
         let resp = client
             .post(format!("{}/v1/chunk", http_url))
             .send_json(&chunk)
@@ -141,79 +121,56 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    // wait for the chunks to migrate
-    let mut start_offset_fut = Box::pin(async {
-        let delay = Duration::from_secs(1);
-
-        for attempt in 1..20 {
-            let mut response = client
-                .get(format!(
-                    "{}/v1/tx/{}/local/data_start_offset",
-                    http_url, &id
-                ))
-                .send()
-                .await
-                .unwrap();
-
-            if response.status() == StatusCode::OK {
-                let res: TxOffset = response.json().await.unwrap();
-                debug!("start offset: {:?}", &res);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
-                return Some(res);
-            }
-            sleep(delay).await;
-        }
-        None
-    });
-
-    let start_offset = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut start_offset_fut,
-        Duration::from_millis(500),
-    )
-    .await?
-    .unwrap();
-
-    // mine a couple blocks
-    let reth_context = node.node_ctx.reth_node_adapter.clone();
+    // confirm that we have the right number of CachedChunks in mdbx table
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;
 
     assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
 
-    for i in 1..4 {
-        info!("manually producing block {}", i);
-        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
-
-        //check reth for built block
-        let reth_block = reth_context
-            .inner
-            .provider
-            .block_by_hash(block.evm_block_hash)?
-            .unwrap();
-
-        // check irys DB for built block
-        let db_irys_block = &node
+    // confirm that we have the right number of IngressProofs in mdbx table
+    let expected_proofs = 1;
+    let mut ingress_proofs = vec![];
+    for _ in 0..20 {
+        ingress_proofs = node
             .node_ctx
             .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
+            .view(walk_all::<IngressProofs, _>)
+            .unwrap()
             .unwrap();
-        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-        // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
-        sleep(Duration::from_millis(1500)).await;
+        if ingress_proofs.len() == expected_proofs {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    assert_eq!(ingress_proofs.len(), expected_proofs);
 
+    // now chunks have been posted. mine some blocks to get the publish ledger to be updated in the latest block
+    node.mine_blocks(3).await?;
+
+    // confirm that we have one entry in CachedChunks mdbx table
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;
-    assert_eq!(*chunk_cache_count, 0);
+    assert_eq!(*chunk_cache_count, 1_u64);
 
-    // make sure we can read the chunks
+    // mine enough blocks to cause chunk migration
+    node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
+        .await?;
+
+    // confirm that we no longer see an entry in CachedChunks mdbx table
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    })?;
+    assert_eq!(*chunk_cache_count, 0_u64);
+
+    // make sure we can read the chunks after migration
     let chunk_res = client
         .get(format!(
-            "{}/v1/chunk/ledger/0/{}",
-            http_url, start_offset.data_start_offset
+            "{}/v1/chunk/ledger/{}/{}",
+            http_url,
+            DataLedger::Publish as usize,
+            0_u64,
         ))
         .send()
         .await
