@@ -1269,8 +1269,12 @@ impl IrysNode {
             arbiters.push(part_arbiter);
         }
 
-        // request packing for uninitialized ranges
-        for sm in storage_modules_guard.read().iter() {
+        // request packing for uninitialized ranges of assigned storage modules
+        for sm in storage_modules_guard
+            .read()
+            .iter()
+            .filter(|sm| sm.partition_assignment().is_some())
+        {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
                 packing_actor_addr.do_send(PackingRequest {
