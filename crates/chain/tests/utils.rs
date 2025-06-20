@@ -904,7 +904,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mempool_response = oneshot_rx.await.expect(
             "to receive IrysTransactionResponse from MempoolServiceMessage::GetCommitmentTxs message",
         );
-        let maybe_mempool_tx = mempool_response.get(&tx_id);
+        let maybe_mempool_tx = mempool_response.get(tx_id);
         if let Some(tx) = maybe_mempool_tx {
             return Ok(tx.clone());
         }
