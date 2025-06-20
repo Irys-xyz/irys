@@ -341,10 +341,17 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             match validation_result {
                 Ok(()) => {
-                    // TODO: we shouldn't insert the block just yet, let it live in the mempool until it migrates
-                    db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
-                        .unwrap();
+                    // add block to mempool
+                    let (tx, rx) = oneshot::channel();
+                    mempool_sender.send(MempoolServiceMessage::IngestBlocks {
+                        prevalidated_blocks: vec![new_block_header.clone()],
+                        response: tx,
+                    })?;
+                    if let Err(e) = rx.await? {
+                        tracing::error!("error from MempoolServiceMessage::IngestBlocks: {:?}", e);
+                    }
 
+                    // all txs
                     let mut all_txs = submit_txs;
                     all_txs.extend_from_slice(&publish_txs);
 
