@@ -151,6 +151,11 @@ pub enum MempoolServiceMessage {
         UnpackedChunk,
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
+    /// Ingress Pre-validated Block
+    IngestBlocks {
+        prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
+        response: oneshot::Sender<Result<(), ChunkIngressError>>,
+    },
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// Ingress CommitmentTransaction into the mempool
@@ -1590,6 +1595,10 @@ impl Inner {
                 MempoolServiceMessage::BlockConfirmed(block) => {
                     let _unused_response_message = self.handle_block_confirmed_message(block).await;
                 }
+                MempoolServiceMessage::IngestBlocks {
+                    prevalidated_blocks,
+                    response,
+                } => {}
                 MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
                     let response_message = self
                         .handle_ingress_commitment_tx_message(commitment_tx)
