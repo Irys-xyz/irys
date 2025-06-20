@@ -1596,7 +1596,14 @@ impl Inner {
                 MempoolServiceMessage::IngestBlocks {
                     prevalidated_blocks,
                     response,
-                } => {}
+                } => {
+                    let response_value = self
+                        .handle_ingress_blocks_message(prevalidated_blocks)
+                        .await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
                 MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
                     let response_message = self
                         .handle_ingress_commitment_tx_message(commitment_tx)
@@ -1960,6 +1967,20 @@ impl Inner {
             debug!("Signature is NOT valid");
             Err(TxIngressError::InvalidSignature)
         }
+    }
+
+    /// ingest a block into the mempool
+    async fn handle_ingress_blocks_message(
+        &self,
+        prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
+    ) -> Result<(), ChunkIngressError> {
+        let mut mempool_state_guard = self.mempool_state.write().await;
+        for block in prevalidated_blocks {
+            mempool_state_guard
+                .prevalidated_blocks
+                .insert(block.block_hash, (*block).clone());
+        }
+        Ok(())
     }
 }
 
