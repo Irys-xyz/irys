@@ -700,11 +700,7 @@ async fn extract_data_txs(
                 submit_ledger.ledger_id == DataLedger::Submit,
                 "Submit ledger must be the second ledger in the data ledgers"
             );
-            ensure!(
-                publish_ledger.tx_ids.is_empty(),
-                "we don't generate any system txs for publish ledger. Update the code below"
-            );
-
+            // we only access the submit ledger data. Publish ledger does not require billing the user extra
             get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
                 .await?
         }

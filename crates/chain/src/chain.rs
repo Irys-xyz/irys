@@ -501,7 +501,6 @@ impl IrysNode {
         let node_mode = &config.node_config.mode;
         // Start with base genesis and update fields
         let (chain_spec, genesis_block) = IrysChainSpecBuilder::from_config(&self.config).build();
-        tracing::error!(reth_genesis = ?chain_spec.genesis);
 
         // In all startup modes, irys_db and block_index are prerequisites
         let irys_db = init_irys_db(config).expect("could not open irys db");
