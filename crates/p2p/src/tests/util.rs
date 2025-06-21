@@ -1,4 +1,4 @@
-use crate::execution_payload_provider::{ExecutionPayloadProvider, RethPayloadProvider};
+use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
 use crate::peer_list::{AddPeer, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
@@ -20,9 +20,9 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    CommitmentTransaction, Config, DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress,
-    PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    CommitmentTransaction, Config, DatabaseProvider, GossipBroadcastMessage, GossipRequest,
+    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig,
+    PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -38,12 +38,12 @@ use tracing::{debug, warn};
 pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub internal_message_bus: mpsc::UnboundedSender<GossipData>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
 }
 
 impl MempoolStub {
     #[must_use]
-    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipData>) -> Self {
+    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),
@@ -77,7 +77,7 @@ impl MempoolFacade for MempoolStub {
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
-                .send(GossipData::Transaction(tx_header))
+                .send(GossipBroadcastMessage::from(tx_header))
                 .expect("to send transaction");
         });
 
@@ -104,7 +104,7 @@ impl MempoolFacade for MempoolStub {
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
-                .send(GossipData::Chunk(chunk))
+                .send(GossipBroadcastMessage::from(chunk))
                 .expect("to send chunk");
         });
 
@@ -125,7 +125,7 @@ impl MempoolFacade for MempoolStub {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
-    pub internal_message_bus: mpsc::UnboundedSender<GossipData>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
 }
 
 #[async_trait]
@@ -141,7 +141,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
         // Pretend that we've validated the block and we're ready to gossip it
         tokio::runtime::Handle::current().spawn(async move {
             sender
-                .send(GossipData::Block(block))
+                .send(GossipBroadcastMessage::from(block))
                 .expect("to send block");
         });
 
@@ -340,7 +340,7 @@ impl GossipServiceTestFixture {
         let mocked_execution_payloads = Arc::new(TokioRwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadProvider::new(
             peer_list.clone(),
-            RethPayloadProvider::Mock(mocked_execution_payloads),
+            RethBlockProvider::Mock(mocked_execution_payloads),
         );
 
         Self {
@@ -371,10 +371,11 @@ impl GossipServiceTestFixture {
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
-        mpsc::UnboundedSender<GossipData>,
+        mpsc::UnboundedSender<GossipBroadcastMessage>,
     ) {
-        let (internal_message_bus, rx) = tokio::sync::mpsc::unbounded_channel::<GossipData>();
-        let gossip_service = P2PService::new(self.mining_address, rx);
+        let (internal_message_bus, rx) =
+            tokio::sync::mpsc::unbounded_channel::<GossipBroadcastMessage>();
+        let gossip_service = P2PService::new(self.mining_address, rx, internal_message_bus.clone());
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()

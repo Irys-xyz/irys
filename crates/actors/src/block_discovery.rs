@@ -16,8 +16,8 @@ use irys_database::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionId,
+    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage,
+    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database as _;
@@ -422,9 +422,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         "sending block to bus: block height {:?}",
                         &new_block_header.height
                     );
-                    if let Err(error) =
-                        gossip_sender.send(GossipData::Block(new_block_header.as_ref().clone()))
-                    {
+                    if let Err(error) = gossip_sender.send(GossipBroadcastMessage::from(
+                        new_block_header.as_ref().clone(),
+                    )) {
                         tracing::error!("Failed to send gossip message: {}", error);
                     }
 

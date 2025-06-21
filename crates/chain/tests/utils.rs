@@ -41,12 +41,13 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
 use irys_types::partition::PartitionAssignment;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
+    block_production::Seed, block_production::SolutionContext, Address, DataLedger,
+    GossipBroadcastMessage, H256List, H256,
 };
 use irys_types::{
-    Base64, CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
-    NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    Base64, CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, IrysTransaction,
+    IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk,
+    PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -909,7 +910,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mempool_response = oneshot_rx.await.expect(
             "to receive IrysTransactionResponse from MempoolServiceMessage::GetCommitmentTxs message",
         );
-        let maybe_mempool_tx = mempool_response.get(&tx_id);
+        let maybe_mempool_tx = mempool_response.get(tx_id);
         if let Some(tx) = maybe_mempool_tx {
             return Ok(tx.clone());
         }
@@ -957,7 +958,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipData::Block((*block_header).clone()))?;
+            .send(GossipBroadcastMessage::from((*block_header).clone()))?;
 
         Ok(())
     }

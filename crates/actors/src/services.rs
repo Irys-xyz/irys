@@ -8,7 +8,7 @@ use crate::{
 };
 use actix::Message;
 use core::ops::Deref;
-use irys_types::GossipData;
+use irys_types::GossipBroadcastMessage;
 use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
@@ -53,7 +53,7 @@ pub struct ServiceReceivers {
     pub vdf_mining: Receiver<bool>,
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
-    pub gossip_broadcast: UnboundedReceiver<GossipData>,
+    pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
@@ -68,7 +68,7 @@ pub struct ServiceSendersInner {
     pub vdf_mining: Sender<bool>,
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
-    pub gossip_broadcast: UnboundedSender<GossipData>,
+    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
@@ -88,7 +88,7 @@ impl ServiceSendersInner {
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
-            unbounded_channel::<GossipData>();
+            unbounded_channel::<GossipBroadcastMessage>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
         let (validation_sender, validation_receiver) =

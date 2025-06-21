@@ -877,6 +877,7 @@ impl IrysNode {
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
             receivers.gossip_broadcast,
+            service_senders.gossip_broadcast.clone(),
         );
         let sync_state = p2p_service.sync_state.clone();
 
@@ -1271,8 +1272,12 @@ impl IrysNode {
             arbiters.push(part_arbiter);
         }
 
-        // request packing for uninitialized ranges
-        for sm in storage_modules_guard.read().iter() {
+        // request packing for uninitialized ranges of assigned storage modules
+        for sm in storage_modules_guard
+            .read()
+            .iter()
+            .filter(|sm| sm.partition_assignment().is_some())
+        {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
                 packing_actor_addr.do_send(PackingRequest {

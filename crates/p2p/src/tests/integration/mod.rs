@@ -3,10 +3,10 @@ use core::time::Duration;
 use irys_actors::mempool_service::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockHash, DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore,
+    BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader, PeerScore,
 };
-use reth::revm::primitives::B256;
-use reth::rpc::types::engine::{ExecutionPayload, ExecutionPayloadV1};
+use reth::builder::Block as _;
+use reth::primitives::{Block, BlockBody, Header};
 use tracing::debug;
 
 #[actix_web::test]
@@ -28,7 +28,7 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let data = GossipData::Transaction(generate_test_tx().header);
+    let data = GossipBroadcastMessage::from(generate_test_tx().header);
 
     // Service 1 receives a message through the message bus from a system's component
     gossip_service1_message_bus
@@ -137,7 +137,7 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let data = GossipData::Transaction(generate_test_tx().header);
+    let data = GossipBroadcastMessage::from(generate_test_tx().header);
 
     // Send same data multiple times
     for _ in 0_i32..3_i32 {
@@ -184,7 +184,7 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     // Create and send chunk data
     let chunks = create_test_chunks(&generate_test_tx());
     #[expect(clippy::indexing_slicing, reason = "just a test")]
-    let data = GossipData::Chunk(chunks[0].clone());
+    let data = GossipBroadcastMessage::from(chunks[0].clone());
 
     gossip_service1_message_bus
         .send(data)
@@ -226,7 +226,7 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let data = GossipData::Transaction(generate_test_tx().header);
+    let data = GossipBroadcastMessage::from(generate_test_tx().header);
     gossip_service1_message_bus
         .send(data)
         .expect("Failed to send transaction to low reputation peer");
@@ -264,7 +264,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let data = GossipData::Transaction(generate_test_tx().header);
+    let data = GossipBroadcastMessage::from(generate_test_tx().header);
 
     // Should not panic when peer is offline
     gossip_service1_message_bus
@@ -314,7 +314,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipData::Block(block))
+        .send(GossipBroadcastMessage::from(block))
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and fetch transactions
@@ -368,7 +368,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipData::Block(block))
+        .send(GossipBroadcastMessage::from(block))
         .expect("Failed to send block to service 1");
 
     // Wait for service 2 to process the block and attempt to fetch transactions
@@ -399,10 +399,25 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     fixture1.add_peer(&fixture2).await;
     fixture2.add_peer(&fixture1).await;
 
+    let evm_block = Block {
+        header: Header {
+            parent_hash: Default::default(),
+            number: 1,
+            gas_limit: 10,
+            gas_used: 10,
+            timestamp: 10,
+            extra_data: Default::default(),
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        },
+        body: BlockBody::default(),
+    };
+    let sealed_block = evm_block.clone().seal_slow();
+
     // Create a test block with transactions
     let mut block = IrysBlockHeader {
         block_hash: BlockHash::random(),
-        evm_block_hash: B256::random(),
+        evm_block_hash: sealed_block.hash(),
         ..IrysBlockHeader::new_mock_header()
     };
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
@@ -410,25 +425,10 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .sign_block_header(&mut block)
         .expect("to sign block header");
 
-    let block_payload = ExecutionPayload::V1(ExecutionPayloadV1 {
-        block_hash: block.evm_block_hash,
-        parent_hash: Default::default(),
-        fee_recipient: Default::default(),
-        state_root: Default::default(),
-        receipts_root: Default::default(),
-        logs_bloom: Default::default(),
-        prev_randao: Default::default(),
-        block_number: 0,
-        gas_limit: 0,
-        gas_used: 0,
-        timestamp: 0,
-        extra_data: Default::default(),
-        base_fee_per_gas: Default::default(),
-        transactions: vec![],
-    });
+    let block_execution_data = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block.clone());
     fixture1
         .execution_payload_provider
-        .add_payload_to_cache(block_payload.clone())
+        .add_payload_to_cache(sealed_block.clone())
         .await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
@@ -439,22 +439,39 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipData::Block(block.clone()))
+        .send(GossipBroadcastMessage::from(block.clone()))
         .expect("Failed to send block to service 2");
 
-    // Wait for service 2 to process the block and receive the execution payload
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Wait for service 2 to process the block and receive the execution payload with a timeout of 10 seconds
+    fixture2
+        .execution_payload_provider
+        .test_observe_sealed_block_arrival(block.evm_block_hash, Duration::from_secs(10))
+        .await;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
 
-    let execution_payload = fixture2
+    let local_block = fixture2
         .execution_payload_provider
-        .get_locally_stored_payload(&block.evm_block_hash)
+        .get_locally_stored_evm_block(&block.evm_block_hash)
         .await
         .expect("to get execution payload stored on peer 1 from peer 2");
+    assert_eq!(local_block, evm_block);
 
-    assert_eq!(execution_payload, block_payload);
+    let local_sealed_block = fixture2
+        .execution_payload_provider
+        .get_locally_stored_sealed_block(&block.evm_block_hash)
+        .await
+        .expect("to get execution payload stored on peer 1 from peer 2");
+    assert_eq!(local_sealed_block, evm_block.seal_slow());
+
+    let payload = fixture2
+        .execution_payload_provider
+        .wait_for_payload(&block.evm_block_hash)
+        .await
+        .expect("to wait for execution payload");
+    // We compare the payloads because the execution data doesn't implement `PartialEq` directly
+    assert_eq!(payload.payload, block_execution_data.payload);
 
     Ok(())
 }

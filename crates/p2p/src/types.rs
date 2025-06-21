@@ -95,6 +95,8 @@ pub enum InvalidDataError {
     InvalidBlock(String),
     #[error("Invalid block signature")]
     InvalidBlockSignature,
+    #[error("Execution payload hash mismatch")]
+    ExecutionPayloadHashMismatch,
 }
 
 #[derive(Debug, Error, Clone)]
