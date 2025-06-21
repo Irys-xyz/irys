@@ -185,7 +185,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // let (testnet_config_genesis, _trusted_peers, genesis_trusted_peers) = init_configs();
     // setup a funded account at genesis block
     let testnet_config_genesis = NodeConfig::testnet();
-    let genesis_trusted_peers = testnet_config_genesis.trusted_peers.clone();
     let account1 = testnet_config_genesis.signer();
 
     let ctx_genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone())

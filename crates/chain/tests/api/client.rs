@@ -144,6 +144,7 @@ async fn check_get_block_endpoint(
 async fn heavy_api_client_all_endpoints_should_work() {
     let config = NodeConfig::testnet();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
+    ctx.wait_for_packing(20).await;
 
     let api_address = SocketAddr::new(
         IpAddr::from_str("127.0.0.1").unwrap(),

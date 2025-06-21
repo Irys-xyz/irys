@@ -29,7 +29,7 @@ use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -638,23 +638,8 @@ async fn generate_expected_system_transactions_from_db<'a>(
     // Look up commitment txs
     let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
 
-    // Look up submit transaction headers
-    let _submit_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
-        .ok_or_eyre("Submit ledger not found")?;
-
-    // Lookup submit txs
-    let submit_tx_ids: Vec<H256> = block
-        .get_data_ledger_tx_ids()
-        .get(&DataLedger::Submit)
-        .unwrap()
-        .iter()
-        .copied()
-        .collect();
-
-    let submit_txs = get_data_tx_in_parallel(submit_tx_ids, &service_senders.mempool, db).await?;
+    // Lookup data txs
+    let data_txs = extract_data_txs(service_senders, block, db).await?;
 
     let system_txs = SystemTxGenerator::new(
         &block.height,
@@ -663,7 +648,7 @@ async fn generate_expected_system_transactions_from_db<'a>(
         &prev_block,
     );
     let system_txs = system_txs
-        .generate_all(&commitment_txs, &submit_txs)
+        .generate_all(&commitment_txs, &data_txs)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(system_txs)
 }
@@ -685,7 +670,6 @@ async fn extract_commitment_txs(
                     ledger.ledger_id == SystemLedger::Commitment,
                     "only commitment ledger supported"
                 );
-                // ledger
 
                 get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
                     .await?
@@ -701,7 +685,36 @@ async fn extract_commitment_txs(
     Ok(commitment_txs)
 }
 
-/// Validates that the actual system transactions match the expected ones
+async fn extract_data_txs(
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
+    let txs = match &block.data_ledgers[..] {
+        [publish_ledger, submit_ledger] => {
+            ensure!(
+                publish_ledger.ledger_id == DataLedger::Publish,
+                "Publish ledger must be the first ledger in the data ledgers"
+            );
+            ensure!(
+                submit_ledger.ledger_id == DataLedger::Submit,
+                "Submit ledger must be the second ledger in the data ledgers"
+            );
+            ensure!(
+                publish_ledger.tx_ids.is_empty(),
+                "we don't generate any system txs for publish ledger. Update the code below"
+            );
+
+            get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                .await?
+        }
+        // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
+        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
+    };
+    Ok(txs)
+}
+
+/// Validates  the actual system transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
 fn validate_system_transactions_match(
     actual: impl Iterator<Item = eyre::Result<SystemTransaction>>,

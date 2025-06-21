@@ -193,6 +193,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }).await??;
 
             // Get all the ingress proofs for data promotion
+            // TODO: We don't generate any reth system txs for publish transactions. Should we?
             let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
             let mut proofs: Vec<TxIngressProof> = Vec::new();
             {

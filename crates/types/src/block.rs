@@ -535,6 +535,18 @@ pub enum DataLedger {
     // Add more term ledgers as they exist
 }
 
+impl PartialEq<u32> for DataLedger {
+    fn eq(&self, other: &u32) -> bool {
+        self.get_id() == *other
+    }
+}
+
+impl PartialEq<DataLedger> for u32 {
+    fn eq(&self, other: &DataLedger) -> bool {
+        *self == other.get_id()
+    }
+}
+
 impl Default for DataLedger {
     fn default() -> Self {
         Self::Publish
