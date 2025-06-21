@@ -7,10 +7,11 @@ use irys_reth_node_bridge::{irys_reth, IrysRethNodeAdapter};
 use lru::LruCache;
 use reth::builder::Block as _;
 use reth::core::primitives::SealedBlock;
+use reth::network::types::HashOrNumber;
 use reth::primitives::{Block, Header, Receipt, Transaction};
+use reth::providers::BlockReader;
 use reth::revm::primitives::B256;
 use reth::rpc::api::EthApiClient;
-use reth::rpc::types::engine::ExecutionData;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
