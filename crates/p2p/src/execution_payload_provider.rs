@@ -7,7 +7,8 @@ use irys_reth_node_bridge::{irys_reth, IrysRethNodeAdapter};
 use lru::LruCache;
 use reth::builder::Block as _;
 use reth::network::import::BlockImportEvent;
-use reth::network::types::BlockBodies;
+use reth::network::types::{BlockBodies, HashOrNumber};
+use reth::providers::BlockReader;
 use reth::revm::primitives::B256;
 use reth::rpc::api::EthApiClient;
 use reth::rpc::types::engine::ExecutionPayload;
@@ -56,18 +57,13 @@ impl RethPayloadProvider {
             }
         };
 
-        let rpc = ctx.rpc_client().unwrap();
-        let evm_block = EthApiClient::<
-            serde_json::Value,
-            alloy_rpc_types::Block,
-            serde_json::Value,
-            serde_json::Value,
-        >::block_by_hash(&rpc, evm_block_hash, true)
-        .await
-        .inspect_err(|err| tracing::error!(?err))
-        .ok()??;
+        let evm_block = ctx
+            .inner
+            .provider
+            .block(HashOrNumber::Hash(evm_block_hash))
+            .inspect_err(|err| tracing::error!(?err))
+            .ok()??;
 
-        let evm_block = <irys_reth::EthPrimitives as NodePrimitives>::Block::from(evm_block);
         let sealed_block = evm_block.seal_unchecked(evm_block_hash);
 
         let payload =

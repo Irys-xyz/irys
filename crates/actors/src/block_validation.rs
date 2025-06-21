@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{pin::pin, sync::Arc, time::Duration};
 
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
@@ -9,7 +9,7 @@ use crate::{
     services::ServiceSenders,
     system_tx_generator::SystemTxGenerator,
 };
-use alloy_consensus::Transaction as _;
+use alloy_consensus::{EthereumTxEnvelope, Transaction as _, TxEip4844};
 use alloy_eips::{
     eip7685::{Requests, RequestsOrHash},
     HashOrNumber,
@@ -18,6 +18,7 @@ use alloy_rpc_types_engine::ExecutionData;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt};
+use futures::future::{select, Either};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
@@ -37,6 +38,7 @@ use openssl::sha;
 use reth::revm::primitives::B256;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth::{providers::TransactionsProvider as _, rpc::api::EngineApiClient};
+use reth_ethereum_primitives::Block;
 use tracing::{debug, info};
 
 /// Trait for providing execution payloads for block validation
@@ -505,10 +507,33 @@ pub async fn system_transactions_are_valid(
     db: &DatabaseProvider,
     payload_provider: impl PayloadProvider,
 ) -> eyre::Result<()> {
-    let payload = payload_provider
-        .wait_for_payload(&block.evm_block_hash)
-        .await
-        .ok_or_eyre("reth execute payload never arrived")?;
+    // 1. Validate that the evm block is valid
+    let mut elapsed_secs = 0u64;
+
+    // TODO: `wait_for_payload` is not cancel safe, refactor it so we can freely use it here.
+    // Because current impl will result in some skewed behavior.
+    let payload = loop {
+        let payload_future = pin!(payload_provider.wait_for_payload(&block.evm_block_hash));
+        let timer_future = pin!(tokio::time::sleep(Duration::from_secs(5)));
+
+        match select(payload_future, timer_future).await {
+            Either::Left((Some(p), _)) => {
+                break p;
+            }
+            Either::Left((None, _)) => {
+                return Err(eyre::eyre!("reth execute payload never arrived"));
+            }
+            Either::Right((_, _)) => {
+                elapsed_secs += 5;
+                tracing::warn!(
+                    evm_block_hash = ?block.evm_block_hash,
+                    height = block.height,
+                    elapsed_secs,
+                    "Still waiting for execution payload to arrive"
+                );
+            }
+        }
+    };
 
     let engine_api_client = reth_adapter.inner.engine_http_client();
     let ExecutionData { payload, sidecar } = payload;
@@ -553,18 +578,13 @@ pub async fn system_transactions_are_valid(
             }
         }
     }
-
-    // 1. Fetch EVM block transactions
-    let block_txs = reth_adapter
-        .inner
-        .provider
-        .transactions_by_block(HashOrNumber::Hash(block.evm_block_hash))?
-        // todo add a test what happens with an invalid evm block
-        .ok_or_eyre("Block not found in reth")?;
+    let evm_block: Block = payload.try_into_block()?;
 
     // 2. Extract system transactions from the beginning of the block
     let mut expect_system_txs = true;
-    let actual_system_txs = block_txs
+    let actual_system_txs = evm_block
+        .body
+        .transactions
         .into_iter()
         .map(|tx| {
             if expect_system_txs {

@@ -238,14 +238,13 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet_peer(&self) -> NodeConfig {
         let node_config = &self.node_ctx.config.node_config;
+        // Initialize the peer with a random signer, copying the genesis config
         let peer_signer = IrysSigner::random_signer(&node_config.consensus_config());
         self.testnet_peer_with_signer(&peer_signer)
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
         use irys_types::{PeerAddress, RethPeerInfo};
 
@@ -254,8 +253,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         if node_config.mode == NodeMode::PeerSync {
             panic!("Can only create a peer from a genesis config");
         }
-
-        // Initialize the peer with a random signer, copying the genesis config
 
         let mut peer_config = node_config.clone();
         peer_config.mining_key = peer_signer.signer.clone();
@@ -291,17 +288,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
+        self.testnet_peer_with_assignments_and_name(peer_signer, "PEER")
+            .await
+    }
+
+    pub async fn testnet_peer_with_assignments_and_name(
+        &self,
+        peer_signer: &IrysSigner,
+        name: &'static str,
+    ) -> Self {
         let seconds_to_wait = 20;
 
         // Create a new peer config using the provided signer
         let peer_config = self.testnet_peer_with_signer(peer_signer);
 
         // Start the peer node
-        let peer_node = IrysNodeTest::new(peer_config)
-            .start_with_name("PEER_WITH_ASSIGNMENTS")
-            .await;
+        let peer_node = IrysNodeTest::new(peer_config).start_with_name(name).await;
 
         // Get the latest block hash to use as anchor
         let current_height = self.get_height().await;

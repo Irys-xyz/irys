@@ -767,6 +767,19 @@ impl NodeConfig {
     pub fn vdf_steps_dir(&self) -> PathBuf {
         self.base_directory.join("vdf_steps")
     }
+
+    /// Get the PeerAddress for this node configuration
+    pub fn peer_address(&self) -> PeerAddress {
+        PeerAddress {
+            api: format!("{}:{}", self.http.public_ip, self.http.public_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("{}:{}", self.gossip.public_ip, self.gossip.public_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            execution: self.reth_peer_info.clone(),
+        }
+    }
 }
 
 pub mod serde_utils {
