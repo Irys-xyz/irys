@@ -4,7 +4,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 
 #[actix_web::test]
-async fn test_rejection_of_duplicate_tx() -> eyre::Result<()> {
+async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
