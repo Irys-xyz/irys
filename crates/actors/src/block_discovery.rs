@@ -363,13 +363,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         let expected_commitment_tx = parent_snapshot.get_epoch_commitments();
 
                         // Validate epoch block has expected commitments in correct order
-                        let commitments_match = expected_commitment_tx.len()
-                            == arc_commitment_txs.len()
-                            && expected_commitment_tx
-                                .iter()
-                                .zip(arc_commitment_txs.iter())
-                                .all(|(tx1, tx2)| tx1.id == tx2.id);
-
+                        let commitments_match =
+                            expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
                         if !commitments_match {
                             debug!(
                                 "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
