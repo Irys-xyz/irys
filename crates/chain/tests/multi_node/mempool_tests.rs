@@ -61,7 +61,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     post_chunk(&app, &tx, 2, &chunks).await;
 
     // Then post the tx
-    post_storage_tx(&app, &tx).await;
+    post_data_tx(&app, &tx).await;
 
     // Mine some blocks to trigger chunk migration
     genesis_node.mine_blocks(2).await?;
@@ -170,7 +170,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 
     // post storage tx
     let storage_tx = genesis_node
-        .post_storage_tx_without_gossip(H256::zero(), data, &signer)
+        .post_data_tx_without_gossip(H256::zero(), data, &signer)
         .await;
 
     // Restart the node
@@ -524,7 +524,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let data: Vec<u8> = chunks.concat();
 
     let _peer2_tx = peer2
-        .post_storage_tx_without_gossip(H256::zero(), data, &recipient2)
+        .post_data_tx_without_gossip(H256::zero(), data, &recipient2)
         .await;
 
     // call get best txs from the mempool

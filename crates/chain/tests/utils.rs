@@ -689,7 +689,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .read()
             .canonical_commitment_snapshot();
 
-        commitment_snapshot.get_commitment_status(commitment_tx)
+        let is_staked = self
+            .node_ctx
+            .commitment_state_guard
+            .is_staked(commitment_tx.signer);
+        commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
     }
 
     /// wait for tx to appear in the mempool or be found in the database
@@ -992,7 +996,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn post_storage_tx_without_gossip(
+    pub async fn post_data_tx_without_gossip(
         &self,
         anchor: H256,
         data: Vec<u8>,
@@ -1000,12 +1004,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> IrysTransaction {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
         self.node_ctx.sync_state.set_is_syncing(true);
-        let tx = self.post_storage_tx(anchor, data, signer).await;
+        let tx = self.post_data_tx(anchor, data, signer).await;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         tx
     }
 
-    pub async fn post_storage_tx(
+    pub async fn post_data_tx(
         &self,
         anchor: H256,
         data: Vec<u8>,
@@ -1046,6 +1050,63 @@ impl IrysNodeTest<IrysNodeCtx> {
             );
         }
         tx
+    }
+
+    pub async fn post_data_tx_raw(&self, tx: &IrysTransactionHeader) {
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/tx", api_uri);
+        let mut response = client
+            .post(url)
+            .send_json(&tx) // Send the tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        if response.status() != StatusCode::OK {
+            // Read the response body
+            let body_bytes = response.body().await.expect("Failed to read response body");
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            panic!(
+                "Response status: {} - {}\nRequest Body: {}",
+                response.status(),
+                body_str,
+                serde_json::to_string_pretty(&tx).unwrap(),
+            );
+        } else {
+            info!(
+                "Response status: {}\n{}",
+                response.status(),
+                serde_json::to_string_pretty(&tx).unwrap()
+            );
+        }
+    }
+
+    pub async fn post_chunk_32b(
+        &self,
+        tx: &IrysTransaction,
+        chunk_index: usize,
+        chunks: &[[u8; 32]],
+    ) {
+        let chunk = UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[chunk_index].proof.clone()),
+            bytes: Base64(chunks[chunk_index].to_vec()),
+            tx_offset: TxChunkOffset::from(chunk_index as u32),
+        };
+
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/chunk", api_uri);
+        let response = client
+            .post(url)
+            .send_json(&chunk) // Send the tx as JSON in the request body
+            .await
+            .expect("client post failed");
+
+        debug!("chunk_index: {:?}", chunk_index);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {
@@ -1238,7 +1299,7 @@ pub async fn post_chunk<T, B>(
 ///
 /// # Panics
 /// Panics if the response status is not HTTP 200 OK.
-pub async fn post_storage_tx<T, B>(app: &T, tx: &IrysTransaction)
+pub async fn post_data_tx<T, B>(app: &T, tx: &IrysTransaction)
 where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody + Unpin,

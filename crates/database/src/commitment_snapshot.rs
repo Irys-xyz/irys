@@ -1,6 +1,6 @@
 use irys_primitives::CommitmentType;
-use irys_types::{Address, CommitmentTransaction, H256List, H256};
-use std::collections::{BTreeMap, HashSet};
+use irys_types::{Address, CommitmentTransaction};
+use std::collections::BTreeMap;
 use tracing::debug;
 
 #[derive(Debug, PartialEq)]
@@ -39,6 +39,7 @@ impl CommitmentSnapshot {
     pub fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
+        is_staked_in_current_epoch: bool,
     ) -> CommitmentSnapshotStatus {
         debug!("GetCommitmentStatus message received");
 
@@ -58,38 +59,57 @@ impl CommitmentSnapshot {
             return CommitmentSnapshotStatus::Unsupported;
         }
 
-        // Check if we have commitments for this miner address
-        let commitments = self.commitments.get(signer);
-
         // Handle by the input values commitment type
         let status = match commitment_type {
             CommitmentType::Stake => {
-                if let Some(commitments) = &commitments {
-                    // Check for duplicate stake transaction
-                    if commitments.stake.as_ref().is_some_and(|s| s.id == txid) {
-                        CommitmentSnapshotStatus::Accepted
+                // If already staked in current epoch, just return Accepted
+                if is_staked_in_current_epoch {
+                    CommitmentSnapshotStatus::Accepted
+                } else {
+                    // Only check local commitments if not staked in current epoch
+                    if let Some(commitments) = self.commitments.get(signer) {
+                        // Check for duplicate stake transaction
+                        if commitments.stake.as_ref().is_some_and(|s| s.id == txid) {
+                            CommitmentSnapshotStatus::Accepted
+                        } else {
+                            CommitmentSnapshotStatus::Unknown
+                        }
                     } else {
+                        // No local commitments and not staked in current epoch
                         CommitmentSnapshotStatus::Unknown
                     }
-                } else {
-                    // No commitments for this address yet
-                    CommitmentSnapshotStatus::Unknown
                 }
             }
             CommitmentType::Pledge => {
-                if let Some(commitments) = &commitments {
-                    // Check for duplicate pledge transaction
-                    if commitments.pledges.iter().any(|p| p.id == txid) {
-                        CommitmentSnapshotStatus::Accepted
-                    } else if commitments.stake.is_none() {
-                        // Require existing stake for pledges
-                        CommitmentSnapshotStatus::Unstaked
+                // For pledges, we need to ensure there's a stake (either current epoch or local)
+                if is_staked_in_current_epoch {
+                    // Has stake in current epoch, check for duplicate pledge locally
+                    if let Some(commitments) = self.commitments.get(signer) {
+                        if commitments.pledges.iter().any(|p| p.id == txid) {
+                            CommitmentSnapshotStatus::Accepted
+                        } else {
+                            CommitmentSnapshotStatus::Unknown
+                        }
                     } else {
+                        // No local commitments but has stake in current epoch
                         CommitmentSnapshotStatus::Unknown
                     }
                 } else {
-                    // No commitments for this address, so no stake exists
-                    CommitmentSnapshotStatus::Unstaked
+                    // Not staked in current epoch, check local commitments
+                    if let Some(commitments) = self.commitments.get(signer) {
+                        // Check for duplicate pledge transaction
+                        if commitments.pledges.iter().any(|p| p.id == txid) {
+                            CommitmentSnapshotStatus::Accepted
+                        } else if commitments.stake.is_none() {
+                            // No local stake and not staked in current epoch
+                            CommitmentSnapshotStatus::Unstaked
+                        } else {
+                            CommitmentSnapshotStatus::Unknown
+                        }
+                    } else {
+                        // No local commitments and not staked in current epoch
+                        CommitmentSnapshotStatus::Unstaked
+                    }
                 }
             }
             _ => unreachable!(), // We already handled unsupported types
@@ -166,42 +186,6 @@ impl CommitmentSnapshot {
             // No stake found, reject pledge
             CommitmentSnapshotStatus::Unstaked
         }
-    }
-
-    /// Removes commitment transactions with specified IDs from the commitment snapshot
-    pub fn rollback_commitments(&mut self, commitment_txs: &H256List) -> eyre::Result<()> {
-        // Create a HashSet for faster lookups
-        let ids_set: HashSet<&H256> = commitment_txs.iter().collect();
-
-        // Store addresses that need cleaning up
-        let mut addresses_to_check = Vec::new();
-
-        // First pass: collect all addresses (to avoid borrow issues)
-        for address in self.commitments.keys() {
-            addresses_to_check.push(*address);
-        }
-
-        // Second pass: update each address's commitments
-        for address in addresses_to_check {
-            if let Some(commitments) = self.commitments.get_mut(&address) {
-                // Check stake transaction
-                if let Some(stake) = &commitments.stake {
-                    if ids_set.contains(&stake.id) {
-                        commitments.stake = None;
-                    }
-                }
-
-                // Filter pledges to remove matching IDs
-                commitments.pledges.retain(|tx| !ids_set.contains(&tx.id));
-
-                // If both stake and pledges are empty, remove the entry completely
-                if commitments.stake.is_none() && commitments.pledges.is_empty() {
-                    self.commitments.remove(&address);
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Collects all commitment transactions from the snapshot for epoch processing

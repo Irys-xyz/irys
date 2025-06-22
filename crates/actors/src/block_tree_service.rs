@@ -951,7 +951,7 @@ impl BlockTreeCache {
         };
 
         // Initialize commitment snapshot and add start block
-        let mut commitment_snapshot = current_epoch_commitments(
+        let mut commitment_snapshot = build_current_snapshot_from_index(
             block_index_guard.clone(),
             commitment_state_guard.clone(),
             db.clone(),
@@ -1766,7 +1766,7 @@ pub async fn get_block(
 ///
 /// # Returns
 /// Initialized commitment snapshot containing all commitments from the current epoch
-pub fn current_epoch_commitments(
+pub fn build_current_snapshot_from_index(
     block_index_guard: BlockIndexReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     db: DatabaseProvider,
