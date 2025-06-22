@@ -93,7 +93,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             debug!(
                 "\nGenesis Block Commitments:\n{:#?}\nStake: {:#?}\nPledges:\n{:#?}",
                 genesis_block.get_commitment_ledger_tx_ids(),
-                steaks.unwrap().id,
+                stakes.unwrap().id,
                 pledges.unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
             );
 
