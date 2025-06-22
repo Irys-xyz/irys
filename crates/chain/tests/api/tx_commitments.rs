@@ -78,7 +78,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         {
             let commitment_state = commitment_state_guard.read();
             let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
-            let steaks = commitment_state.stake_commitments.get(&genesis_signer);
+            let stakes = commitment_state.stake_commitments.get(&genesis_signer);
             if let Some(pledges) = pledges {
                 assert_eq!(
                     pledges.len(),
