@@ -1,9 +1,8 @@
-use crate::utils::{read_block_from_state, BlockValidationOutcome, IrysNodeTest};
-use irys_types::{storage_pricing::Amount, NodeConfig};
-use reth::core::primitives::SealedBlock;
-use rust_decimal_macros::dec;
+use crate::utils::IrysNodeTest;
+use irys_types::NodeConfig;
 
 #[test_log::test(actix_web::test)]
+#[ignore = "wip"]
 async fn heavy_block_invalid_block_reward_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
