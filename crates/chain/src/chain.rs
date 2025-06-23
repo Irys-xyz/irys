@@ -1004,20 +1004,21 @@ impl IrysNode {
 
         // set up the block producer
 
-        let (block_producer_addr, block_producer_arbiter, block_producer_inner) = Self::init_block_producer(
-            &config,
-            Arc::clone(&reward_curve),
-            &irys_db,
-            &service_senders,
-            &epoch_service_actor,
-            &block_tree_guard,
-            &vdf_state_readonly,
-            block_discovery.clone(),
-            broadcast_mining_actor.clone(),
-            price_oracle,
-            reth_node_adapter.clone(),
-            reth_service_actor.clone(),
-        );
+        let (block_producer_addr, block_producer_arbiter, block_producer_inner) =
+            Self::init_block_producer(
+                &config,
+                Arc::clone(&reward_curve),
+                &irys_db,
+                &service_senders,
+                &epoch_service_actor,
+                &block_tree_guard,
+                &vdf_state_readonly,
+                block_discovery.clone(),
+                broadcast_mining_actor.clone(),
+                price_oracle,
+                reth_node_adapter.clone(),
+                reth_service_actor.clone(),
+            );
 
         let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
         let seed = seed.0;
@@ -1319,7 +1320,11 @@ impl IrysNode {
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         reth_service_actor: actix::Addr<RethServiceActor>,
-    ) -> (actix::Addr<BlockProducerActor>, Arbiter, Arc<irys_actors::BlockProducerInner>) {
+    ) -> (
+        actix::Addr<BlockProducerActor>,
+        Arbiter,
+        Arc<irys_actors::BlockProducerInner>,
+    ) {
         let block_producer_arbiter = Arbiter::new();
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
@@ -1344,7 +1349,11 @@ impl IrysNode {
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
                 block_producer_actor
             });
-        (block_producer_addr, block_producer_arbiter, block_producer_inner)
+        (
+            block_producer_addr,
+            block_producer_arbiter,
+            block_producer_inner,
+        )
     }
 
     fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {

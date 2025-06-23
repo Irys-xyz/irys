@@ -12,7 +12,7 @@ use crate::{
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_consensus::{
-    transaction::SignerRecoverable as _, EthereumTxEnvelope, Sealed, SignableTransaction as _,
+    transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _,
     TxEip4844,
 };
 use alloy_eips::BlockHashOrNumber;
@@ -192,12 +192,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         system_tx_ledger,
                         current_timestamp,
                         block_reward,
-                        &evm_block,
+                        evm_block,
                     )
                     .await?;
 
                 let Some(block) = block else { return Ok(None) };
-                return Ok(Some((block, eth_built_payload)));
+                Ok(Some((block, eth_built_payload)))
             }
             .into_actor(self)
             .map(move |result, actor, _ctx| {
@@ -236,7 +236,7 @@ impl BlockProducerInner {
             &block_height,
             &self.config.node_config.reward_address,
             &reward_amount.amount,
-            &prev_block_header,
+            prev_block_header,
         );
         let system_txs = system_txs
             .generate_all(commitment_txs_to_bill, submit_txs)
@@ -451,7 +451,7 @@ impl BlockProducerInner {
                     proofs: None,
                 },
             ],
-            evm_block_hash: evm_block_hash.into(),
+            evm_block_hash,
             vdf_limiter_info: VDFLimiterInfo {
                 global_step_number: solution.vdf_step,
                 output: solution.seed.into_inner(),
@@ -509,7 +509,7 @@ impl BlockProducerInner {
         // we set the canon head here, as we produced this block, and this lets us build off of it
         self.reth_service
             .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(evm_block_hash.into()),
+                head_hash: BlockHashType::Evm(evm_block_hash),
                 confirmed_hash: None,
                 finalized_hash: None,
             })

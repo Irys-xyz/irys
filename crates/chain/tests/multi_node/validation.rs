@@ -1,7 +1,7 @@
 use crate::utils::{
-    mine_block, read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest,
+    read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest,
 };
-use irys_actors::{current_timestamp, reth_ethereum_primitives};
+use irys_actors::current_timestamp;
 use irys_types::{storage_pricing::Amount, NodeConfig};
 use reth::core::primitives::SealedBlock;
 use rust_decimal_macros::dec;
@@ -70,7 +70,7 @@ async fn heavy_block_invalid_block_reward_gets_rejected() -> eyre::Result<()> {
                 system_tx_ledger,
                 current_timestamp,
                 block_reward,
-                &evm_block,
+                evm_block,
             )
             .await?
     }
@@ -161,7 +161,7 @@ async fn heavy_block_tampered_storage_txs_gets_rejected() -> eyre::Result<()> {
                 system_tx_ledger,
                 current_timestamp,
                 block_reward,
-                &evm_block, // Tampered EVM payload
+                evm_block, // Tampered EVM payload
             )
             .await?
     }
