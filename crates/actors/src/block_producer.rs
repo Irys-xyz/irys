@@ -157,8 +157,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         }
 
         let inner = self.inner.clone();
-        let gossip_broadcast_bus = inner.service_senders.gossip_broadcast.clone();
-
         AtomicResponse::new(Box::pin(
             async move {
                 let prev_block_header = inner.parent_irys_block()?;
@@ -179,7 +177,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     )
                     .await?;
 
-                inner
+                let block = inner
                     .produce_block(
                         solution,
                         &prev_block_header,
@@ -188,28 +186,20 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         system_tx_ledger,
                         current_timestamp,
                         block_reward,
+                        &eth_built_payload,
                     )
-                    .await
-                    .map(|res| res.map(|block| (block, eth_built_payload)))
+                    .await?;
+
+                let Some(block) = block else { return Ok(None) };
+                return Ok(Some((block, eth_built_payload)));
             }
             .into_actor(self)
             .map(move |result, actor, _ctx| {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Ok(Some((_irys_block_header, eth_built_payload))) = &result {
+                if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
                     // If blocks_remaining_for_test is Some, decrement it by 1
                     if let Some(remaining) = actor.blocks_remaining_for_test {
                         actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
-                    }
-
-                    let execution_payload_gossip_data =
-                        GossipBroadcastMessage::from(eth_built_payload.block().clone());
-                    if let Err(payload_broadcast_error) =
-                        gossip_broadcast_bus.send(execution_payload_gossip_data)
-                    {
-                        error!(
-                            "Failed to broadcast execution payload: {:?}",
-                            payload_broadcast_error
-                        );
                     }
                 }
                 result
@@ -313,6 +303,7 @@ impl BlockProducerInner {
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
+        eth_built_payload: &EthBuiltPayload,
     ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
@@ -522,6 +513,20 @@ impl BlockProducerInner {
         if is_difficulty_updated {
             self.mining_broadcaster
                 .do_send(BroadcastDifficultyUpdate(block.clone()));
+        }
+
+        // Broadcast the EVM payload
+        let execution_payload_gossip_data =
+            GossipBroadcastMessage::from(eth_built_payload.block().clone());
+        if let Err(payload_broadcast_error) = self
+            .service_senders
+            .gossip_broadcast
+            .send(execution_payload_gossip_data)
+        {
+            error!(
+                "Failed to broadcast execution payload: {:?}",
+                payload_broadcast_error
+            );
         }
 
         info!(
