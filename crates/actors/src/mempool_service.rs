@@ -911,15 +911,17 @@ impl Inner {
         }
 
         let mempool_state = &self.mempool_state.clone();
-        let mut mempool_state_write_guard = mempool_state.write().await;
-        for txid in submit_tx_ids.iter() {
-            // Remove the data tx from the pending valid_tx pool
-            mempool_state_write_guard
-                .valid_submit_ledger_tx
-                .remove(txid);
-            mempool_state_write_guard.recent_valid_tx.remove(txid);
+
+        // Remove the submit tx from the pending valid_submit_ledger_tx pool
+        {
+            let mut mempool_state_write_guard = mempool_state.write().await;
+            for txid in submit_tx_ids.iter() {
+                mempool_state_write_guard
+                    .valid_submit_ledger_tx
+                    .remove(txid);
+                mempool_state_write_guard.recent_valid_tx.remove(txid);
+            }
         }
-        drop(mempool_state_write_guard);
 
         // add block with optional poa chunk to index
         {
