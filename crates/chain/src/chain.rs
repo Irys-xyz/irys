@@ -1012,6 +1012,7 @@ impl IrysNode {
             &block_tree_guard,
             &vdf_state_readonly,
             block_discovery.clone(),
+            broadcast_mining_actor.clone(),
             price_oracle,
             reth_node_adapter.clone(),
         );
@@ -1311,23 +1312,27 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         block_discovery: actix::Addr<BlockDiscoveryActor>,
+        broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
     ) -> (actix::Addr<BlockProducerActor>, Arbiter) {
         let block_producer_arbiter = Arbiter::new();
         let block_producer_actor = BlockProducerActor {
-            db: irys_db.clone(),
-            config: config.clone(),
-            reward_curve,
-            block_discovery_addr: block_discovery,
-            epoch_service: epoch_service_actor.clone(),
-            vdf_steps_guard: vdf_steps_guard.clone(),
-            block_tree_guard: block_tree_guard.clone(),
-            price_oracle,
-            service_senders: service_senders.clone(),
+            inner: Arc::new(irys_actors::BlockProducerInner {
+                db: irys_db.clone(),
+                config: config.clone(),
+                reward_curve,
+                mining_broadcaster: broadcast_mining_actor,
+                block_discovery_addr: block_discovery,
+                epoch_service: epoch_service_actor.clone(),
+                vdf_steps_guard: vdf_steps_guard.clone(),
+                block_tree_guard: block_tree_guard.clone(),
+                price_oracle,
+                service_senders: service_senders.clone(),
+                reth_node_adapter,
+            }),
             blocks_remaining_for_test: None,
             span: Span::current(),
-            reth_node_adapter,
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
