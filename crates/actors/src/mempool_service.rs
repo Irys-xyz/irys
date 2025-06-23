@@ -20,7 +20,7 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
-    validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot,
+    validate_path, Address, Base64, CommitmentTransaction, Config, DataLedger, DataRoot,
     GossipBroadcastMessage, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader,
     IrysTransactionId, MempoolConfig, TxChunkOffset, H256, U256,
 };
@@ -134,7 +134,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     ) -> Result<Option<IrysBlockHeader>, TxReadError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, tx))
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))
             .map_err(|_| TxReadError::Other("Error sending GetBlockHeader message".to_owned()))?;
 
         rx.await
@@ -156,6 +156,7 @@ pub struct MempoolState {
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
     /// pre-validated blocks that have passed pre-validation in discovery service
     prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
+    prevalidated_blocks_poa: HashMap<H256, Base64>,
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -212,7 +213,7 @@ pub enum MempoolServiceMessage {
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
     ),
     /// Get block header from the mempool cache
-    GetBlockHeader(H256, oneshot::Sender<Option<IrysBlockHeader>>),
+    GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
 }
 
 #[derive(Debug)]
@@ -1606,9 +1607,24 @@ impl Inner {
         filtered_map
     }
 
-    async fn handle_get_block_header_message(&self, block_hash: H256) -> Option<IrysBlockHeader> {
+    async fn handle_get_block_header_message(
+        &self,
+        block_hash: H256,
+        include_chunk: bool,
+    ) -> Option<IrysBlockHeader> {
         let guard = self.mempool_state.read().await;
-        guard.prevalidated_blocks.get(&block_hash).cloned()
+
+        //read block from mempool
+        let mut block = guard.prevalidated_blocks.get(&block_hash).cloned();
+
+        // retrieve poa from mempool and include in returned block
+        if include_chunk {
+            if let Some(ref mut b) = block {
+                b.poa.chunk = guard.prevalidated_blocks_poa.get(&block_hash).cloned();
+            }
+        }
+
+        block
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -1677,8 +1693,10 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::GetBlockHeader(hash, response) => {
-                    let response_value = self.handle_get_block_header_message(hash).await;
+                MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
+                    let response_value = self
+                        .handle_get_block_header_message(hash, include_chunk)
+                        .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -2104,9 +2122,19 @@ impl Inner {
     ) -> Result<(), ChunkIngressError> {
         let mut mempool_state_guard = self.mempool_state.write().await;
         for block in prevalidated_blocks {
+            // insert poa into mempool
+            if let Some(chunk) = &block.poa.chunk {
+                mempool_state_guard
+                    .prevalidated_blocks_poa
+                    .insert(block.block_hash, chunk.clone().into());
+            };
+
+            // insert block into mempool without poa
+            let mut block_without_chunk = (*block).clone();
+            block_without_chunk.poa.chunk = None;
             mempool_state_guard
                 .prevalidated_blocks
-                .insert(block.block_hash, (*block).clone());
+                .insert(block.block_hash, (block_without_chunk).clone());
         }
         Ok(())
     }
@@ -2119,6 +2147,7 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
         prevalidated_blocks: HashMap::new(),
+        prevalidated_blocks_poa: HashMap::new(),
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),

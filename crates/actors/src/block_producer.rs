@@ -176,7 +176,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let prev_block_header = {
                 let (tx_prev, rx_prev) = oneshot::channel();
-                service_senders.mempool.send(MempoolServiceMessage::GetBlockHeader(prev.block_hash, tx_prev))?;
+                service_senders.mempool.send(MempoolServiceMessage::GetBlockHeader(prev.block_hash, false, tx_prev))?;
                 match rx_prev.await? {
                     Some(h) => h,
                     None => db.view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false))?.ok_or_else(|| eyre!("No block header found for hash {} ({})", prev.block_hash, prev.height + 1))?,

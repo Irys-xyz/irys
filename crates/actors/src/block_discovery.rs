@@ -141,6 +141,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 let (tx_prev, rx_prev) = oneshot::channel();
                 mempool_sender.send(MempoolServiceMessage::GetBlockHeader(
                     prev_block_hash,
+                    false,
                     tx_prev,
                 ))?;
                 match rx_prev.await? {

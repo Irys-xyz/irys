@@ -571,6 +571,7 @@ async fn generate_expected_system_transactions_from_db<'a>(
             .mempool
             .send(MempoolServiceMessage::GetBlockHeader(
                 block.previous_block_hash,
+                false,
                 tx_prev,
             ))?;
         match rx_prev.await? {
