@@ -684,6 +684,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
+    pub async fn mine_block_without_gossip(
+        &self,
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        let res = mine_block(&self.node_ctx).await?.unwrap();
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        Ok(res)
+    }
+
     pub fn get_commitment_snapshot_status(
         &self,
         commitment_tx: &CommitmentTransaction,

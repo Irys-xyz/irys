@@ -14,7 +14,7 @@ use irys_types::{
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
-use std::{collections::HashMap, net::TcpListener};
+use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
@@ -473,14 +473,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     );
 
     Ok(())
-}
-
-fn get_available_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("Failed to bind to address")
-        .local_addr()
-        .expect("Failed to get local addr")
-        .port()
 }
 
 /// helper function to reduce replication of local ip in codebase
