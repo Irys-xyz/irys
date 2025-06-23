@@ -2070,14 +2070,10 @@ impl Inner {
         let block_hash = &canonical_head_entry.block_hash;
         let block_height = canonical_head_entry.height;
 
-        // FIXME: Currently assumes all block headers exist in the database. In the future,
-        // this will need to check the local mempool state for recent blocks not yet persisted.
         let mut block = self
-            .irys_db
-            .view(|tx| irys_database::block_header_by_hash(tx, block_hash, false))
-            .unwrap()
-            .unwrap()
-            .expect("to find the block header in the database");
+            .handle_get_block_header_message(*block_hash, false)
+            .await
+            .expect("to find the block header in the mempool");
 
         // Calculate the minimum block height we need to check for transaction conflicts
         // Only transactions anchored within this depth window are considered valid
