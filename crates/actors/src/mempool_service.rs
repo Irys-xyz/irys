@@ -56,6 +56,10 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
+    async fn get_block_header(
+        &self,
+        block_hash: H256,
+    ) -> Result<Option<IrysBlockHeader>, TxReadError>;
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +124,19 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
+    }
+
+    async fn get_block_header(
+        &self,
+        block_hash: H256,
+    ) -> Result<Option<IrysBlockHeader>, TxReadError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, tx))
+            .map_err(|_| TxReadError::Other("Error sending GetBlockHeader message".to_owned()))?;
+
+        rx.await
+            .map_err(|_| TxReadError::Other("GetBlockHeader response error".to_owned()))
     }
 }
 
@@ -192,6 +209,8 @@ pub enum MempoolServiceMessage {
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
     ),
+    /// Get block header from the mempool cache
+    GetBlockHeader(H256, oneshot::Sender<Option<IrysBlockHeader>>),
 }
 
 #[derive(Debug)]
@@ -1586,6 +1605,11 @@ impl Inner {
         filtered_map
     }
 
+    async fn handle_get_block_header_message(&self, block_hash: H256) -> Option<IrysBlockHeader> {
+        let guard = self.mempool_state.read().await;
+        guard.prevalidated_blocks.get(&block_hash).cloned()
+    }
+
     #[tracing::instrument(skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
     fn handle_message<'a>(
@@ -1648,6 +1672,12 @@ impl Inner {
                 }
                 MempoolServiceMessage::DataTxExists(txid, response) => {
                     let response_value = self.handle_data_tx_exists_message(txid).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetBlockHeader(hash, response) => {
+                    let response_value = self.handle_get_block_header_message(hash).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
