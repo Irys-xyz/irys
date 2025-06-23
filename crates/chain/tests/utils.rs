@@ -1227,6 +1227,19 @@ pub async fn mine_block(
         .await?
 }
 
+pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
+    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+    node_ctx.start_vdf().await?;
+    let poa_solution = capacity_chunk_solution(
+        node_ctx.config.node_config.miner_address(),
+        vdf_steps_guard.clone(),
+        &node_ctx.config,
+    )
+    .await;
+    node_ctx.stop_vdf().await?;
+    Ok(poa_solution)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockValidationOutcome {
     StoredOnNode(ChainState),
