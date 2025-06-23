@@ -1621,6 +1621,7 @@ impl Inner {
         filtered_map
     }
 
+    /// return block header from mempool, if found
     async fn handle_get_block_header_message(
         &self,
         block_hash: H256,
