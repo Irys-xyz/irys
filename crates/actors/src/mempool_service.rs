@@ -2061,7 +2061,6 @@ impl Inner {
     /// # Notes
     /// - Only considers Submit ledger transactions (filters out Publish, etc.)
     /// - Only examines blocks within the configured `anchor_expiry_depth`
-    /// - Currently assumes all block headers exist in the database (see FIXME)
     async fn get_pending_submit_ledger_txs(&self) -> Vec<IrysTransactionHeader> {
         // Get the current canonical chain head to establish our starting point for block traversal
         let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())
@@ -2077,13 +2076,34 @@ impl Inner {
             debug!("Optimistic and Canonical have different heads");
         }
 
-        let block_hash = &canonical_head_entry.block_hash;
+        let block_hash = canonical_head_entry.block_hash;
         let block_height = canonical_head_entry.height;
 
-        let mut block = self
-            .handle_get_block_header_message(*block_hash, false)
+        // retrieve block from mempool or database
+        // be aware that genesis starts its life immediately in the database
+        let mut block = match self
+            .handle_get_block_header_message(block_hash, false)
             .await
-            .expect("to find the block header in the mempool");
+        {
+            Some(b) => b,
+            None => match self
+                .irys_db
+                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
+            {
+                Ok(Some(header)) => Ok(header),
+                Ok(None) => Err(eyre!(
+                    "No block header found for hash {} ({})",
+                    block_hash,
+                    block_height
+                )),
+                Err(e) => Err(eyre!(
+                    "Failed to get previous block ({}) header: {}",
+                    block_height,
+                    e
+                )),
+            }
+            .expect("to find the block header in the db"),
+        };
 
         // Calculate the minimum block height we need to check for transaction conflicts
         // Only transactions anchored within this depth window are considered valid
