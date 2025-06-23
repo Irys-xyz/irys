@@ -556,7 +556,7 @@ pub async fn system_transactions_are_valid(
     validate_system_transactions_match(actual_system_txs, expected_txs.into_iter())
 }
 
-/// Generates expected system transactions by looking up required data from the database
+/// Generates expected system transactions by looking up required data from the mempool or database
 #[tracing::instrument(skip_all, err)]
 async fn generate_expected_system_transactions_from_db<'a>(
     config: &Config,
