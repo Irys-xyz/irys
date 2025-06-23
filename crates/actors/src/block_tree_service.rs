@@ -246,10 +246,16 @@ impl BlockTreeServiceInner {
         let block_header = match block_header_by_hash(&tx, &block_hash, false) {
             Ok(Some(header)) => header,
             Ok(None) => {
-                return Err(eyre::eyre!("No block header found for hash {}", block_hash));
+                return Err(eyre::eyre!(
+                    "No block header found for hash {} in database",
+                    block_hash
+                ));
             }
             Err(e) => {
-                return Err(eyre::eyre!("Failed to get previous block header: {}", e));
+                return Err(eyre::eyre!(
+                    "Failed to get previous block header from database: {}",
+                    e
+                ));
             }
         };
 
