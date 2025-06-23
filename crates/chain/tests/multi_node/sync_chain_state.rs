@@ -1,6 +1,4 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
-use alloy_core::primitives::ruint::aliases::U256;
-use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{
@@ -12,15 +10,13 @@ use irys_chain::{
 use irys_database::block_header_by_hash;
 use irys_primitives::IrysTxId;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, Compact, Config, GossipConfig, HttpConfig, IrysTransaction,
-    NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
+    irys::IrysSigner, BlockIndexItem, IrysTransaction, NodeConfig, PeerAddress, H256,
 };
-use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
 use std::{collections::HashMap, net::TcpListener};
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, info_span, span, Instrument, Level};
+use tracing::{error, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {

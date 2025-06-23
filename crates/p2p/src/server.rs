@@ -12,7 +12,6 @@ use actix_web::{
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
-use alloy_rpc_types::engine::ExecutionData;
 use base58::ToBase58 as _;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;

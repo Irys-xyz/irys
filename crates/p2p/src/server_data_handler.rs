@@ -8,7 +8,6 @@ use crate::{
     GossipClient, GossipError, GossipResult,
 };
 use alloy_core::primitives::keccak256;
-use alloy_rpc_types::engine::ExecutionData;
 use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{

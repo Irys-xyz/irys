@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{NodeConfig, H256};
+use irys_types::NodeConfig;
 
 #[test_log::test(actix_web::test)]
 #[ignore]

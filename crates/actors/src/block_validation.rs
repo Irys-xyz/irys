@@ -9,15 +9,12 @@ use crate::{
     services::ServiceSenders,
     system_tx_generator::SystemTxGenerator,
 };
-use alloy_consensus::{EthereumTxEnvelope, Transaction as _, TxEip4844};
-use alloy_eips::{
-    eip7685::{Requests, RequestsOrHash},
-    HashOrNumber,
-};
+use alloy_consensus::Transaction as _;
+use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
-use eyre::{ensure, OptionExt};
+use eyre::{ensure, OptionExt as _};
 use futures::future::{select, Either};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
@@ -36,8 +33,8 @@ use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
 use reth::revm::primitives::B256;
+use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
-use reth::{providers::TransactionsProvider as _, rpc::api::EngineApiClient};
 use reth_ethereum_primitives::Block;
 use tracing::{debug, info};
 
@@ -508,7 +505,7 @@ pub async fn system_transactions_are_valid(
     payload_provider: impl PayloadProvider,
 ) -> eyre::Result<()> {
     // 1. Validate that the evm block is valid
-    let mut elapsed_secs = 0u64;
+    let mut elapsed_secs = 0_u64;
 
     // TODO: `wait_for_payload` is not cancel safe, refactor it so we can freely use it here.
     // Because current impl will result in some skewed behavior.
@@ -549,7 +546,7 @@ pub async fn system_transactions_are_valid(
     let versioned_hashes = sidecar
         .versioned_hashes()
         .ok_or_eyre("version hashes must be present")?
-        .to_vec();
+        .clone();
     loop {
         let payload = engine_api_client
             .new_payload_v4(

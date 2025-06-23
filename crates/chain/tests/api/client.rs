@@ -3,7 +3,6 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_testing_utils::initialize_tracing;
 use irys_types::{
     AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
     ProtocolVersion, VersionRequest,

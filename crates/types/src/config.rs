@@ -777,7 +777,7 @@ impl NodeConfig {
             gossip: format!("{}:{}", self.gossip.public_ip, self.gossip.public_port)
                 .parse()
                 .expect("valid SocketAddr expected"),
-            execution: self.reth_peer_info.clone(),
+            execution: self.reth_peer_info,
         }
     }
 }

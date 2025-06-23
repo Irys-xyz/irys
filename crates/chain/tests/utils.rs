@@ -10,7 +10,7 @@ use actix_web::{
 use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
-use eyre::OptionExt;
+use eyre::OptionExt as _;
 use futures::future::select;
 use irys_actors::block_tree_service::{BlockState, ChainState, ReorgEvent};
 
