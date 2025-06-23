@@ -2112,14 +2112,20 @@ impl Inner {
             }
 
             // Move to the parent block and continue the traversal backwards
-            let parent_block = self
-                .irys_db
-                .view(|tx| {
-                    irys_database::block_header_by_hash(tx, &block.previous_block_hash, false)
-                })
-                .unwrap()
-                .unwrap()
-                .expect("to find the block header in the database");
+            let parent_block = match self
+                .handle_get_block_header_message(block.previous_block_hash, false)
+                .await
+            {
+                Some(h) => h,
+                None => self
+                    .irys_db
+                    .view(|tx| {
+                        irys_database::block_header_by_hash(tx, &block.previous_block_hash, false)
+                    })
+                    .unwrap()
+                    .unwrap()
+                    .expect("to find the parent block header in the database"),
+            };
 
             block = parent_block;
         }
