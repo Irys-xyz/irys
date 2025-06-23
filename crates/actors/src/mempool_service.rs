@@ -1,4 +1,6 @@
-use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
+use crate::block_tree_service::{
+    get_optimistic_chain, BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent,
+};
 use crate::services::ServiceSenders;
 use crate::CommitmentStateReadGuard;
 use base58::ToBase58 as _;
@@ -1275,6 +1277,7 @@ impl Inner {
                 }
             }
         }
+        drop(mempool_state_guard);
 
         debug!(
             "best_mempool_txs: confirmed_commitments\n {:#?}",
@@ -1289,13 +1292,7 @@ impl Inner {
         );
 
         // Prepare data transactions for inclusion after commitments
-        let mut submit_ledger_txs: Vec<_> = mempool_state_guard
-            .valid_submit_ledger_tx
-            .values()
-            .cloned()
-            .collect();
-
-        drop(mempool_state_guard);
+        let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
 
         // Sort data transactions by fee (highest first) to maximize revenue
         submit_ledger_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
@@ -1346,7 +1343,7 @@ impl Inner {
         if mempool_state_read_guard.invalid_tx.contains(&tx.id)
             || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
         {
-            error!("error: {:?}", TxIngressError::Skipped);
+            warn!("duplicate tx: {:?}", TxIngressError::Skipped);
             return Err(TxIngressError::Skipped);
         }
         drop(mempool_state_read_guard);
@@ -1825,24 +1822,14 @@ impl Inner {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> CommitmentSnapshotStatus {
-        let mempool_state = &self.mempool_state;
-        // Check if already staked in the blockchain
-        let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
-
-        // Most commitments are valid by default
-        // Only pledges require special validation when not already staked
-        let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
-        if !is_pledge || is_staked {
-            return CommitmentSnapshotStatus::Accepted;
-        }
-
-        // For unstaked pledges, validate against cache and pending transactions
+        // Get the commitment snapshot for the current canonical chain
         let commitment_snapshot = self
             .block_tree_read_guard
             .read()
             .canonical_commitment_snapshot();
 
-        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx);
+        let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
+        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, is_staked);
 
         // Reject unsupported commitment types
         if matches!(cache_status, CommitmentSnapshotStatus::Unsupported) {
@@ -1855,7 +1842,7 @@ impl Inner {
 
         // For unstaked addresses, check for pending stake transactions
         if matches!(cache_status, CommitmentSnapshotStatus::Unstaked) {
-            let mempool_state_guard = mempool_state.read().await;
+            let mempool_state_guard = self.mempool_state.read().await;
             // Get pending transactions for this address
             if let Some(pending) = mempool_state_guard
                 .valid_commitment_tx
@@ -1939,6 +1926,103 @@ impl Inner {
         ))?;
 
         Ok(latest.height)
+    }
+
+    /// Returns all Submit ledger transactions that are pending inclusion in future blocks.
+    ///
+    /// This function specifically filters the Submit ledger mempool to exclude transactions
+    /// that have already been included in recent canonical blocks within the anchor expiry
+    /// window. Unlike the general mempool filter, this focuses solely on Submit transactions.
+    ///
+    /// # Algorithm
+    /// 1. Starts with all valid Submit ledger transactions from mempool
+    /// 2. Walks backwards through canonical chain within anchor expiry depth
+    /// 3. Removes Submit transactions that already exist in historical blocks
+    /// 4. Returns remaining pending Submit transactions
+    ///
+    /// # Returns
+    /// A vector of `IrysTransactionHeader` representing Submit ledger transactions
+    /// that are pending inclusion and have not been processed in recent blocks.
+    ///
+    /// # Notes
+    /// - Only considers Submit ledger transactions (filters out Publish, etc.)
+    /// - Only examines blocks within the configured `anchor_expiry_depth`
+    /// - Currently assumes all block headers exist in the database (see FIXME)
+    async fn get_pending_submit_ledger_txs(&self) -> Vec<IrysTransactionHeader> {
+        // Get the current canonical chain head to establish our starting point for block traversal
+        let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())
+            .await
+            .unwrap();
+        let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        let canonical_head_entry = canonical.last().unwrap();
+
+        // This is just here to catch any oddities in the debug log. The optimistic
+        // and canonical should always have the same results from my reading of the code.
+        // if the tests are stable and this hasn't come up it can be removed.
+        if optimistic.last().unwrap().0 != canonical_head_entry.block_hash {
+            debug!("Optimistic and Canonical have different heads");
+        }
+
+        let block_hash = &canonical_head_entry.block_hash;
+        let block_height = canonical_head_entry.height;
+
+        // FIXME: Currently assumes all block headers exist in the database. In the future,
+        // this will need to check the local mempool state for recent blocks not yet persisted.
+        let mut block = self
+            .irys_db
+            .view(|tx| irys_database::block_header_by_hash(tx, block_hash, false))
+            .unwrap()
+            .unwrap()
+            .expect("to find the block header in the database");
+
+        // Calculate the minimum block height we need to check for transaction conflicts
+        // Only transactions anchored within this depth window are considered valid
+        let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+        let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+
+        // Start with all valid Submit ledger transactions - we'll filter out already-included ones
+        let mut valid_submit_ledger_tx = self
+            .mempool_state
+            .read()
+            .await
+            .valid_submit_ledger_tx
+            .clone();
+
+        // Walk backwards through the canonical chain, removing Submit transactions
+        // that have already been included in recent blocks within the anchor expiry window
+        while block.height >= min_anchor_height {
+            let block_data_tx_ids = block.get_data_ledger_tx_ids();
+
+            // Check if this block contains any Submit ledger transactions
+            if let Some(submit_txids) = block_data_tx_ids.get(&DataLedger::Submit) {
+                // Remove Submit transactions that already exist in this historical block
+                // This prevents double-inclusion and ensures we only return truly pending transactions
+                for txid in submit_txids.iter() {
+                    valid_submit_ledger_tx.remove(txid);
+                }
+            }
+
+            // Stop if we've reached the genesis block
+            if block.height == 0 {
+                break;
+            }
+
+            // Move to the parent block and continue the traversal backwards
+            let parent_block = self
+                .irys_db
+                .view(|tx| {
+                    irys_database::block_header_by_hash(tx, &block.previous_block_hash, false)
+                })
+                .unwrap()
+                .unwrap()
+                .expect("to find the block header in the database");
+
+            block = parent_block;
+        }
+
+        // Return all remaining Submit transactions by consuming the map
+        // These represent Submit transactions that are pending and haven't been included in any recent block
+        valid_submit_ledger_tx.into_values().collect()
     }
 
     // Helper to verify signature

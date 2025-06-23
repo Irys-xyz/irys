@@ -1,6 +1,6 @@
 use crate::{
     block_index_service::BlockIndexReadGuard,
-    block_tree_service::BlockTreeServiceMessage,
+    block_tree_service::{BlockTreeReadGuard, BlockTreeServiceMessage},
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     mempool_service::MempoolServiceMessage,
@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
-    CommitmentSnapshot, CommitmentSnapshotStatus, SystemLedger,
+    CommitmentSnapshotStatus, SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
@@ -35,6 +35,8 @@ pub struct BlockDiscoveryActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
+    /// Read only view of the block_tree
+    pub block_tree_guard: BlockTreeReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Reference to the global config
@@ -124,7 +126,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //====================================
         // Block header pre-validation
         //------------------------------------
-        let block_index_guard2 = self.block_index_guard.clone();
+        let block_index_guard = self.block_index_guard.clone();
+        let block_tree_guard = self.block_tree_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let config = self.config.clone();
         let db = self.db.clone();
@@ -146,6 +149,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
         let mempool = self.service_senders.mempool.clone();
+        let mempool_config = self.config.consensus.mempool.clone();
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
@@ -239,7 +243,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 .iter()
                 .find(|b| b.ledger_id == SystemLedger::Commitment);
 
-            // Validate commitments (if there are some)
+            // Validate commitments transactions exist (if there are commitment txids in the block)
             let mut commitments: Vec<CommitmentTransaction> = Vec::new();
             if let Some(commitment_ledger) = commitment_ledger {
                 debug!(
@@ -260,69 +264,57 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
 
-            info!("Pre-validating block: {}", new_block_header.height);
-
-            // TODO: This first pass a validating transactions are not duplicates causes a bunch
-            // of tests to fail that seem to rely on or not expect this validation check.
-            // Disabling the code for now as this is already a difficult to marge PR.
+            info!(
+                "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
+                new_block_header.block_hash,
+                new_block_header.height,
+                new_block_header.get_commitment_ledger_tx_ids(),
+                commitments.iter().map(|x| x.id).collect::<Vec<_>>()
+            );
 
             // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
             // have already been included in a recent parent.
             let block_height = new_block_header.height;
 
-            /*(
             let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
             let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
             let mut parent_block = previous_block_header.clone();
 
-            // Get the transaction IDs from the current block to check against
-            let _current_commitment_tx_ids: HashSet<_> = new_block_header
-                .get_commitment_ledger_tx_ids()
-                .into_iter()
-                .collect();
-            let current_data_tx_ids = new_block_header.get_data_ledger_tx_ids();
+            let binding = new_block_header.get_data_ledger_tx_ids();
+            let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
 
-            while parent_block.height >= min_anchor_height {
-                // Check to see if any commitment txids appeared in prior blocks
-                // let parent_commitment_tx_ids = parent_block.get_commitment_ledger_tx_ids();
-                // for txid in &parent_commitment_tx_ids {
-                //     if current_commitment_tx_ids.contains(txid) {
-                //         return Err(eyre!("Duplicate commitment transaction id {}", txid));
-                //     }
-                // }
+            if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
+                while parent_block.height >= min_anchor_height {
+                    // Check to see if any data txids appeared in prior blocks
+                    let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
 
-                // Check to see if any data txids appeared in prior blocks
-                let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
-
-                // Compare each ledger type between current and parent blocks
-                for (ledger_type, current_txids) in &current_data_tx_ids {
-                    if let Some(parent_txids) = parent_data_tx_ids.get(ledger_type) {
+                    // Compare each ledger type between current and parent blocks
+                    if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
                         // Check for intersection between current and parent txids for this ledger
-                        for txid in current_txids {
+                        for txid in incoming_data_tx_ids {
                             if parent_txids.contains(txid) {
                                 return Err(eyre!("Duplicate data transaction id {}", txid));
                             }
                         }
                     }
+
+                    if parent_block.height == 0 {
+                        break;
+                    }
+
+                    // Continue the loop - get the next parent block
+                    // Get the next parent block and own it
+                    let previous_block_header = match db.view_eyre(|tx| {
+                        block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                    }) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => break,
+                        Err(e) => return Err(e),
+                    };
+
+                    parent_block = previous_block_header; // Move instead of borrow
                 }
-
-                if parent_block.height == 0 {
-                    break;
-                }
-
-                // Continue the loop - get the next parent block
-                // Get the next parent block and own it
-                let previous_block_header = match db.view_eyre(|tx| {
-                    block_header_by_hash(tx, &parent_block.previous_block_hash, false)
-                }) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => break,
-                    Err(e) => return Err(e),
-                };
-
-                parent_block = previous_block_header; // Move instead of borrow
             }
-            */
 
             let validation_result = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
@@ -349,58 +341,93 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     all_txs.extend_from_slice(&publish_txs);
 
                     // Check if we've reached the end of an epoch and should finalize commitments
-
                     let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
                     let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
 
                     let arc_commitment_txs = Arc::new(commitments);
 
+                    let commitment_state_guard = epoch_service
+                        .send(GetCommitmentStateGuardMessage)
+                        .await
+                        .unwrap();
+
+                    // Get the current epoch snapshot from the parent block
+                    let mut parent_snapshot = block_tree_guard
+                        .read()
+                        .get_commitment_snapshot(&prev_block_hash)
+                        .expect("parent block to be in block_tree")
+                        .as_ref()
+                        .clone();
+
                     if is_epoch_block {
-                        // For epoch blocks, validate that all included commitments are legitimate
-                        // Get current commitment state from epoch service for validation
-                        let commitment_state_guard = epoch_service
-                            .send(GetCommitmentStateGuardMessage)
-                            .await
-                            .unwrap();
+                        let expected_commitment_tx = parent_snapshot.get_epoch_commitments();
 
-                        // Create a temporary local commitment validation environment
-                        // This avoids async overhead while checking commitment validity and creates
-                        // an independent cache we can populate and discard
-                        let mut local_snapshot = CommitmentSnapshot::default();
-
-                        // Validate each commitment transaction before accepting the epoch block
-                        for commitment_tx in arc_commitment_txs.iter() {
-                            let is_staked_in_current_epoch =
-                                commitment_state_guard.is_staked(commitment_tx.signer);
-
-                            let status = local_snapshot
-                                .add_commitment(commitment_tx, is_staked_in_current_epoch);
-
-                            // Reject the entire epoch block if any commitment is invalid
-                            // This ensures only verified commitments are finalized at epoch boundaries
-                            if status != CommitmentSnapshotStatus::Accepted {
-                                return Err(eyre::eyre!("Invalid commitments in epoch block"));
-                            }
+                        // Validate epoch block has expected commitments in correct order
+                        let commitments_match =
+                            expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
+                        if !commitments_match {
+                            debug!(
+                                "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
+                                expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
+                                arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
+                            );
+                            return Err(eyre::eyre!(
+                                "Epoch block commitments don't match expected"
+                            ));
                         }
 
-                        // Look up the previous epoch block
-                        let block_item = block_index_guard2
+                        // Send NewEpochMessage with previous and current epoch blocks
+                        let block_item = block_index_guard
                             .read()
                             .get_item(block_height - blocks_in_epoch)
                             .expect("previous epoch block to be in block index")
                             .clone();
-
                         let previous_epoch_block = db
                             .view(|tx| block_header_by_hash(tx, &block_item.block_hash, false))
                             .unwrap()
                             .expect("previous epoch block to be in database");
 
-                        // Send the NewEpochMessage referencing the current and previous epoch blocks
                         epoch_service.do_send(NewEpochMessage {
                             previous_epoch_block,
                             epoch_block: new_block_header.clone(),
                             commitments: arc_commitment_txs.clone(),
                         });
+                    } else {
+                        // Validate and add each commitment transaction for non-epoch blocks
+                        for commitment_tx in arc_commitment_txs.iter() {
+                            let is_staked = commitment_state_guard.is_staked(commitment_tx.signer);
+                            let status =
+                                parent_snapshot.get_commitment_status(commitment_tx, is_staked);
+
+                            // Ensure commitment is unknown (new) and from staked address
+                            match status {
+                                CommitmentSnapshotStatus::Accepted => {
+                                    return Err(eyre::eyre!(
+                                        "Commitment tx included in prior block"
+                                    ))
+                                }
+                                CommitmentSnapshotStatus::Unsupported => {
+                                    return Err(eyre::eyre!("Commitment tx of unsupported type"))
+                                }
+                                CommitmentSnapshotStatus::Unstaked => {
+                                    return Err(eyre::eyre!(
+                                        "Commitment tx {} from unstaked address {:?}",
+                                        commitment_tx.id,
+                                        commitment_tx.signer
+                                    ))
+                                }
+                                CommitmentSnapshotStatus::Unknown => {} // Success case
+                            }
+
+                            // Add commitment and validate it's accepted
+                            let is_staked_in_current_epoch =
+                                commitment_state_guard.is_staked(commitment_tx.signer);
+                            let add_status = parent_snapshot
+                                .add_commitment(commitment_tx, is_staked_in_current_epoch);
+                            if add_status != CommitmentSnapshotStatus::Accepted {
+                                return Err(eyre::eyre!("Commitment tx is invalid"));
+                            }
+                        }
                     }
 
                     // WARNING: All block pre-validation needs to be completed before

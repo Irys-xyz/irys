@@ -26,7 +26,8 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{
-    ActorAddresses, EpochReplayData, GetCommitmentStateGuardMessage, StorageModuleService,
+    ActorAddresses, CommitmentStateReadGuard, EpochReplayData, GetCommitmentStateGuardMessage,
+    StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -98,6 +99,7 @@ pub struct IrysNodeCtx {
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub block_tree_guard: BlockTreeReadGuard,
+    pub commitment_state_guard: CommitmentStateReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
@@ -981,6 +983,7 @@ impl IrysNode {
             &service_senders,
             &epoch_service_actor,
             &block_index_guard,
+            &block_tree_guard,
             partition_assignments_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
@@ -1089,6 +1092,7 @@ impl IrysNode {
             sync_state: sync_state.clone(),
             system_tx_store,
             reth_node_adapter,
+            commitment_state_guard,
         };
 
         // Spawn the StorageModuleService to manage the lifecycle of storage modules
@@ -1379,12 +1383,14 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         epoch_service: &Addr<EpochServiceActor>,
         block_index_guard: &BlockIndexReadGuard,
+        block_tree_guard: &BlockTreeReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
+            block_tree_guard: block_tree_guard.clone(),
             partition_assignments_guard,
             db: irys_db.clone(),
             config: config.clone(),
