@@ -1992,6 +1992,22 @@ impl Inner {
 
         drop(mempool_state_read_guard); // Release read lock before acquiring write lock
 
+        // check tree / mempool for header
+        if let Some(hdr) = self
+            .mempool_state
+            .read()
+            .await
+            .prevalidated_blocks
+            .get(anchor)
+            .cloned()
+        {
+            if hdr.height + anchor_expiry_depth >= latest_height {
+                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
+                return Ok(hdr);
+            }
+        }
+
+        // check index for block header
         match irys_database::block_header_by_hash(&read_tx, anchor, false) {
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
                 debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
