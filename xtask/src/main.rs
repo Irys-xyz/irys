@@ -108,7 +108,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Clippy { args } => {
             println!("cargo clippy");
-            cmd!(sh, "cargo clippy --workspace --locked {args...}").remove_and_run()?;
+            cmd!(sh, "cargo clippy --workspace --tests --locked {args...}").remove_and_run()?;
         }
         Commands::Fmt {
             check_only: only_check,
@@ -226,12 +226,12 @@ impl CmdExt for Cmd<'_> {
             "CARGO_PKG_VERSION_PRE",
             "CARGO_MANIFEST_LINKS",
             "RING_PREGENERATE_ASM",
-            "OUT_DIR",
+            // "OUT_DIR",
             "CARGO_CFG_TARGET_ARCH",
             "CARGO_CFG_TARGET_OS",
             "CARGO_CFG_TARGET_ENV",
             "CARGO_CFG_TARGET_ENDIAN",
-            "DEBUG",
+            // "DEBUG",
         ] {
             c = c.env_remove(k);
         }
