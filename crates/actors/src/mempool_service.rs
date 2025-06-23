@@ -812,7 +812,7 @@ impl Inner {
             event.block.height
         );
 
-        let migrated_block = event.block;
+        let mut migrated_block = (*event.block).clone();
         let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
 
         // stage 1: move commitment transactions from tree to index
@@ -921,14 +921,26 @@ impl Inner {
         }
         drop(mempool_state_write_guard);
 
-        // add block to index
-        self.irys_db
-            .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))
-            .unwrap();
-        // Remove migrated block from mempool cache
+        // add block with optional poa chunk to index
+        {
+            let mempool_state_read_guard = mempool_state.read().await;
+            migrated_block.poa.chunk = mempool_state_read_guard
+                .prevalidated_blocks_poa
+                .get(&migrated_block.block_hash)
+                .clone()
+                .cloned();
+            self.irys_db
+                .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))
+                .unwrap();
+        }
+
+        // Remove migrated block and poa chunk from mempool cache
         {
             let mut state = self.mempool_state.write().await;
             state.prevalidated_blocks.remove(&migrated_block.block_hash);
+            state
+                .prevalidated_blocks_poa
+                .remove(&migrated_block.block_hash);
         }
 
         Ok(())
