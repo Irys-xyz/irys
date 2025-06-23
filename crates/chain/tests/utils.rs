@@ -881,10 +881,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             "to receive IrysTransactionResponse from MempoolServiceMessage::GetDataTxs message",
         );
         let maybe_mempool_tx = mempool_response.first();
-        if let Some(result) = maybe_mempool_tx {
-            if let Some(tx) = result {
-                return Ok(tx.clone());
-            }
+        if let Some(Some(tx)) = maybe_mempool_tx {
+            return Ok(tx.clone());
         }
         Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }

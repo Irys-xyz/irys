@@ -60,10 +60,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     node.mine_block().await?;
     let block2 = node.get_block_by_height(2).await?;
     let txid_map = block2.get_data_ledger_tx_ids();
-    assert_eq!(
-        txid_map.get(&DataLedger::Submit).unwrap().contains(&txid),
-        false
-    );
+    assert!(!txid_map.get(&DataLedger::Submit).unwrap().contains(&txid));
 
     // Verify the tx is published
     assert!(txid_map.get(&DataLedger::Publish).unwrap().contains(&txid));

@@ -76,9 +76,12 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // Check that the genesis block producer has the expected initial pledges
 
         {
+            let genesis_block = node.get_block_by_height(0).await?;
+
             let commitment_state = commitment_state_guard.read();
             let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
             let stakes = commitment_state.stake_commitments.get(&genesis_signer);
+
             if let Some(pledges) = pledges {
                 assert_eq!(
                     pledges.len(),
@@ -89,14 +92,12 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
                 panic!("Expected genesis miner to have pledges!");
             }
 
-            let genesis_block = node.get_block_by_height(0).await?;
             debug!(
                 "\nGenesis Block Commitments:\n{:#?}\nStake: {:#?}\nPledges:\n{:#?}",
                 genesis_block.get_commitment_ledger_tx_ids(),
                 stakes.unwrap().id,
                 pledges.unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
             );
-
             drop(commitment_state); // Release lock to allow node operations
         }
 
