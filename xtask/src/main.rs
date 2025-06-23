@@ -152,7 +152,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         Commands::UnusedDeps => {
             println!("unused deps");
             cmd!(sh, "cargo install --locked cargo-machete").remove_and_run()?;
-            cmd!(sh, "cargo-machete").remove_and_run()?;
+            cmd!(sh, "cargo-machete").run()?;
         }
         Commands::EmissionSimulation => {
             println!("block reward emission simulation");
@@ -225,6 +225,13 @@ impl CmdExt for Cmd<'_> {
             "CARGO_PKG_VERSION_PATCH",
             "CARGO_PKG_VERSION_PRE",
             "CARGO_MANIFEST_LINKS",
+            "RING_PREGENERATE_ASM",
+            "OUT_DIR",
+            "CARGO_CFG_TARGET_ARCH",
+            "CARGO_CFG_TARGET_OS",
+            "CARGO_CFG_TARGET_ENV",
+            "CARGO_CFG_TARGET_ENDIAN",
+            "DEBUG",
         ] {
             c = c.env_remove(k);
         }
