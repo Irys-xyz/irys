@@ -104,23 +104,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
 
-        let previous_block_header = match self
-            .db
-            .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
-        {
-            Ok(Some(header)) => header,
-            other => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!(
-                        // the previous blocks header was not found in the database
-                        "Failed to get previous block header. Previous block hash: {}: {:?}",
-                        prev_block_hash,
-                        other
-                    ))
-                });
-            }
-        };
-
         //====================================
         // Block header pre-validation
         //------------------------------------
@@ -149,6 +132,25 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
+
+            let previous_block_header = {
+                let (tx_prev, rx_prev) = oneshot::channel();
+                mempool_sender.send(MempoolServiceMessage::GetBlockHeader(
+                    prev_block_hash,
+                    tx_prev,
+                ))?;
+                match rx_prev.await? {
+                    Some(hdr) => hdr,
+                    None => db
+                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))?
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "Failed to get previous block header. Previous block hash: {}",
+                                prev_block_hash
+                            )
+                        })?,
+                }
+            };
 
             //====================================
             // Submit ledger TX validation
