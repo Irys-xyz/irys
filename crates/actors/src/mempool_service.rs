@@ -8,6 +8,7 @@ use core::fmt::Display;
 use eyre::eyre;
 use futures::future::BoxFuture;
 use irys_database::{
+    block_header_by_hash,
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
     submodule::get_data_size_by_data_root,
@@ -1982,15 +1983,23 @@ impl Inner {
             let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
             let latest = canonical_blocks.last().unwrap();
             // Just provide the most recent block as an anchor
-            match irys_database::block_header_by_hash(&read_tx, &latest.block_hash, false) {
-                Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+            if let Some(hdr) = mempool_state_read_guard
+                .prevalidated_blocks
+                .get(&latest.block_hash)
+            {
+                if hdr.height + anchor_expiry_depth >= latest_height {
+                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
+                    return Ok(hdr.clone());
+                }
+            } else if let Ok(Some(hdr)) =
+                irys_database::block_header_by_hash(&read_tx, &latest.block_hash, false)
+            {
+                if hdr.height + anchor_expiry_depth >= latest_height {
                     debug!("valid txid anchor {} for tx {}", anchor, tx_id);
                     return Ok(hdr);
                 }
-                _ => {}
-            };
+            }
         }
-
         drop(mempool_state_read_guard); // Release read lock before acquiring write lock
 
         // check tree / mempool for header
