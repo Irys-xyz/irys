@@ -1159,6 +1159,16 @@ pub async fn mine_blocks(
 pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
 ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+    let poa_solution = solution_context(node_ctx).await?;
+
+    node_ctx
+        .actor_addresses
+        .block_producer
+        .send(SolutionFoundMessage(poa_solution.clone()))
+        .await?
+}
+
+pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     node_ctx.start_vdf().await?;
     let poa_solution = capacity_chunk_solution(
@@ -1168,12 +1178,7 @@ pub async fn mine_block(
     )
     .await;
     node_ctx.stop_vdf().await?;
-
-    node_ctx
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution.clone()))
-        .await?
+    Ok(poa_solution)
 }
 
 #[derive(Debug, Clone, PartialEq)]

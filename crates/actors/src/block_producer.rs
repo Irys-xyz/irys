@@ -12,7 +12,8 @@ use crate::{
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_consensus::{
-    transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
+    transaction::SignerRecoverable as _, EthereumTxEnvelope, Sealed, SignableTransaction as _,
+    TxEip4844,
 };
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::TxSignerSync as _;
@@ -38,7 +39,10 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{payload::EthBuiltPayload, revm::primitives::B256, rpc::types::BlockId};
+use reth::{
+    core::primitives::SealedBlock, payload::EthBuiltPayload, revm::primitives::B256,
+    rpc::types::BlockId,
+};
 use reth_db::cursor::*;
 use reth_db::Database as _;
 use reth_transaction_pool::EthPooledTransaction;
@@ -95,6 +99,8 @@ pub struct BlockProducerInner {
     pub price_oracle: Arc<IrysPriceOracle>,
     /// Reth node adapter
     pub reth_node_adapter: IrysRethNodeAdapter,
+    /// Reth service actor
+    pub reth_service: Addr<RethServiceActor>,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -166,7 +172,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let (system_tx_ledger, commitment_txs_to_bill, submit_txs) =
                     inner.get_mempool_txs(&prev_block_header).await?;
                 let block_reward = inner.block_reward(&prev_block_header, current_timestamp)?;
-                let (evm_block_hash, eth_built_payload) = inner
+                let eth_built_payload = inner
                     .create_evm_block(
                         &prev_block_header,
                         &prev_evm_block,
@@ -176,17 +182,17 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         current_timestamp,
                     )
                     .await?;
+                let evm_block = eth_built_payload.block();
 
                 let block = inner
                     .produce_block(
                         solution,
                         &prev_block_header,
-                        evm_block_hash,
                         submit_txs,
                         system_tx_ledger,
                         current_timestamp,
                         block_reward,
-                        &eth_built_payload,
+                        &evm_block,
                     )
                     .await?;
 
@@ -222,7 +228,7 @@ impl BlockProducerInner {
         submit_txs: &[IrysTransactionHeader],
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
-    ) -> eyre::Result<(H256, EthBuiltPayload)> {
+    ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.config.irys_signer().signer);
         // Generate expected system transactions using shared logic
@@ -264,7 +270,7 @@ impl BlockProducerInner {
         timestamp_ms: u128,
         system_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
-    ) -> eyre::Result<(H256, EthBuiltPayload)> {
+    ) -> eyre::Result<EthBuiltPayload> {
         // generate payload attributes
         let payload_attrs = PayloadAttributes {
             timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
@@ -290,23 +296,22 @@ impl BlockProducerInner {
             )
             .await?;
 
-        let evm_block_hash = payload.block().hash();
-        Ok((H256(evm_block_hash.0), payload))
+        Ok(payload)
     }
 
     pub async fn produce_block(
         &self,
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
-        evm_block_hash: H256,
         submit_txs: Vec<IrysTransactionHeader>,
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
-        eth_built_payload: &EthBuiltPayload,
+        eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
     ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
+        let evm_block_hash = eth_built_payload.hash();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
             warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58());
@@ -502,7 +507,7 @@ impl BlockProducerInner {
         }?;
 
         // we set the canon head here, as we produced this block, and this lets us build off of it
-        RethServiceActor::from_registry()
+        self.reth_service
             .send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Evm(evm_block_hash.into()),
                 confirmed_hash: None,
@@ -516,8 +521,7 @@ impl BlockProducerInner {
         }
 
         // Broadcast the EVM payload
-        let execution_payload_gossip_data =
-            GossipBroadcastMessage::from(eth_built_payload.block().clone());
+        let execution_payload_gossip_data = GossipBroadcastMessage::from(eth_built_payload.clone());
         if let Err(payload_broadcast_error) = self
             .service_senders
             .gossip_broadcast
@@ -535,10 +539,10 @@ impl BlockProducerInner {
             &block_height
         );
 
-        Ok(Some((block.clone())))
+        Ok(Some(block.clone()))
     }
 
-    fn block_reward(
+    pub fn block_reward(
         &self,
         prev_block_header: &IrysBlockHeader,
         current_timestamp: u128,
@@ -551,7 +555,7 @@ impl BlockProducerInner {
         Ok(reward_amount)
     }
 
-    async fn get_ema_price(
+    pub async fn get_ema_price(
         &self,
         height_of_new_block: u64,
     ) -> eyre::Result<crate::ema_service::NewBlockEmaResponse> {
@@ -568,7 +572,7 @@ impl BlockProducerInner {
         Ok(ema_irys_price)
     }
 
-    async fn get_mempool_txs(
+    pub async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<(
@@ -664,7 +668,7 @@ impl BlockProducerInner {
         ))
     }
 
-    async fn get_publish_txs_and_proofs(
+    pub async fn get_publish_txs_and_proofs(
         &self,
     ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
         let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
@@ -737,7 +741,7 @@ impl BlockProducerInner {
         Ok((publish_txs, proofs))
     }
 
-    async fn get_evm_block(
+    pub async fn get_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<reth_ethereum_primitives::Block> {
@@ -779,7 +783,7 @@ impl BlockProducerInner {
         Ok(parent)
     }
 
-    fn parent_irys_block(&self) -> eyre::Result<IrysBlockHeader> {
+    pub fn parent_irys_block(&self) -> eyre::Result<IrysBlockHeader> {
         let (canonical_blocks, _not_onchain_count) =
             self.block_tree_guard.read().get_canonical_chain();
         let prev = canonical_blocks.last().unwrap();
@@ -804,7 +808,7 @@ impl BlockProducerInner {
     }
 }
 
-async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
+pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
     // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp

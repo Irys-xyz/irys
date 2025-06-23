@@ -100,6 +100,7 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
+    pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -1003,7 +1004,7 @@ impl IrysNode {
 
         // set up the block producer
 
-        let (block_producer_addr, block_producer_arbiter) = Self::init_block_producer(
+        let (block_producer_addr, block_producer_arbiter, block_producer_inner) = Self::init_block_producer(
             &config,
             Arc::clone(&reward_curve),
             &irys_db,
@@ -1015,6 +1016,7 @@ impl IrysNode {
             broadcast_mining_actor.clone(),
             price_oracle,
             reth_node_adapter.clone(),
+            reth_service_actor.clone(),
         );
 
         let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
@@ -1076,6 +1078,7 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_state_readonly,
             service_senders: service_senders.clone(),
+            block_producer_inner,
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
@@ -1315,22 +1318,25 @@ impl IrysNode {
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
-    ) -> (actix::Addr<BlockProducerActor>, Arbiter) {
+        reth_service_actor: actix::Addr<RethServiceActor>,
+    ) -> (actix::Addr<BlockProducerActor>, Arbiter, Arc<irys_actors::BlockProducerInner>) {
         let block_producer_arbiter = Arbiter::new();
+        let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
+            db: irys_db.clone(),
+            config: config.clone(),
+            reward_curve,
+            mining_broadcaster: broadcast_mining_actor,
+            block_discovery_addr: block_discovery,
+            epoch_service: epoch_service_actor.clone(),
+            vdf_steps_guard: vdf_steps_guard.clone(),
+            block_tree_guard: block_tree_guard.clone(),
+            price_oracle,
+            service_senders: service_senders.clone(),
+            reth_node_adapter,
+            reth_service: reth_service_actor,
+        });
         let block_producer_actor = BlockProducerActor {
-            inner: Arc::new(irys_actors::BlockProducerInner {
-                db: irys_db.clone(),
-                config: config.clone(),
-                reward_curve,
-                mining_broadcaster: broadcast_mining_actor,
-                block_discovery_addr: block_discovery,
-                epoch_service: epoch_service_actor.clone(),
-                vdf_steps_guard: vdf_steps_guard.clone(),
-                block_tree_guard: block_tree_guard.clone(),
-                price_oracle,
-                service_senders: service_senders.clone(),
-                reth_node_adapter,
-            }),
+            inner: block_producer_inner.clone(),
             blocks_remaining_for_test: None,
             span: Span::current(),
         };
@@ -1338,7 +1344,7 @@ impl IrysNode {
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
                 block_producer_actor
             });
-        (block_producer_addr, block_producer_arbiter)
+        (block_producer_addr, block_producer_arbiter, block_producer_inner)
     }
 
     fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {
