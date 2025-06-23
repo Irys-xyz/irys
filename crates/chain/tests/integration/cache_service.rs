@@ -11,7 +11,7 @@ use irys_database::{
 };
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
-use reth_db::Database;
+use reth_db::Database as _;
 use std::time::Duration;
 use tracing::info;
 

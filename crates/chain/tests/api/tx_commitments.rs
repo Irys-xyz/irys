@@ -1,7 +1,4 @@
-use crate::{api::post_commitment_tx_request, utils::*};
-use actix_web::{middleware::Logger, App};
-use alloy_core::primitives::U256;
-use alloy_genesis::GenesisAccount;
+use crate::utils::*;
 use assert_matches::assert_matches;
 use base58::ToBase58 as _;
 use eyre::eyre;
@@ -9,7 +6,7 @@ use irys_actors::{
     packing::wait_for_packing, CommitmentStateReadGuard, GetCommitmentStateGuardMessage,
     GetPartitionAssignmentsGuardMessage, PartitionAssignmentsReadGuard,
 };
-use irys_api_server::routes;
+use irys_chain::IrysNodeCtx;
 use irys_database::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
@@ -64,29 +61,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // Initialize blockchain components
         node.start_mining().await;
 
-        let uri = format!(
-            "http://127.0.0.1:{}",
-            node.node_ctx.config.node_config.http.bind_port
-        );
-
-        // Initialize blockchain components
-        wait_for_packing(
-            node.node_ctx.actor_addresses.packing.clone(),
-            Some(Duration::from_secs(10)),
-        )
-        .await?;
-
-        // Initialize API for submitting commitment transactions
-        let api_state = node.node_ctx.get_api_state();
-
-        let _app = actix_web::test::init_service(
-            App::new()
-                .wrap(Logger::default())
-                .app_data(actix_web::web::Data::new(api_state))
-                .service(routes()),
-        )
-        .await;
-
         // Get access to commitment and partition services for verification
         let epoch_service = node.node_ctx.actor_addresses.epoch_service.clone();
         let commitment_state_guard = epoch_service
@@ -102,8 +76,12 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // Check that the genesis block producer has the expected initial pledges
 
         {
+            let genesis_block = node.get_block_by_height(0).await?;
+
             let commitment_state = commitment_state_guard.read();
             let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
+            let stakes = commitment_state.stake_commitments.get(&genesis_signer);
+
             if let Some(pledges) = pledges {
                 assert_eq!(
                     pledges.len(),
@@ -113,25 +91,50 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             } else {
                 panic!("Expected genesis miner to have pledges!");
             }
+
+            debug!(
+                "\nGenesis Block Commitments:\n{:#?}\nStake: {:#?}\nPledges:\n{:#?}",
+                genesis_block.get_commitment_ledger_tx_ids(),
+                stakes.unwrap().id,
+                pledges.unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
+            );
             drop(commitment_state); // Release lock to allow node operations
         }
 
         // ===== PHASE 2: First Epoch - Create Commitments =====
         // Create stake commitment for first test signer
-        post_stake_commitment(&uri, &signer1).await;
+        let stake_tx1 = post_stake_commitment(&node, &signer1).await;
 
         // Create two pledge commitments for first test signer
-        let anchor = post_pledge_commitment(&uri, &signer1, H256::default())
-            .await
-            .id;
-        post_pledge_commitment(&uri, &signer1, anchor).await;
+        let pledge1 = post_pledge_commitment(&node, &signer1, H256::default()).await;
+        let pledge2 = post_pledge_commitment(&node, &signer1, pledge1.id).await;
 
         // Create stake commitment for second test signer
-        post_stake_commitment(&uri, &signer2).await;
+        let stake_tx2 = post_stake_commitment(&node, &signer2).await;
 
         // Mine enough blocks to reach the first epoch boundary
         info!("MINE FIRST EPOCH BLOCK:");
         node.mine_blocks(num_blocks_in_epoch).await?;
+
+        debug!(
+            "Post Commitments:\nstake1: {:?}\nstake2: {:?}\npledge1: {:?}\npledge2: {:?}\n",
+            stake_tx1.id, stake_tx2.id, pledge1.id, pledge2.id
+        );
+
+        // Block height: 1 should have two stake and two pledge commitments
+        let expected_ids = [stake_tx1.id, stake_tx2.id, pledge1.id, pledge2.id];
+        let block_1 = node.get_block_by_height(1).await.unwrap();
+        let commitments_1 = block_1.get_commitment_ledger_tx_ids();
+        debug!("Block - height: {:?}\n{:#?}", block_1.height, commitments_1,);
+        assert_eq!(commitments_1.len(), 4);
+        assert!(expected_ids.iter().all(|id| commitments_1.contains(id)));
+
+        // Block height: 2 is an epoch block and should have the same commitments and no more
+        let block_2 = node.get_block_by_height(2).await.unwrap();
+        let commitments_2 = block_2.get_commitment_ledger_tx_ids();
+        debug!("Block - height: {:?}\n{:#?}", block_2.height, commitments_2);
+        assert_eq!(commitments_2.len(), 4);
+        assert!(expected_ids.iter().all(|id| commitments_2.contains(id)));
 
         // ===== PHASE 3: Verify First Epoch Assignments =====
         // Verify that all pledges have been assigned partitions
@@ -181,12 +184,20 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // ===== PHASE 4: Second Epoch - Add More Commitments =====
         // Create pledge for second test signer
-        let c_tx = post_pledge_commitment(&uri, &signer2, H256::default()).await;
-        info!("signer2: {} post pledge: {}", signer2_address, c_tx.id);
+        let pledge3 = post_pledge_commitment(&node, &signer2, H256::default()).await;
+        info!("signer2: {} post pledge: {}", signer2_address, pledge3.id);
 
         // Mine enough blocks to reach the second epoch boundary
         info!("MINE SECOND EPOCH BLOCK:");
         node.mine_blocks(num_blocks_in_epoch + 2).await?;
+
+        let block_3 = node.get_block_by_height(3).await.unwrap();
+        let commitments_3 = block_3.get_commitment_ledger_tx_ids();
+        debug!("Block - height: {:?}\n{:#?}", block_3.height, commitments_3);
+
+        // Block height: 3 should have 1 pledge commitment
+        assert_eq!(commitments_3.len(), 1);
+        assert_eq!(commitments_3, vec![pledge3.id]);
 
         // ===== PHASE 5: Verify Second Epoch Assignments =====
         // Verify all signers have proper partition assignments for all pledges
@@ -355,19 +366,9 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // Create test environment with a funded signer for transaction creation
     let mut config = NodeConfig::testnet();
     let signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![(
-        signer.address(),
-        GenesisAccount {
-            balance: U256::from(690000000000000000_u128),
-            ..Default::default()
-        },
-    )]);
-    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
+    config.fund_genesis_accounts(vec![&signer]);
 
-    let uri = format!(
-        "http://127.0.0.1:{}",
-        node.node_ctx.config.node_config.http.bind_port
-    );
+    let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // Initialize packing and mining
     wait_for_packing(
@@ -391,7 +392,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Unknown);
 
     // Submit stake commitment via API
-    post_commitment_tx_request(&uri, &stake_tx).await;
+    node.post_commitment_tx(&stake_tx).await;
 
     // Mine a block to include the commitment
     node.mine_blocks(1).await?;
@@ -415,7 +416,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Unknown);
 
     // Submit pledge via API
-    post_commitment_tx_request(&uri, &pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx).await;
 
     // Verify pledge is still 'Unknown' before mining
     let status = node.get_commitment_snapshot_status(&pledge_tx);
@@ -435,7 +436,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // Re-submit the same stake commitment
-    post_commitment_tx_request(&uri, &stake_tx).await;
+    node.post_commitment_tx(&stake_tx).await;
     node.mine_blocks(1).await?;
 
     // Verify stake is still 'Accepted' (idempotent operation)
@@ -460,7 +461,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
     // Submit pledge via API
-    post_commitment_tx_request(&uri, &pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx).await;
     node.mine_blocks(1).await?;
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
@@ -472,7 +473,10 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
+async fn post_stake_commitment(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    signer: &IrysSigner,
+) -> CommitmentTransaction {
     let stake_tx = CommitmentTransaction {
         commitment_type: CommitmentType::Stake,
         fee: 1,
@@ -482,11 +486,12 @@ async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
     info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
 
     // Submit stake commitment via API
-    post_commitment_tx_request(uri, &stake_tx).await;
+    node.post_commitment_tx(&stake_tx).await;
+    stake_tx
 }
 
 async fn post_pledge_commitment(
-    uri: &str,
+    node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
     anchor: H256,
 ) -> CommitmentTransaction {
@@ -500,7 +505,7 @@ async fn post_pledge_commitment(
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
     // Submit pledge commitment via API
-    post_commitment_tx_request(uri, &pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx).await;
 
     pledge_tx
 }

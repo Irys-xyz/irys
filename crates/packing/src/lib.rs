@@ -279,7 +279,7 @@ mod tests {
         let node_config = NodeConfig::testnet();
         let mining_address = node_config.miner_address();
         let chunk_offset = rng.gen_range(1..=1000);
-        let mut partition_hash = [0u8; SHA_HASH_SIZE];
+        let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
         let iterations = 2 * testnet_config.chunk_size as u32;
 
@@ -474,7 +474,7 @@ mod tests {
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; ConsensusConfig::CHUNK_SIZE as usize];
+            let mut chunk = [0_u8; ConsensusConfig::CHUNK_SIZE as usize];
             rng.fill_bytes(&mut chunk);
             chunks_rust.push(chunk.to_vec());
             for j in 0..ConsensusConfig::CHUNK_SIZE as usize {
