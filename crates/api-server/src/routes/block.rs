@@ -5,11 +5,14 @@ use actix_web::{
     Result,
 };
 use base58::FromBase58 as _;
-use irys_database::{database, db::IrysDatabaseExt as _};
+use eyre::eyre;
+use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_database::{block_header_by_hash, database, db::IrysDatabaseExt as _};
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use tokio::sync::oneshot;
 
 pub async fn get_block(
     state: web::Data<ApiState>,
@@ -58,26 +61,45 @@ pub async fn get_block(
         }
         BlockParam::Hash(hash) => hash,
     };
-    get_block_by_hash(&state, block_hash)
+    get_block_by_hash(&state, block_hash).await
 }
 
-fn get_block_by_hash(
+async fn get_block_by_hash(
     state: &web::Data<ApiState>,
     block_hash: H256,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
-    let irys_header = match state
-        .db
-        .view_eyre(|tx| database::block_header_by_hash(tx, &block_hash, true))
-    {
-        Err(_error) => Err(ApiError::Internal {
-            err: String::from("db error"),
-        }),
-        Ok(None) => Err(ApiError::ErrNoId {
-            id: block_hash.to_string(),
-            err: String::from("block hash not found"),
-        }),
-        Ok(Some(tx_header)) => Ok(tx_header),
-    }?;
+    let irys_header = {
+        let (tx, rx) = oneshot::channel();
+        state
+            .mempool_service
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, true, tx))
+            .expect("expected send to mempool to succeed");
+        let mempool_response = rx.await.map_err(|e| {
+            tracing::error!("Mempool response error: {}", e);
+            ApiError::Internal {
+                err: "mempool response error".to_string(),
+            }
+        })?;
+        match mempool_response {
+            Some(h) => h,
+            None => state
+                .db
+                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
+                .map_err(|e| {
+                    tracing::error!("DB error when reading block header: {}", e);
+                    ApiError::Internal {
+                        err: "DB error".to_string(),
+                    }
+                })?
+                .ok_or_else(|| {
+                    tracing::warn!("No block header found for hash {}", block_hash);
+                    ApiError::ErrNoId {
+                        id: block_hash.to_string(),
+                        err: "block hash not found".to_string(),
+                    }
+                })?,
+        }
+    };
 
     let reth_block = match state
         .reth_provider
