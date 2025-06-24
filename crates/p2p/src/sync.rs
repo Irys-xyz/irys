@@ -132,7 +132,11 @@ impl SyncState {
         let target = Arc::clone(&self.sync_target_height);
         let highest_processed_block = Arc::clone(&self.highest_processed_block);
         tokio::spawn(async move {
-            while target.load(Ordering::Relaxed) > highest_processed_block.load(Ordering::Relaxed) {
+            // We need to add 1 to the highest processed block. For the cases when the node
+            // starts fully caught up, no new blocks are added to the index, and the
+            // target is always going to be one more than the highest processed block.
+            // If this function never resolves, no new blocks can arrive over gossip in that case.
+            while target.load(Ordering::Relaxed) > highest_processed_block.load(Ordering::Relaxed) + 1 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
@@ -167,7 +171,7 @@ pub async fn sync_chain(
 
     let fetch_index_from_the_trusted_peer = !is_in_genesis_mode;
     if is_in_genesis_mode {
-        warn!("Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", genesis_peer_discovery_timeout_millis);
+        warn!("Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", genesis_peer_discovery_timeout_millis);
         match timeout(
             Duration::from_millis(genesis_peer_discovery_timeout_millis),
             peer_list.wait_for_active_peers(),
@@ -224,14 +228,14 @@ pub async fn sync_chain(
             Ok(()) => {
                 sync_state.increment_sync_target_height();
                 info!(
-                    "Successfully requested block {} (sync height is {}) from the network",
+                    "Sync task: Successfully requested block {} (sync height is {}) from the network",
                     block.block_hash.0.to_base58(),
                     sync_state.sync_target_height()
                 );
             }
             Err(err) => {
                 error!(
-                    "Failed to request block {} (height {}) from the network: {}",
+                    "Sync task: Failed to request block {} (height {}) from the network: {}",
                     block.block_hash.0.to_base58(),
                     sync_state.sync_target_height(),
                     err
@@ -262,11 +266,13 @@ pub async fn sync_chain(
     // If no new blocks were added to the index, nothing is going to mark
     //  the tip as processed
     if !no_new_blocks_to_process {
+        debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
     }
+    debug!("Sync task: Block queue is empty, waiting for the highest processed block to reach the target sync height");
     sync_state.wait_for_processed_block_to_reach_target().await;
     sync_state.finish_sync();
-    info!("Gossip service sync completed");
+    info!("Sync task: Gossip service sync task completed");
     Ok(())
 }
 
