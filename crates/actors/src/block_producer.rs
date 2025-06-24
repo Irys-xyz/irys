@@ -163,61 +163,65 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let inner = self.inner.clone();
         AtomicResponse::new(Box::pin(
-            async move {
-                let prev_block_header = inner.parent_irys_block()?;
-                let prev_evm_block = inner.get_evm_block(&prev_block_header).await?;
-                let current_timestamp = current_timestamp(&prev_block_header).await;
-
-                let (system_tx_ledger, commitment_txs_to_bill, submit_txs) =
-                    inner.get_mempool_txs(&prev_block_header).await?;
-                let block_reward = inner.block_reward(&prev_block_header, current_timestamp)?;
-                let eth_built_payload = inner
-                    .create_evm_block(
-                        &prev_block_header,
-                        &prev_evm_block,
-                        &commitment_txs_to_bill,
-                        &submit_txs,
-                        block_reward,
-                        current_timestamp,
-                    )
-                    .await?;
-                let evm_block = eth_built_payload.block();
-
-                let block = inner
-                    .produce_block(
-                        solution,
-                        &prev_block_header,
-                        submit_txs,
-                        system_tx_ledger,
-                        current_timestamp,
-                        block_reward,
-                        evm_block,
-                    )
-                    .await?;
-
-                let Some(block) = block else { return Ok(None) };
-                Ok(Some((block, eth_built_payload)))
-            }
-            .into_actor(self)
-            .map(move |result, actor, _ctx| {
-                // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
-                    // If blocks_remaining_for_test is Some, decrement it by 1
-                    if let Some(remaining) = actor.blocks_remaining_for_test {
-                        actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
+            async move { inner.fully_produce_new_block(solution).await }
+                .into_actor(self)
+                .map(move |result, actor, _ctx| {
+                    // Only decrement blocks_remaining_for_test when a block is successfully produced
+                    if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
+                        // If blocks_remaining_for_test is Some, decrement it by 1
+                        if let Some(remaining) = actor.blocks_remaining_for_test {
+                            actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
+                        }
                     }
-                }
-                result
-            })
-            .map_err(|e: eyre::Error, _, _| {
-                error!("Error producing a block: {}", &e);
-                std::process::abort();
-            }),
+                    result
+                })
+                .map_err(|e: eyre::Error, _, _| {
+                    error!("Error producing a block: {}", &e);
+                    std::process::abort();
+                }),
         ))
     }
 }
 
 impl BlockProducerInner {
+    pub async fn fully_produce_new_block(
+        &self,
+        solution: SolutionContext,
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+        let prev_block_header = self.parent_irys_block()?;
+        let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
+        let current_timestamp = current_timestamp(&prev_block_header).await;
+
+        let (system_tx_ledger, commitment_txs_to_bill, submit_txs) =
+            self.get_mempool_txs(&prev_block_header).await?;
+        let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
+        let eth_built_payload = self
+            .create_evm_block(
+                &prev_block_header,
+                &prev_evm_block,
+                &commitment_txs_to_bill,
+                &submit_txs,
+                block_reward,
+                current_timestamp,
+            )
+            .await?;
+        let evm_block = eth_built_payload.block();
+
+        let block = self
+            .produce_block(
+                solution,
+                &prev_block_header,
+                submit_txs,
+                system_tx_ledger,
+                current_timestamp,
+                block_reward,
+                evm_block,
+            )
+            .await?;
+
+        let Some(block) = block else { return Ok(None) };
+        Ok(Some((block, eth_built_payload)))
+    }
     /// Extracts and collects all transactions that should be included in a block
     pub async fn create_evm_block(
         &self,
