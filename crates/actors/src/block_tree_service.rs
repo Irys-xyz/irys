@@ -391,7 +391,7 @@ impl BlockTreeServiceInner {
             }
 
             debug!(?finalized_hash, ?finalized_height, "migrating irys block");
-            // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
+            // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
             if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Irys(cache.tip),
                 confirmed_hash: None,
