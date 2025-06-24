@@ -31,7 +31,6 @@ use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
-use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, warn};
 
 #[derive(Clone, Debug)]
@@ -337,7 +336,7 @@ impl GossipServiceTestFixture {
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
 
-        let mocked_execution_payloads = Arc::new(TokioRwLock::new(HashMap::new()));
+        let mocked_execution_payloads = Arc::new(RwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadProvider::new(
             peer_list.clone(),
             RethBlockProvider::Mock(mocked_execution_payloads),

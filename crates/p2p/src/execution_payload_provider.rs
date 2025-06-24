@@ -27,7 +27,7 @@ const PAYLOAD_REQUESTS_CACHE_CAPACITY: usize = 1000;
 pub enum RethBlockProvider {
     IrysRethAdapter(IrysRethNodeAdapter),
     #[cfg(test)]
-    Mock(Arc<RwLock<HashMap<B256, Block>>>),
+    Mock(Arc<std::sync::RwLock<HashMap<B256, Block>>>),
 }
 
 impl RethBlockProvider {
@@ -37,7 +37,7 @@ impl RethBlockProvider {
 
     #[cfg(test)]
     pub fn new_mock() -> Self {
-        Self::Mock(Arc::new(RwLock::new(HashMap::new())))
+        Self::Mock(Arc::new(std::sync::RwLock::new(HashMap::new())))
     }
 
     /// Fetches the execution payload for a given EVM block hash. You can get the EVM block hash
@@ -47,12 +47,12 @@ impl RethBlockProvider {
     /// let irys_block: IrysBlockHeader = IrysBlockHeader::new_mock_header(); // Obtain the Irys block header
     /// let evm_block_hash = irys_block.evm_block_hash; // Get the EVM block hash
     /// ```
-    pub async fn evm_block(&self, evm_block_hash: B256) -> Option<Block> {
+    pub fn evm_block(&self, evm_block_hash: B256) -> Option<Block> {
         let ctx = match self {
             Self::IrysRethAdapter(adapter) => &adapter.reth_node,
             #[cfg(test)]
             Self::Mock(_) => {
-                return self.evm_block_mock(evm_block_hash).await;
+                return self.evm_block_mock(evm_block_hash);
             }
         };
 
@@ -67,9 +67,9 @@ impl RethBlockProvider {
     }
 
     #[cfg(test)]
-    pub async fn evm_block_mock(&self, evm_block_hash: B256) -> Option<Block> {
+    pub fn evm_block_mock(&self, evm_block_hash: B256) -> Option<Block> {
         if let Self::Mock(payloads) = self {
-            let payloads = payloads.read().await;
+            let payloads = payloads.read().expect("can always read");
             payloads.get(&evm_block_hash).cloned()
         } else {
             panic!("Tried to get payload from mock provider, but it is not a mock provider");
@@ -141,7 +141,7 @@ where
         if let Some(sealed_block) = self.cache.write().await.payloads.get(evm_block_hash) {
             Some(sealed_block.clone_block())
         } else {
-            self.reth_payload_provider.evm_block(*evm_block_hash).await
+            self.reth_payload_provider.evm_block(*evm_block_hash)
         }
     }
 
@@ -157,10 +157,7 @@ where
         if let Some(s) = maybe_sealed {
             Some(s)
         } else {
-            let block = self
-                .reth_payload_provider
-                .evm_block(*evm_block_hash)
-                .await?;
+            let block = self.reth_payload_provider.evm_block(*evm_block_hash)?;
             Some(block.seal_slow())
         }
     }

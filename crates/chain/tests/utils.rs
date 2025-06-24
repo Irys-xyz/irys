@@ -1279,12 +1279,14 @@ pub async fn read_block_from_state(
     let mut was_validation_scheduled = false;
 
     for _ in 0..1000 {
-        let read = node_ctx.block_tree_guard.read();
-        let mut result = read
-            .get_block_and_status(block_hash)
-            .into_iter()
-            .map(|(_, state)| *state);
-        let result = result.next();
+        let result = {
+            let read = node_ctx.block_tree_guard.read();
+            let mut result = read
+                .get_block_and_status(block_hash)
+                .into_iter()
+                .map(|(_, state)| *state);
+            result.next()
+        };
 
         let Some(chain_state) = result else {
             // If we previously saw "validation scheduled" and now block status is None,
