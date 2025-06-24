@@ -154,7 +154,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     })?;
     assert_eq!(*chunk_cache_count, 1_u64);
 
-    // mine enough blocks to cause block chunk migration
+    // mine enough blocks to cause block and chunk migration
     node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
         .await?;
 
