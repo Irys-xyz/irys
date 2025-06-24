@@ -276,7 +276,7 @@ pub fn vdf_steps_are_valid(
             }
         },
         Err(err) =>
-            tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)
+            tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err.to_string())
     };
 
     let reset_seed = vdf_info.seed;
