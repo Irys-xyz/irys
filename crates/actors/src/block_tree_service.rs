@@ -520,8 +520,11 @@ impl BlockTreeServiceInner {
         let arc_block;
         match validation_result {
             ValidationResult::Invalid => {
-                // Do nothing - TODO probably remove from cache
-                error!("{} INVALID BLOCK", block_hash.0.to_base58());
+                error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+                let mut cache = self.cache.write().unwrap();
+                let _ = cache
+                    .remove_block(&block_hash)
+                    .inspect_err(|err| tracing::error!(?err));
             }
             ValidationResult::Valid => {
                 {

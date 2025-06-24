@@ -57,7 +57,7 @@ async fn test_genesis_state_dump_and_restore() -> eyre::Result<()> {
 
     // mine at least one block (minimum for the dump code to work)
     node.mine_blocks(4).await?;
-    node.wait_until_height(4, 20).await?;
+    let _block_hash = node.wait_until_height(4, 20).await?;
 
     let reth_db = node.node_ctx.reth_db.clone();
     let dump_dir = node.cfg.base_directory.canonicalize()?;

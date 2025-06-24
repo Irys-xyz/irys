@@ -1,6 +1,4 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
-use alloy_core::primitives::ruint::aliases::U256;
-use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{
@@ -12,15 +10,13 @@ use irys_chain::{
 use irys_database::block_header_by_hash;
 use irys_primitives::IrysTxId;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
-    NodeConfig, NodeMode, PeerAddress, RethConfig, RethPeerInfo, H256,
+    irys::IrysSigner, BlockIndexItem, IrysTransaction, NodeConfig, PeerAddress, H256,
 };
-use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
-use std::{collections::HashMap, net::TcpListener};
+use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, span, Level};
+use tracing::{error, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
@@ -101,10 +97,9 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     let seconds_to_wait = 20;
-    reth_tracing::init_test_tracing();
     let mut genesis_config = NodeConfig::testnet();
     let peer_account = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_account]);
@@ -179,21 +174,15 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 1. spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
-/// TODO: Mine on peer2 and see if those blocks arrive at genesis via gossip
 #[test_log::test(actix_web::test)]
 async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // setup trusted peers connection data and configs for genesis and nodes
-    let (
-        testnet_config_genesis,
-        testnet_config_peer1,
-        testnet_config_peer2,
-        _trusted_peers,
-        genesis_trusted_peers,
-    ) = init_configs();
-    // setup a funded account at genesis block
-    let account1 = IrysSigner::random_signer(&testnet_config_genesis.consensus_config());
+    let testnet_config_genesis = NodeConfig::testnet();
+    let account1 = testnet_config_genesis.signer();
 
-    let ctx_genesis_node = start_genesis_node(&testnet_config_genesis, &account1).await;
+    let ctx_genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone())
+        .start_and_wait_for_packing("GENESIS", 10)
+        .await;
 
     let required_blocks_height: usize = 2;
     let expected_block_lag_between_index_and_tree: usize = 2;
@@ -210,25 +199,18 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await
         .expect("expected many mined blocks");
 
-    // wait and retry hitting the peer_list endpoint of genesis node
-    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_genesis_node).await;
-    // assert that genesis node is advertising the trusted peers it was given via config that succeeded in a handshake in trusted_peers_handshake_task()
-    // i.e. the only good peer will be genesis at his point in the tests as other peers are not yet online
-    // so we expect one peer, and we expect it to have the mining_address of the genesis node
-    error!("peer_list_items: {:?}", peer_list_items);
-    // assert_eq!(1, peer_list_items.len());
-    // assert_eq!(
-    //     genesis_trusted_peers[0].api.ip(),
-    //     peer_list_items[0].api.ip()
-    // );
-
     // start additional nodes (after we have mined some blocks on genesis node)
-    let (ctx_peer1_node, ctx_peer2_node) = start_peer_nodes(
-        &Config::new(testnet_config_peer1),
-        &Config::new(testnet_config_peer2),
-        &account1,
-    )
-    .await;
+    let ctx_peer1_node = ctx_genesis_node.testnet_peer();
+    let ctx_peer2_node = ctx_genesis_node.testnet_peer();
+    let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
+        .start_with_name("PEER1")
+        .await;
+    ctx_peer1_node.start_public_api().await;
+
+    let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
+        .start_with_name("PEER2")
+        .await;
+    ctx_peer2_node.start_public_api().await;
 
     // disable vdf mining on the peers, as they can instead use VDF fast forward as blocks arrive
     // this does not directly contribute to the test but does reduce resource usage during test run
@@ -271,15 +253,36 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     )
     .await;
 
-    // wait and retry hitting the peer_list endpoint of peer1 node
-    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer1_node).await;
-    // assert that peer1 node has updated trusted peers, - 1 because we shouldn't add ourselves
-    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len() - 1);
+    // Check peer lists - each peer should see the genesis node and the other peer
+    let peer_list_items_1 = poll_peer_list(&ctx_peer1_node, 2).await;
+    let peer_list_items_2 = poll_peer_list(&ctx_peer2_node, 2).await;
 
-    // wait and retry hitting the peer_list endpoint of peer2 node
-    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer2_node).await;
-    // assert that peer2 node has updated trusted peers
-    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len() - 1);
+    // Get the peer addresses for comparison
+    let genesis_peer_addr = ctx_genesis_node.node_ctx.config.node_config.peer_address();
+    let peer1_peer_addr = ctx_peer1_node.node_ctx.config.node_config.peer_address();
+    let peer2_peer_addr = ctx_peer2_node.node_ctx.config.node_config.peer_address();
+
+    // Peer1 should see genesis and peer2
+    assert_eq!(peer_list_items_1.len(), 2, "Peer1 should see 2 other peers");
+    assert!(
+        peer_list_items_1.contains(&genesis_peer_addr),
+        "Peer1 should see genesis node"
+    );
+    assert!(
+        peer_list_items_1.contains(&peer2_peer_addr),
+        "Peer1 should see peer2"
+    );
+
+    // Peer2 should see genesis and peer1
+    assert_eq!(peer_list_items_2.len(), 2, "Peer2 should see 2 other peers");
+    assert!(
+        peer_list_items_2.contains(&genesis_peer_addr),
+        "Peer2 should see genesis node"
+    );
+    assert!(
+        peer_list_items_2.contains(&peer1_peer_addr),
+        "Peer2 should see peer1"
+    );
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
         "peer2".to_owned(),
@@ -292,7 +295,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     .await;
 
     let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.http.bind_port),
+        &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
         0,
         required_blocks_height
             .try_into()
@@ -383,48 +386,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         block_index_genesis, block_index_peer2
     );
 
-    //FIXME: https://github.com/Irys-xyz/irys/issues/368
-    // mine more blocks on peer2 node, and see if gossip service brings them to genesis
-    /*let additional_blocks_for_gossip_test: usize = 2;
-    mine_blocks(&ctx_peer2_node.node_ctx, additional_blocks_for_gossip_test)
-        .await
-        .expect("expected many mined blocks");
-    let result_genesis = poll_until_fetch_at_block_index_height(
-        &ctx_genesis_node,
-        (required_blocks_height + additional_blocks_for_gossip_test)
-            .try_into()
-            .expect("expected required_blocks_height to be valid u64"),
-        20,
-    )
-    .await;
-
-    let mut result_peer2 = block_index_endpoint_request(
-        &local_test_url(&testnet_config_peer2.api_port),
-        0,
-        required_blocks_height
-            .try_into()
-            .expect("expected required_blocks_height to be valid u64"),
-    )
-    .await;
-    let block_index_genesis = result_genesis
-        .expect("expected a client response from peer2")
-        .json::<Vec<BlockIndexItem>>()
-        .await
-        .expect("expected a valid json deserialize");
-    let block_index_peer2 = result_peer2
-        .json::<Vec<BlockIndexItem>>()
-        .await
-        .expect("expected a valid json deserialize");
-    assert_eq!(
-        block_index_genesis, block_index_peer2,
-        "expecting json from genesis node {:?} to match json from peer2 {:?}",
-        block_index_genesis, block_index_peer2
-    );*/
-
-    /*
-    // BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2
-     */
-
     tracing::debug!("BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2");
 
     // mine more blocks on genesis node, and see if gossip service brings them to peer2
@@ -439,7 +400,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
 
     // TODO WE could possibly add a check here to see if genesis really did mine the block and the index height has increased...
     let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.http.bind_port),
+        &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
         0,
         (required_blocks_height + 1 + additional_blocks_for_gossip_test)
             .try_into()
@@ -509,205 +470,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     );
 
     Ok(())
-}
-
-fn get_available_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("Failed to bind to address")
-        .local_addr()
-        .expect("Failed to get local addr")
-        .port()
-}
-
-/// setup configs for genesis, peer1 and peer2 for e2e tests
-/// FIXME: hardcoded ports https://github.com/Irys-xyz/irys/issues/367
-fn init_configs() -> (
-    NodeConfig,
-    NodeConfig,
-    NodeConfig,
-    Vec<PeerAddress>,
-    Vec<PeerAddress>,
-) {
-    let http_port_genesis = get_available_port();
-    let gossip_port_genesis = get_available_port();
-
-    let http_port_peer1 = get_available_port();
-    let gossip_port_peer1 = get_available_port();
-
-    let http_port_peer2 = get_available_port();
-    let gossip_port_peer2 = get_available_port();
-
-    info!("Ports:\n genesis:http = {}\n genesis:gossip = {}\n peer1:http = {}\n peer1:gossip = {}\n peer2:http = {}\n peer2:gossip = {}", http_port_genesis, gossip_port_genesis, http_port_peer1, gossip_port_peer1, http_port_peer2, gossip_port_peer2);
-
-    let mut testnet_config_genesis = NodeConfig {
-        http: HttpConfig {
-            public_ip: "127.0.0.1".to_string(),
-            public_port: http_port_genesis,
-            bind_port: http_port_genesis,
-            bind_ip: "127.0.0.1".to_string(),
-        },
-        gossip: GossipConfig {
-            public_port: gossip_port_genesis,
-            public_ip: "127.0.0.1".to_string(),
-            bind_port: gossip_port_genesis,
-            bind_ip: "127.0.0.1".to_string(),
-        },
-        mining_key: SigningKey::from_slice(
-            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                .expect("valid hex"),
-        )
-        .expect("valid key"),
-        mode: NodeMode::Genesis,
-        ..NodeConfig::testnet()
-    };
-    let mut testnet_config_peer1 = NodeConfig {
-        http: HttpConfig {
-            // Use random port
-            bind_port: http_port_peer1,
-            // The same as bind port
-            public_port: http_port_peer1,
-            bind_ip: "127.0.0.1".to_string(),
-            public_ip: "127.0.0.1".to_string(),
-        },
-        gossip: GossipConfig {
-            public_port: gossip_port_peer1,
-            public_ip: "127.0.0.1".to_string(),
-            bind_port: gossip_port_peer1,
-            bind_ip: "127.0.0.1".to_string(),
-        },
-        mining_key: SigningKey::from_slice(
-            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d1")
-                .expect("valid hex"),
-        )
-        .expect("valid key"),
-        mode: NodeMode::PeerSync,
-        reth: RethConfig {
-            use_random_ports: true,
-        },
-        ..NodeConfig::testnet()
-    };
-    let mut testnet_config_peer2 = NodeConfig {
-        http: HttpConfig {
-            bind_port: http_port_peer2,
-            public_port: http_port_peer2,
-            bind_ip: "127.0.0.1".to_string(),
-            public_ip: "127.0.0.1".to_string(),
-        },
-        gossip: GossipConfig {
-            public_port: gossip_port_peer2,
-            public_ip: "127.0.0.1".to_string(),
-            bind_port: gossip_port_peer2,
-            bind_ip: "127.0.0.1".to_string(),
-        },
-        mining_key: SigningKey::from_slice(
-            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d2")
-                .expect("valid hex"),
-        )
-        .expect("valid key"),
-        mode: NodeMode::PeerSync,
-        reth: RethConfig {
-            use_random_ports: true,
-        },
-        ..NodeConfig::testnet()
-    };
-    let trusted_peers = vec![PeerAddress {
-        api: format!("127.0.0.1:{}", http_port_genesis)
-            .parse()
-            .expect("valid SocketAddr expected"),
-        gossip: format!("127.0.0.1:{}", gossip_port_genesis)
-            .parse()
-            .expect("valid SocketAddr expected"),
-        execution: RethPeerInfo::default(),
-    }];
-    let genesis_trusted_peers = vec![
-        PeerAddress {
-            api: format!("127.0.0.1:{}", http_port_genesis)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            gossip: format!("127.0.0.1:{}", gossip_port_genesis)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            execution: RethPeerInfo::default(),
-        },
-        PeerAddress {
-            api: format!("127.0.0.1:{}", http_port_peer1)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            gossip: format!("127.0.0.1:{}", gossip_port_peer1)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            execution: RethPeerInfo::default(),
-        },
-        PeerAddress {
-            api: format!("127.0.0.1:{}", http_port_peer2)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            gossip: format!("127.0.0.1:{}", gossip_port_peer2)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            execution: RethPeerInfo::default(),
-        },
-    ];
-    testnet_config_peer1.trusted_peers = trusted_peers.clone();
-    testnet_config_peer2.trusted_peers = trusted_peers.clone();
-    testnet_config_genesis.trusted_peers = genesis_trusted_peers.clone();
-    (
-        testnet_config_genesis,
-        testnet_config_peer1,
-        testnet_config_peer2,
-        trusted_peers,
-        genesis_trusted_peers,
-    )
-}
-
-/// add a single account to the supplied node config
-fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner) {
-    irys_node_config.consensus.extend_genesis_accounts(vec![(
-        account.address(),
-        GenesisAccount {
-            balance: U256::from(42_000_000_000_000_000_u64),
-            ..Default::default()
-        },
-    )]);
-}
-
-/// start genesis node with an account
-async fn start_genesis_node(
-    testnet_config_genesis: &NodeConfig,
-    account: &IrysSigner, // account with balance at genesis
-) -> IrysNodeTest<IrysNodeCtx> {
-    let span = span!(Level::DEBUG, "genesis");
-    let _enter = span.enter();
-    // init genesis node
-    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone());
-    // add accounts with balances to genesis node
-    add_account_to_config(&mut genesis_node.cfg, account);
-    // start genesis node
-
-    genesis_node.start().await
-}
-
-/// start peer nodes with an account
-async fn start_peer_nodes(
-    testnet_config_peer1: &Config,
-    testnet_config_peer2: &Config,
-    account: &IrysSigner, // account with balance at genesis
-) -> (IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>) {
-    let ctx_peer1_node = {
-        let span = span!(Level::DEBUG, "peer1");
-        let _enter = span.enter();
-        let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.node_config.clone());
-        add_account_to_config(&mut peer1_node.cfg, account);
-        peer1_node.start().await
-    };
-    let ctx_peer2_node = {
-        let span = span!(Level::DEBUG, "peer2");
-        let _enter = span.enter();
-        let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.node_config.clone());
-        add_account_to_config(&mut peer2_node.cfg, account);
-        peer2_node.start().await
-    };
-    (ctx_peer1_node, ctx_peer2_node)
 }
 
 /// helper function to reduce replication of local ip in codebase
@@ -784,10 +546,9 @@ async fn poll_until_fetch_at_block_index_height(
 
 /// poll peer_list_endpoint until timeout or we get the expected result
 async fn poll_peer_list(
-    trusted_peers: Vec<PeerAddress>,
     ctx_node: &IrysNodeTest<IrysNodeCtx>,
+    desired_count_of_items: usize,
 ) -> Vec<PeerAddress> {
-    let mut peer_list_items: Vec<PeerAddress> = Vec::new();
     let max_attempts = 200;
     for _ in 0..max_attempts {
         sleep(Duration::from_millis(100)).await;
@@ -797,14 +558,14 @@ async fn poll_peer_list(
         ))
         .await;
 
-        peer_list_items = peer_results_genesis
+        let mut peer_list_items = peer_results_genesis
             .json::<Vec<PeerAddress>>()
             .await
             .expect("valid PeerAddress");
         peer_list_items.sort(); //sort peer list so we have sane comparisons in asserts
-        if trusted_peers == peer_list_items {
-            break;
+        if peer_list_items.len() == desired_count_of_items {
+            return peer_list_items;
         }
     }
-    peer_list_items
+    panic!("never got the desired amount of items")
 }

@@ -324,8 +324,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     genesis.mine_block().await.unwrap();
 
     // Wait for peers to sync and start packing
-    peer1.wait_until_height(2, seconds_to_wait).await?;
-    peer2.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer1.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer2.wait_until_height(2, seconds_to_wait).await?;
     peer1.wait_for_packing(seconds_to_wait).await;
     peer2.wait_for_packing(seconds_to_wait).await;
 
@@ -388,8 +388,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 
-    peer1.wait_until_height(3, seconds_to_wait).await?;
-    peer2.wait_until_height(3, seconds_to_wait).await?;
+    let _block_hash = peer1.wait_until_height(3, seconds_to_wait).await?;
+    let _block_hash = peer2.wait_until_height(3, seconds_to_wait).await?;
 
     // ensure the change is there
     let mut expected_recipient1_balance = U256::from(123);
@@ -572,8 +572,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         peer2.wait_until_height(height + 1, 20)
     );
 
-    gen?;
-    p2?;
+    let _block_hash = gen?;
+    let _block_hash = p2?;
 
     // the storage tx shouldn't be in the best mempool txs due to the fork change
 

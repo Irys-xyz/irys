@@ -3,7 +3,6 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_testing_utils::initialize_tracing;
 use irys_types::{
     AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
     ProtocolVersion, VersionRequest,
@@ -140,12 +139,11 @@ async fn check_get_block_endpoint(
     debug!("block: {:?}", block);
 }
 
-#[actix_rt::test]
-#[test_log::test]
+#[test_log::test(actix_rt::test)]
 async fn heavy_api_client_all_endpoints_should_work() {
-    initialize_tracing();
     let config = NodeConfig::testnet();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
+    ctx.wait_for_packing(20).await;
 
     let api_address = SocketAddr::new(
         IpAddr::from_str("127.0.0.1").unwrap(),

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
@@ -11,7 +11,9 @@ use crate::{
     system_tx_generator::SystemTxGenerator,
 };
 use alloy_consensus::Transaction as _;
-use alloy_eips::HashOrNumber;
+use alloy_eips::eip7685::{Requests, RequestsOrHash};
+use alloy_rpc_types_engine::ExecutionData;
+use async_trait::async_trait;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
@@ -24,14 +26,25 @@ use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::providers::TransactionsProvider as _;
+use reth::revm::primitives::B256;
+use reth::rpc::api::EngineApiClient as _;
+use reth::rpc::types::engine::ExecutionPayload;
+use reth_ethereum_primitives::Block;
 use tracing::{debug, info};
+
+/// Trait for providing execution payloads for block validation
+#[async_trait]
+pub trait PayloadProvider: Clone + Send + Sync + 'static {
+    /// Waits for the execution payload to arrive over gossip. This method will first check the local
+    /// cache, then try to retrieve the payload from the network if it is not found locally.
+    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData>;
+}
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -155,10 +168,10 @@ pub async fn prevalidate_block(
 
 async fn check_valid_oracle_price(
     block: &IrysBlockHeader,
-    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_serviece_sendr.send(EmaServiceMessage::ValidateOraclePrice {
+    ema_service_sender.send(EmaServiceMessage::ValidateOraclePrice {
         block_height: block.height,
         oracle_price: block.oracle_irys_price,
         response: tx,
@@ -173,10 +186,10 @@ async fn check_valid_oracle_price(
 
 async fn check_valid_ema_calculation(
     block: &IrysBlockHeader,
-    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_serviece_sendr.send(EmaServiceMessage::ValidateEmaPrice {
+    ema_service_sender.send(EmaServiceMessage::ValidateEmaPrice {
         block_height: block.height,
         ema_price: block.ema_irys_price,
         oracle_price: block.oracle_irys_price,
@@ -489,36 +502,64 @@ pub async fn system_transactions_are_valid(
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
+    payload_provider: impl PayloadProvider,
 ) -> eyre::Result<()> {
-    // pending work:
-    // the local reth node does not have access to the incoming evm block.
-    // the responsibility for providing this evm block data is on the CL (irys)
-    // we need to propagate ExecutioinPayload in Irys gossip, and provide it here.
-    // The interactoin with the reth node then becomes:
-    //
-    // todo: we need to validate the executeion paylad (check that no `withdrawls` are present)
-    // let engine_api = reth_adapter.inner.engine_http_client();
-    // let result = engine_api
-    //     .new_payload_v3(
-    //         execution_payload_v3,
-    //         vec![], // blob version hashes are empty
-    //         parent_irys_block_hash,
-    //     )
-    //     .await?;
-    // // todo if result.is_syncing() we need to postpone the validation and attempt later
-    // ensure!(result.is_valid());
+    // 1. Validate that the evm block is valid
+    let payload = payload_provider
+        .wait_for_payload(&block.evm_block_hash)
+        .await
+        .ok_or_eyre("reth execution payload never arrived")?;
 
-    // 1. Fetch EVM block transactions
-    let block_txs = reth_adapter
-        .inner
-        .provider
-        .transactions_by_block(HashOrNumber::Hash(block.evm_block_hash))?
-        // todo add a test what happens with an invalid evm block
-        .ok_or_eyre("Block not found in reth")?;
+    let engine_api_client = reth_adapter.inner.engine_http_client();
+    let ExecutionData { payload, sidecar } = payload;
+
+    let ExecutionPayload::V3(payload) = payload else {
+        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+    };
+    ensure!(
+        payload.withdrawals().is_empty(),
+        "withdrawals must always be empty"
+    );
+
+    let versioned_hashes = sidecar
+        .versioned_hashes()
+        .ok_or_eyre("version hashes must be present")?
+        .clone();
+    loop {
+        let payload = engine_api_client
+            .new_payload_v4(
+                payload.clone(),
+                versioned_hashes.clone(),
+                block.previous_block_hash.into(),
+                RequestsOrHash::Requests(Requests::new(vec![])),
+            )
+            .await?;
+        match payload.status {
+            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
+                return Err(eyre::Report::msg(validation_error))
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
+                tracing::debug!("syncing extra blocks to validate payload");
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
+                tracing::info!("reth payload already known & is valid");
+                break;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
+                tracing::info!("accepted a side-chain (fork) payload");
+                break;
+            }
+        }
+    }
+    let evm_block: Block = payload.try_into_block()?;
 
     // 2. Extract system transactions from the beginning of the block
     let mut expect_system_txs = true;
-    let actual_system_txs = block_txs
+    let actual_system_txs = evm_block
+        .body
+        .transactions
         .into_iter()
         .map(|tx| {
             if expect_system_txs {
@@ -585,23 +626,8 @@ async fn generate_expected_system_transactions_from_db<'a>(
     // Look up commitment txs
     let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
 
-    // Look up submit transaction headers
-    let _submit_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
-        .ok_or_eyre("Submit ledger not found")?;
-
-    // Lookup submit txs
-    let submit_tx_ids: Vec<H256> = block
-        .get_data_ledger_tx_ids()
-        .get(&DataLedger::Submit)
-        .unwrap()
-        .iter()
-        .copied()
-        .collect();
-
-    let submit_txs = get_data_tx_in_parallel(submit_tx_ids, &service_senders.mempool, db).await?;
+    // Lookup data txs
+    let data_txs = extract_data_txs(service_senders, block, db).await?;
 
     let system_txs = SystemTxGenerator::new(
         &block.height,
@@ -610,7 +636,7 @@ async fn generate_expected_system_transactions_from_db<'a>(
         &prev_block,
     );
     let system_txs = system_txs
-        .generate_all(&commitment_txs, &submit_txs)
+        .generate_all(&commitment_txs, &data_txs)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(system_txs)
 }
@@ -632,7 +658,6 @@ async fn extract_commitment_txs(
                     ledger.ledger_id == SystemLedger::Commitment,
                     "only commitment ledger supported"
                 );
-                // ledger
 
                 get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
                     .await?
@@ -648,7 +673,32 @@ async fn extract_commitment_txs(
     Ok(commitment_txs)
 }
 
-/// Validates that the actual system transactions match the expected ones
+async fn extract_data_txs(
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
+    let txs = match &block.data_ledgers[..] {
+        [publish_ledger, submit_ledger] => {
+            ensure!(
+                publish_ledger.ledger_id == DataLedger::Publish,
+                "Publish ledger must be the first ledger in the data ledgers"
+            );
+            ensure!(
+                submit_ledger.ledger_id == DataLedger::Submit,
+                "Submit ledger must be the second ledger in the data ledgers"
+            );
+            // we only access the submit ledger data. Publish ledger does not require billing the user extra
+            get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                .await?
+        }
+        // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
+        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
+    };
+    Ok(txs)
+}
+
+/// Validates  the actual system transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
 fn validate_system_transactions_match(
     actual: impl Iterator<Item = eyre::Result<SystemTransaction>>,

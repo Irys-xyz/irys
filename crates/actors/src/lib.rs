@@ -21,4 +21,5 @@ pub mod validation_service;
 pub use addresses::*;
 pub use block_producer::*;
 pub use epoch_service::*;
+pub use reth_ethereum_primitives;
 pub use storage_module_service::*;
