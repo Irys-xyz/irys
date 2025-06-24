@@ -12,6 +12,9 @@ use irys_types::{
 };
 use reth::{payload::EthBuiltPayload, primitives::SealedBlock};
 
+// This test creates a malicious block producer that squares the reward amount instead of using the correct value.
+// The assertion will fail (block will be discarded) because the block rewards between irys block and reth
+// block must match.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
@@ -93,6 +96,10 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     Ok(())
 }
 
+// This test produces a valid block but then tampers with the evm_block_hash field in the Irys block header,
+// setting it to a valid reth block hash, but not the one that was intended to be used.
+// The block will be discarded because the system will detect that the reth block hash does not match the one that's been provided.
+// (note: the fail in question happens because each evm block hash contains "parent beacon block" hash as part of the seed)
 #[test_log::test(actix_web::test)]
 async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
@@ -122,18 +129,25 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
+    let (_block, eth_payload_other) = block_prod_strategy
+        .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
+        .await?
+        .unwrap();
+    assert_ne!(
+        eth_payload.block().header().hash_slow(),
+        eth_payload_other.block().header().hash_slow(),
+        "eth payloads must have different hashes"
+    );
 
     let mut irys_block = block.as_ref().clone();
-    let invalid_evm_blockhash = FixedBytes::new([111; 32]);
-    irys_block.evm_block_hash = invalid_evm_blockhash;
+    irys_block.evm_block_hash = eth_payload_other.block().header().hash_slow();
     peer_signer.sign_block_header(&mut irys_block)?;
     let irys_block = Arc::new(irys_block);
     peer_node.node_ctx.sync_state.set_is_syncing(false);
 
     peer_node.gossip_block(&irys_block)?;
-    let evm_block = eth_payload.block().clone_block();
-    let eth_block = SealedBlock::new_unchecked(evm_block, invalid_evm_blockhash);
-    peer_node.gossip_eth_block(&eth_block)?;
+    peer_node.gossip_eth_block(&eth_payload.block())?;
+    peer_node.gossip_eth_block(&eth_payload_other.block())?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -144,6 +158,9 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
+// This test adds an extra transaction to the EVM block that isn't included in the Irys block's transaction list.
+// The assertion will fail (block will be discarded) because during validation, the system will detect
+// that the EVM block contains transactions not accounted for in the Irys block, breaking the 1:1 mapping requirement.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_system_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
@@ -230,6 +247,9 @@ async fn heavy_block_system_txs_misalignment_block_rejected() -> eyre::Result<()
     Ok(())
 }
 
+// This test reverses the order of transactions when creating the EVM block compared to their order in the Irys block.
+// The assertion will fail (block will be discarded) because transaction ordering must be preserved between
+// the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_system_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
