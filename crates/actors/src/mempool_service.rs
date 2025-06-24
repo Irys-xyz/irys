@@ -8,6 +8,7 @@ use core::fmt::Display;
 use eyre::eyre;
 use futures::future::BoxFuture;
 use irys_database::{
+    block_header_by_hash,
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
     submodule::get_data_size_by_data_root,
@@ -20,7 +21,7 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
-    validate_path, Address, CommitmentTransaction, Config, DataLedger, DataRoot,
+    validate_path, Address, Base64, CommitmentTransaction, Config, DataLedger, DataRoot,
     GossipBroadcastMessage, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader,
     IrysTransactionId, MempoolConfig, TxChunkOffset, H256, U256,
 };
@@ -58,6 +59,11 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
+    async fn get_block_header(
+        &self,
+        block_hash: H256,
+        include_chunk: bool,
+    ) -> Result<Option<IrysBlockHeader>, TxReadError>;
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +129,24 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
     }
+
+    async fn get_block_header(
+        &self,
+        block_hash: H256,
+        include_chunk: bool,
+    ) -> Result<Option<IrysBlockHeader>, TxReadError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block_hash,
+                include_chunk,
+                tx,
+            ))
+            .map_err(|_| TxReadError::Other("Error sending GetBlockHeader message".to_owned()))?;
+
+        rx.await
+            .map_err(|_| TxReadError::Other("GetBlockHeader response error".to_owned()))
+    }
 }
 
 #[derive(Debug)]
@@ -137,6 +161,9 @@ pub struct MempoolState {
     /// LRU caches for out of order gossip data
     pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
+    /// pre-validated blocks that have passed pre-validation in discovery service
+    prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
+    prevalidated_blocks_poa: HashMap<H256, Base64>,
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -151,6 +178,10 @@ pub enum MempoolServiceMessage {
         UnpackedChunk,
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
+    /// Ingress Pre-validated Block
+    IngestBlocks {
+        prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
+    },
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// Ingress CommitmentTransaction into the mempool
@@ -187,6 +218,8 @@ pub enum MempoolServiceMessage {
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
     ),
+    /// Get block header from the mempool cache
+    GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
 }
 
 #[derive(Debug)]
@@ -751,8 +784,6 @@ impl Inner {
             }
         }
 
-        info!("Removing confirmed tx - Block height: {}", block.height,);
-
         Ok(())
     }
 
@@ -787,7 +818,7 @@ impl Inner {
             event.block.height
         );
 
-        let migrated_block = event.block;
+        let mut migrated_block = (*event.block).clone();
         let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
 
         // stage 1: move commitment transactions from tree to index
@@ -886,15 +917,38 @@ impl Inner {
         }
 
         let mempool_state = &self.mempool_state.clone();
-        let mut mempool_state_write_guard = mempool_state.write().await;
-        for txid in submit_tx_ids.iter() {
-            // Remove the data tx from the pending valid_tx pool
-            mempool_state_write_guard
-                .valid_submit_ledger_tx
-                .remove(txid);
-            mempool_state_write_guard.recent_valid_tx.remove(txid);
+
+        // Remove the submit tx from the pending valid_submit_ledger_tx pool
+        {
+            let mut mempool_state_write_guard = mempool_state.write().await;
+            for txid in submit_tx_ids.iter() {
+                mempool_state_write_guard
+                    .valid_submit_ledger_tx
+                    .remove(txid);
+                mempool_state_write_guard.recent_valid_tx.remove(txid);
+            }
         }
-        drop(mempool_state_write_guard);
+
+        // add block with optional poa chunk to index
+        {
+            let mempool_state_read_guard = mempool_state.read().await;
+            migrated_block.poa.chunk = mempool_state_read_guard
+                .prevalidated_blocks_poa
+                .get(&migrated_block.block_hash)
+                .cloned();
+            self.irys_db
+                .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))
+                .unwrap();
+        }
+
+        // Remove migrated block and poa chunk from mempool cache
+        {
+            let mut state = self.mempool_state.write().await;
+            state.prevalidated_blocks.remove(&migrated_block.block_hash);
+            state
+                .prevalidated_blocks_poa
+                .remove(&migrated_block.block_hash);
+        }
 
         Ok(())
     }
@@ -1572,6 +1626,27 @@ impl Inner {
         filtered_map
     }
 
+    /// return block header from mempool, if found
+    async fn handle_get_block_header_message(
+        &self,
+        block_hash: H256,
+        include_chunk: bool,
+    ) -> Option<IrysBlockHeader> {
+        let guard = self.mempool_state.read().await;
+
+        //read block from mempool
+        let mut block = guard.prevalidated_blocks.get(&block_hash).cloned();
+
+        // retrieve poa from mempool and include in returned block
+        if include_chunk {
+            if let Some(ref mut b) = block {
+                b.poa.chunk = guard.prevalidated_blocks_poa.get(&block_hash).cloned();
+            }
+        }
+
+        block
+    }
+
     #[tracing::instrument(skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
     fn handle_message<'a>(
@@ -1588,6 +1663,13 @@ impl Inner {
                 }
                 MempoolServiceMessage::BlockConfirmed(block) => {
                     let _unused_response_message = self.handle_block_confirmed_message(block).await;
+                }
+                MempoolServiceMessage::IngestBlocks {
+                    prevalidated_blocks,
+                } => {
+                    let _unused_response_message = self
+                        .handle_ingress_blocks_message(prevalidated_blocks)
+                        .await;
                 }
                 MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
                     let response_message = self
@@ -1623,6 +1705,14 @@ impl Inner {
                 }
                 MempoolServiceMessage::DataTxExists(txid, response) => {
                     let response_value = self.handle_data_tx_exists_message(txid).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
+                    let response_value = self
+                        .handle_get_block_header_message(hash, include_chunk)
+                        .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1893,17 +1983,41 @@ impl Inner {
             let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
             let latest = canonical_blocks.last().unwrap();
             // Just provide the most recent block as an anchor
-            match irys_database::block_header_by_hash(&read_tx, &latest.block_hash, false) {
-                Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+            if let Some(hdr) = mempool_state_read_guard
+                .prevalidated_blocks
+                .get(&latest.block_hash)
+            {
+                if hdr.height + anchor_expiry_depth >= latest_height {
+                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
+                    return Ok(hdr.clone());
+                }
+            } else if let Ok(Some(hdr)) =
+                irys_database::block_header_by_hash(&read_tx, &latest.block_hash, false)
+            {
+                if hdr.height + anchor_expiry_depth >= latest_height {
                     debug!("valid txid anchor {} for tx {}", anchor, tx_id);
                     return Ok(hdr);
                 }
-                _ => {}
-            };
+            }
         }
-
         drop(mempool_state_read_guard); // Release read lock before acquiring write lock
 
+        // check tree / mempool for block header
+        if let Some(hdr) = self
+            .mempool_state
+            .read()
+            .await
+            .prevalidated_blocks
+            .get(anchor)
+            .cloned()
+        {
+            if hdr.height + anchor_expiry_depth >= latest_height {
+                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
+                return Ok(hdr);
+            }
+        }
+
+        // check index for block header
         match irys_database::block_header_by_hash(&read_tx, anchor, false) {
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
                 debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
@@ -1947,7 +2061,6 @@ impl Inner {
     /// # Notes
     /// - Only considers Submit ledger transactions (filters out Publish, etc.)
     /// - Only examines blocks within the configured `anchor_expiry_depth`
-    /// - Currently assumes all block headers exist in the database (see FIXME)
     async fn get_pending_submit_ledger_txs(&self) -> Vec<IrysTransactionHeader> {
         // Get the current canonical chain head to establish our starting point for block traversal
         let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())
@@ -1963,17 +2076,34 @@ impl Inner {
             debug!("Optimistic and Canonical have different heads");
         }
 
-        let block_hash = &canonical_head_entry.block_hash;
+        let block_hash = canonical_head_entry.block_hash;
         let block_height = canonical_head_entry.height;
 
-        // FIXME: Currently assumes all block headers exist in the database. In the future,
-        // this will need to check the local mempool state for recent blocks not yet persisted.
-        let mut block = self
-            .irys_db
-            .view(|tx| irys_database::block_header_by_hash(tx, block_hash, false))
-            .unwrap()
-            .unwrap()
-            .expect("to find the block header in the database");
+        // retrieve block from mempool or database
+        // be aware that genesis starts its life immediately in the database
+        let mut block = match self
+            .handle_get_block_header_message(block_hash, false)
+            .await
+        {
+            Some(b) => b,
+            None => match self
+                .irys_db
+                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
+            {
+                Ok(Some(header)) => Ok(header),
+                Ok(None) => Err(eyre!(
+                    "No block header found for hash {} ({})",
+                    block_hash,
+                    block_height
+                )),
+                Err(e) => Err(eyre!(
+                    "Failed to get previous block ({}) header: {}",
+                    block_height,
+                    e
+                )),
+            }
+            .expect("to find the block header in the db"),
+        };
 
         // Calculate the minimum block height we need to check for transaction conflicts
         // Only transactions anchored within this depth window are considered valid
@@ -2008,14 +2138,20 @@ impl Inner {
             }
 
             // Move to the parent block and continue the traversal backwards
-            let parent_block = self
-                .irys_db
-                .view(|tx| {
-                    irys_database::block_header_by_hash(tx, &block.previous_block_hash, false)
-                })
-                .unwrap()
-                .unwrap()
-                .expect("to find the block header in the database");
+            let parent_block = match self
+                .handle_get_block_header_message(block.previous_block_hash, false)
+                .await
+            {
+                Some(h) => h,
+                None => self
+                    .irys_db
+                    .view(|tx| {
+                        irys_database::block_header_by_hash(tx, &block.previous_block_hash, false)
+                    })
+                    .unwrap()
+                    .unwrap()
+                    .expect("to find the parent block header in the database"),
+            };
 
             block = parent_block;
         }
@@ -2040,6 +2176,26 @@ impl Inner {
             Err(TxIngressError::InvalidSignature)
         }
     }
+
+    /// ingest a block into the mempool
+    async fn handle_ingress_blocks_message(&self, prevalidated_blocks: Vec<Arc<IrysBlockHeader>>) {
+        let mut mempool_state_guard = self.mempool_state.write().await;
+        for block in prevalidated_blocks {
+            // insert poa into mempool
+            if let Some(chunk) = &block.poa.chunk {
+                mempool_state_guard
+                    .prevalidated_blocks_poa
+                    .insert(block.block_hash, chunk.clone());
+            };
+
+            // insert block into mempool without poa
+            let mut block_without_chunk = (*block).clone();
+            block_without_chunk.poa.chunk = None;
+            mempool_state_guard
+                .prevalidated_blocks
+                .insert(block.block_hash, (block_without_chunk).clone());
+        }
+    }
 }
 
 /// Create a new instance of the mempool state passing in a reference
@@ -2048,6 +2204,8 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
+        prevalidated_blocks: HashMap::new(),
+        prevalidated_blocks_poa: HashMap::new(),
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         invalid_tx: Vec::new(),

@@ -35,7 +35,7 @@ where
     TPeerList: PeerList,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: BlockPool<TPeerList, TBlockDiscovery>,
+    pub block_pool: BlockPool<TPeerList, TBlockDiscovery, TMempoolFacade>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
