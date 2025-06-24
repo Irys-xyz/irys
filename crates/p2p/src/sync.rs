@@ -37,6 +37,7 @@ impl SyncState {
     pub fn set_syncing_from(&self, height: usize) {
         self.set_is_syncing(true);
         self.set_sync_target_height(height);
+        self.mark_processed(height.saturating_sub(1));
     }
 
     pub fn finish_sync(&self) {
@@ -145,13 +146,18 @@ pub async fn sync_chain(
     api_client: impl ApiClient,
     peer_list: impl PeerList,
     node_mode: &NodeMode,
-    start_sync_from_height: usize,
+    mut start_sync_from_height: usize,
     genesis_peer_discovery_timeout_millis: u64,
 ) -> Result<(), GossipError> {
+    // If the peer doesn't have any blocks, it should start syncing from 1, as the genesis block
+    // should always be present
+    if start_sync_from_height == 0 {
+        start_sync_from_height = 1;
+    }
     sync_state.set_syncing_from(start_sync_from_height);
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
 
-    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}", node_mode, sync_state.sync_target_height());
+    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}", node_mode, start_sync_from_height);
 
     if is_in_genesis_mode && sync_state.sync_target_height() <= 1 {
         debug!("Sync task: The node is a genesis node with no blocks, skipping the sync task");
