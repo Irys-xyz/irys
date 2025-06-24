@@ -337,14 +337,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             match validation_result {
                 Ok(()) => {
                     // add block to mempool
-                    let (tx, rx) = oneshot::channel();
                     mempool_sender.send(MempoolServiceMessage::IngestBlocks {
                         prevalidated_blocks: vec![new_block_header.clone()],
-                        response: tx,
                     })?;
-                    if let Err(e) = rx.await? {
-                        tracing::error!("error from MempoolServiceMessage::IngestBlocks: {:?}", e);
-                    }
 
                     // all txs
                     let mut all_txs = submit_txs;

@@ -181,7 +181,6 @@ pub enum MempoolServiceMessage {
     /// Ingress Pre-validated Block
     IngestBlocks {
         prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
-        response: oneshot::Sender<Result<(), ChunkIngressError>>,
     },
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
@@ -1667,14 +1666,10 @@ impl Inner {
                 }
                 MempoolServiceMessage::IngestBlocks {
                     prevalidated_blocks,
-                    response,
                 } => {
-                    let response_value = self
+                    let _unused_response_message = self
                         .handle_ingress_blocks_message(prevalidated_blocks)
                         .await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
                 }
                 MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
                     let response_message = self
@@ -2183,10 +2178,7 @@ impl Inner {
     }
 
     /// ingest a block into the mempool
-    async fn handle_ingress_blocks_message(
-        &self,
-        prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
-    ) -> Result<(), ChunkIngressError> {
+    async fn handle_ingress_blocks_message(&self, prevalidated_blocks: Vec<Arc<IrysBlockHeader>>) {
         let mut mempool_state_guard = self.mempool_state.write().await;
         for block in prevalidated_blocks {
             // insert poa into mempool
@@ -2203,7 +2195,6 @@ impl Inner {
                 .prevalidated_blocks
                 .insert(block.block_hash, (block_without_chunk).clone());
         }
-        Ok(())
     }
 }
 
