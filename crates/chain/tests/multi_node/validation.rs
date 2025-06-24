@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
-use alloy_core::primitives::FixedBytes;
 use irys_actors::{
     async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
@@ -10,7 +9,7 @@ use irys_types::{
     storage_pricing::Amount, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
     NodeConfig,
 };
-use reth::{payload::EthBuiltPayload, primitives::SealedBlock};
+use reth::payload::EthBuiltPayload;
 
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
@@ -85,7 +84,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 
     peer_node.gossip_block(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(&eth_block)?;
+    peer_node.gossip_eth_block(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -146,8 +145,8 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     peer_node.node_ctx.sync_state.set_is_syncing(false);
 
     peer_node.gossip_block(&irys_block)?;
-    peer_node.gossip_eth_block(&eth_payload.block())?;
-    peer_node.gossip_eth_block(&eth_payload_other.block())?;
+    peer_node.gossip_eth_block(eth_payload.block())?;
+    peer_node.gossip_eth_block(eth_payload_other.block())?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -236,7 +235,7 @@ async fn heavy_block_system_txs_misalignment_block_rejected() -> eyre::Result<()
 
     peer_node.gossip_block(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(&eth_block)?;
+    peer_node.gossip_eth_block(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -330,7 +329,7 @@ async fn heavy_block_system_txs_different_order_of_txs() -> eyre::Result<()> {
 
     peer_node.gossip_block(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(&eth_block)?;
+    peer_node.gossip_eth_block(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
