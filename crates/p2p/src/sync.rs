@@ -136,7 +136,9 @@ impl SyncState {
             // starts fully caught up, no new blocks are added to the index, and the
             // target is always going to be one more than the highest processed block.
             // If this function never resolves, no new blocks can arrive over gossip in that case.
-            while target.load(Ordering::Relaxed) > highest_processed_block.load(Ordering::Relaxed) + 1 {
+            while target.load(Ordering::Relaxed)
+                > highest_processed_block.load(Ordering::Relaxed) + 1
+            {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
