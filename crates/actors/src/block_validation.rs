@@ -693,7 +693,7 @@ fn validate_system_transactions_match(
     // Validate each expected system transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
-            // If either of the systxs is not present, it means it was not generated as `expected`
+            // If either of the system txs is not present, it means it was not generated as `expected`
             // or it was not included in the block. either way - an error
             tracing::warn!(?data, "system tx len mismatch");
             eyre::bail!("actual and expected system txs lens differ");

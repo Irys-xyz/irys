@@ -1252,7 +1252,7 @@ mod tests {
         // The EMA to use is the 100th block (idx 89 in the `new_blocks`).
         let expected_final_ema_price = new_blocks[89].ema_irys_price;
 
-        // setup  -- add new blocks to the canonical chain post-initializatoin
+        // setup  -- add new blocks to the canonical chain post-initialization
         {
             let mut tree = ctx.guard.write();
             for mut block in new_blocks {
