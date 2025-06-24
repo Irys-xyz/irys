@@ -318,7 +318,7 @@ impl BlockTreeServiceInner {
             .expect("EMA service has unexpectedly become unreachable");
     }
 
-    /// Checks if a block that is `chunk_migration_depth` blocks behind `arc_block`
+    /// Checks if a block that is `block_migration_depth` blocks behind `arc_block`
     /// should be finalized. If eligible, sends finalization message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
@@ -327,7 +327,7 @@ impl BlockTreeServiceInner {
         {
             let binding = self.cache.clone();
             let cache = binding.write().unwrap();
-            let migration_depth = self.consensus_config.chunk_migration_depth as usize;
+            let migration_depth = self.consensus_config.block_migration_depth as usize;
 
             // Skip if block isn't deep enough for finalization
             if arc_block.height <= migration_depth as u64 {
@@ -391,7 +391,7 @@ impl BlockTreeServiceInner {
             }
 
             debug!(?finalized_hash, ?finalized_height, "migrating irys block");
-            // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
+            // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
             if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Irys(cache.tip),
                 confirmed_hash: None,

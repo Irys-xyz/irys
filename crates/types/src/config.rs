@@ -112,7 +112,7 @@ pub struct ConsensusConfig {
     pub chunk_size: u64,
 
     /// Defines how many blocks must pass before a block is marked as finalized
-    pub chunk_migration_depth: u32,
+    pub block_migration_depth: u32,
 
     /// Number of blocks to retain in cache from chain head
     pub block_cache_depth: u64,
@@ -904,7 +904,7 @@ mod tests {
         annual_cost_per_gb = 0.01
         decay_rate = 0.01
         chunk_size = 262144
-        chunk_migration_depth = 1
+        block_migration_depth = 1
         block_cache_depth = 50
         num_chunks_in_partition = 10
         num_chunks_in_recall_range = 2

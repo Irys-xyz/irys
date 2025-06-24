@@ -194,7 +194,7 @@ async fn add_slots_test() {
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
         num_partitions_per_slot: 1,
-        chunk_migration_depth: 1, // Testnet / single node config
+        block_migration_depth: 1, // Testnet / single node config
         chain_id: 333,
         epoch: EpochConfig {
             capacity_scalar: 100,
@@ -315,7 +315,7 @@ async fn partition_expiration_and_repacking_test() {
         num_chunks_in_partition: chunk_count,
         num_chunks_in_recall_range: 2,
         num_partitions_per_slot: 1,
-        chunk_migration_depth: 1,
+        block_migration_depth: 1,
         epoch: EpochConfig {
             capacity_scalar: 100,
             submit_ledger_epoch_length: 2,
@@ -883,7 +883,7 @@ async fn partitions_assignment_determinism_test() {
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
         num_partitions_per_slot: 1,
-        chunk_migration_depth: 1, // Testnet / single node config
+        block_migration_depth: 1, // Testnet / single node config
         chain_id: 1,
         epoch: EpochConfig {
             capacity_scalar: 100,
