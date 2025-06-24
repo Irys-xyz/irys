@@ -454,7 +454,7 @@ mod tests {
                 num_chunks_in_recall_range: 2,
                 num_partitions_per_slot: 1,
                 entropy_packing_iterations: 1,
-                chunk_migration_depth: 1, // Testnet / single node config
+                block_migration_depth: 1, // Testnet / single node config
                 chain_id: 1,
                 ..ConsensusConfig::testnet()
             }),

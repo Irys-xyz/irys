@@ -63,7 +63,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Then post the tx
     post_data_tx(&app, &tx).await;
 
-    // Mine some blocks to trigger chunk migration
+    // Mine some blocks to trigger block and chunk migration
     genesis_node.mine_blocks(2).await?;
 
     // Finally verify the chunks didn't get dropped
@@ -237,7 +237,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .entropy_packing_iterations = 1_000;
-    genesis_config.consensus.get_mut().chunk_migration_depth = 1;
+    genesis_config.consensus.get_mut().block_migration_depth = 1;
 
     // Create signers for the test accounts
     let peer1_signer = genesis_config.new_random_signer();

@@ -1606,7 +1606,7 @@ mod tests {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
                 num_chunks_in_partition: 51,
-                chunk_migration_depth: 1,
+                block_migration_depth: 1,
                 ..ConsensusConfig::testnet()
             }),
             storage: StorageSyncConfig {
