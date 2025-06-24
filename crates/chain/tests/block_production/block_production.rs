@@ -166,9 +166,6 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
         // Collect block hash for later verification
         block_hashes.push(block.block_hash);
-
-        // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
-        sleep(Duration::from_millis(1500)).await;
     }
 
     // Verify all collected blocks are on-chain
