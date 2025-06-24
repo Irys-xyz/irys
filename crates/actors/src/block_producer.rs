@@ -36,16 +36,18 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::rpc::types::BlockId;
-use reth::{payload::EthBuiltPayload, rpc::eth::EthApiServer as _};
-use reth_db::cursor::*;
-use reth_db::Database as _;
+use reth::{
+    payload::EthBuiltPayload,
+    rpc::{eth::EthApiServer as _, types::BlockId},
+};
+use reth_db::{cursor::*, Database as _};
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn, Span};
 
 /// Used to mock up a `BlockProducerActor`
@@ -172,11 +174,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let prev = canonical_blocks.last().unwrap();
             info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
 
-            let prev_block_header = match db.view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false)) {
-                Ok(Some(header)) => Ok(header),
-                Ok(None) => Err(eyre!("No block header found for hash {} ({})", prev.block_hash, prev.height + 1)),
-                Err(e) =>  Err(eyre!("Failed to get previous block ({}) header: {}", prev.height, e))
-            }?;
+            let prev_block_header = {
+                let (tx_prev, rx_prev) = oneshot::channel();
+                service_senders.mempool.send(MempoolServiceMessage::GetBlockHeader(prev.block_hash, false, tx_prev))?;
+                match rx_prev.await? {
+                    Some(h) => h,
+                    None => db.view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false))?.ok_or_else(|| eyre!("No block header found for hash {} ({})", prev.block_hash, prev.height + 1))?,
+                }
+            };
+
             let prev_block_hash = prev_block_header.block_hash;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
