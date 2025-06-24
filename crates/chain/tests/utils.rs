@@ -975,6 +975,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
+    pub fn gossip_eth_block(
+        &self,
+        block: &reth::primitives::SealedBlock<reth::primitives::Block>,
+    ) -> eyre::Result<()> {
+        self.node_ctx
+            .service_senders
+            .gossip_broadcast
+            .send(GossipBroadcastMessage::from((block).clone()))?;
+
+        Ok(())
+    }
+
     pub fn get_block_by_hash_on_chain(
         &self,
         hash: &H256,
@@ -1278,7 +1290,7 @@ pub async fn read_block_from_state(
 ) -> BlockValidationOutcome {
     let mut was_validation_scheduled = false;
 
-    for _ in 0..1000 {
+    for _ in 0..500 {
         let result = {
             let read = node_ctx.block_tree_guard.read();
             let mut result = read

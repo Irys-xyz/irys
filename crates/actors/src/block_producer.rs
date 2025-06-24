@@ -163,28 +163,60 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let inner = self.inner.clone();
         AtomicResponse::new(Box::pin(
-            async move { inner.fully_produce_new_block(solution).await }
-                .into_actor(self)
-                .map(move |result, actor, _ctx| {
-                    // Only decrement blocks_remaining_for_test when a block is successfully produced
-                    if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
-                        // If blocks_remaining_for_test is Some, decrement it by 1
-                        if let Some(remaining) = actor.blocks_remaining_for_test {
-                            actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
-                        }
+            async move {
+                ProductionStrategy { inner }
+                    .fully_produce_new_block(solution)
+                    .await
+            }
+            .into_actor(self)
+            .map(move |result, actor, _ctx| {
+                // Only decrement blocks_remaining_for_test when a block is successfully produced
+                if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
+                    // If blocks_remaining_for_test is Some, decrement it by 1
+                    if let Some(remaining) = actor.blocks_remaining_for_test {
+                        actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
                     }
-                    result
-                })
-                .map_err(|e: eyre::Error, _, _| {
-                    error!("Error producing a block: {}", &e);
-                    std::process::abort();
-                }),
+                }
+                result
+            })
+            .map_err(|e: eyre::Error, _, _| {
+                error!("Error producing a block: {}", &e);
+                std::process::abort();
+            }),
         ))
     }
 }
 
-impl BlockProducerInner {
-    pub async fn fully_produce_new_block(
+#[async_trait::async_trait(?Send)]
+pub trait BlockProdStrategy {
+    fn inner(&self) -> &BlockProducerInner;
+
+    fn parent_irys_block(&self) -> eyre::Result<IrysBlockHeader> {
+        let (canonical_blocks, _not_onchain_count) =
+            self.inner().block_tree_guard.read().get_canonical_chain();
+        let prev = canonical_blocks.last().unwrap();
+        info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
+        let prev_block_header = match self
+            .inner()
+            .db
+            .view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false))
+        {
+            Ok(Some(header)) => Ok(header),
+            Ok(None) => Err(eyre!(
+                "No block header found for hash {} ({})",
+                prev.block_hash,
+                prev.height + 1
+            )),
+            Err(e) => Err(eyre!(
+                "Failed to get previous block ({}) header: {}",
+                prev.height,
+                e
+            )),
+        }?;
+        Ok(prev_block_header)
+    }
+
+    async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
@@ -222,8 +254,9 @@ impl BlockProducerInner {
         let Some(block) = block else { return Ok(None) };
         Ok(Some((block, eth_built_payload)))
     }
+
     /// Extracts and collects all transactions that should be included in a block
-    pub async fn create_evm_block(
+    async fn create_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
@@ -233,11 +266,11 @@ impl BlockProducerInner {
         timestamp_ms: u128,
     ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
-        let local_signer = LocalSigner::from(self.config.irys_signer().signer);
+        let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
         // Generate expected system transactions using shared logic
         let system_txs = SystemTxGenerator::new(
             &block_height,
-            &self.config.node_config.reward_address,
+            &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
         );
@@ -245,7 +278,7 @@ impl BlockProducerInner {
             .generate_all(commitment_txs_to_bill, submit_txs)
             .map(|tx_result| {
                 let tx = tx_result?;
-                let mut tx_raw = compose_system_tx(self.config.consensus.chain_id, &tx);
+                let mut tx_raw = compose_system_tx(self.inner().config.consensus.chain_id, &tx);
                 let signature = local_signer
                     .sign_transaction_sync(&mut tx_raw)
                     .expect("system tx must always be signable");
@@ -267,7 +300,7 @@ impl BlockProducerInner {
     }
 
     /// Builds and submits a Reth payload with forkchoice update
-    pub async fn build_and_submit_reth_payload(
+    async fn build_and_submit_reth_payload(
         &self,
         prev_block_header: &IrysBlockHeader,
         timestamp_ms: u128,
@@ -278,18 +311,20 @@ impl BlockProducerInner {
         let payload_attrs = PayloadAttributes {
             timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
             prev_randao: parent_mix_hash,
-            suggested_fee_recipient: self.config.node_config.reward_address,
+            suggested_fee_recipient: self.inner().config.node_config.reward_address,
             withdrawals: None, // these should ALWAYS be none
             parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
         };
 
         let payload = self
+            .inner()
             .reth_node_adapter
             .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, system_txs)
             .await?;
 
         // trigger forkchoice update via engine api to commit the block to the blockchain
-        self.reth_node_adapter
+        self.inner()
+            .reth_node_adapter
             .update_forkchoice_full(
                 payload.block().hash(),
                 // we mark this block as confirmed because we produced it
@@ -302,7 +337,7 @@ impl BlockProducerInner {
         Ok(payload)
     }
 
-    pub async fn produce_block(
+    async fn produce_block(
         &self,
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
@@ -325,7 +360,7 @@ impl BlockProducerInner {
 
         // Publish Ledger Transactions
         let publish_chunks_added =
-            calculate_chunks_added(&publish_txs, self.config.consensus.chunk_size);
+            calculate_chunks_added(&publish_txs, self.inner().config.consensus.chunk_size);
         let publish_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Publish]
             .max_chunk_offset
             + publish_chunks_added;
@@ -340,7 +375,7 @@ impl BlockProducerInner {
             last_diff_timestamp,
             current_timestamp,
             current_difficulty,
-            &self.config.consensus.difficulty_adjustment,
+            &self.inner().config.consensus.difficulty_adjustment,
         );
 
         // Did an adjustment happen?
@@ -364,6 +399,7 @@ impl BlockProducerInner {
 
         // Use the partition hash to figure out what ledger it belongs to
         let ledger_id = self
+            .inner()
             .epoch_service
             .send(GetPartitionAssignmentMessage(solution.partition_hash))
             .await?
@@ -386,7 +422,7 @@ impl BlockProducerInner {
         {
             H256List::new()
         } else {
-            self.vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1))
+            self.inner().vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1))
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
         };
         steps.push(solution.seed.0);
@@ -404,12 +440,14 @@ impl BlockProducerInner {
         let mut last_epoch_hash = prev_block_header.last_epoch_hash;
 
         // If this is the first block following an epoch boundary block
-        if block_height > 0 && block_height % self.config.consensus.epoch.num_blocks_in_epoch == 1 {
+        if block_height > 0
+            && block_height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 1
+        {
             // Record the hash of the epoch block (previous block) as our epoch reference
             last_epoch_hash = prev_block_hash;
         }
         let submit_chunks_added =
-            calculate_chunks_added(&submit_txs, self.config.consensus.chunk_size);
+            calculate_chunks_added(&submit_txs, self.inner().config.consensus.chunk_size);
         let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit]
             .max_chunk_offset
             + submit_chunks_added;
@@ -428,7 +466,7 @@ impl BlockProducerInner {
             previous_block_hash: prev_block_hash,
             previous_cumulative_diff: prev_block_header.cumulative_diff,
             poa,
-            reward_address: self.config.node_config.reward_address,
+            reward_address: self.inner().config.node_config.reward_address,
             reward_amount: block_reward.amount,
             miner_address: solution.mining_address,
             signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer
@@ -469,11 +507,12 @@ impl BlockProducerInner {
         };
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
-        let block_signer = self.config.irys_signer();
+        let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
 
         let block = Arc::new(irys_block);
         match self
+            .inner()
             .block_discovery_addr
             .send(BlockDiscoveredMessage(block.clone()))
             .await
@@ -510,7 +549,8 @@ impl BlockProducerInner {
         }?;
 
         // we set the canon head here, as we produced this block, and this lets us build off of it
-        self.reth_service
+        self.inner()
+            .reth_service
             .send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Evm(evm_block_hash),
                 confirmed_hash: None,
@@ -519,13 +559,15 @@ impl BlockProducerInner {
             .await??;
 
         if is_difficulty_updated {
-            self.mining_broadcaster
+            self.inner()
+                .mining_broadcaster
                 .do_send(BroadcastDifficultyUpdate(block.clone()));
         }
 
         // Broadcast the EVM payload
         let execution_payload_gossip_data = GossipBroadcastMessage::from(eth_built_payload.clone());
         if let Err(payload_broadcast_error) = self
+            .inner()
             .service_senders
             .gossip_broadcast
             .send(execution_payload_gossip_data)
@@ -545,12 +587,12 @@ impl BlockProducerInner {
         Ok(Some(block.clone()))
     }
 
-    pub fn block_reward(
+    fn block_reward(
         &self,
         prev_block_header: &IrysBlockHeader,
         current_timestamp: u128,
     ) -> Result<Amount<irys_types::storage_pricing::phantoms::Irys>, eyre::Error> {
-        let reward_amount = self.reward_curve.reward_between(
+        let reward_amount = self.inner().reward_curve.reward_between(
             // adjust ms -> sec
             prev_block_header.timestamp.saturating_div(1000),
             current_timestamp.saturating_div(1000),
@@ -558,13 +600,14 @@ impl BlockProducerInner {
         Ok(reward_amount)
     }
 
-    pub async fn get_ema_price(
+    async fn get_ema_price(
         &self,
         height_of_new_block: u64,
     ) -> eyre::Result<crate::ema_service::NewBlockEmaResponse> {
-        let oracle_irys_price = self.price_oracle.current_price().await?;
+        let oracle_irys_price = self.inner().price_oracle.current_price().await?;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
+        self.inner()
+            .service_senders
             .ema
             .send(EmaServiceMessage::GetPriceDataForNewBlock {
                 response: tx,
@@ -575,7 +618,7 @@ impl BlockProducerInner {
         Ok(ema_irys_price)
     }
 
-    pub async fn get_mempool_txs(
+    async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<(
@@ -584,7 +627,8 @@ impl BlockProducerInner {
         Vec<IrysTransactionHeader>,
     )> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
+        self.inner()
+            .service_senders
             .mempool
             .send(MempoolServiceMessage::GetBestMempoolTxs(
                 Some(BlockId::Hash(prev_block_header.evm_block_hash.into())),
@@ -593,7 +637,8 @@ impl BlockProducerInner {
             .expect("to send MempoolServiceMessage");
         let mempool_txs = rx.await.expect("to receive txns");
         let block_height = prev_block_header.height + 1;
-        let is_epoch_block = block_height % self.config.consensus.epoch.num_blocks_in_epoch == 0;
+        let is_epoch_block =
+            block_height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0;
         debug!(
             "get_best_mempool_txs for block height: {} returned: {:#?}",
             block_height,
@@ -610,6 +655,7 @@ impl BlockProducerInner {
             // Epoch blocks don't add new commitments - they summarize all commitments
             // that were validated throughout the epoch into a single rollup entry
             let entry = self
+                .inner()
                 .block_tree_guard
                 .read()
                 .get_commitment_snapshot(&prev_block_header.block_hash);
@@ -671,13 +717,14 @@ impl BlockProducerInner {
         ))
     }
 
-    pub async fn get_publish_txs_and_proofs(
+    async fn get_publish_txs_and_proofs(
         &self,
     ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
         let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
         let mut proofs: Vec<TxIngressProof> = Vec::new();
         {
             let read_tx = self
+                .inner()
                 .db
                 .tx()
                 .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
@@ -705,10 +752,13 @@ impl BlockProducerInner {
             }
 
             // Loop though all the pending tx to see which haven't been promoted
-            let tx_headers =
-                get_data_tx_in_parallel(publish_txids, &self.service_senders.mempool, &self.db)
-                    .await
-                    .unwrap_or(vec![]);
+            let tx_headers = get_data_tx_in_parallel(
+                publish_txids,
+                &self.inner().service_senders.mempool,
+                &self.inner().db,
+            )
+            .await
+            .unwrap_or(vec![]);
             for tx_header in &tx_headers {
                 // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
                 if tx_header.ingress_proofs.is_none() {
@@ -744,7 +794,7 @@ impl BlockProducerInner {
         Ok((publish_txs, proofs))
     }
 
-    pub async fn get_evm_block(
+    async fn get_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<reth_ethereum_primitives::Block> {
@@ -759,6 +809,7 @@ impl BlockProducerInner {
                 // NOTE: using BlockReader trait will only read the block from the existing reth instance.
                 // whereas, if we use the reth rpc, it will fetch the block from reth peers (not what we want)!
                 let result = self
+                    .inner()
                     .reth_node_adapter
                     .inner
                     .provider
@@ -785,29 +836,15 @@ impl BlockProducerInner {
         );
         Ok(parent)
     }
+}
 
-    pub fn parent_irys_block(&self) -> eyre::Result<IrysBlockHeader> {
-        let (canonical_blocks, _not_onchain_count) =
-            self.block_tree_guard.read().get_canonical_chain();
-        let prev = canonical_blocks.last().unwrap();
-        info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
-        let prev_block_header = match self
-            .db
-            .view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false))
-        {
-            Ok(Some(header)) => Ok(header),
-            Ok(None) => Err(eyre!(
-                "No block header found for hash {} ({})",
-                prev.block_hash,
-                prev.height + 1
-            )),
-            Err(e) => Err(eyre!(
-                "Failed to get previous block ({}) header: {}",
-                prev.height,
-                e
-            )),
-        }?;
-        Ok(prev_block_header)
+pub struct ProductionStrategy {
+    pub inner: Arc<BlockProducerInner>,
+}
+
+impl BlockProdStrategy for ProductionStrategy {
+    fn inner(&self) -> &BlockProducerInner {
+        &self.inner
     }
 }
 
