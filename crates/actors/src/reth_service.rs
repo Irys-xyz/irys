@@ -92,7 +92,7 @@ impl RethServiceActor {
 
         let evm_head_hash = match head_hash {
             BlockHashType::Irys(irys_hash) => {
-                evm_block_hash_from_block_hash(&mempool_service, &db, irys_hash).await?
+                evm_block_hash_from_block_hash(mempool_service, &db, irys_hash).await?
             }
             BlockHashType::Evm(v) => v,
         };
@@ -100,7 +100,7 @@ impl RethServiceActor {
         let evm_confirmed_hash = match confirmed_hash {
             Some(confirmed_hash) => Some(match confirmed_hash {
                 BlockHashType::Irys(irys_hash) => {
-                    evm_block_hash_from_block_hash(&mempool_service, &db, irys_hash).await?
+                    evm_block_hash_from_block_hash(mempool_service, &db, irys_hash).await?
                 }
                 BlockHashType::Evm(v) => v,
             }),
@@ -110,7 +110,7 @@ impl RethServiceActor {
         let evm_finalized_hash = match finalized_hash {
             Some(finalized_hash) => Some(match finalized_hash {
                 BlockHashType::Irys(irys_hash) => {
-                    evm_block_hash_from_block_hash(&mempool_service, &db, irys_hash).await?
+                    evm_block_hash_from_block_hash(mempool_service, &db, irys_hash).await?
                 }
                 BlockHashType::Evm(v) => v,
             }),

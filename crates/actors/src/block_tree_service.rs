@@ -13,7 +13,7 @@ use base58::ToBase58 as _;
 use eyre::{ensure, eyre, Context as _};
 use futures::future::Either;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt, CommitmentSnapshot,
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, CommitmentSnapshot,
     SystemLedger,
 };
 use irys_types::{

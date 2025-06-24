@@ -936,7 +936,6 @@ impl Inner {
             migrated_block.poa.chunk = mempool_state_read_guard
                 .prevalidated_blocks_poa
                 .get(&migrated_block.block_hash)
-                .clone()
                 .cloned();
             self.irys_db
                 .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))
@@ -2194,7 +2193,7 @@ impl Inner {
             if let Some(chunk) = &block.poa.chunk {
                 mempool_state_guard
                     .prevalidated_blocks_poa
-                    .insert(block.block_hash, chunk.clone().into());
+                    .insert(block.block_hash, chunk.clone());
             };
 
             // insert block into mempool without poa
