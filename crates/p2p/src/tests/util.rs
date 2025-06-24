@@ -124,6 +124,7 @@ impl MempoolFacade for MempoolStub {
     async fn get_block_header(
         &self,
         _block_hash: H256,
+        _include_chunk: bool,
     ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
         Ok(None)
     }

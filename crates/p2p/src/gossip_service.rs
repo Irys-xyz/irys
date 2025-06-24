@@ -174,6 +174,7 @@ impl P2PService {
             db,
             peer_list.clone(),
             block_discovery,
+            mempool.clone(),
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),

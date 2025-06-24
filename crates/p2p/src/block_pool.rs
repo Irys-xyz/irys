@@ -2,7 +2,7 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
-use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
@@ -21,6 +21,7 @@ const BLOCK_POOL_CACHE_SIZE: usize = 1000;
 #[derive(Debug, Clone)]
 pub enum BlockPoolError {
     DatabaseError(String),
+    MempoolError(String),
     OtherInternal(String),
     BlockError(String),
     AlreadyProcessed(BlockHash),
@@ -35,10 +36,11 @@ impl From<PeerListFacadeError> for BlockPoolError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BlockPool<P, B>
+pub(crate) struct BlockPool<P, B, M>
 where
     P: PeerList,
     B: BlockDiscoveryFacade,
+    M: MempoolFacade,
 {
     /// Database provider for accessing transaction headers and related data.
     db: DatabaseProvider,
@@ -46,6 +48,7 @@ where
     blocks_cache: BlockCache,
 
     block_discovery: B,
+    mempool: M,
     peer_list: P,
 
     sync_state: SyncState,
@@ -160,15 +163,17 @@ impl BlockCacheInner {
     }
 }
 
-impl<P, B> BlockPool<P, B>
+impl<P, B, M> BlockPool<P, B, M>
 where
     P: PeerList,
     B: BlockDiscoveryFacade,
+    M: MempoolFacade,
 {
     pub(crate) fn new(
         db: DatabaseProvider,
         peer_list: P,
         block_discovery: B,
+        mempool: M,
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
@@ -179,6 +184,7 @@ where
             blocks_cache: BlockCache::new(),
             peer_list,
             block_discovery,
+            mempool,
             sync_state,
             block_status_provider,
             execution_payload_provider,
@@ -402,6 +408,17 @@ where
     ) -> Result<Option<IrysBlockHeader>, BlockPoolError> {
         if let Some(header) = self.blocks_cache.get_block_header_cloned(block_hash).await {
             return Ok(Some(header));
+        }
+
+        match self.mempool.get_block_header(*block_hash, true).await {
+            Ok(Some(header)) => return Ok(Some(header)),
+            Ok(None) => {}
+            Err(err) => {
+                return Err(BlockPoolError::MempoolError(format!(
+                    "Mempool error: {:?}",
+                    err
+                )))
+            }
         }
 
         self.db

@@ -62,6 +62,7 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn get_block_header(
         &self,
         block_hash: H256,
+        include_chunk: bool,
     ) -> Result<Option<IrysBlockHeader>, TxReadError>;
 }
 
@@ -132,10 +133,15 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn get_block_header(
         &self,
         block_hash: H256,
+        include_chunk: bool,
     ) -> Result<Option<IrysBlockHeader>, TxReadError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block_hash,
+                include_chunk,
+                tx,
+            ))
             .map_err(|_| TxReadError::Other("Error sending GetBlockHeader message".to_owned()))?;
 
         rx.await
@@ -2002,7 +2008,7 @@ impl Inner {
         }
         drop(mempool_state_read_guard); // Release read lock before acquiring write lock
 
-        // check tree / mempool for header
+        // check tree / mempool for block header
         if let Some(hdr) = self
             .mempool_state
             .read()
