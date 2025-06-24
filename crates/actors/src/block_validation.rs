@@ -1,4 +1,4 @@
-use std::{pin::pin, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
@@ -15,7 +15,6 @@ use alloy_rpc_types_engine::ExecutionData;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
-use futures::future::{select, Either};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
@@ -168,10 +167,10 @@ pub async fn prevalidate_block(
 
 async fn check_valid_oracle_price(
     block: &IrysBlockHeader,
-    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_serviece_sendr.send(EmaServiceMessage::ValidateOraclePrice {
+    ema_service_sender.send(EmaServiceMessage::ValidateOraclePrice {
         block_height: block.height,
         oracle_price: block.oracle_irys_price,
         response: tx,
@@ -186,10 +185,10 @@ async fn check_valid_oracle_price(
 
 async fn check_valid_ema_calculation(
     block: &IrysBlockHeader,
-    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_serviece_sendr.send(EmaServiceMessage::ValidateEmaPrice {
+    ema_service_sender.send(EmaServiceMessage::ValidateEmaPrice {
         block_height: block.height,
         ema_price: block.ema_irys_price,
         oracle_price: block.oracle_irys_price,
@@ -505,32 +504,10 @@ pub async fn system_transactions_are_valid(
     payload_provider: impl PayloadProvider,
 ) -> eyre::Result<()> {
     // 1. Validate that the evm block is valid
-    let mut elapsed_secs = 0_u64;
-
-    // TODO: `wait_for_payload` is not cancel safe, refactor it so we can freely use it here.
-    // Because current impl will result in some skewed behavior.
-    let payload = loop {
-        let payload_future = pin!(payload_provider.wait_for_payload(&block.evm_block_hash));
-        let timer_future = pin!(tokio::time::sleep(Duration::from_secs(5)));
-
-        match select(payload_future, timer_future).await {
-            Either::Left((Some(p), _)) => {
-                break p;
-            }
-            Either::Left((None, _)) => {
-                return Err(eyre::eyre!("reth execute payload never arrived"));
-            }
-            Either::Right((_, _)) => {
-                elapsed_secs += 5;
-                tracing::warn!(
-                    evm_block_hash = ?block.evm_block_hash,
-                    height = block.height,
-                    elapsed_secs,
-                    "Still waiting for execution payload to arrive"
-                );
-            }
-        }
-    };
+    let payload = payload_provider
+        .wait_for_payload(&block.evm_block_hash)
+        .await
+        .ok_or_eyre("reth execution payload never arrived")?;
 
     let engine_api_client = reth_adapter.inner.engine_http_client();
     let ExecutionData { payload, sidecar } = payload;
