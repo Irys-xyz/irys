@@ -22,9 +22,6 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    // Initialize blockchain components
-    node.start_mining().await;
-
     // ===== TEST CASE 1: post duplicate data tx =====
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();
