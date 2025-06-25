@@ -185,7 +185,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
         txid_map
             .get(&DataLedger::Publish)
             .unwrap()
-            .into_iter()
+            .iter()
             .collect::<Vec<&H256>>()
     );
 
