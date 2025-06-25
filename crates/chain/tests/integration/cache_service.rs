@@ -162,6 +162,11 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut consensus_config = node.node_ctx.config.node_config.consensus.clone();
     let block_migration_depth = consensus_config.get_mut().block_migration_depth;
     node.wait_for_chunk_cache_count(0, 10).await?;
+
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    })?;
+
     assert_eq!(
         *chunk_cache_count, 0_u64,
         "unexpected chunk in CachedChunks table. block_migration_depth = {:?} cache_clean_lag = {:?}",
