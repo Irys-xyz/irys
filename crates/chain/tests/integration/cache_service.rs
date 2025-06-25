@@ -149,29 +149,14 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     node.mine_blocks(3).await?;
 
     // confirm that we have one entry in CachedChunks mdbx table
-    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
-        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
-    })?;
-    assert_eq!(*chunk_cache_count, 1_u64);
+    node.wait_for_chunk_cache_count(1, 10).await?;
 
     // mine enough blocks to cause block and chunk migration
     node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
         .await?;
 
     // confirm that we no longer see an entry in CachedChunks mdbx table
-    let mut consensus_config = node.node_ctx.config.node_config.consensus.clone();
-    let block_migration_depth = consensus_config.get_mut().block_migration_depth;
     node.wait_for_chunk_cache_count(0, 10).await?;
-
-    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
-        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
-    })?;
-
-    assert_eq!(
-        *chunk_cache_count, 0_u64,
-        "unexpected chunk in CachedChunks table. block_migration_depth = {:?} cache_clean_lag = {:?}",
-        block_migration_depth, node.node_ctx.config.node_config.cache.cache_clean_lag
-    );
 
     // make sure we can read the chunks after migration
     let chunk_res = client
