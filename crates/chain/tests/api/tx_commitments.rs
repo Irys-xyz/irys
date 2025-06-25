@@ -225,6 +225,9 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let stopped_node = node.stop().await;
     let restarted_node = stopped_node.start().await;
 
+    // wait a few seconds for node to wake up
+    restarted_node.wait_for_packing(10).await;
+
     // Get access to commitment and partition services for verification
     let epoch_service = restarted_node
         .node_ctx
