@@ -106,23 +106,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
 
-        let previous_block_header = match self
-            .db
-            .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
-        {
-            Ok(Some(header)) => header,
-            other => {
-                return Box::pin(async move {
-                    Err(eyre::eyre!(
-                        // the previous blocks header was not found in the database
-                        "Failed to get previous block header. Previous block hash: {}: {:?}",
-                        prev_block_hash,
-                        other
-                    ))
-                });
-            }
-        };
-
         //====================================
         // Block header pre-validation
         //------------------------------------
@@ -153,6 +136,26 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         Box::pin(async move {
             let span3 = span2.clone();
             let _span = span3.enter();
+
+            let previous_block_header = {
+                let (tx_prev, rx_prev) = oneshot::channel();
+                mempool_sender.send(MempoolServiceMessage::GetBlockHeader(
+                    prev_block_hash,
+                    false,
+                    tx_prev,
+                ))?;
+                match rx_prev.await? {
+                    Some(hdr) => hdr,
+                    None => db
+                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))?
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "Failed to get previous block header. Previous block hash: {}",
+                                prev_block_hash
+                            )
+                        })?,
+                }
+            };
 
             //====================================
             // Submit ledger TX validation
@@ -333,10 +336,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             match validation_result {
                 Ok(()) => {
-                    // TODO: we shouldn't insert the block just yet, let it live in the mempool until it migrates
-                    db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
-                        .unwrap();
+                    // add block to mempool
+                    mempool_sender.send(MempoolServiceMessage::IngestBlocks {
+                        prevalidated_blocks: vec![new_block_header.clone()],
+                    })?;
 
+                    // all txs
                     let mut all_txs = submit_txs;
                     all_txs.extend_from_slice(&publish_txs);
 

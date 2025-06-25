@@ -5,6 +5,7 @@ use crate::{
     block_index_service::BlockIndexReadGuard,
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
+    mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
     system_tx_generator::SystemTxGenerator,
@@ -596,7 +597,7 @@ pub async fn system_transactions_are_valid(
     validate_system_transactions_match(actual_system_txs, expected_txs.into_iter())
 }
 
-/// Generates expected system transactions by looking up required data from the database
+/// Generates expected system transactions by looking up required data from the mempool or database
 #[tracing::instrument(skip_all, err)]
 async fn generate_expected_system_transactions_from_db<'a>(
     config: &Config,
@@ -605,9 +606,22 @@ async fn generate_expected_system_transactions_from_db<'a>(
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<SystemTransaction>> {
     // Look up previous block to get EVM hash
-    let prev_block = db
-        .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
-        .ok_or_eyre("Previous block not found")?;
+    let prev_block = {
+        let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
+        service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block.previous_block_hash,
+                false,
+                tx_prev,
+            ))?;
+        match rx_prev.await? {
+            Some(h) => h,
+            None => db
+                .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
+                .ok_or_eyre("Previous block not found")?,
+        }
+    };
 
     // Look up commitment txs
     let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
@@ -774,7 +788,7 @@ mod tests {
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
             entropy_packing_iterations: 1_000,
-            chunk_migration_depth: 1,
+            block_migration_depth: 1,
             ..node_config.consensus_config()
         };
 

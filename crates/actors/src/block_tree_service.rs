@@ -10,10 +10,11 @@ use crate::{
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
-use eyre::{ensure, Context as _};
+use eyre::{ensure, eyre, Context as _};
 use futures::future::Either;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, CommitmentSnapshot, SystemLedger,
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, CommitmentSnapshot,
+    SystemLedger,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
@@ -21,9 +22,9 @@ use irys_types::{
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database as _;
-use std::pin::pin;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    pin::pin,
     sync::{Arc, RwLock, RwLockReadGuard},
     time::SystemTime,
 };
@@ -237,19 +238,20 @@ impl BlockTreeServiceInner {
     }
 
     async fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
-        let tx = self
-            .db
-            .clone()
-            .tx()
-            .map_err(|e| eyre::eyre!("Failed to create transaction: {}", e))?;
-
-        let block_header = match block_header_by_hash(&tx, &block_hash, false) {
-            Ok(Some(header)) => header,
-            Ok(None) => {
-                return Err(eyre::eyre!("No block header found for hash {}", block_hash));
-            }
-            Err(e) => {
-                return Err(eyre::eyre!("Failed to get previous block header: {}", e));
+        // retrieve block header from the mempool or database
+        let block_header = {
+            let (tx_block, rx_block) = oneshot::channel();
+            self.service_senders
+                .mempool
+                .send(MempoolServiceMessage::GetBlockHeader(
+                    block_hash, false, tx_block,
+                ))?;
+            match rx_block.await? {
+                Some(h) => h,
+                None => self
+                    .db
+                    .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+                    .ok_or_else(|| eyre!("No block header found for hash {}", block_hash,))?,
             }
         };
 
@@ -316,7 +318,7 @@ impl BlockTreeServiceInner {
             .expect("EMA service has unexpectedly become unreachable");
     }
 
-    /// Checks if a block that is `chunk_migration_depth` blocks behind `arc_block`
+    /// Checks if a block that is `block_migration_depth` blocks behind `arc_block`
     /// should be finalized. If eligible, sends finalization message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
@@ -325,7 +327,7 @@ impl BlockTreeServiceInner {
         {
             let binding = self.cache.clone();
             let cache = binding.write().unwrap();
-            let migration_depth = self.consensus_config.chunk_migration_depth as usize;
+            let migration_depth = self.consensus_config.block_migration_depth as usize;
 
             // Skip if block isn't deep enough for finalization
             if arc_block.height <= migration_depth as u64 {
@@ -389,7 +391,7 @@ impl BlockTreeServiceInner {
             }
 
             debug!(?finalized_hash, ?finalized_height, "migrating irys block");
-            // TODO: this is the wrong place for this, it should be at the prune depth not the chunk_migration depth
+            // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
             if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Irys(cache.tip),
                 confirmed_hash: None,

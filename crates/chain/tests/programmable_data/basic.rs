@@ -41,7 +41,7 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let mut testnet_config = NodeConfig::testnet();
     testnet_config.consensus.get_mut().chunk_size = 32;
-    testnet_config.consensus.get_mut().chunk_migration_depth = 2;
+    testnet_config.consensus.get_mut().block_migration_depth = 2;
     testnet_config
         .consensus
         .get_mut()

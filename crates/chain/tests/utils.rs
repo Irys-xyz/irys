@@ -987,6 +987,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
+    /// reads block header from database
     pub fn get_block_by_hash_on_chain(
         &self,
         hash: &H256,

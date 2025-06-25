@@ -822,7 +822,7 @@ impl IrysNode {
 
         // start reth service
         let (reth_service_actor, reth_arbiter) =
-            init_reth_service(&irys_db, reth_node_adapter.clone());
+            init_reth_service(&irys_db, reth_node_adapter.clone(), service_senders.clone());
         debug!("Reth Service Actor initialized");
         // Get the correct Reth peer info
         let reth_peering = reth_service_actor.send(GetPeeringInfoMessage {}).await??;
@@ -1524,8 +1524,13 @@ fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>,
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
+    service_senders: ServiceSenders,
 ) -> (actix::Addr<RethServiceActor>, Arbiter) {
-    let reth_service = RethServiceActor::new(reth_node_adapter, irys_db.clone());
+    let reth_service = RethServiceActor::new(
+        reth_node_adapter,
+        irys_db.clone(),
+        service_senders.mempool.clone(),
+    );
     let reth_arbiter = Arbiter::new();
     let reth_service_actor =
         RethServiceActor::start_in_arbiter(&reth_arbiter.handle(), |_| reth_service);

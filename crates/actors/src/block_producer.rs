@@ -50,6 +50,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn, Span};
 
 /// Used to mock up a `BlockProducerActor`
@@ -191,36 +192,44 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
-    fn parent_irys_block(&self) -> eyre::Result<IrysBlockHeader> {
+    async fn parent_irys_block(&self) -> eyre::Result<IrysBlockHeader> {
         let (canonical_blocks, _not_onchain_count) =
             self.inner().block_tree_guard.read().get_canonical_chain();
         let prev = canonical_blocks.last().unwrap();
         info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
-        let prev_block_header = match self
-            .inner()
-            .db
-            .view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false))
-        {
-            Ok(Some(header)) => Ok(header),
-            Ok(None) => Err(eyre!(
-                "No block header found for hash {} ({})",
+
+        let (tx_prev, rx_prev) = oneshot::channel();
+        self.inner()
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBlockHeader(
                 prev.block_hash,
-                prev.height + 1
-            )),
-            Err(e) => Err(eyre!(
-                "Failed to get previous block ({}) header: {}",
-                prev.height,
-                e
-            )),
-        }?;
-        Ok(prev_block_header)
+                false,
+                tx_prev,
+            ))?;
+        let header = match rx_prev.await? {
+            Some(header) => header,
+            None => self
+                .inner()
+                .db
+                .view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "No block header found for hash {} ({})",
+                        prev.block_hash,
+                        prev.height + 1
+                    )
+                })?,
+        };
+
+        Ok(header)
     }
 
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        let prev_block_header = self.parent_irys_block()?;
+        let prev_block_header = self.parent_irys_block().await?;
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
