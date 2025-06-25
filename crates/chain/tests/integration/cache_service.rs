@@ -158,8 +158,6 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
         .await?;
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     // confirm that we no longer see an entry in CachedChunks mdbx table
     node.wait_for_chunk_cache_count(0, 3).await?;
     assert_eq!(*chunk_cache_count, 0_u64);
