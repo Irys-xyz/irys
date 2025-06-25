@@ -37,8 +37,15 @@ use irys_vdf::state::{VdfState, VdfStateReadonly};
 
 #[actix::test]
 async fn genesis_test() {
+    // setup temp dir
+    let mut config = NodeConfig::testnet();
+    let tmp_dir = setup_tracing_and_temp_dir(None, false);
+    let base_path = tmp_dir.path().to_path_buf();
+    config.base_directory = base_path;
+    let config: Config = config.into();
+
+    // genesis block
     let mut genesis_block = IrysBlockHeader::new_mock_header();
-    let config = NodeConfig::testnet().into();
     genesis_block.height = 0;
     let commitments = add_genesis_commitments(&mut genesis_block, &config);
 
