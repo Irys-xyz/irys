@@ -22,7 +22,7 @@ pub enum EpochServiceMessage {
     },
     // Read only access to ledgers state (maps ledger slots to partition hashes)
     GetLedgersGuard(oneshot::Sender<LedgersReadGuard>),
-    // Read only access ot the PartitionAssignments state (mapping partition hashes to miner addresses)
+    // Read only access to the PartitionAssignments state (mapping partition hashes to miner addresses)
     GetPartitionAssignmentsGuard(oneshot::Sender<PartitionAssignmentsReadGuard>),
     // Read only access to commitment state (status of stakes and pledges at the end of the last epoch)
     GetCommitmentStateGuard(oneshot::Sender<CommitmentStateReadGuard>),

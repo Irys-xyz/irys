@@ -958,7 +958,7 @@ async fn partitions_assignment_determinism_test() {
         //(testnet_config.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
         epoch_num += 1;
         debug!("epoch block {}", new_epoch_block.height);
-        let (sender, rx) = tokio::sync::oneshot::channel();
+        let (sender, _rx) = tokio::sync::oneshot::channel();
         epoch_service
             .handle_message(EpochServiceMessage::NewEpoch {
                 new_epoch_block: new_epoch_block.clone().into(),

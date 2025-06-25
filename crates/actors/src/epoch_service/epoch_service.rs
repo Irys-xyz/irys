@@ -1,4 +1,4 @@
-use actix::{System, SystemService};
+use actix::{System, SystemService as _};
 use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
