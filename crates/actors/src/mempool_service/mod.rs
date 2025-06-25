@@ -117,7 +117,7 @@ impl MempoolService {
                 // Handle reorg events
                 reorg_result = self.reorg_rx.recv() => {
                     if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
-                        self.inner.handle_reorg(event)?;
+                        self.inner.handle_reorg(event).await?;
                     }
                 }
 
