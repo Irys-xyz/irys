@@ -26,11 +26,11 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
-use irys_database::CommitmentSnapshotStatus;
 use irys_database::{
     db::IrysDatabaseExt as _,
-    tables::{IngressProofs, IrysBlockHeaders},
-    tx_header_by_txid,
+    get_cache_size,
+    tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
+    tx_header_by_txid, CommitmentSnapshotStatus,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -496,6 +496,28 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Failed waiting for chunk to arrive. Waited {} seconds",
             seconds,
         ))
+    }
+
+    /// check number of chunks in the CachedChunks table
+    /// return Ok(()) once it matches the expected value
+    pub async fn wait_for_chunk_cache_count(
+        &self,
+        expected_value: u64,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        let checks_per_second = 10;
+        let delay = Duration::from_millis(seconds.div_ceil(checks_per_second) as u64);
+        let max_checks = seconds * checks_per_second;
+        for _ in 0..max_checks {
+            let (chunk_cache_count, _) = &self.node_ctx.db.view_eyre(|tx| {
+                get_cache_size::<CachedChunks, _>(tx, self.node_ctx.config.consensus.chunk_size)
+            })?;
+            if chunk_cache_count == &expected_value {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+        Ok(())
     }
 
     /// mine blocks until the txs are found in the block index, i.e. mdbx
