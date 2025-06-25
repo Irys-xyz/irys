@@ -189,7 +189,7 @@ fn bound_in_min_max_range(
 /// This is used for historical validation where we need to reconstruct the EMA state
 pub fn create_ema_snapshot_from_chain_history(
     block: &IrysBlockHeader,
-    chain_blocks: &[&IrysBlockHeader],
+    chain_blocks: &[IrysBlockHeader],
     consensus_config: &ConsensusConfig,
 ) -> Result<Arc<EmaSnapshot>> {
     let blocks_in_interval = consensus_config.ema.price_adjustment_interval;

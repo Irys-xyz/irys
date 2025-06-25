@@ -1,7 +1,6 @@
 use crate::{
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
     chunk_migration_service::ChunkMigrationService,
-    ema_service::EmaServiceMessage,
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -17,8 +16,10 @@ use irys_database::{
     SystemLedger,
 };
 use irys_types::{
-    Address, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DatabaseProvider, H256List, IrysBlockHeader, IrysTokenPrice, IrysTransactionHeader, H256, U256,
+    block_height_to_use_for_price, is_ema_recalculation_block,
+    previous_ema_recalculation_block_height, Address, BlockHash, CommitmentTransaction, Config,
+    ConsensusConfig, DataLedger, DatabaseProvider, H256List, IrysBlockHeader, IrysTokenPrice,
+    IrysTransactionHeader, H256, U256,
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database as _;
@@ -35,7 +36,9 @@ use tokio::{
 use tracing::{debug, error, info};
 
 pub mod ema_snapshot;
-use ema_snapshot::{create_ema_snapshot_for_block, EmaSnapshot};
+use ema_snapshot::{
+    create_ema_snapshot_for_block, create_ema_snapshot_from_chain_history, EmaSnapshot,
+};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -1753,7 +1756,56 @@ fn build_current_ema_snapshot_from_index(
     db: DatabaseProvider,
     config: &ConsensusConfig,
 ) -> Arc<EmaSnapshot> {
-    todo!()
+    let block_index = block_index_read_guard.read();
+    let latest_item = block_index.get_latest_item();
+
+    let Some(latest_item) = latest_item else {
+        // If no blocks in index, return genesis EMA snapshot
+        return EmaSnapshot::genesis(config);
+    };
+
+    let tx = db.tx().unwrap();
+
+    let latest_block = block_header_by_hash(&tx, &latest_item.block_hash, false)
+        .unwrap()
+        .expect("block_index block to be in database");
+
+    // Handle genesis block case
+    if latest_block.height == 0 {
+        return EmaSnapshot::genesis(config);
+    }
+
+    // Determine the minimum height we need for EMA calculation
+    let blocks_in_interval = config.ema.price_adjustment_interval;
+    let pricing_height = block_height_to_use_for_price(latest_block.height, blocks_in_interval);
+    let latest_ema_height = if is_ema_recalculation_block(latest_block.height, blocks_in_interval) {
+        latest_block.height
+    } else {
+        previous_ema_recalculation_block_height(latest_block.height, blocks_in_interval)
+    };
+
+    // We need blocks from the pricing height up to the current height
+    let min_height = pricing_height.min(latest_ema_height.saturating_sub(1));
+
+    // Collect all necessary blocks from the chain history
+    let mut chain_blocks = Vec::new();
+    for height in min_height..=latest_block.height {
+        if let Some(item) = block_index.get_item(height) {
+            let block = block_header_by_hash(&tx, &item.block_hash, false)
+                .unwrap()
+                .expect("block_index block to be in database");
+            chain_blocks.push(block);
+        } else {
+            panic!("Missing block at height {} in block index", height);
+        }
+    }
+
+    // Build EMA snapshot using existing helper function
+    create_ema_snapshot_from_chain_history(&latest_block, &chain_blocks, config).unwrap_or_else(
+        |err| {
+            panic!("Failed to create EMA snapshot from chain history: {}", err);
+        },
+    )
 }
 
 pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
