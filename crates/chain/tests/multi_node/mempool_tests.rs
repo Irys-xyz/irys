@@ -66,7 +66,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Mine some blocks to trigger block and chunk migration
     genesis_node.mine_blocks(2).await?;
 
-    // wait for chunk
+    // wait for chunks to be in CachedChunks table
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
     // Finally verify the chunks didn't get dropped
