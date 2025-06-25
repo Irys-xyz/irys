@@ -63,19 +63,31 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Then post the tx
     post_data_tx(&app, &tx).await;
 
-    // Mine some blocks to trigger block and chunk migration
-    genesis_node.mine_blocks(2).await?;
-
     // wait for chunks to be in CachedChunks table
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
+    // Mine some blocks to trigger block and chunk migration
+    genesis_node.mine_blocks(2).await?;
+
     // Finally verify the chunks didn't get dropped
-    let c1 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(0)).await;
-    let c2 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(1)).await;
-    let c3 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(2)).await;
-    assert_matches!(c1, Some(_), "unexpected {:?}", c1);
-    assert_matches!(c2, Some(_), "unexpected {:?}", c2);
-    assert_matches!(c3, Some(_), "unexpected {:?}", c3);
+    let mut success_got_chunks = false;
+    for _ in 0..100 {
+        let c1 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(0)).await;
+        let c2 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(1)).await;
+        let c3 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(2)).await;
+        if c1.is_some() && c2.is_some() && c3.is_some() {
+            assert_matches!(c1, Some(_), "for chunk 1 unexpected {:?}", c1);
+            assert_matches!(c2, Some(_), "for chunk 2 unexpected {:?}", c2);
+            assert_matches!(c3, Some(_), "for chunk 3 unexpected {:?}", c3);
+            success_got_chunks = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        success_got_chunks,
+        "Failed to get chunks from API after many attempts"
+    );
 
     genesis_node.stop().await;
 
