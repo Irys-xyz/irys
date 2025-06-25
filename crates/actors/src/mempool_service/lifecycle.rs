@@ -76,6 +76,7 @@ impl Inner {
             &event.old_fork.len(),
             &event.fork_parent.height
         );
+        let new_tip = event.new_tip;
 
         // TODO: Implement mempool-specific reorg handling
         // 1. Check to see that orphaned submit ledger tx are available in the mempool if not included in the new fork (canonical chain)
@@ -88,7 +89,7 @@ impl Inner {
 
         self.handle_data_tx_reorg(event).await?;
 
-        tracing::info!("Reorg handled, new tip: {}", event.new_tip);
+        tracing::info!("Reorg handled, new tip: {}", &new_tip);
         Ok(())
     }
 
@@ -119,7 +120,7 @@ impl Inner {
             }
             for block in fork.iter() {
                 for ledger in block.data_ledgers.iter() {
-                    // we shouldn't need to deduplicate txids, but we use a HashSet for efficient dedupe
+                    // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
                     hm.entry(ledger.ledger_id.try_into()?)
                         .or_default()
                         .extend(ledger.tx_ids.iter());
