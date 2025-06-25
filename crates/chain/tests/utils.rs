@@ -503,21 +503,33 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn wait_for_chunk_cache_count(
         &self,
         expected_value: u64,
-        seconds: usize,
+        timeout_secs: usize,
     ) -> eyre::Result<()> {
-        let checks_per_second = 10;
-        let delay = Duration::from_millis(seconds.div_ceil(checks_per_second) as u64);
-        let max_checks = seconds * checks_per_second;
-        for _ in 0..max_checks {
-            let (chunk_cache_count, _) = &self.node_ctx.db.view_eyre(|tx| {
-                get_cache_size::<CachedChunks, _>(tx, self.node_ctx.config.consensus.chunk_size)
-            })?;
-            if chunk_cache_count == &expected_value {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            let chunk_cache_count = self
+                .node_ctx
+                .db
+                .view_eyre(|tx| {
+                    get_cache_size::<CachedChunks, _>(tx, self.node_ctx.config.consensus.chunk_size)
+                })?
+                .0;
+
+            if chunk_cache_count == expected_value {
                 return Ok(());
             }
+
             tokio::time::sleep(delay).await;
         }
-        Ok(())
+
+        Err(eyre::eyre!(
+            "Timed out after {} seconds waiting for chunk_cache_count == {}",
+            timeout_secs,
+            expected_value
+        ))
     }
 
     /// mine blocks until the txs are found in the block index, i.e. mdbx
