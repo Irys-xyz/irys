@@ -972,7 +972,7 @@ fn truncate_to_3_decimals(value: f64) -> f64 {
 
 /// mpsc style service wrapper for the Epoch Service
 impl EpochService {
-    /// Spawn a new CommitmentCache service
+    /// Spawn a new Epoch sService
     pub fn spawn_service(
         exec: &TaskExecutor,
         genesis_block: IrysBlockHeader,
