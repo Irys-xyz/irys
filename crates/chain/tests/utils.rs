@@ -15,7 +15,7 @@ use futures::future::select;
 use irys_actors::block_tree_service::{BlockState, ChainState, ReorgEvent};
 
 use irys_actors::mempool_service::MempoolTxs;
-use irys_actors::GetMinerPartitionAssignmentsMessage;
+use irys_actors::EpochServiceMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
@@ -1217,11 +1217,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         mining_address: Address,
     ) -> Vec<PartitionAssignment> {
-        self.node_ctx
-            .actor_addresses
-            .epoch_service
-            .send(GetMinerPartitionAssignmentsMessage(mining_address))
-            .await
+        let epoch_service = self.node_ctx.service_senders.epoch_service.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .send(EpochServiceMessage::GetMinerPartitionAssignments(
+                mining_address,
+                tx,
+            ))
+            .expect("message should be delivered to epoch service");
+        rx.await
             .expect("to retrieve partition assignments for miner")
     }
 

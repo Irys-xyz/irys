@@ -238,7 +238,7 @@ impl StorageModuleServiceInner {
 
 /// mpsc style service wrapper for the Storage Module Service
 impl StorageModuleService {
-    /// Spawn a new CommitmentCache service
+    /// Spawn a new StorageModule service
     pub fn spawn_service(
         exec: &TaskExecutor,
         rx: UnboundedReceiver<StorageModuleServiceMessage>,
