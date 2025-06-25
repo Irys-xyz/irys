@@ -37,7 +37,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     config.consensus.get_mut().num_partitions_per_slot = 1;
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
-    config.consensus.get_mut().block_migration_depth = 1; // Testnet / single node confi;
+    config.consensus.get_mut().block_migration_depth = 1; // Testnet / single node config;
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let account2 = IrysSigner::random_signer(&config.consensus_config());
     let account3 = IrysSigner::random_signer(&config.consensus_config());
@@ -128,9 +128,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .collect::<Vec<_>>();
 
     for i in 0..20 {
-        // let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
-        // let mut evm_txs: HashMap<B256, TxEnvelope> = HashMap::new();
-
         let mut simple_rng = SimpleRNG::new(i);
 
         for (i, a) in accounts.iter().enumerate() {

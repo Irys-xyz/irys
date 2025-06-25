@@ -8,9 +8,9 @@ use irys_chain::{
     IrysNodeCtx,
 };
 use irys_database::block_header_by_hash;
-use irys_primitives::IrysTxId;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, IrysTransaction, NodeConfig, PeerAddress, H256,
+    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, PeerAddress,
+    H256,
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
@@ -481,12 +481,12 @@ fn local_test_url(port: &u16) -> String {
 async fn generate_test_transaction_and_add_to_block(
     node: &IrysNodeTest<IrysNodeCtx>,
     account: &IrysSigner,
-) -> HashMap<IrysTxId, irys_types::IrysTransaction> {
+) -> HashMap<IrysTransactionId, irys_types::IrysTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
-    let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
+    let mut irys_txs: HashMap<IrysTransactionId, IrysTransaction> = HashMap::new();
     match node.create_submit_data_tx(account, data_bytes).await {
         Ok(tx) => {
-            irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
+            irys_txs.insert(tx.header.id, tx);
         }
         Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
             panic!("unfunded account error")

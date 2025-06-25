@@ -2500,7 +2500,7 @@ mod tests {
             )
         );
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b14.block_hash,
                 &ChainState::NotOnchain(BlockState::ValidationScheduled),
                 &cache
@@ -2517,7 +2517,7 @@ mod tests {
             (&b14, &ChainState::NotOnchain(BlockState::ValidBlock))
         );
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b14.block_hash,
                 &ChainState::NotOnchain(BlockState::ValidBlock),
                 &cache
@@ -2532,7 +2532,7 @@ mod tests {
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(()));
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b14.block_hash,
                 &ChainState::NotOnchain(BlockState::ValidBlock),
                 &cache
@@ -2551,7 +2551,7 @@ mod tests {
             Ok(())
         );
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2573,7 +2573,7 @@ mod tests {
             Ok(())
         );
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2586,7 +2586,7 @@ mod tests {
         // Mark b16 as vdf validated eve though b15 is not
         assert_matches!(cache.mark_block_as_valid(&b16.block_hash), Ok(()));
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2606,7 +2606,7 @@ mod tests {
             (&b14, &ChainState::Onchain)
         );
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b15.block_hash,
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
@@ -2641,7 +2641,7 @@ mod tests {
         // When a locally produced block is added as validated "onchain" but it
         // hasn't yet been validated by the validation_service
         assert_matches!(
-            check_earliest_not_onchian(
+            check_earliest_not_onchain(
                 &b12.block_hash,
                 &ChainState::Validated(BlockState::ValidationScheduled),
                 &cache
@@ -2738,7 +2738,7 @@ mod tests {
         new_block
     }
 
-    fn check_earliest_not_onchian(
+    fn check_earliest_not_onchain(
         block_hash: &BlockHash,
         chain_state: &ChainState,
         cache: &BlockTreeCache,

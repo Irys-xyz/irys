@@ -1,4 +1,4 @@
-use crate::mempool_service::types::{
+use crate::mempool_service::{
     ChunkIngressError, MempoolServiceMessage, TxIngressError, TxReadError,
 };
 use irys_types::{
