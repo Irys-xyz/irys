@@ -1,16 +1,20 @@
-use crate::mempool_service::types::ChunkIngressError;
-use crate::mempool_service::utils::generate_ingress_proof;
 use crate::mempool_service::Inner;
+use eyre::eyre;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
     submodule::get_data_size_by_data_root,
-    tables::{CachedChunksIndex, DataRootLRU, IngressProofs},
+    tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
 };
-use irys_types::{chunk::UnpackedChunk, hash_sha256, validate_path, GossipBroadcastMessage, H256};
+use irys_types::{
+    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataRoot, DatabaseProvider,
+    GossipBroadcastMessage, H256,
+};
 use lru::LruCache;
-use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
-use std::num::NonZeroUsize;
+use reth_db::{
+    cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
+};
+use std::{collections::HashSet, fmt::Display, num::NonZeroUsize};
 use tracing::{debug, error, info, warn};
 
 impl Inner {
@@ -286,4 +290,116 @@ impl Inner {
 
         Ok(())
     }
+}
+
+/// Reasons why Chunk Ingress might fail
+#[derive(Debug, Clone)]
+pub enum ChunkIngressError {
+    /// The `data_path/proof` provided with the chunk data is invalid
+    InvalidProof,
+    /// The data hash does not match the chunk data
+    InvalidDataHash,
+    /// This chunk is for an unknown transaction
+    UnknownTransaction,
+    /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
+    InvalidChunkSize,
+    /// Chunks should have the same data_size field as their parent tx
+    InvalidDataSize,
+    /// Some database error occurred when reading or writing the chunk
+    DatabaseError,
+    /// The service is uninitialized
+    ServiceUninitialized,
+    /// Catch-all variant for other errors.
+    Other(String),
+}
+
+impl ChunkIngressError {
+    /// Returns an other error with the given message.
+    pub fn other(err: impl Into<String>) -> Self {
+        Self::Other(err.into())
+    }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display) -> Self {
+        Self::Other(err.to_string())
+    }
+}
+
+/// Generates an ingress proof for a specific `data_root`
+/// pulls required data from all sources
+pub fn generate_ingress_proof(
+    db: DatabaseProvider,
+    data_root: DataRoot,
+    size: u64,
+    chunk_size: u64,
+    signer: IrysSigner,
+) -> eyre::Result<()> {
+    // load the chunks from the DB
+    // TODO: for now we assume the chunks all all in the DB chunk cache
+    // in future, we'll need access to whatever unified storage provider API we have to get chunks
+    // regardless of actual location
+
+    let ro_tx = db.tx()?;
+    let mut dup_cursor = ro_tx.cursor_dup_read::<CachedChunksIndex>()?;
+
+    // start from first duplicate entry for this root_hash
+    let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
+
+    // we need to validate that the index is valid
+    // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
+    // if we have, we *must* error
+    let mut set = HashSet::<H256>::new();
+    let expected_chunk_count = data_size_to_chunk_count(size, chunk_size).unwrap();
+
+    let mut chunk_count: u32 = 0;
+    let mut data_size: u64 = 0;
+
+    let iter = dup_walker.into_iter().map(|entry| {
+        let (root_hash2, index_entry) = entry?;
+        // make sure we haven't traversed into the wrong key
+        assert_eq!(data_root, root_hash2);
+
+        let chunk_path_hash = index_entry.meta.chunk_path_hash;
+        if set.contains(&chunk_path_hash) {
+            return Err(eyre!(
+                "Chunk with hash {} has been found twice for index entry {} of data_root {}",
+                &chunk_path_hash,
+                &index_entry.index,
+                &data_root
+            ));
+        }
+        set.insert(chunk_path_hash);
+
+        // TODO: add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
+        let chunk = ro_tx
+            .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
+            .ok_or(eyre!(
+                "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
+            ))?;
+
+        let chunk_bin = chunk
+            .chunk
+            .ok_or(eyre!(
+                "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
+            ))?
+            .0;
+        data_size += chunk_bin.len() as u64;
+        chunk_count += 1;
+
+        Ok(chunk_bin)
+    });
+
+    // generate the ingress proof hash
+    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, iter)?;
+    info!(
+        "generated ingress proof {} for data root {}",
+        &proof.proof, &data_root
+    );
+    assert_eq!(data_size, size);
+    assert_eq!({ chunk_count }, expected_chunk_count);
+
+    ro_tx.commit()?;
+
+    db.update(|rw_tx| rw_tx.put::<IngressProofs>(data_root, proof))??;
+
+    Ok(())
 }
