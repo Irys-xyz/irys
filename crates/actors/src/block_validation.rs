@@ -788,7 +788,7 @@ mod tests {
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
             entropy_packing_iterations: 1_000,
-            chunk_migration_depth: 1,
+            block_migration_depth: 1,
             ..node_config.consensus_config()
         };
 

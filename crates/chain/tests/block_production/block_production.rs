@@ -279,7 +279,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     config.consensus.get_mut().num_partitions_per_slot = 1;
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
-    config.consensus.get_mut().chunk_migration_depth = 1;
+    config.consensus.get_mut().block_migration_depth = 1;
 
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;

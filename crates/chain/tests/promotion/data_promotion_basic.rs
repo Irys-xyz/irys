@@ -20,7 +20,7 @@ async fn heavy_data_promotion_test() {
     config.consensus.get_mut().num_partitions_per_slot = 1;
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
-    config.consensus.get_mut().chunk_migration_depth = 1; // Testnet / single node config
+    config.consensus.get_mut().block_migration_depth = 1; // Testnet / single node config
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
         signer.address(),

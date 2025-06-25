@@ -19,7 +19,7 @@ use tracing::info;
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
-    config.consensus.get_mut().chunk_migration_depth = 2;
+    config.consensus.get_mut().block_migration_depth = 2;
     config.cache.cache_clean_lag = 5;
 
     let main_address = config.miner_address();
@@ -154,7 +154,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     })?;
     assert_eq!(*chunk_cache_count, 1_u64);
 
-    // mine enough blocks to cause chunk migration
+    // mine enough blocks to cause block and chunk migration
     node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
         .await?;
 
