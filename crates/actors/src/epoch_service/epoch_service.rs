@@ -1030,7 +1030,7 @@ impl EpochService {
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
             tokio::select! {
-                // Handle regular mempool messages
+                // Handle regular epoch service messages
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => self.inner.handle_message(msg)?,
