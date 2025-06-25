@@ -159,8 +159,14 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .await?;
 
     // confirm that we no longer see an entry in CachedChunks mdbx table
+    let mut consensus_config = node.node_ctx.config.node_config.consensus.clone();
+    let block_migration_depth = consensus_config.get_mut().block_migration_depth;
     node.wait_for_chunk_cache_count(0, 10).await?;
-    assert_eq!(*chunk_cache_count, 0_u64);
+    assert_eq!(
+        *chunk_cache_count, 0_u64,
+        "unexpected chunk in CachedChunks table. block_migration_depth = {:?} cache_clean_lag = {:?}",
+        block_migration_depth, node.node_ctx.config.node_config.cache.cache_clean_lag
+    );
 
     // make sure we can read the chunks after migration
     let chunk_res = client
