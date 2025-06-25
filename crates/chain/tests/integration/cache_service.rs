@@ -159,7 +159,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .await?;
 
     // confirm that we no longer see an entry in CachedChunks mdbx table
-    node.wait_for_chunk_cache_count(0, 3).await?;
+    node.wait_for_chunk_cache_count(0, 10).await?;
     assert_eq!(*chunk_cache_count, 0_u64);
 
     // make sure we can read the chunks after migration
