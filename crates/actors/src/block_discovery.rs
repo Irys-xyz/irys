@@ -114,7 +114,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let partitions_guard = self.partition_assignments_guard.clone();
         let config = self.config.clone();
         let db = self.db.clone();
-        let ema_service_sender = self.service_senders.ema.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
@@ -319,19 +318,19 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
 
-            let validation_result = tokio::task::spawn_blocking(move || {
-                prevalidate_block(
-                    block_header,
-                    previous_block_header,
-                    partitions_guard,
-                    config,
-                    reward_curve,
-                    ema_service_sender,
-                )
-                .instrument(span2)
-            })
-            .await
-            .unwrap()
+            let read = block_tree_guard.read();
+            let parent_ema_snapshot = read
+                .get_ema_snapshot(&prev_block_hash)
+                .expect("parent block to be in block tree");
+            let validation_result = prevalidate_block(
+                block_header,
+                previous_block_header,
+                partitions_guard,
+                config,
+                reward_curve,
+                &parent_ema_snapshot,
+            )
+            .instrument(span2)
             .await;
 
             match validation_result {
@@ -357,7 +356,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         .unwrap();
 
                     // Get the current epoch snapshot from the parent block
-                    let mut parent_snapshot = block_tree_guard
+                    let mut parent_commitment_snapshot = block_tree_guard
                         .read()
                         .get_commitment_snapshot(&prev_block_hash)
                         .expect("parent block to be in block_tree")
@@ -365,7 +364,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         .clone();
 
                     if is_epoch_block {
-                        let expected_commitment_tx = parent_snapshot.get_epoch_commitments();
+                        let expected_commitment_tx =
+                            parent_commitment_snapshot.get_epoch_commitments();
 
                         // Validate epoch block has expected commitments in correct order
                         let commitments_match =
@@ -401,8 +401,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         // Validate and add each commitment transaction for non-epoch blocks
                         for commitment_tx in arc_commitment_txs.iter() {
                             let is_staked = commitment_state_guard.is_staked(commitment_tx.signer);
-                            let status =
-                                parent_snapshot.get_commitment_status(commitment_tx, is_staked);
+                            let status = parent_commitment_snapshot
+                                .get_commitment_status(commitment_tx, is_staked);
 
                             // Ensure commitment is unknown (new) and from staked address
                             match status {
@@ -427,7 +427,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             // Add commitment and validate it's accepted
                             let is_staked_in_current_epoch =
                                 commitment_state_guard.is_staked(commitment_tx.signer);
-                            let add_status = parent_snapshot
+                            let add_status = parent_commitment_snapshot
                                 .add_commitment(commitment_tx, is_staked_in_current_epoch);
                             if add_status != CommitmentSnapshotStatus::Accepted {
                                 return Err(eyre::eyre!("Commitment tx is invalid"));

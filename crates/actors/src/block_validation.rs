@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_index_service::BlockIndexReadGuard,
+    block_tree_service::ema_snapshot::EmaSnapshot,
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mempool_service::MempoolServiceMessage,
@@ -53,7 +54,7 @@ pub async fn prevalidate_block(
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
-    ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    parent_ema_snapshot: &EmaSnapshot,
 ) -> eyre::Result<()> {
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
@@ -113,36 +114,26 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    let vdf_checkpoint_valid = async {
-        last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "last_step_checkpoints_is_valid",
-        );
-        Result::<_, eyre::Report>::Ok(())
-    };
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+
     // Check that the oracle price does not exceed the EMA pricing parameters
-    let oracle_price_valid = async {
-        check_valid_oracle_price(&block, &ema_service_sender).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "check_valid_oracle_price",
-        );
-        Result::<_, eyre::Report>::Ok(())
-    };
+    let oracle_price_valid = EmaSnapshot::validate_oracle_price(
+        block.oracle_irys_price,
+        previous_block.oracle_irys_price,
+        config.consensus.token_price_safe_range,
+    );
+    ensure!(oracle_price_valid, "Oracle price must be valid");
+
     // Check that the EMA has been correctly calculated
-    let ema_valid = async {
-        check_valid_ema_calculation(&block, &ema_service_sender).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "check_valid_ema_calculation",
+    let ema_valid = {
+        let res = parent_ema_snapshot.calculate_ema_for_new_block(
+            &previous_block,
+            block.oracle_irys_price,
+            config.consensus.ema.price_adjustment_interval,
         );
-        Result::<_, eyre::Report>::Ok(())
+        res == block.ema_irys_price
     };
-    futures::try_join!(vdf_checkpoint_valid, oracle_price_valid, ema_valid)?;
+    ensure!(ema_valid, "EMA must be valid");
 
     // Check valid curve price
     let reward = reward_curve.reward_between(
@@ -163,40 +154,6 @@ pub async fn prevalidate_block(
     // we just accept any valid signature.
     ensure!(block.is_signature_valid(), "block signature is not valid");
 
-    Ok(())
-}
-
-async fn check_valid_oracle_price(
-    block: &IrysBlockHeader,
-    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
-) -> eyre::Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_service_sender.send(EmaServiceMessage::ValidateOraclePrice {
-        block_height: block.height,
-        oracle_price: block.oracle_irys_price,
-        response: tx,
-    })?;
-    let response = rx.await??;
-    ensure!(
-        response == PriceStatus::Valid,
-        "Oracle price exceeds the defined bounds"
-    );
-    Ok(())
-}
-
-async fn check_valid_ema_calculation(
-    block: &IrysBlockHeader,
-    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
-) -> eyre::Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_service_sender.send(EmaServiceMessage::ValidateEmaPrice {
-        block_height: block.height,
-        ema_price: block.ema_irys_price,
-        oracle_price: block.oracle_irys_price,
-        response: tx,
-    })?;
-    let response = rx.await??;
-    ensure!(response == PriceStatus::Valid, "EMA price is invalid");
     Ok(())
 }
 

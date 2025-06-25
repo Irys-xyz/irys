@@ -19,6 +19,9 @@ use crate::{
     block_tree_service::{BlockTreeReadGuard, ReorgEvent},
     services::ServiceSenders,
 };
+
+#[cfg(test)]
+use crate::block_tree_service::test_utils::dummy_ema_snapshot;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
@@ -1264,6 +1267,7 @@ mod tests {
                     block.block_hash,
                     &block,
                     Arc::new(CommitmentSnapshot::default()),
+                    dummy_ema_snapshot(),
                     ChainState::Onchain,
                 )
                 .unwrap();

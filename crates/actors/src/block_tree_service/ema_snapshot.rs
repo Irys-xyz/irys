@@ -22,7 +22,7 @@ pub struct EmaSnapshot {
     pub latest_ema_predecessor_height: u64,
 
     /// The previous block's oracle price (for validation)
-    pub previous_oracle_price: IrysTokenPrice,
+    pub oracle_price_ema_predecessor: IrysTokenPrice,
 }
 
 impl EmaSnapshot {
@@ -33,24 +33,37 @@ impl EmaSnapshot {
             ema_for_pricing: consensus_config.genesis_price,
             latest_ema_height: 0,
             latest_ema_predecessor_height: 0,
-            previous_oracle_price: consensus_config.genesis_price,
+            oracle_price_ema_predecessor: consensus_config.genesis_price,
         })
     }
 
     /// Calculate EMA for a new block based on parent's cache
     pub fn calculate_ema_for_new_block(
-        parent_snapshot: &EmaSnapshot,
+        &self,
         parent_block: &IrysBlockHeader,
         oracle_price: IrysTokenPrice,
         blocks_in_interval: u64,
     ) -> IrysTokenPrice {
+        let parent_snapshot = self;
+
         // Special handling for first 2 adjustment intervals
         let oracle_price_to_use = if parent_block.height < (blocks_in_interval * 2) {
             oracle_price
         } else {
             // Use oracle price from the predecessor of the latest EMA block
-            parent_snapshot.previous_oracle_price
+            parent_snapshot.oracle_price_ema_predecessor
         };
+        // the first 2 adjustment intervals have special handling where we calculate the
+        // EMA for each block using the value from the preceding oracle price.
+        //
+        // But the generic case:
+        // example EMA calculation on block 29:
+        // 1. take the registered Oracle Irys price in block 18
+        //    and the stored EMA Irys price in block 19.
+        // 2. using these values compute EMA for block 29. In this case
+        //    the *n* (number of block prices) would be 10 (E29.height - E19.height).
+        // 3. this is the price that will be used in the interval 39->49,
+        //    which will be reported to other systems querying for EMA prices.
 
         oracle_price_to_use
             .calculate_ema(blocks_in_interval, parent_snapshot.latest_ema)
@@ -69,21 +82,6 @@ impl EmaSnapshot {
         let capped = bound_in_min_max_range(oracle_price, safe_range, previous_oracle_price);
         oracle_price == capped
     }
-
-    /// Validate EMA price calculation
-    pub fn validate_ema_price(
-        &self,
-        ema_price: IrysTokenPrice,
-        oracle_price: IrysTokenPrice,
-        blocks_in_interval: u64,
-    ) -> bool {
-        // Recalculate EMA to verify
-        let calculated_ema = oracle_price
-            .calculate_ema(blocks_in_interval, self.latest_ema)
-            .unwrap_or(self.latest_ema);
-
-        ema_price == calculated_ema
-    }
 }
 
 /// Create EMA cache for a block
@@ -100,7 +98,7 @@ pub fn create_ema_snapshot_for_block(
     let capped_oracle_price = bound_in_min_max_range(
         block.oracle_irys_price,
         token_price_safe_range,
-        parent_snapshot.previous_oracle_price,
+        parent_snapshot.oracle_price_ema_predecessor,
     );
 
     // Calculate new EMA if this is a recalculation block
@@ -147,7 +145,7 @@ pub fn create_ema_snapshot_for_block(
         ema_for_pricing,
         latest_ema_height,
         latest_ema_predecessor_height,
-        previous_oracle_price: block.oracle_irys_price,
+        oracle_price_ema_predecessor: block.oracle_irys_price,
     })
 }
 
@@ -225,7 +223,7 @@ pub fn create_ema_snapshot_from_chain_history(
         ema_for_pricing: pricing_block.ema_irys_price,
         latest_ema_height,
         latest_ema_predecessor_height,
-        previous_oracle_price: prev_block.oracle_irys_price,
+        oracle_price_ema_predecessor: prev_block.oracle_irys_price,
     }))
 }
 
@@ -233,7 +231,7 @@ pub fn create_ema_snapshot_from_chain_history(
 mod tests {
     use super::*;
     use irys_types::storage_pricing::Amount;
-    use irys_types::{ConsensusConfig, ConsensusOptions, EmaConfig, NodeConfig};
+    use irys_types::{ConsensusConfig, EmaConfig};
     use rust_decimal_macros::dec;
 
     fn test_consensus_config() -> ConsensusConfig {
@@ -256,7 +254,7 @@ mod tests {
         assert_eq!(cache.ema_for_pricing, config.genesis_price);
         assert_eq!(cache.latest_ema_height, 0);
         assert_eq!(cache.latest_ema_predecessor_height, 0);
-        assert_eq!(cache.previous_oracle_price, config.genesis_price);
+        assert_eq!(cache.oracle_price_ema_predecessor, config.genesis_price);
     }
 
     #[test]

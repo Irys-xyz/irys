@@ -13,7 +13,9 @@ use crate::{
     services::{ServiceReceivers, ServiceSenders},
 };
 
-use super::{BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent};
+use super::{
+    ema_snapshot::EmaSnapshot, BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent,
+};
 
 pub fn build_genesis_tree_with_n_blocks(
     max_block_height: u64,
@@ -54,6 +56,10 @@ pub fn deterministic_price(height: u64) -> IrysTokenPrice {
     IrysTokenPrice::new(amount)
 }
 
+pub fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
+    EmaSnapshot::genesis(&irys_types::ConsensusConfig::testnet())
+}
+
 pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
     let mut block_hash = if blocks[0].0.block_hash == H256::default() {
         H256::random()
@@ -82,6 +88,7 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
                 block.block_hash,
                 block,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 *state,
             )
             .unwrap();
@@ -295,6 +302,7 @@ pub fn create_and_apply_fork(
                 header.block_hash,
                 &header,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 chain_state,
             )
             .unwrap();

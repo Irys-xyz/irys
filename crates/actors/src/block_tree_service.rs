@@ -43,6 +43,9 @@ use ema_snapshot::{
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+#[cfg(test)]
+use test_utils::dummy_ema_snapshot;
+
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockTreeReadGuard {
@@ -1505,7 +1508,7 @@ impl BlockTreeCache {
     }
 
     /// Get EMA cache for a specific block
-    pub fn get_ema_cache(&self, block_hash: &BlockHash) -> Option<Arc<EmaSnapshot>> {
+    pub fn get_ema_snapshot(&self, block_hash: &BlockHash) -> Option<Arc<EmaSnapshot>> {
         self.blocks
             .get(block_hash)
             .map(|entry| entry.ema_snapshot.clone())
@@ -1881,7 +1884,7 @@ pub async fn get_ema_snapshot(
     block_hash: H256,
 ) -> eyre::Result<Option<Arc<EmaSnapshot>>> {
     let res = tokio::task::spawn_blocking(move || {
-        block_tree_read_guard.read().get_ema_cache(&block_hash)
+        block_tree_read_guard.read().get_ema_snapshot(&block_hash)
     })
     .await?;
     Ok(res)
@@ -2088,7 +2091,10 @@ mod tests {
         b1_test.data_ledgers[DataLedger::Submit]
             .tx_ids
             .push(H256::random());
-        assert_matches!(cache.add_peer_block(&b1_test, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b1_test, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
@@ -2113,7 +2119,10 @@ mod tests {
 
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2129,7 +2138,10 @@ mod tests {
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -2161,10 +2173,16 @@ mod tests {
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
 
         println!(
             "b1:   {} cdiff: {} solution_hash: {}",
@@ -2296,15 +2314,24 @@ mod tests {
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
         let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2_2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2321,7 +2348,10 @@ mod tests {
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_3, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2_3, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2339,7 +2369,8 @@ mod tests {
             cache.add_local_block(
                 &b2_2,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2364,12 +2395,16 @@ mod tests {
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b3, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b3, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(
             cache.add_local_block(
                 &b3,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2396,7 +2431,10 @@ mod tests {
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b4, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b4, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2530,7 +2568,10 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
@@ -2552,7 +2593,8 @@ mod tests {
             cache.add_local_block(
                 &b13,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2597,7 +2639,10 @@ mod tests {
 
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
-        assert_matches!(cache.add_peer_block(&b14, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b14, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2679,7 +2724,10 @@ mod tests {
 
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
-        assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b15, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(
             check_earliest_not_onchain(
                 &b14.block_hash,
@@ -2695,7 +2743,8 @@ mod tests {
             cache.add_local_block(
                 &b14,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2716,7 +2765,10 @@ mod tests {
 
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
-        assert_matches!(cache.add_peer_block(&b16, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b16, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
             Ok(())
@@ -2768,7 +2820,10 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
@@ -2781,7 +2836,8 @@ mod tests {
             cache.add_local_block(
                 &b12,
                 ChainState::Validated(BlockState::ValidationScheduled),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2808,7 +2864,8 @@ mod tests {
             cache.add_local_block(
                 &b12,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2824,7 +2881,8 @@ mod tests {
             cache.add_local_block(
                 &b13a,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2832,7 +2890,8 @@ mod tests {
             cache.add_local_block(
                 &b13b,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2848,7 +2907,8 @@ mod tests {
             cache.add_local_block(
                 &b14b,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache
+                comm_cache,
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
