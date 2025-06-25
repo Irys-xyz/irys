@@ -61,7 +61,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
 
-    let message = "Irys, world!";
+    let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
     // post a tx, mine a block
     let tx = account1
