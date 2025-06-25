@@ -7,7 +7,7 @@ use irys_types::{
 };
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EmaSnapshot {
     /// Latest EMA value calculated at this block
     pub latest_ema: IrysTokenPrice,
@@ -23,6 +23,12 @@ pub struct EmaSnapshot {
 
     /// The previous block's oracle price (for validation)
     pub oracle_price_ema_predecessor: IrysTokenPrice,
+}
+
+#[derive(Debug)]
+pub struct EmaBlock {
+    pub range_adjusted_oracle_price: IrysTokenPrice,
+    pub ema: IrysTokenPrice,
 }
 
 impl EmaSnapshot {
@@ -42,17 +48,12 @@ impl EmaSnapshot {
         &self,
         parent_block: &IrysBlockHeader,
         oracle_price: IrysTokenPrice,
+        safe_range: Amount<Percentage>,
         blocks_in_interval: u64,
-    ) -> IrysTokenPrice {
+    ) -> EmaBlock {
         let parent_snapshot = self;
 
-        // Special handling for first 2 adjustment intervals
-        let oracle_price_to_use = if parent_block.height < (blocks_in_interval * 2) {
-            oracle_price
-        } else {
-            // Use oracle price from the predecessor of the latest EMA block
-            parent_snapshot.oracle_price_ema_predecessor
-        };
+        // Special handling for first 2 adjustment intervals.
         // the first 2 adjustment intervals have special handling where we calculate the
         // EMA for each block using the value from the preceding oracle price.
         //
@@ -64,13 +65,28 @@ impl EmaSnapshot {
         //    the *n* (number of block prices) would be 10 (E29.height - E19.height).
         // 3. this is the price that will be used in the interval 39->49,
         //    which will be reported to other systems querying for EMA prices.
+        let oracle_price_to_use = if parent_block.height < (blocks_in_interval * 2) {
+            oracle_price
+        } else {
+            // Use oracle price from the predecessor of the latest EMA block
+            parent_snapshot.oracle_price_ema_predecessor
+        };
+        let oracle_price_to_use = bound_in_min_max_range(
+            oracle_price_to_use,
+            safe_range,
+            parent_block.oracle_irys_price,
+        );
 
-        oracle_price_to_use
+        let ema = oracle_price_to_use
             .calculate_ema(blocks_in_interval, parent_snapshot.latest_ema)
             .unwrap_or_else(|err| {
                 tracing::warn!(?err, "price overflow, using previous EMA price");
                 parent_snapshot.latest_ema
-            })
+            });
+        EmaBlock {
+            range_adjusted_oracle_price: oracle_price_to_use,
+            ema,
+        }
     }
 
     /// Validate oracle price is within safe range
@@ -105,15 +121,15 @@ pub fn create_ema_snapshot_for_block(
     let (new_ema, latest_ema_height, latest_ema_predecessor_height) =
         if is_ema_recalculation_block(block.height, blocks_in_interval) {
             // Calculate new EMA
-            let new_ema = EmaSnapshot::calculate_ema_for_new_block(
-                parent_snapshot,
+            let EmaBlock { ema, .. } = parent_snapshot.calculate_ema_for_new_block(
                 parent_block,
                 capped_oracle_price,
+                consensus_config.token_price_safe_range,
                 blocks_in_interval,
             );
 
             // Update heights
-            (new_ema, block.height, block.height.saturating_sub(1))
+            (ema, block.height, block.height.saturating_sub(1))
         } else {
             // Keep existing EMA and heights
             (
@@ -154,7 +170,7 @@ pub fn create_ema_snapshot_for_block(
 ///
 /// Use the previous blocks oracle price as the base value.
 #[tracing::instrument]
-fn bound_in_min_max_range(
+pub fn bound_in_min_max_range(
     desired_price: IrysTokenPrice,
     safe_range: Amount<Percentage>,
     base_price: IrysTokenPrice,

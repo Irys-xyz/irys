@@ -4,7 +4,6 @@ use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_index_service::BlockIndexReadGuard,
     block_tree_service::ema_snapshot::EmaSnapshot,
-    ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
@@ -126,11 +125,14 @@ pub async fn prevalidate_block(
 
     // Check that the EMA has been correctly calculated
     let ema_valid = {
-        let res = parent_ema_snapshot.calculate_ema_for_new_block(
-            &previous_block,
-            block.oracle_irys_price,
-            config.consensus.ema.price_adjustment_interval,
-        );
+        let res = parent_ema_snapshot
+            .calculate_ema_for_new_block(
+                &previous_block,
+                block.oracle_irys_price,
+                config.consensus.token_price_safe_range,
+                config.consensus.ema.price_adjustment_interval,
+            )
+            .ema;
         res == block.ema_irys_price
     };
     ensure!(ema_valid, "EMA must be valid");
