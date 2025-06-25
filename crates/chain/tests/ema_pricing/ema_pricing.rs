@@ -31,7 +31,7 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
         assert_eq!(header.height, expected_height);
         assert_eq!(
             ctx.node_ctx.config.consensus.genesis_price, returned_ema_price,
-            "Genisis price not respected for the expected duration"
+            "Genesis price not respected for the expected duration"
         );
         assert_ne!(
             ctx.node_ctx.config.consensus.genesis_price, header.oracle_irys_price,
@@ -74,7 +74,7 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         .service_senders
         .ema
         .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-    let returnted_ema_price = rx.await?;
+    let returned_ema_price = rx.await?;
 
     // assert
     assert_eq!(
@@ -82,11 +82,11 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         "expected the 7th block to be mined (height = 6)"
     );
     assert_ne!(
-        ctx.node_ctx.config.consensus.genesis_price, returnted_ema_price,
+        ctx.node_ctx.config.consensus.genesis_price, returned_ema_price,
         "After the second interval we no longer use the genesis price"
     );
     assert_eq!(
-        registered_prices[2].1, returnted_ema_price,
+        registered_prices[2].1, returned_ema_price,
         "expected to use the EMA price registered in the 3rd block"
     );
 
