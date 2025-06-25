@@ -73,9 +73,9 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     let c1 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(0)).await;
     let c2 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(1)).await;
     let c3 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(2)).await;
-    assert_matches!(c1, Some(_));
-    assert_matches!(c2, Some(_));
-    assert_matches!(c3, Some(_));
+    assert_matches!(c1, Some(_), "unexpected {:?}", c1);
+    assert_matches!(c2, Some(_), "unexpected {:?}", c2);
+    assert_matches!(c3, Some(_), "unexpected {:?}", c3);
 
     genesis_node.stop().await;
 
