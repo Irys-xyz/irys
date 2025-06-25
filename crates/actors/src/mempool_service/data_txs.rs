@@ -1,6 +1,6 @@
 use crate::block_tree_service::get_optimistic_chain;
-use crate::mempool_service::types::{MempoolServiceMessage, TxIngressError};
 use crate::mempool_service::{Inner, TxReadError};
+use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
