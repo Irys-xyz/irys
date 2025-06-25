@@ -66,6 +66,9 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Mine some blocks to trigger block and chunk migration
     genesis_node.mine_blocks(2).await?;
 
+    // wait for chunk
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+
     // Finally verify the chunks didn't get dropped
     let c1 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(0)).await;
     let c2 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(1)).await;
