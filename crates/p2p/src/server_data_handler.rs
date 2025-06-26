@@ -280,7 +280,8 @@ where
             return Ok(());
         }
 
-        let block_seen = self.cache.seen_block_from_any_peer(&block_hash)?;
+        let is_block_requested_by_the_pool = self.block_pool.is_block_requested(&block_hash).await;
+        let has_block_already_been_received = self.cache.seen_block_from_any_peer(&block_hash)?;
 
         // Record block in cache
         self.cache
@@ -288,9 +289,9 @@ where
 
         // This check must be after we've added the block to the cache, otherwise we won't be
         // able to keep track of which peers seen what
-        if block_seen {
+        if has_block_already_been_received && !is_block_requested_by_the_pool {
             debug!(
-                "Node {}: Block {} already seen, skipping",
+                "Node {}: Block {} already seen and not requested by the pool, skipping",
                 self.gossip_client.mining_address,
                 block_header.block_hash.0.to_base58()
             );

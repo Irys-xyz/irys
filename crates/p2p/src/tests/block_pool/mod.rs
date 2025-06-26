@@ -6,7 +6,7 @@ use crate::{BlockStatusProvider, PeerList as _, SyncState};
 use actix::{Actor as _, Addr};
 use async_trait::async_trait;
 use base58::ToBase58 as _;
-use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_api_client::ApiClient;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -99,7 +99,7 @@ impl BlockDiscoveryStub {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
-    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
+    async fn handle_block(&self, block: IrysBlockHeader) -> Result<(), BlockDiscoveryError> {
         self.block_status_provider
             .add_block_to_index_and_tree_for_testing(&block);
         self.received_blocks

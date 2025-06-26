@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
+use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
@@ -137,7 +138,10 @@ pub(crate) struct BlockDiscoveryStub {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
-    async fn handle_block(&self, block: IrysBlockHeader) -> Result<()> {
+    async fn handle_block(
+        &self,
+        block: IrysBlockHeader,
+    ) -> std::result::Result<(), BlockDiscoveryError> {
         self.blocks
             .write()
             .expect("to unlock blocks")
