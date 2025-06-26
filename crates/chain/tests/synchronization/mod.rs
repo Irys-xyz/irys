@@ -1,18 +1,19 @@
-use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
-use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
-use irys_types::IrysTransactionHeader;
 use irys_types::{irys::IrysSigner, NodeConfig};
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
-use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
+    // settings
+    let max_seconds = 10;
+
+    //setup config
     let mut config = NodeConfig::testnet();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let main_address = config.miner_address();
@@ -34,6 +35,10 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     ]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
+    // retrieve block_migration_depth for use later
+    let mut consensus = node.cfg.consensus.clone();
+    let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.try_into()?;
+
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -48,9 +53,6 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     // server should be running
     // check with request to `/v1/info`
     let client = awc::Client::default();
-
-    // Wait a little for the server to get ready
-    tokio::time::sleep(Duration::from_secs(5)).await;
 
     let response = client
         .get(format!("{}/v1/info", http_url))
@@ -75,40 +77,14 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .send_json(&tx.header)
         .await
         .unwrap();
-
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Check that tx has been sent
-    let id: String = tx.header.id.as_bytes().to_base58();
-    let mut tx_header_fut = Box::pin(async {
-        let delay = Duration::from_secs(1);
-        for attempt in 1..20 {
-            let mut response = client
-                .get(format!("{}/v1/tx/{}", http_url, &id))
-                .send()
-                .await
-                .unwrap();
+    node.wait_for_mempool(tx.header.id, max_seconds).await?;
 
-            if response.status() == StatusCode::OK {
-                let result: IrysTransactionHeader = response.json().await.unwrap();
-                assert_eq!(&tx.header, &result);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
-                break;
-            }
-            sleep(delay).await;
-        }
-    });
-
-    future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut tx_header_fut,
-        Duration::from_millis(500),
-    )
-    .await?;
-
-    mine_block(&node.node_ctx).await?;
-    // Waiting a little for the block
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // mine first block on node
+    node.mine_block().await?;
+    node.wait_until_height(1, max_seconds + 1).await?;
 
     let latest_block_before_restart = {
         let latest = node
@@ -123,11 +99,12 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         latest.unwrap()
     };
 
-    // Add one block on top to confirm previous one
-    mine_block(&node.node_ctx).await?;
-    // Waiting a little for the block
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Add enough blocks on top to move block 1 to index
+    node.mine_blocks(block_migration_depth.try_into()?).await?;
+    node.wait_until_height(block_migration_depth + 1_u64, max_seconds + 2)
+        .await?;
 
+    // restarting the node means we lose blocks in mempool
     info!("Restarting node");
     let restarted_node = node.stop().await.start().await;
 
@@ -154,8 +131,9 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         (latest.unwrap(), earliest.unwrap())
     };
 
+    // mine a fresh block after the restart
     info!("mining blocks");
-    mine_block(&restarted_node.node_ctx).await?;
+    restarted_node.mine_block().await?;
 
     let next_block = {
         let latest = restarted_node
@@ -170,7 +148,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         latest.unwrap()
     };
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    restarted_node.wait_until_height(1, max_seconds).await?;
     restarted_node.stop().await;
 
     debug!("Earliest hash: {:?}", earliest_block.header.hash);
