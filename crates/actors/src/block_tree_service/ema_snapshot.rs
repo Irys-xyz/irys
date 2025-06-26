@@ -212,7 +212,7 @@ pub fn create_ema_snapshot_from_chain_history(
 }
 
 #[cfg(test)]
-mod tests {
+mod snapshot_from_history {
     use super::*;
     use rstest::rstest;
     use rust_decimal::Decimal;
@@ -298,5 +298,65 @@ mod tests {
             "ema_price_last_interval should match EMA price from block at height {}",
             height_current_ema
         );
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::block_tree_service::test_utils::{
+        build_tree, create_and_apply_fork, deterministic_price, setup_chain_for_fork_test,
+        PriceInfo, TestCtx,
+    };
+    use crate::block_tree_service::{get_canonical_chain, ChainState};
+    use irys_database::CommitmentSnapshot;
+    use irys_types::{
+        block_height_to_use_for_price, ConsensusConfig, ConsensusOptions, EmaConfig, NodeConfig,
+        H256,
+    };
+
+    use rstest::rstest;
+
+    use test_log::test;
+
+    #[test(tokio::test)]
+    #[rstest]
+    #[case(1, 0)]
+    #[case(2, 0)]
+    #[case(9, 0)]
+    #[case(19, 0)]
+    #[case(20, 9)] // use the 10th block price during 3rd EMA interval
+    #[case(29, 9)]
+    #[case(30, 19)]
+    #[timeout(std::time::Duration::from_millis(100))]
+    async fn get_current_ema(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
+        // setup
+        let (ctx, rxs) = TestCtx::setup(
+            max_block_height,
+            Config::new(NodeConfig {
+                consensus: ConsensusOptions::Custom(ConsensusConfig {
+                    ema: EmaConfig {
+                        price_adjustment_interval: 10,
+                    },
+                    ..ConsensusConfig::testnet()
+                }),
+                ..NodeConfig::testnet()
+            }),
+        );
+        spawn_ema(&ctx, rxs.ema);
+        let desired_block_price = &ctx.prices[price_block_idx];
+
+        // action
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        ctx.service_senders
+            .ema
+            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
+            .unwrap();
+        let response = rx.await.unwrap();
+
+        // assert
+        assert_eq!(response, desired_block_price.ema);
+        assert!(!ctx.service_senders.ema.is_closed());
+        drop(ctx);
     }
 }
