@@ -116,7 +116,7 @@ pub async fn prevalidate_block(
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
-    let oracle_price_valid = EmaSnapshot::validate_oracle_price(
+    let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
         block.oracle_irys_price,
         previous_block.oracle_irys_price,
         config.consensus.token_price_safe_range,
