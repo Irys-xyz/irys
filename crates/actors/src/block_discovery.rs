@@ -318,10 +318,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
 
-            let read = block_tree_guard.read();
-            let parent_ema_snapshot = read
-                .get_ema_snapshot(&prev_block_hash)
-                .expect("parent block to be in block tree");
+            let parent_ema_snapshot = {
+                let read = block_tree_guard.read();
+                read.get_ema_snapshot(&prev_block_hash)
+                    .expect("parent block to be in block tree")
+            };
             let validation_result = prevalidate_block(
                 block_header,
                 previous_block_header,
