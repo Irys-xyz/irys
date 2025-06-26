@@ -86,6 +86,8 @@ pub enum BlockDiscoveryInternalError {
     MailboxError(#[from] actix::MailboxError),
     #[error("Failed to send message to the epoch service: {0}")]
     EpochRequestFailed(String),
+    #[error("Failed to send message to the block tree service: {0}")]
+    BlockTreeRequestFailed(String),
 }
 
 #[async_trait::async_trait]
@@ -573,7 +575,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             response: oneshot_tx,
                         })
                         .map_err(|channel_error| {
-                            BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                            BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
                                 "Failed to send BlockPreValidated message: {}",
                                 channel_error
                             ))
@@ -582,7 +584,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     oneshot_rx
                         .await
                         .map_err(|e| {
-                            BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                            BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
                                 "Failed to receive response for BlockPreValidated: {}",
                                 e
                             ))

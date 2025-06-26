@@ -11,6 +11,7 @@ use irys_types::{
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -63,6 +64,7 @@ where
 struct BlockCacheInner {
     pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, IrysBlockHeader>,
     pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
+    pub(crate) requested_blocks: HashSet<BlockHash>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +127,22 @@ impl BlockCache {
             .get(block_hash)
             .cloned()
     }
+
+    async fn mark_requested_block(&self, block_hash: BlockHash) {
+        self.inner.write().await.requested_blocks.insert(block_hash);
+    }
+
+    async fn remove_requested_block(&self, block_hash: &BlockHash) {
+        self.inner.write().await.requested_blocks.remove(block_hash);
+    }
+
+    async fn is_block_requested(&self, block_hash: &BlockHash) -> bool {
+        self.inner
+            .write()
+            .await
+            .requested_blocks
+            .contains(block_hash)
+    }
 }
 
 impl BlockCacheInner {
@@ -136,6 +154,7 @@ impl BlockCacheInner {
             block_hash_to_parent_hash: LruCache::new(
                 NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
             ),
+            requested_blocks: HashSet::new(),
         }
     }
 
@@ -308,6 +327,10 @@ where
         });
     }
 
+    pub(crate) async fn is_block_requested(&self, block_hash: &BlockHash) -> bool {
+        self.blocks_cache.is_block_requested(block_hash).await
+    }
+
     pub(crate) async fn is_block_processing_or_processed(
         &self,
         block_hash: &BlockHash,
@@ -382,6 +405,7 @@ where
         &self,
         block_hash: BlockHash,
     ) -> Result<(), BlockPoolError> {
+        self.blocks_cache.mark_requested_block(block_hash).await;
         match self
             .peer_list
             .request_block_from_the_network(block_hash)
@@ -396,6 +420,7 @@ where
             }
             Err(error) => {
                 error!("Error while trying to fetch parent block {:?}: {:?}. Removing the block from the pool", block_hash, error);
+                self.blocks_cache.remove_requested_block(&block_hash).await;
                 self.blocks_cache.remove_block(&block_hash).await;
                 Err(error.into())
             }
