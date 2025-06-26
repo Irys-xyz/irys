@@ -707,7 +707,7 @@ fn validate_system_transactions_match(
     // Validate each expected system transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
-            // If either of the systxs is not present, it means it was not generated as `expected`
+            // If either of the system txs is not present, it means it was not generated as `expected`
             // or it was not included in the block. either way - an error
             tracing::warn!(?data, "system tx len mismatch");
             eyre::bail!("actual and expected system txs lens differ");
@@ -729,12 +729,9 @@ fn validate_system_transactions_match(
 mod tests {
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        epoch_service::{
-            EpochServiceActor, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
-            NewEpochMessage,
-        },
+        epoch_service::EpochServiceInner,
         services::ServiceSenders,
-        BlockFinalizedMessage,
+        BlockFinalizedMessage, EpochServiceMessage,
     };
     use actix::{prelude::*, SystemRegistry};
 
@@ -808,29 +805,32 @@ mod tests {
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
         let service_senders = ServiceSenders::new().0;
-        let epoch_service =
-            EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
-        let epoch_service_addr = epoch_service.start();
+        let mut epoch_service =
+            EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
 
         // Tell the epoch service to initialize the ledgers
-        let msg = NewEpochMessage {
+        let (sender, _rx) = tokio::sync::oneshot::channel();
+        match epoch_service.handle_message(EpochServiceMessage::NewEpoch {
+            new_epoch_block: arc_genesis.clone(),
             previous_epoch_block: None,
-            epoch_block: arc_genesis.clone(),
             commitments: Arc::new(commitments),
-        };
-        match epoch_service_addr.send(msg).await {
+            sender,
+        }) {
             Ok(_) => info!("Genesis Epoch tasks complete."),
             Err(_) => panic!("Failed to perform genesis epoch tasks"),
         }
 
-        let ledgers_guard = epoch_service_addr
-            .send(GetLedgersGuardMessage)
-            .await
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetLedgersGuard(sender))
             .unwrap();
-        let partitions_guard = epoch_service_addr
-            .send(GetPartitionAssignmentsGuardMessage)
-            .await
+        let ledgers_guard = rx.await.unwrap();
+
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
             .unwrap();
+        let partitions_guard = rx.await.unwrap();
 
         let partition_hash = {
             let ledgers = ledgers_guard.read();

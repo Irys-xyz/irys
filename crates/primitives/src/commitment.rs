@@ -1,4 +1,3 @@
-use alloy_primitives::wrap_fixed_bytes;
 use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use bytes::Buf as _;
 use reth_codecs::Compact;
@@ -144,28 +143,5 @@ impl Decodable for CommitmentType {
 
         buf.advance(1);
         Ok(commitment_type)
-    }
-}
-
-wrap_fixed_bytes!(
-    extra_derives: [],
-    pub struct IrysTxId<32>;
-);
-
-// from storage/codecs/src/lib.rs, line 328, impl_compact_for_wrapped_bytes! macro
-// this is done "manually" here to prevent acyclic deps, which is why these structs are defined here in the first place...
-impl Compact for IrysTxId {
-    #[inline]
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        self.0.to_compact(buf)
-    }
-
-    #[inline]
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (v, buf) = <[u8; core::mem::size_of::<Self>()]>::from_compact(buf, len);
-        (Self::from(v), buf)
     }
 }

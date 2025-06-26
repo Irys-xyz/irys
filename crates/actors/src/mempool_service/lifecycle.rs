@@ -1,6 +1,6 @@
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
-use crate::mempool_service::types::TxIngressError;
 use crate::mempool_service::Inner;
+use crate::mempool_service::TxIngressError;
 use base58::ToBase58 as _;
 use irys_database::insert_commitment_tx;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};

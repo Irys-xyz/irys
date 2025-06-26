@@ -227,7 +227,7 @@ impl ApiClient for ApiClientStub {
         _api_address: SocketAddr,
         _version: VersionRequest,
     ) -> Result<PeerResponse> {
-        Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock re sponse
+        Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock response
     }
 
     async fn get_block_by_hash(

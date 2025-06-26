@@ -1,6 +1,6 @@
 use crate::block_tree_service::get_optimistic_chain;
-use crate::mempool_service::types::{MempoolServiceMessage, TxIngressError};
 use crate::mempool_service::{Inner, TxReadError};
+use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
@@ -59,9 +59,15 @@ impl Inner {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_read_guard = mempool_state.read().await;
 
-        // Early out if we already know about this transaction
+        // Early out if we already know about this transaction in
+        // the mempool or the index
         if mempool_state_read_guard.invalid_tx.contains(&tx.id)
             || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
+            || self
+                .irys_db
+                .view_eyre(|dbtx| tx_header_by_txid(dbtx, &tx.id))
+                .map_err(|_| TxIngressError::DatabaseError)?
+                .is_some()
         {
             warn!("duplicate tx: {:?}", TxIngressError::Skipped);
             return Err(TxIngressError::Skipped);

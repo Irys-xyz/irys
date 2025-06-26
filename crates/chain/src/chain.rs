@@ -15,7 +15,6 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingConfig, PackingRequest},
@@ -26,7 +25,7 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{
-    ActorAddresses, CommitmentStateReadGuard, EpochReplayData, GetCommitmentStateGuardMessage,
+    ActorAddresses, CommitmentStateReadGuard, EpochReplayData, EpochService, EpochServiceMessage,
     StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
@@ -106,6 +105,7 @@ pub struct IrysNodeCtx {
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
+    pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
     pub peer_list: PeerListServiceFacade,
     pub sync_state: SyncState,
@@ -859,21 +859,43 @@ impl IrysNode {
         let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
 
         // start the epoch service
-        let (storage_module_infos, epoch_service_actor) =
-            Self::init_epoch_service(&config, &service_senders, &irys_db, &block_index_guard)
-                .await?;
+        let (genesis_block, commitments, epoch_replay_data) =
+            EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config).await?;
+
+        let storage_submodules_config =
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
+        let _handle = EpochService::spawn_service(
+            task_exec,
+            genesis_block,
+            commitments,
+            receivers.epoch_service,
+            &service_senders,
+            &storage_submodules_config,
+            &config,
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        service_senders
+            .epoch_service
+            .send(EpochServiceMessage::ReplayEpochData(epoch_replay_data, tx))?;
+        let storage_module_infos = rx.await?;
 
         // Retrieve Partition assignment
-        let partition_assignments_guard = epoch_service_actor
-            .send(GetPartitionAssignmentsGuardMessage)
-            .await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        service_senders
+            .epoch_service
+            .send(EpochServiceMessage::GetPartitionAssignmentsGuard(tx))?;
+        let partition_assignments_guard = rx.await?;
+
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Retrieve Commitment State
-        let commitment_state_guard = epoch_service_actor
-            .send(GetCommitmentStateGuardMessage)
-            .await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        service_senders
+            .epoch_service
+            .send(EpochServiceMessage::GetCommitmentStateGuard(tx))?;
+        let commitment_state_guard = rx.await?;
 
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
@@ -980,7 +1002,6 @@ impl IrysNode {
             &config,
             &irys_db,
             &service_senders,
-            &epoch_service_actor,
             &block_index_guard,
             &block_tree_guard,
             partition_assignments_guard,
@@ -989,7 +1010,7 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        let p2p_service_handle = p2p_service.run(
+        let p2p_service_handle: ServiceHandleWithShutdownSignal = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
@@ -1005,19 +1026,20 @@ impl IrysNode {
         let price_oracle = Self::init_price_oracle(&config);
 
         // set up the block producer
-
-        let (block_producer_addr, block_producer_arbiter) = Self::init_block_producer(
-            &config,
-            Arc::clone(&reward_curve),
-            &irys_db,
-            &service_senders,
-            &epoch_service_actor,
-            &block_tree_guard,
-            &vdf_state_readonly,
-            block_discovery.clone(),
-            price_oracle,
-            reth_node_adapter.clone(),
-        );
+        let (block_producer_addr, block_producer_arbiter, block_producer_inner) =
+            Self::init_block_producer(
+                &config,
+                Arc::clone(&reward_curve),
+                &irys_db,
+                &service_senders,
+                &block_tree_guard,
+                &vdf_state_readonly,
+                block_discovery.clone(),
+                broadcast_mining_actor.clone(),
+                price_oracle,
+                reth_node_adapter.clone(),
+                reth_service_actor.clone(),
+            );
 
         let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
         let seed = seed.0;
@@ -1066,7 +1088,6 @@ impl IrysNode {
                 block_producer: block_producer_addr,
                 packing: packing_actor_addr,
                 block_index: block_index_service_actor,
-                epoch_service: epoch_service_actor,
                 reth: reth_service_actor,
             },
             arbiters: Arc::new(RwLock::new(Vec::new())),
@@ -1088,6 +1109,7 @@ impl IrysNode {
             system_tx_store,
             reth_node_adapter,
             commitment_state_guard,
+            block_producer_inner,
         };
 
         // Spawn the StorageModuleService to manage the lifecycle of storage modules
@@ -1305,39 +1327,51 @@ impl IrysNode {
             PackingActor::new(task_executor.clone(), sm_ids, packing_config).start();
         (atomic_global_step_number, packing_actor_addr)
     }
-
     fn init_block_producer(
         config: &Config,
         reward_curve: Arc<HalvingCurve>,
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
-        epoch_service_actor: &actix::Addr<EpochServiceActor>,
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         block_discovery: actix::Addr<BlockDiscoveryActor>,
+        broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
-    ) -> (actix::Addr<BlockProducerActor>, Arbiter) {
+        reth_service_actor: actix::Addr<RethServiceActor>,
+    ) -> (
+        actix::Addr<BlockProducerActor>,
+        Arbiter,
+        Arc<irys_actors::BlockProducerInner>,
+    ) {
         let block_producer_arbiter = Arbiter::new();
-        let block_producer_actor = BlockProducerActor {
+        let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),
             reward_curve,
+            mining_broadcaster: broadcast_mining_actor,
             block_discovery_addr: block_discovery,
-            epoch_service: epoch_service_actor.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
+            reth_node_adapter,
+            reth_service: reth_service_actor,
+        });
+        let block_producer_actor = BlockProducerActor {
+            inner: block_producer_inner.clone(),
             blocks_remaining_for_test: None,
             span: Span::current(),
-            reth_node_adapter,
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
                 block_producer_actor
             });
-        (block_producer_addr, block_producer_arbiter)
+        (
+            block_producer_addr,
+            block_producer_arbiter,
+            block_producer_inner,
+        )
     }
 
     fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {
@@ -1361,7 +1395,6 @@ impl IrysNode {
         config: &Config,
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
-        epoch_service: &Addr<EpochServiceActor>,
         block_index_guard: &BlockIndexReadGuard,
         block_tree_guard: &BlockTreeReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
@@ -1376,7 +1409,6 @@ impl IrysNode {
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
-            epoch_service: epoch_service.clone(),
             reward_curve,
             span: Span::current(),
         };
@@ -1416,29 +1448,6 @@ impl IrysNode {
         }
 
         Ok(Arc::new(RwLock::new(storage_modules)))
-    }
-
-    async fn init_epoch_service(
-        config: &Config,
-        service_senders: &ServiceSenders,
-        irys_db: &DatabaseProvider,
-        block_index_guard: &BlockIndexReadGuard,
-    ) -> eyre::Result<(
-        Vec<irys_storage::StorageModuleInfo>,
-        actix::Addr<EpochServiceActor>,
-    )> {
-        let (genesis_block, commitments, epoch_replay_data) =
-            EpochReplayData::query_replay_data(irys_db, block_index_guard, config).await?;
-
-        let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
-        let mut epoch_service =
-            EpochServiceActor::new(service_senders, &storage_submodules_config, config);
-
-        let _ = epoch_service.initialize(genesis_block, commitments)?;
-        let storage_module_infos = epoch_service.replay_epoch_data(epoch_replay_data)?;
-        let epoch_service_actor = epoch_service.start();
-        Ok((storage_module_infos, epoch_service_actor))
     }
 
     fn init_block_index_service(
