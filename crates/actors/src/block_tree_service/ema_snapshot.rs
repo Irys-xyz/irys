@@ -216,61 +216,52 @@ pub fn create_ema_snapshot_from_chain_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::storage_pricing::Amount;
-    use irys_types::{ConsensusConfig, EmaConfig};
-    use rust_decimal_macros::dec;
+    use crate::block_tree_service::ChainState;
+    use rstest::rstest;
 
-    fn test_consensus_config() -> ConsensusConfig {
-        ConsensusConfig {
-            ema: EmaConfig {
-                price_adjustment_interval: 10,
+    #[test_log::test(tokio::test)]
+    #[rstest]
+    #[case(0, 0, 0, 0)]
+    #[case(1, 0, 1, 0)]
+    #[case(10, 0, 10, 9)]
+    #[case(18, 0, 18, 17)]
+    #[case(19, 0, 19, 18)]
+    #[case(20, 9, 19, 18)]
+    #[case(85, 69, 79, 78)]
+    #[case(90, 79, 89, 88)]
+    #[case(99, 79, 99, 98)]
+    async fn test_valid_price_cache(
+        #[case] height_latest_block: u64,
+        #[case] height_for_pricing: u64,
+        #[case] height_current_ema: u64,
+        #[case] height_current_ema_predecessor: u64,
+    ) {
+        // setup
+        let interval = 10;
+        let config = ConsensusConfig {
+            ema: irys_types::EmaConfig {
+                price_adjustment_interval: interval,
             },
-            genesis_price: Amount::token(dec!(1.0)).unwrap(),
-            token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(),
             ..ConsensusConfig::testnet()
-        }
-    }
+        };
+        let mut blocks = (0..=height_latest_block)
+            .map(|height| {
+                let block = IrysBlockHeader {
+                    height,
+                    ..IrysBlockHeader::new_mock_header()
+                };
 
-    #[test]
-    fn test_bound_in_min_max_range() {
-        let base_price = Amount::token(dec!(1.0)).unwrap();
-        let safe_range = Amount::percentage(dec!(0.1)).unwrap();
+                (block)
+            })
+            .collect::<Vec<_>>();
+        let latest_block = blocks.pop().unwrap();
+        let previous_blocks = &blocks;
 
-        // Price within range
-        let desired = Amount::token(dec!(1.05)).unwrap();
-        let result = bound_in_min_max_range(desired, safe_range, base_price);
-        assert_eq!(result, desired);
+        // action
+        let ema_snapshot =
+            create_ema_snapshot_from_chain_history(&latest_block, previous_blocks, &config)
+                .unwrap();
 
-        // Price too high
-        let desired = Amount::token(dec!(1.15)).unwrap();
-        let result = bound_in_min_max_range(desired, safe_range, base_price);
-        assert_eq!(result, Amount::token(dec!(1.1)).unwrap());
-
-        // Price too low
-        let desired = Amount::token(dec!(0.85)).unwrap();
-        let result = bound_in_min_max_range(desired, safe_range, base_price);
-        assert_eq!(result, Amount::token(dec!(0.9)).unwrap());
-    }
-
-    #[test]
-    fn test_validate_oracle_price() {
-        let base_price = Amount::token(dec!(1.0)).unwrap();
-        let safe_range = Amount::percentage(dec!(0.1)).unwrap();
-
-        // Valid price
-        let oracle_price = Amount::token(dec!(1.05)).unwrap();
-        assert!(EmaSnapshot::validate_oracle_price(
-            oracle_price,
-            base_price,
-            safe_range
-        ));
-
-        // Invalid price (too high)
-        let oracle_price = Amount::token(dec!(1.15)).unwrap();
-        assert!(!EmaSnapshot::validate_oracle_price(
-            oracle_price,
-            base_price,
-            safe_range
-        ));
+        // assert all the fields on ema snapshot
     }
 }

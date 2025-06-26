@@ -2048,6 +2048,10 @@ mod tests {
     use assert_matches::assert_matches;
     use eyre::ensure;
 
+    fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
+        EmaSnapshot::genesis(&irys_types::ConsensusConfig::testnet())
+    }
+
     #[actix::test]
     async fn test_block_cache() {
         let b1 = random_block(U256::from(0));
