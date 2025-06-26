@@ -284,7 +284,6 @@ mod snapshot_from_history {
         Amount::token(dec!(2.0) + dec!(0.2) * Decimal::from(height)).expect("Valid price")
     }
 
-    #[test_log::test(tokio::test)]
     #[rstest]
     #[case(0, 0, 0, 0)]
     #[case(1, 0, 1, 0)]
@@ -295,7 +294,7 @@ mod snapshot_from_history {
     #[case(85, 69, 79, 78)]
     #[case(90, 79, 89, 88)]
     #[case(99, 79, 99, 98)]
-    async fn test_valid_price_cache(
+    fn test_valid_price_cache(
         #[case] height_latest_block: u64,
         #[case] height_for_pricing: u64,
         #[case] height_current_ema: u64,
@@ -390,7 +389,7 @@ mod iterative_snapshot_tests {
     #[case(20, 9)] // use the 10th block price during 3rd EMA interval
     #[case(29, 9)]
     #[case(30, 19)]
-    fn get_current_ema(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
+    fn get_ema_for_pricing(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
         // setup
         let config = ConsensusConfig {
             ema: EmaConfig {
