@@ -15,7 +15,7 @@ use futures::future::select;
 use irys_actors::block_tree_service::{BlockState, ChainState, ReorgEvent};
 
 use irys_actors::mempool_service::MempoolTxs;
-use irys_actors::GetMinerPartitionAssignmentsMessage;
+use irys_actors::EpochServiceMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
@@ -26,11 +26,11 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
-use irys_database::CommitmentSnapshotStatus;
 use irys_database::{
     db::IrysDatabaseExt as _,
-    tables::{IngressProofs, IrysBlockHeaders},
-    tx_header_by_txid,
+    get_cache_size,
+    tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
+    tx_header_by_txid, CommitmentSnapshotStatus,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -495,6 +495,40 @@ impl IrysNodeTest<IrysNodeCtx> {
         Err(eyre::eyre!(
             "Failed waiting for chunk to arrive. Waited {} seconds",
             seconds,
+        ))
+    }
+
+    /// check number of chunks in the CachedChunks table
+    /// return Ok(()) once it matches the expected value
+    pub async fn wait_for_chunk_cache_count(
+        &self,
+        expected_value: u64,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            let chunk_cache_count = self
+                .node_ctx
+                .db
+                .view_eyre(|tx| {
+                    get_cache_size::<CachedChunks, _>(tx, self.node_ctx.config.consensus.chunk_size)
+                })?
+                .0;
+
+            if chunk_cache_count == expected_value {
+                return Ok(());
+            }
+
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {} seconds waiting for chunk_cache_count == {}",
+            timeout_secs,
+            expected_value
         ))
     }
 
@@ -1183,11 +1217,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         mining_address: Address,
     ) -> Vec<PartitionAssignment> {
-        self.node_ctx
-            .actor_addresses
-            .epoch_service
-            .send(GetMinerPartitionAssignmentsMessage(mining_address))
-            .await
+        let epoch_service = self.node_ctx.service_senders.epoch_service.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .send(EpochServiceMessage::GetMinerPartitionAssignments(
+                mining_address,
+                tx,
+            ))
+            .expect("message should be delivered to epoch service");
+        rx.await
             .expect("to retrieve partition assignments for miner")
     }
 

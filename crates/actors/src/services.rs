@@ -3,7 +3,7 @@ use crate::{
     cache_service::CacheServiceAction,
     mempool_service::MempoolServiceMessage,
     validation_service::ValidationServiceMessage,
-    StorageModuleServiceMessage,
+    EpochServiceMessage, StorageModuleServiceMessage,
 };
 use actix::Message;
 use core::ops::Deref;
@@ -54,6 +54,7 @@ pub struct ServiceReceivers {
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
+    pub epoch_service: UnboundedReceiver<EpochServiceMessage>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
 }
@@ -68,6 +69,7 @@ pub struct ServiceSendersInner {
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
+    pub epoch_service: UnboundedSender<EpochServiceMessage>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
 }
@@ -89,6 +91,7 @@ impl ServiceSendersInner {
             unbounded_channel::<BlockTreeServiceMessage>();
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
+        let (epoch_sender, epoch_receiver) = unbounded_channel::<EpochServiceMessage>();
         // Create broadcast channel for reorg events
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
         let (block_migrated_sender, block_migrated_receiver) =
@@ -103,6 +106,7 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
             validation_service: validation_sender,
+            epoch_service: epoch_sender,
             reorg_events: reorg_sender,
             block_migrated_events: block_migrated_sender,
         };
@@ -115,6 +119,7 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
             validation_service: validation_receiver,
+            epoch_service: epoch_receiver,
             reorg_events: reorg_receiver,
             block_migrated_events: block_migrated_receiver,
         };

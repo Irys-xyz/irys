@@ -128,9 +128,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .collect::<Vec<_>>();
 
     for i in 0..20 {
-        // let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
-        // let mut evm_txs: HashMap<B256, TxEnvelope> = HashMap::new();
-
         let mut simple_rng = SimpleRNG::new(i);
 
         for (i, a) in accounts.iter().enumerate() {
