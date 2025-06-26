@@ -34,7 +34,7 @@ pub async fn get_price(
     let data_ledger =
         DataLedger::try_from(ledger).map_err(|_| ErrorBadRequest("Ledger type not supported"))?;
 
-    // enforece that the requested size is at least equal to a single chunk
+    // enforce that the requested size is at least equal to a single chunk
     let bytes_to_store = std::cmp::max(chunk_size, bytes_to_store);
 
     // round up to the next multiple of chunk_size

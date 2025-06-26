@@ -3,8 +3,8 @@ use assert_matches::assert_matches;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::{
-    packing::wait_for_packing, CommitmentStateReadGuard, GetCommitmentStateGuardMessage,
-    GetPartitionAssignmentsGuardMessage, PartitionAssignmentsReadGuard,
+    packing::wait_for_packing, CommitmentStateReadGuard, EpochServiceMessage,
+    PartitionAssignmentsReadGuard,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::CommitmentSnapshotStatus;
@@ -58,19 +58,16 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .start_and_wait_for_packing("GENESIS", 10)
             .await;
 
-        // Initialize blockchain components
-        node.start_mining().await;
-
         // Get access to commitment and partition services for verification
-        let epoch_service = node.node_ctx.actor_addresses.epoch_service.clone();
-        let commitment_state_guard = epoch_service
-            .send(GetCommitmentStateGuardMessage)
-            .await
-            .unwrap();
-        let pa_guard = epoch_service
-            .send(GetPartitionAssignmentsGuardMessage)
-            .await
-            .unwrap();
+        let epoch_service = node.node_ctx.service_senders.epoch_service.clone();
+
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service.send(EpochServiceMessage::GetCommitmentStateGuard(sender))?;
+        let commitment_state_guard = rx.await?;
+
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service.send(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))?;
+        let pa_guard = rx.await?;
 
         // ===== PHASE 1: Verify Genesis Block Initialization =====
         // Check that the genesis block producer has the expected initial pledges
@@ -228,20 +225,23 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let stopped_node = node.stop().await;
     let restarted_node = stopped_node.start().await;
 
+    // wait a few seconds for node to wake up
+    restarted_node.wait_for_packing(10).await;
+
     // Get access to commitment and partition services for verification
     let epoch_service = restarted_node
         .node_ctx
-        .actor_addresses
+        .service_senders
         .epoch_service
         .clone();
-    let commitment_state_guard = epoch_service
-        .send(GetCommitmentStateGuardMessage)
-        .await
-        .unwrap();
-    let pa_guard = epoch_service
-        .send(GetPartitionAssignmentsGuardMessage)
-        .await
-        .unwrap();
+
+    let (sender, rx) = tokio::sync::oneshot::channel();
+    epoch_service.send(EpochServiceMessage::GetCommitmentStateGuard(sender))?;
+    let commitment_state_guard = rx.await?;
+
+    let (sender, rx) = tokio::sync::oneshot::channel();
+    epoch_service.send(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))?;
+    let pa_guard = rx.await?;
 
     // Make sure genesis has 3 commitments (1 stake, 2 pledge)
     assert_eq!(

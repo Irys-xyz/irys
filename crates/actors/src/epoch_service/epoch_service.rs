@@ -1,5 +1,4 @@
-use actix::SystemService as _;
-use actix::{Actor, Context};
+use actix::{System, SystemService as _};
 use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -16,21 +15,30 @@ use irys_types::{
 };
 use irys_types::{Config, H256List};
 use openssl::sha;
+use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{
     collections::VecDeque,
+    pin::pin,
     sync::{Arc, RwLock},
+};
+use tokio::{
+    sync::{broadcast, mpsc::UnboundedReceiver},
+    task::JoinHandle,
 };
 
 use tracing::{debug, error, trace, warn, Span};
 
 use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
-use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
-use crate::services::ServiceSenders;
 use crate::StorageModuleServiceMessage;
+use crate::{block_tree_service::ReorgEvent, services::ServiceSenders};
+use crate::{
+    broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
+    EpochServiceMessage,
+};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
-pub struct EpochServiceActor {
+pub struct EpochServiceInner {
     /// Source of randomness derived from previous epoch
     pub last_epoch_hash: H256,
     /// Protocol-managed data ledgers (one permanent, N term)
@@ -51,10 +59,8 @@ pub struct EpochServiceActor {
     pub(super) commitment_state: Arc<RwLock<CommitmentState>>,
     /// Tracing span
     pub span: Span,
-}
-
-impl Actor for EpochServiceActor {
-    type Context = Context<Self>;
+    /// Current actix system (temp hack until broadcast mining actor is a broadcast)
+    pub system: System,
 }
 
 /// Reasons why the epoch service actors epoch tasks might fail
@@ -70,7 +76,15 @@ pub enum EpochServiceError {
     InvalidCommitments,
 }
 
-impl EpochServiceActor {
+#[derive(Debug)]
+pub struct EpochService {
+    shutdown: GracefulShutdown,
+    msg_rx: UnboundedReceiver<EpochServiceMessage>,
+    reorg_rx: broadcast::Receiver<ReorgEvent>, // reorg broadcast receiver
+    inner: EpochServiceInner,
+}
+
+impl EpochServiceInner {
     /// Create a new instance of the epoch service actor
     pub fn new(
         service_senders: &ServiceSenders,
@@ -88,9 +102,9 @@ impl EpochServiceActor {
             config: config.clone(),
             commitment_state: Default::default(),
             span: Span::current(),
+            system: System::current(),
         }
     }
-
     pub fn initialize(
         &mut self,
         genesis_block: IrysBlockHeader,
@@ -317,6 +331,9 @@ impl EpochServiceActor {
         }
 
         debug!("Expiring Hashes: {:?}", expired_hashes);
+
+        // HACK to get from_registry to work outside of actix
+        System::set_current(self.system.clone());
 
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
         mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
@@ -927,6 +944,18 @@ impl EpochServiceActor {
 
         module_infos
     }
+
+    fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
+        tracing::debug!(
+            "Processing reorg: {} orphaned blocks from height {}",
+            event.old_fork.len(),
+            event.fork_parent.height
+        );
+
+        tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
+
+        Ok(())
+    }
 }
 
 /// SHA256 hash the message parameter
@@ -939,4 +968,123 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
 
 fn truncate_to_3_decimals(value: f64) -> f64 {
     (value * 1000.0).trunc() / 1000.0
+}
+
+/// mpsc style service wrapper for the Epoch Service
+impl EpochService {
+    /// Spawn a new Epoch sService
+    pub fn spawn_service(
+        exec: &TaskExecutor,
+        genesis_block: IrysBlockHeader,
+        commitments: Vec<CommitmentTransaction>,
+        rx: UnboundedReceiver<EpochServiceMessage>,
+        service_senders: &ServiceSenders,
+        storage_submodules_config: &StorageSubmodulesConfig,
+        config: &Config,
+    ) -> JoinHandle<()> {
+        let config = config.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
+        let ledgers = Arc::new(RwLock::new(Ledgers::new(&config.consensus)));
+        let service_senders = service_senders.clone();
+        let storage_submodules_config = storage_submodules_config.clone();
+        let system = System::current();
+
+        exec.spawn_critical_with_graceful_shutdown_signal("Epoch Service", |shutdown| async move {
+            let mut pending_epoch_service = Self {
+                shutdown,
+                msg_rx: rx,
+                reorg_rx,
+                inner: EpochServiceInner {
+                    last_epoch_hash: H256::zero(),
+                    ledgers,
+                    partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
+                    all_active_partitions: Vec::new(),
+                    unassigned_partitions: Vec::new(),
+                    service_senders,
+                    storage_submodules_config: storage_submodules_config.clone(),
+                    config: config.clone(),
+                    commitment_state: Default::default(),
+                    span: Span::current(),
+                    system,
+                },
+            };
+
+            match pending_epoch_service
+                .inner
+                .initialize(genesis_block, commitments)
+            {
+                Ok(_) => {}
+                Err(e) => panic!("{}", e),
+            }
+
+            pending_epoch_service
+                .start()
+                .await
+                .expect("Epoch Service encountered an irrecoverable error")
+        })
+    }
+
+    async fn start(mut self) -> eyre::Result<()> {
+        tracing::info!("starting Epoch service");
+
+        let mut shutdown_future = pin!(self.shutdown);
+        let shutdown_guard = loop {
+            tokio::select! {
+                // Handle regular epoch service messages
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => self.inner.handle_message(msg)?,
+                        None => {
+                            tracing::warn!("receiver channel closed");
+                            break None;
+                        }
+                    }
+                }
+
+                // Handle reorg events
+                reorg_result = self.reorg_rx.recv() => {
+                    if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
+                        self.inner.handle_reorg(event)?;
+                    }
+                }
+
+                // Handle shutdown signal
+                shutdown = &mut shutdown_future => {
+                    tracing::warn!("shutdown signal received");
+                    break Some(shutdown);
+                }
+            }
+        };
+
+        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg)?;
+        }
+
+        // explicitly inform the TaskManager that we're shutting down
+        drop(shutdown_guard);
+
+        tracing::info!("shutting down epoch service");
+        Ok(())
+    }
+}
+
+fn handle_broadcast_recv<T>(
+    result: Result<T, broadcast::error::RecvError>,
+    channel_name: &str,
+) -> Option<T> {
+    match result {
+        Ok(event) => Some(event),
+        Err(broadcast::error::RecvError::Closed) => {
+            tracing::debug!("{} channel closed", channel_name);
+            None
+        }
+        Err(broadcast::error::RecvError::Lagged(n)) => {
+            tracing::warn!("{} lagged by {} events", channel_name, n);
+            if n > 5 {
+                tracing::error!("{} significantly lagged", channel_name);
+            }
+            None
+        }
+    }
 }

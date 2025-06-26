@@ -12,13 +12,11 @@ retries = 2
 filter = 'test(/.*serial_.*/)'
 test-group = 'serial'
 
-
 # slow tests
 [[profile.default.overrides]]
 filter = 'test(/.*slow_.*/)'
 threads-required = 2
 priority = 100
-
 
 # heavy tests
 [[profile.default.overrides]]

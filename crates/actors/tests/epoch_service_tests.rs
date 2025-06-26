@@ -1,10 +1,9 @@
-use actix::{Actor as _, Context, Handler as _};
+use actix::Actor as _;
 use base58::ToBase58 as _;
-use irys_actors::epoch_service::{
-    EpochReplayData, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
-};
+use irys_actors::epoch_service::EpochReplayData;
 
 use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
+use irys_actors::EpochServiceMessage;
 use reth::payload::EthBuiltPayload;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
@@ -15,7 +14,7 @@ use tracing::{debug, error, info};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-    epoch_service::{EpochServiceActor, NewEpochMessage},
+    epoch_service::EpochServiceInner,
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -37,8 +36,15 @@ use irys_vdf::state::{VdfState, VdfStateReadonly};
 
 #[actix::test]
 async fn genesis_test() {
+    // setup temp dir
+    let mut config = NodeConfig::testnet();
+    let tmp_dir = setup_tracing_and_temp_dir(None, false);
+    let base_path = tmp_dir.path().to_path_buf();
+    config.base_directory = base_path;
+    let config: Config = config.into();
+
+    // genesis block
     let mut genesis_block = IrysBlockHeader::new_mock_header();
-    let config = NodeConfig::testnet().into();
     genesis_block.height = 0;
     let commitments = add_genesis_commitments(&mut genesis_block, &config);
 
@@ -54,19 +60,20 @@ async fn genesis_test() {
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
     let mut epoch_service =
-        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
+        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
     let miner_address = config.node_config.miner_address();
 
     // Process genesis message directly instead of through actor system
     // This allows us to inspect the actor's state after processing
-    let _ = epoch_service.handle(
-        NewEpochMessage {
+    let (sender, _rx) = tokio::sync::oneshot::channel();
+    epoch_service
+        .handle_message(EpochServiceMessage::NewEpoch {
+            new_epoch_block: genesis_block.into(),
             previous_epoch_block: None,
-            epoch_block: genesis_block.into(),
             commitments: Arc::new(commitments),
-        },
-        &mut Context::new(),
-    );
+            sender,
+        })
+        .unwrap();
 
     {
         // Verify the correct number of ledgers have been added
@@ -146,7 +153,7 @@ async fn genesis_test() {
         let pa = epoch_service.partition_assignments.read().unwrap();
         let data_partition_count = pa.data_partitions.len() as u64;
         let expected_partitions = data_partition_count
-            + EpochServiceActor::get_num_capacity_partitions(
+            + EpochServiceInner::get_num_capacity_partitions(
                 data_partition_count,
                 &config.consensus,
             );
@@ -176,7 +183,11 @@ async fn genesis_test() {
     // println!("Data Partitions: {:#?}", epoch_service.capacity_partitions);
     println!("Ledger State: {:#?}", epoch_service.ledgers);
 
-    let ledgers = epoch_service.handle(GetLedgersGuardMessage, &mut Context::new());
+    let (sender, rx) = tokio::sync::oneshot::channel();
+    epoch_service
+        .handle_message(EpochServiceMessage::GetLedgersGuard(sender))
+        .unwrap();
+    let ledgers = rx.await.unwrap();
 
     println!("{:?}", ledgers.read());
 
@@ -217,8 +228,8 @@ async fn add_slots_test() {
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
     let mut epoch_service =
-        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
-    let mut ctx = Context::new();
+        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+
     let _ = epoch_service.initialize(genesis_block.clone(), commitments);
 
     let mut mock_header = IrysBlockHeader::new_mock_header();
@@ -230,14 +241,15 @@ async fn add_slots_test() {
     new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
     // Post the new epoch block to the service and let it perform_epoch_tasks()
-    let _ = epoch_service.handle(
-        NewEpochMessage {
+    let (sender, _rx) = tokio::sync::oneshot::channel();
+    epoch_service
+        .handle_message(EpochServiceMessage::NewEpoch {
+            new_epoch_block: new_epoch_block.clone().into(),
             previous_epoch_block: Some(genesis_block.clone()),
-            epoch_block: new_epoch_block.clone().into(),
             commitments: Arc::new(Vec::new()),
-        },
-        &mut ctx,
-    );
+            sender,
+        })
+        .unwrap();
 
     let ledgers = epoch_service.ledgers.read().unwrap();
     debug!("{:#?}", ledgers);
@@ -264,14 +276,15 @@ async fn add_slots_test() {
     new_epoch_block.data_ledgers[DataLedger::Publish as usize].max_chunk_offset =
         (num_chunks_in_partition as f64 * 0.75) as u64;
 
-    let _ = epoch_service.handle(
-        NewEpochMessage {
+    let (sender, _rx) = tokio::sync::oneshot::channel();
+    epoch_service
+        .handle_message(EpochServiceMessage::NewEpoch {
+            new_epoch_block: new_epoch_block.clone().into(),
             previous_epoch_block,
-            epoch_block: new_epoch_block.clone().into(),
             commitments: Arc::new(Vec::new()),
-        },
-        &mut ctx,
-    );
+            sender,
+        })
+        .unwrap();
 
     let ledgers = epoch_service.ledgers.read().unwrap();
     debug!("{:#?}", ledgers);
@@ -295,7 +308,7 @@ async fn capacity_projection_tests() {
     for i in (0..max_data_parts).step_by(10) {
         let data_partition_count = i;
         let capacity_count =
-            EpochServiceActor::get_num_capacity_partitions(data_partition_count, &config);
+            EpochServiceInner::get_num_capacity_partitions(data_partition_count, &config);
         let total = data_partition_count + capacity_count;
         println!(
             "data:{}, capacity:{}, total:{}",
@@ -341,12 +354,10 @@ async fn partition_expiration_and_repacking_test() {
     let storage_submodules_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
     let mut epoch_service =
-        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
+        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
     let storage_module_infos = epoch_service
         .initialize(genesis_block.clone(), commitments)
         .unwrap();
-
-    let epoch_service_actor = epoch_service.start();
 
     let mut storage_modules: StorageModuleVec = Vec::new();
     // Create a list of storage modules wrapping the storage files
@@ -420,12 +431,13 @@ async fn partition_expiration_and_repacking_test() {
     }
 
     let assign_submit_partition_hash = {
-        let partition_assignments_read = epoch_service_actor
-            .send(GetPartitionAssignmentsGuardMessage)
-            .await
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
             .unwrap();
+        let partitions_guard = rx.await.unwrap();
 
-        let partition_hash = partition_assignments_read
+        let partition_hash = partitions_guard
             .read()
             .data_partitions
             .iter()
@@ -437,10 +449,11 @@ async fn partition_expiration_and_repacking_test() {
     };
 
     let (publish_partition_hash, submit_partition_hash) = {
-        let ledgers = epoch_service_actor
-            .send(GetLedgersGuardMessage)
-            .await
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetLedgersGuard(sender))
             .unwrap();
+        let ledgers = rx.await.unwrap();
 
         let pub_slots = ledgers.read().get_slots(DataLedger::Publish).clone();
         let sub_slots = ledgers.read().get_slots(DataLedger::Submit).clone();
@@ -453,12 +466,13 @@ async fn partition_expiration_and_repacking_test() {
     assert_eq!(assign_submit_partition_hash, submit_partition_hash);
 
     let capacity_partitions = {
-        let partition_assignments_read = epoch_service_actor
-            .send(GetPartitionAssignmentsGuardMessage)
-            .await
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
             .unwrap();
+        let partitions_guard = rx.await.unwrap();
 
-        let capacity_partitions: Vec<H256> = partition_assignments_read
+        let capacity_partitions: Vec<H256> = partitions_guard
             .read()
             .capacity_partitions
             .keys()
@@ -478,10 +492,11 @@ async fn partition_expiration_and_repacking_test() {
         capacity_partitions
     };
 
-    let ledgers_guard = epoch_service_actor
-        .send(GetLedgersGuardMessage)
-        .await
+    let (sender, rx) = tokio::sync::oneshot::channel();
+    epoch_service
+        .handle_message(EpochServiceMessage::GetLedgersGuard(sender))
         .unwrap();
+    let ledgers_guard = rx.await.unwrap();
 
     // Simulate enough epoch blocks to compete a Submit ledger storage term, expiring a slot
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
@@ -504,14 +519,16 @@ async fn partition_expiration_and_repacking_test() {
             new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset
         );
 
-        let result = epoch_service_actor
-            .send(NewEpochMessage {
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::NewEpoch {
+                new_epoch_block: new_epoch_block.clone().into(),
                 previous_epoch_block,
-                epoch_block: new_epoch_block.clone().into(),
                 commitments: Arc::new(Vec::new()),
+                sender,
             })
-            .await
             .unwrap();
+        let result = rx.await.unwrap();
 
         if let Err(err) = result {
             error!("Error processing NewEpochMessage: {:?}", err);
@@ -600,18 +617,19 @@ async fn partition_expiration_and_repacking_test() {
 
     // check repacking request expired partition for its whole interval range, and partitions assignments are consistent
     {
-        let partition_assignments_read = epoch_service_actor
-            .send(GetPartitionAssignmentsGuardMessage)
-            .await
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
             .unwrap();
+        let partitions_guard = rx.await.unwrap();
 
         assert_eq!(
-            partition_assignments_read.read().data_partitions.len(),
+            partitions_guard.read().data_partitions.len(),
             3,
             "Should have four partitions assignments"
         );
 
-        if let Some(publish_assignment) = partition_assignments_read
+        if let Some(publish_assignment) = partitions_guard
             .read()
             .data_partitions
             .get(&publish_partition)
@@ -630,7 +648,7 @@ async fn partition_expiration_and_repacking_test() {
             panic!("Should have an assignment");
         };
 
-        if let Some(submit_assignment) = partition_assignments_read
+        if let Some(submit_assignment) = partitions_guard
             .read()
             .data_partitions
             .get(&submit_partition)
@@ -649,7 +667,7 @@ async fn partition_expiration_and_repacking_test() {
             panic!("Should have an assignment");
         };
 
-        if let Some(submit_assignment) = partition_assignments_read
+        if let Some(submit_assignment) = partitions_guard
             .read()
             .data_partitions
             .get(&submit_partition2)
@@ -708,11 +726,8 @@ async fn epoch_blocks_reinitialization_test() {
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
     let mut epoch_service =
-        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
+        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
 
-    // Process genesis message directly instead of through actor system
-    // This allows us to inspect the actor's state after processing
-    let mut ctx = Context::new();
     // Initialize genesis block at height 0
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
@@ -727,7 +742,6 @@ async fn epoch_blocks_reinitialization_test() {
     debug!("{:#?}", storage_module_infos);
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
-    let pa_read_guard = epoch_service.handle(GetPartitionAssignmentsGuardMessage, &mut ctx);
 
     let msg = BlockFinalizedMessage {
         block_header: Arc::new(genesis_block.clone()),
@@ -784,14 +798,17 @@ async fn epoch_blocks_reinitialization_test() {
 
         // Send the epoch message
         new_epoch_block.height = next_epoch_height;
-        let result = epoch_service.handle(
-            NewEpochMessage {
+
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::NewEpoch {
+                new_epoch_block: new_epoch_block.clone().into(),
                 previous_epoch_block,
-                epoch_block: new_epoch_block.clone().into(),
                 commitments: Arc::new(Vec::new()),
-            },
-            &mut ctx,
-        );
+                sender,
+            })
+            .unwrap();
+        let result = rx.await.unwrap();
 
         if let Err(err) = result {
             error!("Error processing NewEpochMessage: {:?}", err);
@@ -829,7 +846,13 @@ async fn epoch_blocks_reinitialization_test() {
     //             0    1     2
     // Capacity
 
-    pa_read_guard.read().print_assignments();
+    let (sender, rx) = tokio::sync::oneshot::channel();
+    epoch_service
+        .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
+        .unwrap();
+    let partitions_guard = rx.await.unwrap();
+
+    partitions_guard.read().print_assignments();
 
     let block_index_guard = block_index_actor
         .send(GetBlockIndexGuardMessage)
@@ -844,7 +867,7 @@ async fn epoch_blocks_reinitialization_test() {
     let service_senders = ServiceSenders::new().0;
     // Get the genesis storage modules and their assigned partitions
     let mut epoch_service =
-        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
+        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
     let storage_module_infos = epoch_service
         .initialize(genesis_block, commitments)
         .unwrap();
@@ -911,14 +934,16 @@ async fn partitions_assignment_determinism_test() {
     let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
     let service_senders = ServiceSenders::new().0;
     let mut epoch_service =
-        EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
+        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
 
     let _ = epoch_service.initialize(genesis_block.clone(), commitments);
 
-    let mut ctx = Context::new();
-
-    let pa_read_guard = epoch_service.handle(GetPartitionAssignmentsGuardMessage, &mut ctx);
-    pa_read_guard.read().print_assignments();
+    let (sender, rx) = tokio::sync::oneshot::channel();
+    epoch_service
+        .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
+        .unwrap();
+    let partitions_guard = rx.await.unwrap();
+    partitions_guard.read().print_assignments();
 
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let total_epoch_messages = 6;
@@ -933,18 +958,19 @@ async fn partitions_assignment_determinism_test() {
         //(testnet_config.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
         epoch_num += 1;
         debug!("epoch block {}", new_epoch_block.height);
-        let _ = epoch_service.handle(
-            NewEpochMessage {
+        let (sender, _rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::NewEpoch {
+                new_epoch_block: new_epoch_block.clone().into(),
                 previous_epoch_block,
-                epoch_block: new_epoch_block.clone().into(),
                 commitments: Arc::new(Vec::new()),
-            },
-            &mut ctx,
-        );
+                sender,
+            })
+            .unwrap();
         previous_epoch_block = Some(new_epoch_block.clone());
     }
 
-    pa_read_guard.read().print_assignments();
+    partitions_guard.read().print_assignments();
     debug!(
         "\nAll Partitions({})\n{}",
         &epoch_service.all_active_partitions.len(),
