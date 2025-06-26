@@ -457,7 +457,7 @@ impl BlockTreeServiceInner {
             &prev_ema_snapshot,
             &parent_block.block,
             &self.consensus_config,
-        );
+        )?;
 
         // Add block based on origin (local vs peer)
         let add_result = if block.miner_address == miner_address {
@@ -1002,6 +1002,7 @@ impl BlockTreeCache {
 
         let mut prev_commitment_snapshot = arc_commitment_snapshot;
         let mut prev_ema_snapshot = ema_snapshot;
+        let mut prev_block = start_block.clone();
 
         // Process remaining blocks
         for block_height in (start + 1)..end {
@@ -1030,9 +1031,10 @@ impl BlockTreeCache {
             let arc_ema_snapshot = create_ema_snapshot_for_block(
                 &block,
                 &prev_ema_snapshot,
-                &block,
+                &prev_block,
                 &consensus_config,
-            );
+            )
+            .expect("failed to create EMA snapshot");
 
             // Update commitment snapshot with new commitments if it's not an epoch block
             if block.height % consensus_config.epoch.num_blocks_in_epoch != 0 {
@@ -1045,6 +1047,7 @@ impl BlockTreeCache {
 
             prev_commitment_snapshot = arc_commitment_snapshot.clone();
             prev_ema_snapshot = arc_ema_snapshot.clone();
+            prev_block = block.clone();
             block_tree_cache
                 .add_local_block(
                     &block,
