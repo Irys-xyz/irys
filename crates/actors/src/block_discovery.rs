@@ -2,10 +2,9 @@ use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeReadGuard, BlockTreeServiceMessage},
     block_validation::prevalidate_block,
-    epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
+    epoch_service::PartitionAssignmentsReadGuard,
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
-    GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -30,8 +29,6 @@ use tracing::{debug, error, info, Instrument as _, Span};
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
-    /// Tracks the global state of partition assignments on the protocol
-    pub epoch_service: Addr<EpochServiceActor>,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// Read only view of the block_tree
@@ -152,11 +149,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
-        let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
         let span2 = self.span.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
+        let epoch_sender = self.service_senders.epoch_service.clone();
 
         debug!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -439,15 +436,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                     let arc_commitment_txs = Arc::new(commitments);
 
-                    let commitment_state_guard = epoch_service
-                        .send(GetCommitmentStateGuardMessage)
-                        .await
-                        .map_err(|e| {
-                            BlockDiscoveryInternalError::MempoolRequestFailed(format!(
-                                "Failed to get commitment state: {}",
-                                e
-                            ))
-                        })?;
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    epoch_sender.send(crate::EpochServiceMessage::GetCommitmentStateGuard(
+                        oneshot_tx,
+                    ))?;
+
+                    let commitment_state_guard = oneshot_rx.await.unwrap();
 
                     // Get the current epoch snapshot from the parent block
                     let mut parent_snapshot = block_tree_guard
@@ -495,11 +489,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                                 ))
                             })?;
 
-                        epoch_service.do_send(NewEpochMessage {
+                        let (oneshot_tx, rx) = tokio::sync::oneshot::channel();
+                        epoch_sender.send(crate::EpochServiceMessage::NewEpoch {
+                            new_epoch_block: new_block_header.clone(),
                             previous_epoch_block,
-                            epoch_block: new_block_header.clone(),
                             commitments: arc_commitment_txs.clone(),
-                        });
+                            sender: oneshot_tx,
+                        })?;
+                        let _ = rx.await?;
                     } else {
                         // Validate and add each commitment transaction for non-epoch blocks
                         for commitment_tx in arc_commitment_txs.iter() {

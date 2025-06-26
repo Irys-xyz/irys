@@ -3,11 +3,11 @@ use crate::{
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     system_tx_generator::SystemTxGenerator,
+    EpochServiceMessage,
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
@@ -81,8 +81,6 @@ pub struct BlockProducerInner {
     pub db: DatabaseProvider,
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
-    /// Tracks the global state of partition assignments on the protocol
-    pub epoch_service: Addr<EpochServiceActor>,
     /// Mining broadcast service
     pub mining_broadcaster: Addr<BroadcastMiningService>,
     /// Reference to all the services we can send messages to
@@ -359,6 +357,7 @@ pub trait BlockProdStrategy {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
+        let epoch_service = self.inner().service_senders.epoch_service.clone();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
             warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58());
@@ -407,12 +406,14 @@ pub trait BlockProdStrategy {
         let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
 
         // Use the partition hash to figure out what ledger it belongs to
-        let ledger_id = self
-            .inner()
-            .epoch_service
-            .send(GetPartitionAssignmentMessage(solution.partition_hash))
-            .await?
-            .and_then(|pa| pa.ledger_id);
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .send(EpochServiceMessage::GetPartitionAssignment(
+                solution.partition_hash,
+                sender,
+            ))
+            .unwrap();
+        let ledger_id = rx.await?.and_then(|pa| pa.ledger_id);
 
         let poa_chunk = Base64(solution.chunk);
         let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));

@@ -3,7 +3,7 @@ use actix::Addr;
 use crate::{
     block_discovery::BlockDiscoveryActor, block_index_service::BlockIndexService,
     block_producer::BlockProducerActor, mining::PartitionMiningActor, packing::PackingActor,
-    reth_service::RethServiceActor, EpochServiceActor,
+    reth_service::RethServiceActor,
 };
 
 /// Serves as a kind of app state that can be passed into actix web to allow
@@ -15,6 +15,5 @@ pub struct ActorAddresses {
     pub block_producer: Addr<BlockProducerActor>,
     pub packing: Addr<PackingActor>,
     pub block_index: Addr<BlockIndexService>,
-    pub epoch_service: Addr<EpochServiceActor>,
     pub reth: Addr<RethServiceActor>,
 }

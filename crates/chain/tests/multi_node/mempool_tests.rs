@@ -3,7 +3,6 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
-use assert_matches::assert_matches;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_chain::IrysNodeCtx;
 use irys_reth_node_bridge::{
@@ -11,9 +10,7 @@ use irys_reth_node_bridge::{
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, LedgerChunkOffset, NodeConfig, H256,
-};
+use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 use k256::ecdsa::SigningKey;
 use reth::{
     network::{PeerInfo, Peers as _},
@@ -63,17 +60,24 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Then post the tx
     post_data_tx(&app, &tx).await;
 
+    // wait for chunks to be in CachedChunks table
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+
     // Mine some blocks to trigger block and chunk migration
     genesis_node.mine_blocks(2).await?;
 
     // Finally verify the chunks didn't get dropped
-    let c1 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(0)).await;
-    let c2 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(1)).await;
-    let c3 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(2)).await;
-    assert_matches!(c1, Some(_));
-    assert_matches!(c2, Some(_));
-    assert_matches!(c3, Some(_));
+    genesis_node
+        .wait_for_chunk(&app, DataLedger::Submit, 0, 5)
+        .await?;
+    genesis_node
+        .wait_for_chunk(&app, DataLedger::Submit, 1, 5)
+        .await?;
+    genesis_node
+        .wait_for_chunk(&app, DataLedger::Submit, 2, 5)
+        .await?;
 
+    // teardown
     genesis_node.stop().await;
 
     Ok(())
