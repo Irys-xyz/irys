@@ -193,15 +193,17 @@ pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        let read = self.inner().block_tree_guard.read();
-        let (canonical_blocks, _not_onchain_count) = read.get_canonical_chain();
-        let prev = canonical_blocks
-            .last()
-            .expect("canonical chain must contain at least 1 block");
-        let ema_snapshot = read
-            .get_ema_snapshot(&prev.block_hash)
-            .expect("every block must contain an EMA snapshot");
-        drop(read);
+        let (prev, ema_snapshot) = {
+            let read = self.inner().block_tree_guard.read();
+            let (canonical_blocks, _not_onchain_count) = read.get_canonical_chain();
+            let prev = canonical_blocks
+                .last()
+                .expect("canonical chain must contain at least 1 block");
+            let ema_snapshot = read
+                .get_ema_snapshot(&prev.block_hash)
+                .expect("every block must contain an EMA snapshot");
+            (prev.clone(), ema_snapshot)
+        };
         info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
 
         let (tx_prev, rx_prev) = oneshot::channel();

@@ -229,7 +229,7 @@ impl BlockTreeServiceInner {
                 commitment_txs,
                 response,
             } => {
-                let result = self.on_block_prevalidated(block, commitment_txs).await;
+                let result = self.on_block_prevalidated(block, commitment_txs);
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::BlockValidationFinished {
@@ -409,7 +409,7 @@ impl BlockTreeServiceInner {
     }
 
     /// Handles pre-validated blocks received from the validation service.
-    async fn on_block_prevalidated(
+    fn on_block_prevalidated(
         &mut self,
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
