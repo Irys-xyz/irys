@@ -43,8 +43,6 @@ use ema_snapshot::{
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-#[cfg(test)]
-use test_utils::dummy_ema_snapshot;
 
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
@@ -999,7 +997,7 @@ impl BlockTreeCache {
 
         let mut prev_commitment_snapshot = arc_commitment_snapshot;
         let mut prev_ema_snapshot = ema_snapshot;
-        let mut prev_block = start_block.clone();
+        let mut prev_block = start_block;
 
         // Process remaining blocks
         for block_height in (start + 1)..end {

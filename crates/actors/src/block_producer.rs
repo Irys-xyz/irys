@@ -5,7 +5,6 @@ use crate::{
         BlockTreeReadGuard,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
@@ -448,7 +447,7 @@ pub trait BlockProdStrategy {
         steps.push(solution.seed.0);
 
         let ema_irys_price = self
-            .get_ema_price(&prev_block_header, perv_block_ema_snapshot)
+            .get_ema_price(prev_block_header, perv_block_ema_snapshot)
             .await?;
 
         // Update the last_epoch_hash field, which tracks the most recent epoch boundary

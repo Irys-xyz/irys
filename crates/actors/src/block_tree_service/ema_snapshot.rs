@@ -363,7 +363,7 @@ mod iterative_snapshot_tests {
     use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
     use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+    use rust_decimal_macros::dec;
 
     /// Helper function to calculate deterministic price (matching test_utils::deterministic_price)
     fn deterministic_price(height: u64) -> IrysTokenPrice {
@@ -542,7 +542,7 @@ use rust_decimal_macros::dec;
             .unwrap();
 
         assert_eq!(
-            ema_block.ema, 
+            ema_block.ema,
             expected_ema,
             "EMA should be calculated using current interval's EMA for blocks in first two intervals"
         );
@@ -561,7 +561,6 @@ use rust_decimal_macros::dec;
     #[case(28)]
     #[case(27)]
     fn oracle_price_gets_capped(#[case] max_height: u64) {
-
         // Setup
         let config = ConsensusConfig {
             ema: EmaConfig {
@@ -771,7 +770,8 @@ mod iterative_vs_history_tests {
         // Start with genesis snapshot
         let mut current_snapshot = EmaSnapshot::genesis(&config);
         let mut blocks = Vec::new();
-        let mut snapshots = vec![Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone())];
+        let mut snapshots =
+            vec![Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone())];
 
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -790,11 +790,14 @@ mod iterative_vs_history_tests {
             let parent_block = &blocks[blocks.len() - 1];
 
             // Create snapshot for this block using iterative approach
-            current_snapshot = create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
-                .unwrap();
+            current_snapshot =
+                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
+                    .unwrap();
 
             blocks.push(new_block);
-            snapshots.push(Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone()));
+            snapshots.push(
+                Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone()),
+            );
         }
 
         // Now verify that create_ema_snapshot_from_chain_history produces the same results
@@ -804,12 +807,9 @@ mod iterative_vs_history_tests {
             let previous_blocks = &test_blocks[0..test_blocks.len() - 1];
 
             // Create snapshot using chain history
-            let history_snapshot = create_ema_snapshot_from_chain_history(
-                latest_block,
-                previous_blocks,
-                &config,
-            )
-            .unwrap();
+            let history_snapshot =
+                create_ema_snapshot_from_chain_history(latest_block, previous_blocks, &config)
+                    .unwrap();
 
             // Get the iterative snapshot for this height
             let iterative_snapshot = &snapshots[test_height as usize];
