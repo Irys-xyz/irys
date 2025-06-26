@@ -239,7 +239,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .expect("expect setting mining false on peer2");
 
     //
-    // TEST CASE: check genesis blocks match across the threee nodes
+    // TEST CASE: check genesis blocks match across the theee nodes
     //
     {
         // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
