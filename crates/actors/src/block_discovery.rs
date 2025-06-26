@@ -84,6 +84,8 @@ pub enum BlockDiscoveryInternalError {
     DatabaseError(eyre::Report),
     #[error("Failed to send message to the BlockDiscovery service: {0}")]
     MailboxError(#[from] actix::MailboxError),
+    #[error("Failed to send message to the epoch service: {0}")]
+    EpochRequestFailed(String),
 }
 
 #[async_trait::async_trait]
@@ -439,7 +441,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     epoch_sender.send(crate::EpochServiceMessage::GetCommitmentStateGuard(
                         oneshot_tx,
-                    ))?;
+                    )).map_err(|e| {
+                        BlockDiscoveryInternalError::EpochRequestFailed(format!(
+                            "Failed to send GetCommitmentStateGuard message: {}",
+                            e
+                        ))
+                    })?;
 
                     let commitment_state_guard = oneshot_rx.await.unwrap();
 
@@ -495,8 +502,18 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             previous_epoch_block,
                             commitments: arc_commitment_txs.clone(),
                             sender: oneshot_tx,
+                        }).map_err(|e| {
+                            BlockDiscoveryInternalError::EpochRequestFailed(format!(
+                                "Failed to send NewEpoch message: {}",
+                                e
+                            ))
                         })?;
-                        let _ = rx.await?;
+                        let _ = rx.await.map_err(|e| {
+                            BlockDiscoveryInternalError::EpochRequestFailed(format!(
+                                "Failed to receive response for NewEpoch: {}",
+                                e
+                            ))
+                        })?;
                     } else {
                         // Validate and add each commitment transaction for non-epoch blocks
                         for commitment_tx in arc_commitment_txs.iter() {
