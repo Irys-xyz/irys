@@ -32,7 +32,6 @@ pub struct EmaSnapshot {
     pub ema_price_1_interval_ago: IrysTokenPrice,
 }
 
-
 #[derive(Debug)]
 pub struct EmaBlock {
     pub range_adjusted_oracle_price: IrysTokenPrice,
@@ -484,60 +483,57 @@ mod iterative_snapshot_tests {
         // Start with genesis snapshot
         let mut current_snapshot = EmaSnapshot::genesis(&config);
         let mut blocks = Vec::new();
-        
+
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         genesis_block.oracle_irys_price = oracle_price_for_height(0);
         genesis_block.ema_irys_price = ema_price_for_height(0);
         blocks.push(genesis_block);
-        
+
         // Build chain up to max_height
         for height in 1..=max_height {
             let mut new_block = IrysBlockHeader::new_mock_header();
             new_block.height = height;
             new_block.oracle_irys_price = oracle_price_for_height(height);
             new_block.ema_irys_price = ema_price_for_height(height);
-            
+
             let parent_block = &blocks[blocks.len() - 1];
-            
+
             // Create snapshot for this block
-            current_snapshot = create_ema_snapshot_for_block(
-                &new_block, 
-                parent_block, 
-                &current_snapshot, 
-                &config
-            ).unwrap();
-            
+            current_snapshot =
+                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
+                    .unwrap();
+
             blocks.push(new_block);
         }
-        
+
         // Test calculating EMA for the next block
         let parent_block = &blocks[blocks.len() - 1];
         let new_oracle_price = oracle_price_for_height(max_height + 1);
-        
+
         let ema_block = current_snapshot.calculate_ema_for_new_block(
             parent_block,
             new_oracle_price,
             config.token_price_safe_range,
             config.ema.price_adjustment_interval,
         );
-        
+
         // Verify the EMA was calculated using the current interval's EMA
         let expected_ema = new_oracle_price
             .calculate_ema(
                 config.ema.price_adjustment_interval,
-                current_snapshot.ema_price_current_interval
+                current_snapshot.ema_price_current_interval,
             )
             .unwrap();
-            
+
         assert_eq!(
             ema_block.ema, 
             expected_ema,
             "EMA should be calculated using current interval's EMA for blocks in first two intervals"
         );
     }
-    
+
     #[rstest]
     #[case(5)]
     #[case(8)]
@@ -552,7 +548,7 @@ mod iterative_snapshot_tests {
     #[case(27)]
     fn oracle_price_gets_capped(#[case] max_height: u64) {
         use rust_decimal_macros::dec;
-        
+
         // Setup
         let config = ConsensusConfig {
             ema: EmaConfig {
@@ -565,44 +561,45 @@ mod iterative_snapshot_tests {
         // Build chain up to max_height
         let mut current_snapshot = EmaSnapshot::genesis(&config);
         let mut blocks = Vec::new();
-        
+
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         genesis_block.oracle_irys_price = oracle_price_for_height(0);
         genesis_block.ema_irys_price = ema_price_for_height(0);
         blocks.push(genesis_block);
-        
+
         // Build chain
         for height in 1..=max_height {
             let mut new_block = IrysBlockHeader::new_mock_header();
             new_block.height = height;
             new_block.oracle_irys_price = oracle_price_for_height(height);
             new_block.ema_irys_price = ema_price_for_height(height);
-            
+
             let parent_block = &blocks[blocks.len() - 1];
-            
-            current_snapshot = create_ema_snapshot_for_block(
-                &new_block,
-                parent_block,
-                &current_snapshot,
-                &config
-            ).unwrap();
-            
+
+            current_snapshot =
+                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
+                    .unwrap();
+
             blocks.push(new_block);
         }
-        
+
         // Get the last block's oracle price
         let parent_block = &blocks[blocks.len() - 1];
         let price_oracle_latest = parent_block.oracle_irys_price;
-        
+
         // Create prices outside the safe range (10.1% above and below)
         let mul_outside_of_range = Amount::percentage(dec!(0.101)).unwrap();
         let oracle_prices = [
-            price_oracle_latest.add_multiplier(mul_outside_of_range).unwrap(),
-            price_oracle_latest.sub_multiplier(mul_outside_of_range).unwrap(),
+            price_oracle_latest
+                .add_multiplier(mul_outside_of_range)
+                .unwrap(),
+            price_oracle_latest
+                .sub_multiplier(mul_outside_of_range)
+                .unwrap(),
         ];
-        
+
         // Test both prices (too high and too low)
         for oracle_price in oracle_prices {
             let ema_block = current_snapshot.calculate_ema_for_new_block(
@@ -611,14 +608,13 @@ mod iterative_snapshot_tests {
                 config.token_price_safe_range,
                 config.ema.price_adjustment_interval,
             );
-            
+
             // Verify price was capped
             assert_ne!(
-                ema_block.range_adjusted_oracle_price,
-                oracle_price,
+                ema_block.range_adjusted_oracle_price, oracle_price,
                 "Oracle price outside safe range should be capped"
             );
-            
+
             // Verify the capped price is valid (within safe range)
             assert!(
                 EmaSnapshot::oracle_price_is_valid(
@@ -628,7 +624,7 @@ mod iterative_snapshot_tests {
                 ),
                 "Capped oracle price should be within safe range"
             );
-            
+
             // Verify the original price was invalid
             assert!(
                 !EmaSnapshot::oracle_price_is_valid(
@@ -640,9 +636,6 @@ mod iterative_snapshot_tests {
             );
         }
     }
-
-
-    
 
     #[rstest]
     #[case(28, 19, 18)]
@@ -664,51 +657,49 @@ mod iterative_snapshot_tests {
         // Build chain up to max_height
         let mut current_snapshot = EmaSnapshot::genesis(&config);
         let mut blocks = Vec::new();
-        
+
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         genesis_block.oracle_irys_price = oracle_price_for_height(0);
         genesis_block.ema_irys_price = ema_price_for_height(0);
         blocks.push(genesis_block);
-        
+
         // Build chain
         for height in 1..=max_height {
             let mut new_block = IrysBlockHeader::new_mock_header();
             new_block.height = height;
             new_block.oracle_irys_price = oracle_price_for_height(height);
             new_block.ema_irys_price = ema_price_for_height(height);
-            
+
             let parent_block = &blocks[blocks.len() - 1];
-            
-            current_snapshot = create_ema_snapshot_for_block(
-                &new_block,
-                parent_block,
-                &current_snapshot,
-                &config
-            ).unwrap();
-            
+
+            current_snapshot =
+                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
+                    .unwrap();
+
             blocks.push(new_block);
         }
-        
+
         // Calculate EMA for the next block (which should be an EMA recalculation block)
         let new_block_height = max_height + 1;
         let parent_block = &blocks[blocks.len() - 1];
         let new_oracle_price = oracle_price_for_height(new_block_height);
-        
+
         // Verify this is an EMA recalculation block
         assert!(
             is_ema_recalculation_block(new_block_height, config.ema.price_adjustment_interval),
-            "Block {} should be an EMA recalculation block", new_block_height
+            "Block {} should be an EMA recalculation block",
+            new_block_height
         );
-        
+
         let ema_block = current_snapshot.calculate_ema_for_new_block(
             parent_block,
             new_oracle_price,
             config.token_price_safe_range,
             config.ema.price_adjustment_interval,
         );
-        
+
         // Calculate expected EMA using the formula:
         // oracle_price[prev_ema_predecessor_height].calculate_ema(interval, ema_price[prev_ema_height])
         let expected_oracle_price = oracle_price_for_height(prev_ema_predecessor_height);
@@ -716,7 +707,7 @@ mod iterative_snapshot_tests {
         let expected_ema = expected_oracle_price
             .calculate_ema(config.ema.price_adjustment_interval, expected_prev_ema)
             .unwrap();
-        
+
         assert_eq!(
             ema_block.ema,
             expected_ema,
