@@ -37,7 +37,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     // retrieve block_migration_depth for use later
     let mut consensus = node.cfg.consensus.clone();
-    let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.try_into()?;
+    let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
