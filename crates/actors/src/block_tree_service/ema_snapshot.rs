@@ -477,41 +477,68 @@ mod iterative_snapshot_tests {
     #[case(15)]
     #[case(19)]
     fn first_and_second_adjustment_period(#[case] max_height: u64) {
-        // prepare
-        let price_adjustment_interval = 10;
-        let (ctx, rxs) = TestCtx::setup(
-            max_height,
-            Config::new(NodeConfig {
-                consensus: ConsensusOptions::Custom(ConsensusConfig {
-                    ema: EmaConfig {
-                        price_adjustment_interval,
-                    },
-                    ..ConsensusConfig::testnet()
-                }),
-                ..NodeConfig::testnet()
-            }),
+        // Setup
+        let config = ConsensusConfig {
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            ..ConsensusConfig::testnet()
+        };
+
+        // Start with genesis snapshot
+        let mut current_snapshot = EmaSnapshot::genesis(&config);
+        let mut blocks = Vec::new();
+        
+        // Create genesis block
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
+        genesis_block.height = 0;
+        genesis_block.oracle_irys_price = oracle_price_for_height(0);
+        genesis_block.ema_irys_price = ema_price_for_height(0);
+        blocks.push(genesis_block);
+        
+        // Build chain up to max_height
+        for height in 1..=max_height {
+            let mut new_block = IrysBlockHeader::new_mock_header();
+            new_block.height = height;
+            new_block.oracle_irys_price = oracle_price_for_height(height);
+            new_block.ema_irys_price = ema_price_for_height(height);
+            
+            let parent_block = &blocks[blocks.len() - 1];
+            
+            // Create snapshot for this block
+            current_snapshot = create_ema_snapshot_for_block(
+                &new_block, 
+                parent_block, 
+                &current_snapshot, 
+                &config
+            ).unwrap();
+            
+            blocks.push(new_block);
+        }
+        
+        // Test calculating EMA for the next block
+        let parent_block = &blocks[blocks.len() - 1];
+        let new_oracle_price = oracle_price_for_height(max_height + 1);
+        
+        let ema_block = current_snapshot.calculate_ema_for_new_block(
+            parent_block,
+            new_oracle_price,
+            config.token_price_safe_range,
+            config.ema.price_adjustment_interval,
         );
-        spawn_ema(&ctx, rxs.ema);
-
-        let new_oracle_price = deterministic_price(max_height);
-
-        // action
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.service_senders
-            .ema
-            .send(EmaServiceMessage::GetPriceDataForNewBlock {
-                height_of_new_block: max_height + 1,
-                response: tx,
-                oracle_price: new_oracle_price,
-            })
+        
+        // Verify the EMA was calculated using the current interval's EMA
+        let expected_ema = new_oracle_price
+            .calculate_ema(
+                config.ema.price_adjustment_interval,
+                current_snapshot.ema_price_current_interval
+            )
             .unwrap();
-        let ema_response = rx.await.unwrap().unwrap().ema;
-
-        // assert
-        let prev_price = ctx.prices.last().unwrap().clone();
-        let ema_computed = new_oracle_price
-            .calculate_ema(price_adjustment_interval, prev_price.ema)
-            .unwrap();
-        assert_eq!(ema_computed, ema_response);
+            
+        assert_eq!(
+            ema_block.ema, 
+            expected_ema,
+            "EMA should be calculated using current interval's EMA for blocks in first two intervals"
+        );
     }
 }
