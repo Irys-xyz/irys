@@ -128,7 +128,7 @@ impl BlockCache {
             .cloned()
     }
 
-    async fn mark_requested_block(&self, block_hash: BlockHash) {
+    async fn mark_block_as_requested(&self, block_hash: BlockHash) {
         self.inner.write().await.requested_blocks.insert(block_hash);
     }
 
@@ -405,7 +405,7 @@ where
         &self,
         block_hash: BlockHash,
     ) -> Result<(), BlockPoolError> {
-        self.blocks_cache.mark_requested_block(block_hash).await;
+        self.blocks_cache.mark_block_as_requested(block_hash).await;
         match self
             .peer_list
             .request_block_from_the_network(block_hash)
