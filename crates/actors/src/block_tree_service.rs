@@ -448,14 +448,11 @@ impl BlockTreeServiceInner {
             &self.commitment_state_guard,
         );
 
-        // Get previous block's EMA snapshot
-        let prev_ema_snapshot = parent_block.ema_snapshot.clone();
-
         // Create ema snapshot for this block
         let ema_snapshot = create_ema_snapshot_for_block(
             &block,
-            &prev_ema_snapshot,
             &parent_block.block,
+            &parent_block.ema_snapshot,
             &self.consensus_config,
         )?;
 
@@ -1030,8 +1027,8 @@ impl BlockTreeCache {
 
             let arc_ema_snapshot = create_ema_snapshot_for_block(
                 &block,
-                &prev_ema_snapshot,
                 &prev_block,
+                &prev_ema_snapshot,
                 &consensus_config,
             )
             .expect("failed to create EMA snapshot");
@@ -1523,7 +1520,7 @@ impl BlockTreeCache {
             .get(&self.tip)
             .expect("tip should exist in blocks")
             .ema_snapshot
-            .ema_for_pricing
+            .ema_price_2_intervals_ago
     }
 
     /// Get EMA cache for the canonical chain tip
