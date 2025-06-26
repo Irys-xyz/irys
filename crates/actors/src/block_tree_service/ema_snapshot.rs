@@ -19,13 +19,17 @@ pub struct EmaSnapshot {
     /// example EMA calculation on block 29:
     /// 1. take the registered Oracle Irys price in block 18 (this value)
     ///    and the stored EMA Irys price in block 19.
-    pub oracle_price_for_ema_predecessor: IrysTokenPrice,
+    pub oracle_price_for_current_ema_predecessor: IrysTokenPrice,
 
     /// Latest EMA value calculated at this block
     /// example EMA calculation on block 29:
     /// 1. take the registered Oracle Irys price in block 18
     ///    and the stored EMA Irys price in block 19 (this value).
-    pub ema_price_last_interval: IrysTokenPrice,
+    pub ema_price_current_interval: IrysTokenPrice,
+
+    /// EMA from the previous interval (1 interval ago)
+    /// This is needed to properly update ema_price_2_intervals_ago when crossing pricing boundaries
+    pub ema_price_1_interval_ago: IrysTokenPrice,
 }
 
 // pub struct EmaInfo {
@@ -45,8 +49,9 @@ impl EmaSnapshot {
         Arc::new(Self {
             ema_price_2_intervals_ago: consensus_config.genesis_price,
             oracle_price_parent_block: consensus_config.genesis_price,
-            oracle_price_for_ema_predecessor: consensus_config.genesis_price,
-            ema_price_last_interval: consensus_config.genesis_price,
+            oracle_price_for_current_ema_predecessor: consensus_config.genesis_price,
+            ema_price_current_interval: consensus_config.genesis_price,
+            ema_price_1_interval_ago: consensus_config.genesis_price,
         })
     }
 
@@ -76,7 +81,7 @@ impl EmaSnapshot {
             oracle_price
         } else {
             // Use oracle price from the predecessor of the latest EMA block
-            parent_snapshot.oracle_price_for_ema_predecessor
+            parent_snapshot.oracle_price_for_current_ema_predecessor
         };
         let oracle_price_to_use = bound_in_min_max_range(
             oracle_price_to_use,
@@ -85,10 +90,13 @@ impl EmaSnapshot {
         );
 
         let ema = oracle_price_to_use
-            .calculate_ema(blocks_in_interval, parent_snapshot.ema_price_last_interval)
+            .calculate_ema(
+                blocks_in_interval,
+                parent_snapshot.ema_price_current_interval,
+            )
             .unwrap_or_else(|err| {
                 tracing::warn!(?err, "price overflow, using previous EMA price");
-                parent_snapshot.ema_price_last_interval
+                parent_snapshot.ema_price_current_interval
             });
         EmaBlock {
             range_adjusted_oracle_price: oracle_price_to_use,
@@ -116,21 +124,47 @@ pub fn create_ema_snapshot_for_block(
 ) -> eyre::Result<Arc<EmaSnapshot>> {
     let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
 
-    if is_ema_recalculation_block(new_block.height, blocks_in_interval) {
-        return Ok(Arc::new(EmaSnapshot {
-            ema_price_2_intervals_ago: parent_ema_snapshot.ema_price_last_interval,
-            oracle_price_parent_block: parent_block.oracle_irys_price,
-            oracle_price_for_ema_predecessor: parent_block.oracle_irys_price,
-            ema_price_last_interval: new_block.ema_irys_price,
-        }));
+    // Check if we're at an EMA boundary where we shift intervals
+    // This happens at blocks 10, 20, 30, etc.
+    let crossing_interval_boundary =
+        new_block.height % blocks_in_interval == 0 && new_block.height > 0;
+
+    // Update the interval tracking
+    let (ema_price_2_intervals_ago, ema_price_1_interval_ago) = if crossing_interval_boundary {
+        // Shift the intervals:
+        // - What was 1 interval ago becomes 2 intervals ago
+        // - What was the last interval becomes 1 interval ago
+        (
+            parent_ema_snapshot.ema_price_1_interval_ago,
+            parent_ema_snapshot.ema_price_current_interval,
+        )
     } else {
-        return Ok(Arc::new(EmaSnapshot {
-            ema_price_2_intervals_ago: parent_ema_snapshot.ema_price_2_intervals_ago,
-            oracle_price_parent_block: parent_block.oracle_irys_price,
-            oracle_price_for_ema_predecessor: parent_ema_snapshot.oracle_price_for_ema_predecessor,
-            ema_price_last_interval: parent_ema_snapshot.ema_price_last_interval,
-        }));
+        // Keep the same interval tracking
+        (
+            parent_ema_snapshot.ema_price_2_intervals_ago,
+            parent_ema_snapshot.ema_price_1_interval_ago,
+        )
     };
+
+    // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
+    if is_ema_recalculation_block(new_block.height, blocks_in_interval) {
+        Ok(Arc::new(EmaSnapshot {
+            ema_price_2_intervals_ago,
+            ema_price_1_interval_ago,
+            oracle_price_parent_block: parent_block.oracle_irys_price,
+            oracle_price_for_current_ema_predecessor: parent_block.oracle_irys_price,
+            ema_price_current_interval: new_block.ema_irys_price,
+        }))
+    } else {
+        Ok(Arc::new(EmaSnapshot {
+            ema_price_2_intervals_ago,
+            ema_price_1_interval_ago,
+            ema_price_current_interval: parent_ema_snapshot.ema_price_current_interval,
+            oracle_price_parent_block: parent_block.oracle_irys_price,
+            oracle_price_for_current_ema_predecessor: parent_ema_snapshot
+                .oracle_price_for_current_ema_predecessor,
+        }))
+    }
 }
 
 /// Cap the provided price value to fit within the max / min acceptable range.
@@ -199,15 +233,23 @@ pub fn create_ema_snapshot_from_chain_history(
         Result::<_, eyre::Report>::Ok(block)
     };
 
+    // Calculate the height for 1 interval ago
+    let height_1_interval_ago = if latest_block_height >= blocks_in_interval {
+        previous_ema_recalculation_block_height(latest_block_height, blocks_in_interval)
+    } else {
+        0
+    };
+
     // Calculate new EMA if this is a recalculation block
     Ok(Arc::new(EmaSnapshot {
         ema_price_2_intervals_ago: get_block_with_height(height_pricing_block)?.ema_irys_price,
+        ema_price_1_interval_ago: get_block_with_height(height_1_interval_ago)?.ema_irys_price,
         oracle_price_parent_block: get_block_with_height(height_parent_block)?.oracle_irys_price,
-        oracle_price_for_ema_predecessor: get_block_with_height(
+        oracle_price_for_current_ema_predecessor: get_block_with_height(
             height_latest_ema_interval_predecessor,
         )?
         .oracle_irys_price,
-        ema_price_last_interval: get_block_with_height(height_latest_ema_block)?.ema_irys_price,
+        ema_price_current_interval: get_block_with_height(height_latest_ema_block)?.ema_irys_price,
     }))
 }
 
@@ -286,14 +328,14 @@ mod snapshot_from_history {
         );
 
         assert_eq!(
-            ema_snapshot.oracle_price_for_ema_predecessor,
+            ema_snapshot.oracle_price_for_current_ema_predecessor,
             oracle_price_for_height(height_current_ema_predecessor),
             "oracle_price_for_ema_predecessor should match oracle price from block at height {}",
             height_current_ema_predecessor
         );
 
         assert_eq!(
-            ema_snapshot.ema_price_last_interval,
+            ema_snapshot.ema_price_current_interval,
             ema_price_for_height(height_current_ema),
             "ema_price_last_interval should match EMA price from block at height {}",
             height_current_ema
