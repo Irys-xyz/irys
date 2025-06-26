@@ -1,12 +1,10 @@
-use eyre::{ensure, OptionExt, Result};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt};
+use eyre::Result;
 use irys_types::{
     block_height_to_use_for_price, is_ema_recalculation_block,
     previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
-    ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTokenPrice,
+    ConsensusConfig, IrysBlockHeader, IrysTokenPrice,
 };
-use reth::rpc::server_types::eth::gas_oracle;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
@@ -216,8 +214,19 @@ pub fn create_ema_snapshot_from_chain_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_tree_service::ChainState;
     use rstest::rstest;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    /// Helper function to calculate oracle price for a given block height
+    fn oracle_price_for_height(height: u64) -> IrysTokenPrice {
+        Amount::token(dec!(1.0) + dec!(0.1) * Decimal::from(height)).expect("Valid price")
+    }
+
+    /// Helper function to calculate EMA price for a given block height
+    fn ema_price_for_height(height: u64) -> IrysTokenPrice {
+        Amount::token(dec!(2.0) + dec!(0.2) * Decimal::from(height)).expect("Valid price")
+    }
 
     #[test_log::test(tokio::test)]
     #[rstest]
@@ -246,12 +255,12 @@ mod tests {
         };
         let mut blocks = (0..=height_latest_block)
             .map(|height| {
-                let block = IrysBlockHeader {
-                    height,
-                    ..IrysBlockHeader::new_mock_header()
-                };
-
-                (block)
+                let mut block = IrysBlockHeader::new_mock_header();
+                block.height = height;
+                // Set unique prices for each block to properly test the snapshot logic
+                block.oracle_irys_price = oracle_price_for_height(height);
+                block.ema_irys_price = ema_price_for_height(height);
+                block
             })
             .collect::<Vec<_>>();
         let latest_block = blocks.pop().unwrap();
@@ -263,5 +272,31 @@ mod tests {
                 .unwrap();
 
         // assert all the fields on ema snapshot
+        assert_eq!(
+            ema_snapshot.ema_price_2_intervals_ago,
+            ema_price_for_height(height_for_pricing),
+            "ema_price_2_intervals_ago should match EMA price from block at height {}",
+            height_for_pricing
+        );
+
+        assert_eq!(
+            ema_snapshot.oracle_price_parent_block,
+            oracle_price_for_height(height_latest_block.saturating_sub(1)),
+            "oracle_price_parent_block should match oracle price from parent block"
+        );
+
+        assert_eq!(
+            ema_snapshot.oracle_price_for_ema_predecessor,
+            oracle_price_for_height(height_current_ema_predecessor),
+            "oracle_price_for_ema_predecessor should match oracle price from block at height {}",
+            height_current_ema_predecessor
+        );
+
+        assert_eq!(
+            ema_snapshot.ema_price_last_interval,
+            ema_price_for_height(height_current_ema),
+            "ema_price_last_interval should match EMA price from block at height {}",
+            height_current_ema
+        );
     }
 }
