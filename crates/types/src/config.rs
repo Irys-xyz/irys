@@ -541,7 +541,7 @@ impl ConsensusConfig {
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
-            chunk_migration_depth: 6,
+            block_migration_depth: 6,
             block_cache_depth: 50,
             epoch: EpochConfig {
                 capacity_scalar: 100,

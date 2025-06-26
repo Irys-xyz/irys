@@ -18,9 +18,9 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     let ctx = IrysNodeTest::default_async().start().await;
 
-    // retrieve chunk_migration_depth for use later
+    // retrieve block_migration_depth for use later
     let mut consensus = ctx.cfg.consensus.clone();
-    let chunk_migration_depth = consensus.get_mut().chunk_migration_depth;
+    let block_migration_depth = consensus.get_mut().block_migration_depth;
 
     let address = format!(
         "http://127.0.0.1:{}",
@@ -59,7 +59,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
     assert_eq!(json_response.block_index_height, 0);
 
     // advance enough blocks to cause 1 block to migrate from mempool to index
-    ctx.mine_blocks(chunk_migration_depth as usize + 1).await?;
+    ctx.mine_blocks(block_migration_depth as usize + 1).await?;
 
     // wait for 1 block in the index
     if let Err(e) = ctx.wait_until_height_on_chain(1, 10).await {
