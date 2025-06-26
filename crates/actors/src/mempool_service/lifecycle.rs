@@ -1,10 +1,10 @@
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
-use eyre::OptionExt;
-use irys_database::insert_commitment_tx;
+use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
-use irys_types::{DataLedger, IrysBlockHeader, IrysTransactionId, H256};
+use irys_database::{insert_commitment_tx, SystemLedger};
+use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256};
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -87,7 +87,9 @@ impl Inner {
         // 6. Similar work with commitment transactions (stake and pledge)
         //    - This may require adding some features to the commitment_snapshot so that stake/pledge tx can be rolled back and new ones applied
 
-        self.handle_data_tx_reorg(event).await?;
+        self.handle_data_tx_reorg(event.clone()).await?;
+
+        self.handle_commitment_tx_reorg(event).await?;
 
         tracing::info!("Reorg handled, new tip: {}", &new_tip);
         Ok(())
@@ -98,7 +100,89 @@ impl Inner {
             old_fork, new_fork, ..
         } = event;
 
-        // reduce down the sytem tx ledgers
+        // reduce down the system tx ledgers (or well, ledger)
+
+        let reduce_system_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<
+            HashMap<SystemLedger, HashSet<IrysTransactionId>>,
+        > {
+            let mut hm = HashMap::<SystemLedger, HashSet<IrysTransactionId>>::new();
+            for ledger in SystemLedger::ALL {
+                // blocks can not have a system ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
+                hm.insert(ledger, HashSet::new());
+            }
+            for block in fork.iter().rev() {
+                for ledger in block.system_ledgers.iter() {
+                    // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
+                    hm.entry(ledger.ledger_id.try_into()?)
+                        .or_default()
+                        .extend(ledger.tx_ids.iter());
+                }
+            }
+            Ok(hm)
+        };
+
+        let old_fork_red = reduce_system_ledgers(&old_fork)?;
+        let new_fork_red = reduce_system_ledgers(&new_fork)?;
+
+        // diff the two
+        let mut orphaned_system_txs: HashMap<SystemLedger, Vec<IrysTransactionId>> = HashMap::new();
+
+        for ledger in SystemLedger::ALL {
+            let new_txs = new_fork_red.get(&ledger).expect("should be populated");
+            let old_txs = old_fork_red.get(&ledger).expect("should be populated");
+            // get the txs in old that are not in new (orphans)
+            // add them to the orphaned map
+            orphaned_system_txs
+                .entry(ledger)
+                .or_default()
+                .extend(old_txs.difference(new_txs));
+        }
+
+        // resubmit orphaned system txs
+        // as we reduce the fork blocks down in reverse order (oldest -> newest) and preserve the ordering,
+        // we shouldn't run into any issues resubmitting them in this order, as stakes should come before pledges
+        // (and we have an out-of-order commitment cache anyway)
+
+        // since these are orphaned from our ""current"" fork, they should be accessible (right?)
+        // extract orphaned from commitment snapshot
+        let mut orphaned_full_commitment_txs =
+            HashMap::<IrysTransactionId, CommitmentTransaction>::new();
+        let orphaned_commitment_tx_ids = orphaned_system_txs
+            .get(&SystemLedger::Commitment)
+            .ok_or_eyre("Should be populated")?
+            .clone();
+
+        for block in old_fork.iter().rev() {
+            let entry = self
+                .block_tree_read_guard
+                .read()
+                .get_commitment_snapshot(&block.block_hash)?;
+            let all_commitments = entry.get_all_commitments();
+
+            // extract all the commitment txs
+            // TODO: change this so the above orphan code creates a block height/hash -> orphan tx list mapping
+            // so this is more efficient & so we can do block-by-block asserts
+            for orphan_commitment_tx_id in orphaned_commitment_tx_ids.iter() {
+                if let Some(commitment_tx) = all_commitments
+                    .iter()
+                    .find(|c| c.id == *orphan_commitment_tx_id)
+                {
+                    orphaned_full_commitment_txs
+                        .insert(*orphan_commitment_tx_id, commitment_tx.clone());
+                };
+            }
+        }
+        assert_eq!(
+            orphaned_full_commitment_txs.iter().len(),
+            orphaned_commitment_tx_ids.iter().len()
+        );
+
+        // resubmit each commitment tx
+        for (_, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
+            self.handle_ingress_commitment_tx_message(orphaned_full_commitment_tx)
+                .await
+                .unwrap(); // TODO: remove unwrap
+        }
 
         Ok(())
     }
@@ -118,7 +202,7 @@ impl Inner {
                 // blocks can not have a data ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
                 hm.insert(ledger, HashSet::new());
             }
-            for block in fork.iter() {
+            for block in fork.iter().rev() {
                 for ledger in block.data_ledgers.iter() {
                     // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
                     hm.entry(ledger.ledger_id.try_into()?)
@@ -222,7 +306,7 @@ impl Inner {
 
         let full_published_txs = self.handle_get_data_tx_message(published_in_both).await;
         for tx in full_published_txs {
-            let tx = tx.ok_or_eyre("Unable to get tx that was promoted in both forks")?;
+            let _tx = tx.ok_or_eyre("Unable to get tx that was promoted in both forks")?;
             // TODO: How do we get the "ingress proofs from the canonical fork"
         }
 

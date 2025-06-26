@@ -320,7 +320,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 if let Ok(entry) = entry {
                     let mut txids = H256List::new();
-                    let commitments = entry.get_epoch_commitments();
+                    let commitments = entry.get_all_commitments();
 
                     // Collect all commitment transaction IDs from the epoch
                     for tx in commitments.iter() {

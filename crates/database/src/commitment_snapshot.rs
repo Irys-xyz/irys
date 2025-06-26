@@ -189,7 +189,7 @@ impl CommitmentSnapshot {
     }
 
     /// Collects all commitment transactions from the snapshot for epoch processing
-    pub fn get_epoch_commitments(&self) -> Vec<CommitmentTransaction> {
+    pub fn get_all_commitments(&self) -> Vec<CommitmentTransaction> {
         let mut commitment_tx: Vec<CommitmentTransaction> = Vec::new();
 
         // First collect all stake transactions in address order
