@@ -302,24 +302,29 @@ mod snapshot_from_history {
 }
 
 #[cfg(test)]
-mod test {
+mod iterative_snapshot_tests {
     use super::*;
-    use crate::block_tree_service::test_utils::{
-        build_tree, create_and_apply_fork, deterministic_price, setup_chain_for_fork_test,
-        PriceInfo, TestCtx,
-    };
-    use crate::block_tree_service::{get_canonical_chain, ChainState};
-    use irys_database::CommitmentSnapshot;
-    use irys_types::{
-        block_height_to_use_for_price, ConsensusConfig, ConsensusOptions, EmaConfig, NodeConfig,
-        H256,
-    };
-
+    use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
+    use rust_decimal::Decimal;
 
-    use test_log::test;
+    /// Helper function to calculate deterministic price (matching test_utils::deterministic_price)
+    fn deterministic_price(height: u64) -> IrysTokenPrice {
+        use irys_types::storage_pricing::TOKEN_SCALE;
+        let amount = TOKEN_SCALE + IrysTokenPrice::token(Decimal::from(height)).unwrap().amount;
+        IrysTokenPrice::new(amount)
+    }
 
-    #[test(tokio::test)]
+    /// Helper function to calculate oracle price for a given block height
+    fn oracle_price_for_height(height: u64) -> IrysTokenPrice {
+        Amount::new(deterministic_price(height).amount.saturating_add(42.into()))
+    }
+
+    /// Helper function to calculate EMA price for a given block height
+    fn ema_price_for_height(height: u64) -> IrysTokenPrice {
+        deterministic_price(height)
+    }
+
     #[rstest]
     #[case(1, 0)]
     #[case(2, 0)]
@@ -328,35 +333,52 @@ mod test {
     #[case(20, 9)] // use the 10th block price during 3rd EMA interval
     #[case(29, 9)]
     #[case(30, 19)]
-    #[timeout(std::time::Duration::from_millis(100))]
-    async fn get_current_ema(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
+    fn get_current_ema(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
         // setup
-        let (ctx, rxs) = TestCtx::setup(
-            max_block_height,
-            Config::new(NodeConfig {
-                consensus: ConsensusOptions::Custom(ConsensusConfig {
-                    ema: EmaConfig {
-                        price_adjustment_interval: 10,
-                    },
-                    ..ConsensusConfig::testnet()
-                }),
-                ..NodeConfig::testnet()
-            }),
+        let config = ConsensusConfig {
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            ..ConsensusConfig::testnet()
+        };
+
+        // Start with genesis snapshot
+        let mut current_snapshot = EmaSnapshot::genesis(&config);
+        let mut blocks = Vec::new();
+
+        // Create genesis block
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
+        genesis_block.height = 0;
+        genesis_block.oracle_irys_price = oracle_price_for_height(0);
+        genesis_block.ema_irys_price = ema_price_for_height(0);
+        blocks.push(genesis_block);
+
+        // Iteratively build snapshots using create_ema_snapshot_for_block
+        for height in 1..=max_block_height {
+            let mut new_block = IrysBlockHeader::new_mock_header();
+            new_block.height = height;
+            new_block.oracle_irys_price = oracle_price_for_height(height);
+            new_block.ema_irys_price = ema_price_for_height(height);
+
+            let parent_block = &blocks[blocks.len() - 1];
+
+            // Create snapshot for this block
+            current_snapshot =
+                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
+                    .unwrap();
+
+            blocks.push(new_block);
+        }
+
+        // Verify that the snapshot contains the expected EMA price for pricing
+        // using the price_block_idx parameter to specify which block's EMA price to expect
+        let expected_ema_price = ema_price_for_height(price_block_idx as u64);
+
+        assert_eq!(
+            current_snapshot.ema_price_2_intervals_ago,
+            expected_ema_price,
+            "Snapshot ema_price_2_intervals_ago should equal EMA price from block {} (deterministic_price({}))",
+            price_block_idx, price_block_idx
         );
-        spawn_ema(&ctx, rxs.ema);
-        let desired_block_price = &ctx.prices[price_block_idx];
-
-        // action
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.service_senders
-            .ema
-            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
-            .unwrap();
-        let response = rx.await.unwrap();
-
-        // assert
-        assert_eq!(response, desired_block_price.ema);
-        assert!(!ctx.service_senders.ema.is_closed());
-        drop(ctx);
     }
 }
