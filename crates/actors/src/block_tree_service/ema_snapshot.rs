@@ -105,7 +105,7 @@ impl EmaSnapshot {
     }
 
     /// Validate oracle price is within safe range
-    pub fn validate_oracle_price(
+    pub fn oracle_price_is_valid(
         oracle_price: IrysTokenPrice,
         previous_oracle_price: IrysTokenPrice,
         safe_range: Amount<Percentage>,
@@ -540,5 +540,108 @@ mod iterative_snapshot_tests {
             expected_ema,
             "EMA should be calculated using current interval's EMA for blocks in first two intervals"
         );
+    }
+    
+    #[rstest]
+    #[case(5)]
+    #[case(8)]
+    #[case(9)]
+    #[case(20)]
+    #[case(30)]
+    #[case(15)]
+    #[case(19)]
+    #[case(20)]
+    #[case(29)]
+    #[case(28)]
+    #[case(27)]
+    fn oracle_price_gets_capped(#[case] max_height: u64) {
+        use rust_decimal_macros::dec;
+        
+        // Setup
+        let config = ConsensusConfig {
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(),
+            ..ConsensusConfig::testnet()
+        };
+
+        // Build chain up to max_height
+        let mut current_snapshot = EmaSnapshot::genesis(&config);
+        let mut blocks = Vec::new();
+        
+        // Create genesis block
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
+        genesis_block.height = 0;
+        genesis_block.oracle_irys_price = oracle_price_for_height(0);
+        genesis_block.ema_irys_price = ema_price_for_height(0);
+        blocks.push(genesis_block);
+        
+        // Build chain
+        for height in 1..=max_height {
+            let mut new_block = IrysBlockHeader::new_mock_header();
+            new_block.height = height;
+            new_block.oracle_irys_price = oracle_price_for_height(height);
+            new_block.ema_irys_price = ema_price_for_height(height);
+            
+            let parent_block = &blocks[blocks.len() - 1];
+            
+            current_snapshot = create_ema_snapshot_for_block(
+                &new_block,
+                parent_block,
+                &current_snapshot,
+                &config
+            ).unwrap();
+            
+            blocks.push(new_block);
+        }
+        
+        // Get the last block's oracle price
+        let parent_block = &blocks[blocks.len() - 1];
+        let price_oracle_latest = parent_block.oracle_irys_price;
+        
+        // Create prices outside the safe range (10.1% above and below)
+        let mul_outside_of_range = Amount::percentage(dec!(0.101)).unwrap();
+        let oracle_prices = [
+            price_oracle_latest.add_multiplier(mul_outside_of_range).unwrap(),
+            price_oracle_latest.sub_multiplier(mul_outside_of_range).unwrap(),
+        ];
+        
+        // Test both prices (too high and too low)
+        for oracle_price in oracle_prices {
+            let ema_block = current_snapshot.calculate_ema_for_new_block(
+                parent_block,
+                oracle_price,
+                config.token_price_safe_range,
+                config.ema.price_adjustment_interval,
+            );
+            
+            // Verify price was capped
+            assert_ne!(
+                ema_block.range_adjusted_oracle_price,
+                oracle_price,
+                "Oracle price outside safe range should be capped"
+            );
+            
+            // Verify the capped price is valid (within safe range)
+            assert!(
+                EmaSnapshot::oracle_price_is_valid(
+                    ema_block.range_adjusted_oracle_price,
+                    parent_block.oracle_irys_price,
+                    config.token_price_safe_range,
+                ),
+                "Capped oracle price should be within safe range"
+            );
+            
+            // Verify the original price was invalid
+            assert!(
+                !EmaSnapshot::oracle_price_is_valid(
+                    oracle_price,
+                    parent_block.oracle_irys_price,
+                    config.token_price_safe_range,
+                ),
+                "Original oracle price should be outside safe range"
+            );
+        }
     }
 }
