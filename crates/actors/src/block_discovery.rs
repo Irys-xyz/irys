@@ -15,10 +15,7 @@ use irys_database::{
     CommitmentSnapshotStatus, SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
-use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
-};
+use irys_types::{BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId};
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -51,6 +48,33 @@ pub struct BlockDiscoveryActor {
     pub service_senders: ServiceSenders,
     /// Tracing span
     pub span: Span,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlockDiscoveryError {
+    #[error("Validation error: {0}")]
+    BlockValidationError(eyre::Report),
+    #[error("Failed to get previous block header. Previous block hash: {0:?}")]
+    PreviousBlockNotFound {
+        /// The hash of the previous block that was not found
+        previous_block_hash: BlockHash,
+    },
+    #[error("{0}")]
+    InternalError(BlockDiscoveryInternalError),
+}
+
+impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
+    fn from(err: BlockDiscoveryInternalError) -> Self {
+        BlockDiscoveryError::InternalError(err)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlockDiscoveryInternalError {
+    #[error("Failed to communicate with the mempool: {0}")]
+    MempoolRequestFailed(String),
+    #[error("Database error: {0:?}")]
+    DatabaseError(eyre::Report),
 }
 
 #[async_trait::async_trait]
@@ -97,7 +121,7 @@ impl Actor for BlockDiscoveryActor {
 }
 
 impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
-    type Result = ResponseFuture<eyre::Result<()>>;
+    type Result = ResponseFuture<Result<(), BlockDiscoveryError>>;
 
     fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
         let span = self.span.clone();
@@ -143,16 +167,15 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     prev_block_hash,
                     false,
                     tx_prev,
-                ))?;
-                match rx_prev.await? {
+                )).map_err(|channel_error| BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string()))?;
+                match rx_prev.await.map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(e.to_string()))? {
                     Some(hdr) => hdr,
                     None => db
-                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))?
+                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false)).map_err(BlockDiscoveryInternalError::DatabaseError)?
                         .ok_or_else(|| {
-                            eyre::eyre!(
-                                "Failed to get previous block header. Previous block hash: {}",
-                                prev_block_hash
-                            )
+                            BlockDiscoveryError::PreviousBlockNotFound {
+                                previous_block_hash: prev_block_hash,
+                            }
                         })?,
                 }
             };
@@ -176,7 +199,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             mempool.send(MempoolServiceMessage::GetDataTxs(
                 submit_tx_ids_to_check.clone(),
                 tx,
-            ))?;
+            )).map_err(|channel_error| {
+                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
+            })?;
 
             let submit_txs = rx
                 .await
