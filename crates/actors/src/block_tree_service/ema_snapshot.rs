@@ -113,6 +113,12 @@ impl EmaSnapshot {
         let capped = bound_in_min_max_range(oracle_price, safe_range, previous_oracle_price);
         oracle_price == capped
     }
+
+    /// Get the EMA price that should be used for public pricing
+    /// This is the EMA from 2 intervals ago
+    pub fn ema_for_public_pricing(&self) -> IrysTokenPrice {
+        self.ema_price_2_intervals_ago
+    }
 }
 
 /// Create EMA cache for a block
@@ -417,9 +423,9 @@ mod iterative_snapshot_tests {
         let expected_ema_price = ema_price_for_height(price_block_idx as u64);
 
         assert_eq!(
-            current_snapshot.ema_price_2_intervals_ago,
+            current_snapshot.ema_for_public_pricing(),
             expected_ema_price,
-            "Snapshot ema_price_2_intervals_ago should equal EMA price from block {} (deterministic_price({}))",
+            "Snapshot ema_for_public_pricing() should equal EMA price from block {} (deterministic_price({}))",
             price_block_idx, price_block_idx
         );
     }
