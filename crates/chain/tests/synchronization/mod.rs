@@ -84,7 +84,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     // mine first block on node
     node.mine_block().await?;
-    node.wait_until_height(1, max_seconds + 1).await?;
+    node.wait_until_height(1, max_seconds).await?;
 
     let latest_block_before_restart = {
         let latest = node
@@ -101,12 +101,15 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     // Add enough blocks on top to move block 1 to index
     node.mine_blocks(block_migration_depth.try_into()?).await?;
-    node.wait_until_height(block_migration_depth + 1_u64, max_seconds + 2)
+    node.wait_until_height(block_migration_depth + 1_u64, max_seconds)
         .await?;
+    node.wait_until_height_on_chain(1_u64, max_seconds).await?;
 
     // restarting the node means we lose blocks in mempool
     info!("Restarting node");
     let restarted_node = node.stop().await.start().await;
+
+    restarted_node.wait_until_height(1_u64, max_seconds).await?;
 
     info!("getting reth node context");
     let (latest_block_right_after_restart, earliest_block) = {
