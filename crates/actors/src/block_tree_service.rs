@@ -43,7 +43,6 @@ use ema_snapshot::{
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockTreeReadGuard {

@@ -3,7 +3,7 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
-use eyre::OptionExt;
+use eyre::OptionExt as _;
 use irys_types::{
     storage_pricing::{
         phantoms::{Irys, NetworkFee},
@@ -44,7 +44,6 @@ pub async fn get_price(
         DataLedger::Publish => {
             // If the cost calculation fails, return 400 with the error text
             let perm_storage_price = cost_of_perm_storage(state, bytes_to_store)
-                .await
                 .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
@@ -57,7 +56,7 @@ pub async fn get_price(
     }
 }
 
-async fn cost_of_perm_storage(
+fn cost_of_perm_storage(
     state: web::Data<ApiState>,
     bytes_to_store: u64,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {

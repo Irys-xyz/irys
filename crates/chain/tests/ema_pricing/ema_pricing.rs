@@ -72,12 +72,10 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Get the current EMA price from the block tree
-    let ema_snapshot = get_ema_snapshot(
-        ctx.node_ctx.block_tree_guard.clone(),
-        ctx.node_ctx.block_tree_guard.read().tip,
-    )
-    .await?
-    .expect("EMA snapshot should exist for tip");
+    let tip = ctx.node_ctx.block_tree_guard.read().tip;
+    let ema_snapshot = get_ema_snapshot(ctx.node_ctx.block_tree_guard.clone(), tip)
+        .await?
+        .expect("EMA snapshot should exist for tip");
     let returned_ema_price = ema_snapshot.ema_for_public_pricing();
 
     // assert
