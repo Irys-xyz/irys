@@ -7,7 +7,7 @@ use irys_types::{
 };
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmaSnapshot {
     /// EMA price to use for pricing (from block 2 intervals ago)
     pub ema_price_2_intervals_ago: IrysTokenPrice,
@@ -363,6 +363,7 @@ mod iterative_snapshot_tests {
     use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
     use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
     /// Helper function to calculate deterministic price (matching test_utils::deterministic_price)
     fn deterministic_price(height: u64) -> IrysTokenPrice {
@@ -560,7 +561,6 @@ mod iterative_snapshot_tests {
     #[case(28)]
     #[case(27)]
     fn oracle_price_gets_capped(#[case] max_height: u64) {
-        use rust_decimal_macros::dec;
 
         // Setup
         let config = ConsensusConfig {
@@ -816,45 +816,9 @@ mod iterative_vs_history_tests {
 
             // Assert all fields match
             assert_eq!(
-                history_snapshot.ema_price_2_intervals_ago,
-                iterative_snapshot.ema_price_2_intervals_ago,
+                history_snapshot.as_ref(),
+                iterative_snapshot,
                 "ema_price_2_intervals_ago mismatch at height {}",
-                test_height
-            );
-
-            assert_eq!(
-                history_snapshot.ema_price_1_interval_ago,
-                iterative_snapshot.ema_price_1_interval_ago,
-                "ema_price_1_interval_ago mismatch at height {}",
-                test_height
-            );
-
-            assert_eq!(
-                history_snapshot.oracle_price_parent_block,
-                iterative_snapshot.oracle_price_parent_block,
-                "oracle_price_parent_block mismatch at height {}",
-                test_height
-            );
-
-            assert_eq!(
-                history_snapshot.oracle_price_for_current_ema_predecessor,
-                iterative_snapshot.oracle_price_for_current_ema_predecessor,
-                "oracle_price_for_current_ema_predecessor mismatch at height {}",
-                test_height
-            );
-
-            assert_eq!(
-                history_snapshot.ema_price_current_interval,
-                iterative_snapshot.ema_price_current_interval,
-                "ema_price_current_interval mismatch at height {}",
-                test_height
-            );
-
-            // Also verify the public pricing method returns the same value
-            assert_eq!(
-                history_snapshot.ema_for_public_pricing(),
-                iterative_snapshot.ema_for_public_pricing(),
-                "ema_for_public_pricing() mismatch at height {}",
                 test_height
             );
         }
