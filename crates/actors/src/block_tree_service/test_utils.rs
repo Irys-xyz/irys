@@ -8,10 +8,7 @@ use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysToke
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
-use crate::{
-    ema_service::{EmaServiceMessage, NewBlockEmaResponse, PriceStatus},
-    services::{ServiceReceivers, ServiceSenders},
-};
+use crate::services::{ServiceReceivers, ServiceSenders};
 
 use super::{
     ema_snapshot::EmaSnapshot, BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent,
@@ -116,59 +113,6 @@ impl TestCtx {
     pub fn setup(max_block_height: u64, config: Config) -> (Self, ServiceReceivers) {
         let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(max_block_height);
         Self::setup_with_tree(block_tree_guard, prices, config)
-    }
-
-    pub async fn get_prices_for_new_block(
-        &self,
-        height_of_new_block: u64,
-        new_oracle_price: IrysTokenPrice,
-    ) -> eyre::Result<NewBlockEmaResponse> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
-            .ema
-            .send(EmaServiceMessage::GetPriceDataForNewBlock {
-                height_of_new_block,
-                response: tx,
-                oracle_price: new_oracle_price,
-            })
-            .unwrap();
-        rx.await.unwrap()
-    }
-
-    pub async fn validate_ema_price(
-        &self,
-        block_height: u64,
-        ema_price: IrysTokenPrice,
-        oracle_price: IrysTokenPrice,
-    ) -> eyre::Result<PriceStatus> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
-            .ema
-            .send(EmaServiceMessage::ValidateEmaPrice {
-                response: tx,
-                block_height,
-                ema_price,
-                oracle_price,
-            })
-            .unwrap();
-        rx.await.unwrap()
-    }
-
-    pub async fn validate_oracle_price(
-        &self,
-        block_height: u64,
-        oracle_price: IrysTokenPrice,
-    ) -> eyre::Result<PriceStatus> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
-            .ema
-            .send(EmaServiceMessage::ValidateOraclePrice {
-                response: tx,
-                block_height,
-                oracle_price,
-            })
-            .unwrap();
-        rx.await.unwrap()
     }
 
     pub fn setup_with_tree(

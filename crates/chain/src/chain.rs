@@ -14,7 +14,6 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
-    ema_service::EmaService,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining::{MiningControl, PartitionMiningActor},
@@ -118,7 +117,6 @@ impl IrysNodeCtx {
         ApiState {
             mempool_service: self.service_senders.mempool.clone(),
             chunk_provider: self.chunk_provider.clone(),
-            ema_service: self.service_senders.ema.clone(),
             peer_list: self.peer_list.clone(),
             db: self.db.clone(),
             config: self.config.clone(),
@@ -904,15 +902,6 @@ impl IrysNode {
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
-        // Spawn EMA service
-        let _handle = EmaService::spawn_service(
-            task_exec,
-            block_tree_guard.clone(),
-            receivers.ema,
-            &config,
-            &service_senders,
-        );
-
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) =
             init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
@@ -1140,7 +1129,6 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
-                ema_service: service_senders.ema.clone(),
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_service,
                 db: irys_db,

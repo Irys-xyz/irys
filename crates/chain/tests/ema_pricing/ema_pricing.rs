@@ -1,10 +1,7 @@
 use std::time::Duration;
 
 use crate::utils::{mine_block, IrysNodeTest};
-use irys_actors::{
-    block_tree_service::{get_block, get_canonical_chain},
-    ema_service::EmaServiceMessage,
-};
+use irys_actors::block_tree_service::{get_block, get_canonical_chain, get_ema_snapshot};
 use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 
@@ -20,12 +17,16 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
     // we start at 1 because the genesis block is already mined
     for expected_height in 1..(price_adjustment_interval * 2) {
         let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.node_ctx
-            .service_senders
-            .ema
-            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-        let returned_ema_price = rx.await?;
+        
+        // Get the current EMA price from the block tree
+        let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap();
+        let tip_hash = chain.last().unwrap().block_hash;
+        let ema_snapshot = get_ema_snapshot(ctx.node_ctx.block_tree_guard.clone(), tip_hash)
+            .await?
+            .expect("EMA snapshot should exist for tip");
+        let returned_ema_price = ema_snapshot.ema_for_public_pricing();
 
         // assert each new block that we mine
         assert_eq!(header.height, expected_height);
@@ -69,12 +70,16 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     // action -- mine a new block. This pushes the system to use a new EMA rather than the genesis EMA
     let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ctx.node_ctx
-        .service_senders
-        .ema
-        .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-    let returned_ema_price = rx.await?;
+    
+    // Get the current EMA price from the block tree
+    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+        .await
+        .unwrap();
+    let tip_hash = chain.last().unwrap().block_hash;
+    let ema_snapshot = get_ema_snapshot(ctx.node_ctx.block_tree_guard.clone(), tip_hash)
+        .await?
+        .expect("EMA snapshot should exist for tip");
+    let returned_ema_price = ema_snapshot.ema_for_public_pricing();
 
     // assert
     assert_eq!(
