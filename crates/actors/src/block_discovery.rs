@@ -439,14 +439,16 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     let arc_commitment_txs = Arc::new(commitments);
 
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    epoch_sender.send(crate::EpochServiceMessage::GetCommitmentStateGuard(
-                        oneshot_tx,
-                    )).map_err(|e| {
-                        BlockDiscoveryInternalError::EpochRequestFailed(format!(
-                            "Failed to send GetCommitmentStateGuard message: {}",
-                            e
+                    epoch_sender
+                        .send(crate::EpochServiceMessage::GetCommitmentStateGuard(
+                            oneshot_tx,
                         ))
-                    })?;
+                        .map_err(|e| {
+                            BlockDiscoveryInternalError::EpochRequestFailed(format!(
+                                "Failed to send GetCommitmentStateGuard message: {}",
+                                e
+                            ))
+                        })?;
 
                     let commitment_state_guard = oneshot_rx.await.unwrap();
 
@@ -497,17 +499,19 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             })?;
 
                         let (oneshot_tx, rx) = tokio::sync::oneshot::channel();
-                        epoch_sender.send(crate::EpochServiceMessage::NewEpoch {
-                            new_epoch_block: new_block_header.clone(),
-                            previous_epoch_block,
-                            commitments: arc_commitment_txs.clone(),
-                            sender: oneshot_tx,
-                        }).map_err(|e| {
-                            BlockDiscoveryInternalError::EpochRequestFailed(format!(
-                                "Failed to send NewEpoch message: {}",
-                                e
-                            ))
-                        })?;
+                        epoch_sender
+                            .send(crate::EpochServiceMessage::NewEpoch {
+                                new_epoch_block: new_block_header.clone(),
+                                previous_epoch_block,
+                                commitments: arc_commitment_txs.clone(),
+                                sender: oneshot_tx,
+                            })
+                            .map_err(|e| {
+                                BlockDiscoveryInternalError::EpochRequestFailed(format!(
+                                    "Failed to send NewEpoch message: {}",
+                                    e
+                                ))
+                            })?;
                         let _ = rx.await.map_err(|e| {
                             BlockDiscoveryInternalError::EpochRequestFailed(format!(
                                 "Failed to receive response for NewEpoch: {}",
