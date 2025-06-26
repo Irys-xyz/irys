@@ -14,7 +14,10 @@ use irys_database::{
     CommitmentSnapshotStatus, SystemLedger,
 };
 use irys_reward_curve::HalvingCurve;
-use irys_types::{BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId};
+use irys_types::{
+    BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage,
+    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
+};
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -72,7 +75,7 @@ pub enum BlockDiscoveryError {
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
     fn from(err: BlockDiscoveryInternalError) -> Self {
-        BlockDiscoveryError::InternalError(err)
+        Self::InternalError(err)
     }
 }
 
@@ -172,19 +175,25 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             let previous_block_header = {
                 let (tx_prev, rx_prev) = oneshot::channel();
-                mempool_sender.send(MempoolServiceMessage::GetBlockHeader(
-                    prev_block_hash,
-                    false,
-                    tx_prev,
-                )).map_err(|channel_error| BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string()))?;
-                match rx_prev.await.map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(e.to_string()))? {
+                mempool_sender
+                    .send(MempoolServiceMessage::GetBlockHeader(
+                        prev_block_hash,
+                        false,
+                        tx_prev,
+                    ))
+                    .map_err(|channel_error| {
+                        BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
+                    })?;
+                match rx_prev
+                    .await
+                    .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(e.to_string()))?
+                {
                     Some(hdr) => hdr,
                     None => db
-                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false)).map_err(BlockDiscoveryInternalError::DatabaseError)?
-                        .ok_or_else(|| {
-                            BlockDiscoveryError::PreviousBlockNotFound {
-                                previous_block_hash: prev_block_hash,
-                            }
+                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
+                        .map_err(BlockDiscoveryInternalError::DatabaseError)?
+                        .ok_or_else(|| BlockDiscoveryError::PreviousBlockNotFound {
+                            previous_block_hash: prev_block_hash,
                         })?,
                 }
             };
@@ -205,25 +214,33 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 .clone();
 
             let (tx, rx) = oneshot::channel();
-            mempool.send(MempoolServiceMessage::GetDataTxs(
-                submit_tx_ids_to_check.clone(),
-                tx,
-            )).map_err(|channel_error| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-            })?;
+            mempool
+                .send(MempoolServiceMessage::GetDataTxs(
+                    submit_tx_ids_to_check.clone(),
+                    tx,
+                ))
+                .map_err(|channel_error| {
+                    BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
+                })?;
 
             let submit_txs = rx
                 .await
-                .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(format!("Mempool response error: {}", e)))?
+                .map_err(|e| {
+                    BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                        "Mempool response error: {}",
+                        e
+                    ))
+                })?
                 .into_iter()
                 .flatten()
                 .collect::<Vec<IrysTransactionHeader>>();
 
             if submit_txs.len() != submit_tx_ids_to_check.len() {
                 return Err(BlockDiscoveryError::MissingTransactions(
-                    submit_tx_ids_to_check.into_iter()
-                    .filter(|id| !submit_txs.iter().any(|tx| tx.id == *id))
-                    .collect()
+                    submit_tx_ids_to_check
+                        .into_iter()
+                        .filter(|id| !submit_txs.iter().any(|tx| tx.id == *id))
+                        .collect(),
                 ));
             }
 
@@ -242,22 +259,30 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 .clone();
 
             let (tx, rx) = oneshot::channel();
-            mempool.send(MempoolServiceMessage::GetDataTxs(
-                publish_tx_ids_to_check.clone(),
-                tx,
-            )).map_err(|channel_error| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-            })?;
+            mempool
+                .send(MempoolServiceMessage::GetDataTxs(
+                    publish_tx_ids_to_check.clone(),
+                    tx,
+                ))
+                .map_err(|channel_error| {
+                    BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
+                })?;
 
             let publish_txs = rx
                 .await
-                .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(format!("Mempool response error: {}", e)))?
+                .map_err(|e| {
+                    BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                        "Mempool response error: {}",
+                        e
+                    ))
+                })?
                 .into_iter()
                 .flatten()
                 .collect::<Vec<IrysTransactionHeader>>();
 
             if publish_txs.len() != publish_tx_ids_to_check.len() {
-                let missing_txs = publish_tx_ids_to_check.into_iter()
+                let missing_txs = publish_tx_ids_to_check
+                    .into_iter()
                     .filter(|id| !publish_txs.iter().any(|tx| tx.id == *id))
                     .collect();
                 return Err(BlockDiscoveryError::MissingTransactions(missing_txs));
@@ -268,18 +293,19 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
                         Some(proofs) => proofs,
                         None => {
-                            return Err(BlockDiscoveryError::BlockValidationError(
-                                eyre::eyre!("Ingress proofs missing")
-                            ));
+                            return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
+                                "Ingress proofs missing"
+                            )));
                         }
                     };
 
                 // Pre-Validate the ingress-proof by verifying the signature
                 for (i, tx_header) in publish_txs.iter().enumerate() {
                     if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                        return Err(BlockDiscoveryError::BlockValidationError(
-                            eyre::eyre!("Invalid ingress proof signature: {}", e)
-                        ));
+                        return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
+                            "Invalid ingress proof signature: {}",
+                            e
+                        )));
                     }
                 }
             }
@@ -313,7 +339,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     Err(e) => {
                         error!("Failed to collect commitment transactions: {:?}", e);
                         return Err(BlockDiscoveryError::MissingTransactions(
-                            commitment_ledger.tx_ids.0.clone()
+                            commitment_ledger.tx_ids.0.clone(),
                         ));
                     }
                 }
@@ -348,9 +374,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         // Check for intersection between current and parent txids for this ledger
                         for txid in incoming_data_tx_ids {
                             if parent_txids.contains(txid) {
-                                return Err(BlockDiscoveryError::DuplicateTransaction(
-                                    *txid
-                                ));
+                                return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
                             }
                         }
                     }
@@ -366,9 +390,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     }) {
                         Ok(Some(header)) => header,
                         Ok(None) => break,
-                        Err(e) => return Err(BlockDiscoveryError::InternalError(
-                            BlockDiscoveryInternalError::DatabaseError(e)
-                        )),
+                        Err(e) => {
+                            return Err(BlockDiscoveryError::InternalError(
+                                BlockDiscoveryInternalError::DatabaseError(e),
+                            ))
+                        }
                     };
 
                     parent_block = previous_block_header; // Move instead of borrow
@@ -393,11 +419,15 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             match validation_result {
                 Ok(()) => {
                     // add block to mempool
-                    mempool_sender.send(MempoolServiceMessage::IngestBlocks {
-                        prevalidated_blocks: vec![new_block_header.clone()],
-                    }).map_err(|channel_error| {
-                        BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-                    })?;
+                    mempool_sender
+                        .send(MempoolServiceMessage::IngestBlocks {
+                            prevalidated_blocks: vec![new_block_header.clone()],
+                        })
+                        .map_err(|channel_error| {
+                            BlockDiscoveryInternalError::MempoolRequestFailed(
+                                channel_error.to_string(),
+                            )
+                        })?;
 
                     // all txs
                     let mut all_txs = submit_txs;
@@ -412,9 +442,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     let commitment_state_guard = epoch_service
                         .send(GetCommitmentStateGuardMessage)
                         .await
-                        .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(
-                            format!("Failed to get commitment state: {}", e)
-                        ))?;
+                        .map_err(|e| {
+                            BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                                "Failed to get commitment state: {}",
+                                e
+                            ))
+                        })?;
 
                     // Get the current epoch snapshot from the parent block
                     let mut parent_snapshot = block_tree_guard
@@ -437,7 +470,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                                 arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
                             return Err(BlockDiscoveryError::InvalidEpochBlock(
-                                "Epoch block commitments don't match expected".to_string()
+                                "Epoch block commitments don't match expected".to_string(),
                             ));
                         }
 
@@ -449,13 +482,17 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .clone();
                         let previous_epoch_block = db
                             .view(|tx| block_header_by_hash(tx, &block_item.block_hash, false))
-                            .map_err(|e| BlockDiscoveryInternalError::DatabaseError(
-                                eyre::eyre!("Database error retrieving previous epoch block: {:?}", e)
-                            ))?
+                            .map_err(|e| {
+                                BlockDiscoveryInternalError::DatabaseError(eyre::eyre!(
+                                    "Database error retrieving previous epoch block: {:?}",
+                                    e
+                                ))
+                            })?
                             .map_err(|report| {
-                                BlockDiscoveryError::BlockValidationError(
-                                    eyre::eyre!("Previous epoch block not found in database: {}", report)
-                                )
+                                BlockDiscoveryError::BlockValidationError(eyre::eyre!(
+                                    "Previous epoch block not found in database: {}",
+                                    report
+                                ))
                             })?;
 
                         epoch_service.do_send(NewEpochMessage {
@@ -474,20 +511,20 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             match status {
                                 CommitmentSnapshotStatus::Accepted => {
                                     return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        "Commitment tx included in prior block".to_string()
+                                        "Commitment tx included in prior block".to_string(),
                                     ));
                                 }
                                 CommitmentSnapshotStatus::Unsupported => {
                                     return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        "Commitment tx of unsupported type".to_string()
+                                        "Commitment tx of unsupported type".to_string(),
                                     ));
                                 }
                                 CommitmentSnapshotStatus::Unstaked => {
                                     return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        format!("Commitment tx {} from unstaked address {:?}",
-                                            commitment_tx.id,
-                                            commitment_tx.signer
-                                        )
+                                        format!(
+                                            "Commitment tx {} from unstaked address {:?}",
+                                            commitment_tx.id, commitment_tx.signer
+                                        ),
                                     ));
                                 }
                                 CommitmentSnapshotStatus::Unknown => {} // Success case
@@ -500,7 +537,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                                 .add_commitment(commitment_tx, is_staked_in_current_epoch);
                             if add_status != CommitmentSnapshotStatus::Accepted {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                    "Commitment tx is invalid".to_string()
+                                    "Commitment tx is invalid".to_string(),
                                 ));
                             }
                         }
@@ -511,25 +548,32 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     info!("Block is valid, sending to block tree");
 
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    block_tree_sender.send(BlockTreeServiceMessage::BlockPreValidated {
-                        block: new_block_header.clone(),
-                        commitment_txs: arc_commitment_txs,
-                        response: oneshot_tx,
-                    }).map_err(|channel_error| {
-                        BlockDiscoveryInternalError::MempoolRequestFailed(
-                            format!("Failed to send BlockPreValidated message: {}", channel_error)
-                        )
-                    })?;
+                    block_tree_sender
+                        .send(BlockTreeServiceMessage::BlockPreValidated {
+                            block: new_block_header.clone(),
+                            commitment_txs: arc_commitment_txs,
+                            response: oneshot_tx,
+                        })
+                        .map_err(|channel_error| {
+                            BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                                "Failed to send BlockPreValidated message: {}",
+                                channel_error
+                            ))
+                        })?;
 
                     oneshot_rx
                         .await
-                        .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(
-                            format!("Failed to receive response for BlockPreValidated: {}", e)
-                        ))?
                         .map_err(|e| {
-                            BlockDiscoveryError::BlockValidationError(
-                                eyre::eyre!("Block pre-validation failed: {}", e)
-                            )
+                            BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                                "Failed to receive response for BlockPreValidated: {}",
+                                e
+                            ))
+                        })?
+                        .map_err(|e| {
+                            BlockDiscoveryError::BlockValidationError(eyre::eyre!(
+                                "Block pre-validation failed: {}",
+                                e
+                            ))
                         })?;
 
                     // Send the block to the gossip bus
