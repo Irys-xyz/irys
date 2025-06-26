@@ -429,4 +429,89 @@ mod iterative_snapshot_tests {
             price_block_idx, price_block_idx
         );
     }
+
+    #[test]
+    fn first_block() {
+        use rust_decimal_macros::dec;
+
+        // Setup
+        let config = ConsensusConfig {
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            ..ConsensusConfig::testnet()
+        };
+
+        // Create genesis snapshot
+        let genesis_snapshot = EmaSnapshot::genesis(&config);
+
+        // Create genesis block
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
+        genesis_block.height = 0;
+        genesis_block.oracle_irys_price = config.genesis_price;
+        genesis_block.ema_irys_price = config.genesis_price;
+
+        // New oracle price for block 1
+        let new_oracle_price = Amount::token(dec!(1.01)).unwrap();
+
+        // Calculate EMA for block 1
+        let ema_block = genesis_snapshot.calculate_ema_for_new_block(
+            &genesis_block,
+            new_oracle_price,
+            config.token_price_safe_range,
+            config.ema.price_adjustment_interval,
+        );
+
+        // Assert the computed EMA matches expected value
+        assert_eq!(
+            ema_block.ema,
+            Amount::token(dec!(1.0018181818181818181818)).unwrap(),
+            "known first magic value when oracle price is 1.01"
+        );
+    }
+
+    #[rstest]
+    #[case(1)]
+    #[case(5)]
+    #[case(10)]
+    #[case(15)]
+    #[case(19)]
+    fn first_and_second_adjustment_period(#[case] max_height: u64) {
+        // prepare
+        let price_adjustment_interval = 10;
+        let (ctx, rxs) = TestCtx::setup(
+            max_height,
+            Config::new(NodeConfig {
+                consensus: ConsensusOptions::Custom(ConsensusConfig {
+                    ema: EmaConfig {
+                        price_adjustment_interval,
+                    },
+                    ..ConsensusConfig::testnet()
+                }),
+                ..NodeConfig::testnet()
+            }),
+        );
+        spawn_ema(&ctx, rxs.ema);
+
+        let new_oracle_price = deterministic_price(max_height);
+
+        // action
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        ctx.service_senders
+            .ema
+            .send(EmaServiceMessage::GetPriceDataForNewBlock {
+                height_of_new_block: max_height + 1,
+                response: tx,
+                oracle_price: new_oracle_price,
+            })
+            .unwrap();
+        let ema_response = rx.await.unwrap().unwrap().ema;
+
+        // assert
+        let prev_price = ctx.prices.last().unwrap().clone();
+        let ema_computed = new_oracle_price
+            .calculate_ema(price_adjustment_interval, prev_price.ema)
+            .unwrap();
+        assert_eq!(ema_computed, ema_response);
+    }
 }
