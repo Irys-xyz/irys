@@ -235,10 +235,23 @@ pub fn create_ema_snapshot_from_chain_history(
     };
 
     // Calculate the height for 1 interval ago
-    let height_1_interval_ago = if latest_block_height >= blocks_in_interval {
-        previous_ema_recalculation_block_height(latest_block_height, blocks_in_interval)
-    } else {
+    // This tracks which EMA value was active 1 interval ago
+    // The logic depends on whether we've crossed interval boundaries
+    let height_1_interval_ago = if latest_block_height < blocks_in_interval {
+        // First interval (0-9) - no previous interval, use genesis
         0
+    } else if latest_block_height < blocks_in_interval * 2 {
+        // Second interval (10-19) - 1 interval ago was the first interval's last EMA
+        // For blocks 10-19, the "1 interval ago" EMA is from block 9
+        blocks_in_interval - 1
+    } else {
+        // Third interval and beyond
+        // We need the last EMA recalculation block from the previous interval
+        // For example:
+        // - At block 20-29: 1 interval ago is block 19
+        // - At block 30-39: 1 interval ago is block 29
+        let intervals_completed = latest_block_height / blocks_in_interval;
+        (intervals_completed - 1) * blocks_in_interval + (blocks_in_interval - 1)
     };
 
     // Calculate new EMA if this is a recalculation block
@@ -714,5 +727,136 @@ mod iterative_snapshot_tests {
             "EMA at block {} should be calculated using oracle price from block {} and EMA from block {}",
             new_block_height, prev_ema_predecessor_height, prev_ema_height
         );
+    }
+}
+
+#[cfg(test)]
+mod iterative_vs_history_tests {
+    use super::*;
+    use rstest::rstest;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    /// Helper function to calculate oracle price for a given block height
+    fn oracle_price_for_height(height: u64) -> IrysTokenPrice {
+        Amount::token(dec!(1.0) + dec!(0.1) * Decimal::from(height)).expect("Valid price")
+    }
+
+    /// Helper function to calculate EMA price for a given block height
+    fn ema_price_for_height(height: u64) -> IrysTokenPrice {
+        Amount::token(dec!(2.0) + dec!(0.2) * Decimal::from(height)).expect("Valid price")
+    }
+
+    #[rstest]
+    #[case(1)]
+    #[case(5)]
+    #[case(10)]
+    #[case(13)]
+    #[case(19)]
+    #[case(29)]
+    #[case(30)]
+    #[case(31)]
+    #[case(49)]
+    #[case(50)]
+    #[case(51)]
+    fn test_iterative_vs_history_consistency(#[case] max_block_height: u64) {
+        // Setup
+        let config = ConsensusConfig {
+            ema: irys_types::EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            ..ConsensusConfig::testnet()
+        };
+
+        // Start with genesis snapshot
+        let mut current_snapshot = EmaSnapshot::genesis(&config);
+        let mut blocks = Vec::new();
+        let mut snapshots = vec![Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone())];
+
+        // Create genesis block
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
+        genesis_block.height = 0;
+        genesis_block.oracle_irys_price = config.genesis_price;
+        genesis_block.ema_irys_price = config.genesis_price;
+        blocks.push(genesis_block);
+
+        // Build chain iteratively and store all snapshots
+        for height in 1..=max_block_height {
+            let mut new_block = IrysBlockHeader::new_mock_header();
+            new_block.height = height;
+            new_block.oracle_irys_price = oracle_price_for_height(height);
+            new_block.ema_irys_price = ema_price_for_height(height);
+
+            let parent_block = &blocks[blocks.len() - 1];
+
+            // Create snapshot for this block using iterative approach
+            current_snapshot = create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
+                .unwrap();
+
+            blocks.push(new_block);
+            snapshots.push(Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone()));
+        }
+
+        // Now verify that create_ema_snapshot_from_chain_history produces the same results
+        for test_height in 1..=max_block_height {
+            let test_blocks = &blocks[0..=test_height as usize];
+            let latest_block = test_blocks.last().unwrap();
+            let previous_blocks = &test_blocks[0..test_blocks.len() - 1];
+
+            // Create snapshot using chain history
+            let history_snapshot = create_ema_snapshot_from_chain_history(
+                latest_block,
+                previous_blocks,
+                &config,
+            )
+            .unwrap();
+
+            // Get the iterative snapshot for this height
+            let iterative_snapshot = &snapshots[test_height as usize];
+
+            // Assert all fields match
+            assert_eq!(
+                history_snapshot.ema_price_2_intervals_ago,
+                iterative_snapshot.ema_price_2_intervals_ago,
+                "ema_price_2_intervals_ago mismatch at height {}",
+                test_height
+            );
+
+            assert_eq!(
+                history_snapshot.ema_price_1_interval_ago,
+                iterative_snapshot.ema_price_1_interval_ago,
+                "ema_price_1_interval_ago mismatch at height {}",
+                test_height
+            );
+
+            assert_eq!(
+                history_snapshot.oracle_price_parent_block,
+                iterative_snapshot.oracle_price_parent_block,
+                "oracle_price_parent_block mismatch at height {}",
+                test_height
+            );
+
+            assert_eq!(
+                history_snapshot.oracle_price_for_current_ema_predecessor,
+                iterative_snapshot.oracle_price_for_current_ema_predecessor,
+                "oracle_price_for_current_ema_predecessor mismatch at height {}",
+                test_height
+            );
+
+            assert_eq!(
+                history_snapshot.ema_price_current_interval,
+                iterative_snapshot.ema_price_current_interval,
+                "ema_price_current_interval mismatch at height {}",
+                test_height
+            );
+
+            // Also verify the public pricing method returns the same value
+            assert_eq!(
+                history_snapshot.ema_for_public_pricing(),
+                iterative_snapshot.ema_for_public_pricing(),
+                "ema_for_public_pricing() mismatch at height {}",
+                test_height
+            );
+        }
     }
 }
