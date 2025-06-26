@@ -32,6 +32,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+use irys_actors::block_discovery::BlockDiscoveryError;
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
@@ -137,7 +138,7 @@ pub(crate) struct BlockDiscoveryStub {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
-    async fn handle_block(&self, block: IrysBlockHeader) -> Result<()> {
+    async fn handle_block(&self, block: IrysBlockHeader) -> std::result::Result<(), BlockDiscoveryError> {
         self.blocks
             .write()
             .expect("to unlock blocks")
