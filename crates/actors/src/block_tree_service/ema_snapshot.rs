@@ -40,13 +40,13 @@ pub struct EmaBlock {
 
 impl EmaSnapshot {
     /// Create EMA cache for genesis block
-    pub fn genesis(consensus_config: &ConsensusConfig) -> Arc<Self> {
+    pub fn genesis(genesis_header: &IrysBlockHeader) -> Arc<Self> {
         Arc::new(Self {
-            ema_price_2_intervals_ago: consensus_config.genesis_price,
-            oracle_price_parent_block: consensus_config.genesis_price,
-            oracle_price_for_current_ema_predecessor: consensus_config.genesis_price,
-            ema_price_current_interval: consensus_config.genesis_price,
-            ema_price_1_interval_ago: consensus_config.genesis_price,
+            ema_price_2_intervals_ago: genesis_header.ema_irys_price,
+            oracle_price_parent_block: genesis_header.oracle_irys_price,
+            oracle_price_for_current_ema_predecessor: genesis_header.oracle_irys_price,
+            ema_price_current_interval: genesis_header.ema_irys_price,
+            ema_price_1_interval_ago: genesis_header.ema_irys_price,
         })
     }
 
@@ -301,7 +301,7 @@ mod snapshot_from_history {
         max_height: u64,
         config: &ConsensusConfig,
     ) -> Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        let mut current_snapshot = EmaSnapshot::genesis(config);
+        let mut current_snapshot: Arc<EmaSnapshot> = Arc::new(EmaSnapshot::default());
         let mut results: Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> = Vec::new();
 
         for height in 0..=max_height {
@@ -316,8 +316,12 @@ mod snapshot_from_history {
                 block.ema_irys_price = ema_price_for_height(height);
             }
 
-            // For non-genesis blocks, create snapshot
-            if height > 0 {
+            // Create snapshot for this block
+            if height == 0 {
+                // Genesis block
+                current_snapshot = EmaSnapshot::genesis(&block);
+            } else {
+                // Non-genesis blocks
                 let parent_block = &results.last().unwrap().0;
                 current_snapshot = current_snapshot
                     .next_snapshot(&block, parent_block, config)
@@ -439,14 +443,14 @@ mod snapshot_from_history {
             ..ConsensusConfig::testnet()
         };
 
-        // Create genesis snapshot
-        let genesis_snapshot = EmaSnapshot::genesis(&config);
-
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         genesis_block.oracle_irys_price = config.genesis_price;
         genesis_block.ema_irys_price = config.genesis_price;
+
+        // Create genesis snapshot
+        let genesis_snapshot = EmaSnapshot::genesis(&genesis_block);
 
         // New oracle price for block 1
         let new_oracle_price = Amount::token(dec!(1.01)).unwrap();

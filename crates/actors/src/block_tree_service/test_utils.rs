@@ -54,7 +54,11 @@ pub fn deterministic_price(height: u64) -> IrysTokenPrice {
 }
 
 pub fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
-    EmaSnapshot::genesis(&irys_types::ConsensusConfig::testnet())
+    let config = irys_types::ConsensusConfig::testnet();
+    let mut genesis_header = IrysBlockHeader::default();
+    genesis_header.oracle_irys_price = config.genesis_price;
+    genesis_header.ema_irys_price = config.genesis_price;
+    EmaSnapshot::genesis(&genesis_header)
 }
 
 pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {

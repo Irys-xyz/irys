@@ -847,6 +847,7 @@ impl BlockTreeCache {
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
     // #[cfg(feature = "test-utils")]
+    // todo - this code is only used for tests, we can get rid of EmaSnapshot::genesis
     pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         let block_hash = genesis_block.block_hash;
         let solution_hash = genesis_block.solution_hash;
@@ -861,7 +862,7 @@ impl BlockTreeCache {
         let commitment_snapshot = Arc::new(CommitmentSnapshot::default());
 
         // Create EMA cache for genesis block
-        let ema_snapshot = EmaSnapshot::genesis(&consensus_config);
+        let ema_snapshot = EmaSnapshot::genesis(&genesis_block);
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
@@ -1753,8 +1754,11 @@ fn build_current_ema_snapshot_from_index(
     let latest_item = block_index.get_latest_item();
 
     let Some(latest_item) = latest_item else {
-        // If no blocks in index, return genesis EMA snapshot
-        return EmaSnapshot::genesis(config);
+        // If no blocks in index, create a minimal genesis header for EMA snapshot
+        let mut genesis_header = IrysBlockHeader::default();
+        genesis_header.oracle_irys_price = config.genesis_price;
+        genesis_header.ema_irys_price = config.genesis_price;
+        return EmaSnapshot::genesis(&genesis_header);
     };
 
     let tx = db.tx().unwrap();
@@ -1765,7 +1769,7 @@ fn build_current_ema_snapshot_from_index(
 
     // Handle genesis block case
     if latest_block.height == 0 {
-        return EmaSnapshot::genesis(config);
+        return EmaSnapshot::genesis(&latest_block);
     }
 
     // Determine the minimum height we need for EMA calculation
@@ -2039,7 +2043,11 @@ mod tests {
     use eyre::ensure;
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
-        EmaSnapshot::genesis(&irys_types::ConsensusConfig::testnet())
+        let config = irys_types::ConsensusConfig::testnet();
+        let mut genesis_header = IrysBlockHeader::default();
+        genesis_header.oracle_irys_price = config.genesis_price;
+        genesis_header.ema_irys_price = config.genesis_price;
+        EmaSnapshot::genesis(&genesis_header)
     }
 
     #[actix::test]
