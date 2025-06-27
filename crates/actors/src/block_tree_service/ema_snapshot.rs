@@ -209,10 +209,10 @@ pub fn create_ema_snapshot_from_chain_history(
     blocks: &[IrysBlockHeader],
     consensus_config: &ConsensusConfig,
 ) -> Result<Arc<EmaSnapshot>> {
-    let latest_block = blocks
-        .last()
-        .ok_or_else(|| eyre::eyre!("No blocks provided to create_ema_snapshot_from_chain_history"))?;
-    
+    let latest_block = blocks.last().ok_or_else(|| {
+        eyre::eyre!("No blocks provided to create_ema_snapshot_from_chain_history")
+    })?;
+
     let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
     let latest_block_height = latest_block.height;
 
@@ -233,7 +233,12 @@ pub fn create_ema_snapshot_from_chain_history(
         let block = blocks
             .iter()
             .find(|b| b.height == desired_height)
-            .ok_or_else(|| eyre::eyre!("Block with height {} not found in chain history", desired_height))?;
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "Block with height {} not found in chain history",
+                    desired_height
+                )
+            })?;
         Result::<_, eyre::Report>::Ok(block)
     };
 
@@ -341,6 +346,18 @@ mod snapshot_from_history {
     #[case(85, 69, 79, 78, 79)]
     #[case(90, 79, 89, 88, 89)]
     #[case(99, 79, 99, 98, 89)]
+    #[case(5, 0, 5, 4, 0)]
+    #[case(15, 0, 15, 14, 9)]
+    #[case(25, 9, 19, 18, 19)]
+    #[case(30, 19, 29, 28, 29)]
+    #[case(35, 19, 29, 28, 29)]
+    #[case(40, 29, 39, 38, 39)]
+    #[case(45, 29, 39, 38, 39)]
+    #[case(50, 39, 49, 48, 49)]
+    #[case(100, 89, 99, 98, 99)]
+    #[case(105, 89, 99, 98, 99)]
+    #[case(110, 99, 109, 108, 109)]
+    #[case(200, 189, 199, 198, 199)]
     fn test_valid_price_cache(
         #[case] height_latest_block: u64,
         #[case] height_for_pricing: u64,
@@ -356,23 +373,33 @@ mod snapshot_from_history {
             },
             ..ConsensusConfig::testnet()
         };
-        let blocks = (0..=height_latest_block)
-            .map(|height| {
-                let mut block = IrysBlockHeader::new_mock_header();
-                block.height = height;
-                // Set unique prices for each block to properly test the snapshot logic
-                block.oracle_irys_price = oracle_price_for_height(height);
-                block.ema_irys_price = ema_price_for_height(height);
-                block
-            })
-            .collect::<Vec<_>>();
 
-        // action
-        let ema_snapshot =
-            create_ema_snapshot_from_chain_history(&blocks, &config)
-                .unwrap();
+        // Build blocks and snapshots iteratively
+        let blocks_and_snapshots = build_blocks_with_snapshots(height_latest_block, &config);
 
-        // assert
+        // Extract blocks for chain history approach
+        let blocks: Vec<IrysBlockHeader> = blocks_and_snapshots
+            .iter()
+            .map(|(block, _)| block.clone())
+            .collect();
+
+        // Get the iterative snapshot for the target height
+        let (_, iterative_snapshot) = blocks_and_snapshots
+            .last()
+            .expect("Should have at least one block");
+
+        // action - create snapshot from chain history
+        let ema_snapshot = create_ema_snapshot_from_chain_history(&blocks, &config).unwrap();
+
+        // assert - verify iterative and chain history approaches match
+        assert_eq!(
+            ema_snapshot.as_ref(),
+            iterative_snapshot.as_ref(),
+            "Iterative snapshot should match chain history snapshot at height {}",
+            height_latest_block
+        );
+
+        // assert - verify expected values
         let get_block = |height: u64| blocks.iter().find(|x| x.height == height).unwrap();
 
         let expected_price_snapshot = EmaSnapshot {
@@ -695,8 +722,7 @@ mod snapshot_from_history {
 
             // Create snapshot using chain history
             let history_snapshot =
-                create_ema_snapshot_from_chain_history(test_blocks, &config)
-                    .unwrap();
+                create_ema_snapshot_from_chain_history(test_blocks, &config).unwrap();
 
             // Get the iterative snapshot for this height
             let iterative_snapshot = &snapshots[test_height as usize];
