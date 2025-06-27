@@ -217,6 +217,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             &signer2_address,
         ));
 
+        node.wait_until_height_confirmed(6, 10).await?;
+
         node
     };
 
