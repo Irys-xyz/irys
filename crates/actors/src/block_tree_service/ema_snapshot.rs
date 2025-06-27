@@ -308,7 +308,7 @@ mod snapshot_from_history {
             },
             ..ConsensusConfig::testnet()
         };
-        let mut blocks = (0..=height_latest_block)
+        let blocks = (0..=height_latest_block)
             .map(|height| {
                 let mut block = IrysBlockHeader::new_mock_header();
                 block.height = height;
@@ -318,7 +318,7 @@ mod snapshot_from_history {
                 block
             })
             .collect::<Vec<_>>();
-        let latest_block = blocks.pop().unwrap();
+        let latest_block = blocks.last().cloned().unwrap();
         let previous_blocks = &blocks;
 
         // action
@@ -326,33 +326,19 @@ mod snapshot_from_history {
             create_ema_snapshot_from_chain_history(&latest_block, previous_blocks, &config)
                 .unwrap();
 
-        // assert all the fields on ema snapshot
-        assert_eq!(
-            ema_snapshot.ema_price_2_intervals_ago,
-            ema_price_for_height(height_for_pricing),
-            "ema_price_2_intervals_ago should match EMA price from block at height {}",
-            height_for_pricing
-        );
+        // assert
+        let get_block = |height: u64| blocks.iter().find(|x| x.height == height).unwrap();
 
-        assert_eq!(
-            ema_snapshot.oracle_price_parent_block,
-            oracle_price_for_height(height_latest_block.saturating_sub(1)),
-            "oracle_price_parent_block should match oracle price from parent block"
-        );
-
-        assert_eq!(
-            ema_snapshot.oracle_price_for_current_ema_predecessor,
-            oracle_price_for_height(height_current_ema_predecessor),
-            "oracle_price_for_ema_predecessor should match oracle price from block at height {}",
-            height_current_ema_predecessor
-        );
-
-        assert_eq!(
-            ema_snapshot.ema_price_current_interval,
-            ema_price_for_height(height_current_ema),
-            "ema_price_last_interval should match EMA price from block at height {}",
-            height_current_ema
-        );
+        let expected_price_snapshot = EmaSnapshot {
+            ema_price_2_intervals_ago: get_block(height_for_pricing).ema_irys_price,
+            oracle_price_parent_block: get_block(height_latest_block.saturating_sub(1))
+                .oracle_irys_price,
+            oracle_price_for_current_ema_predecessor: get_block(height_current_ema_predecessor)
+                .oracle_irys_price,
+            ema_price_current_interval: get_block(height_current_ema).ema_irys_price,
+            ema_price_1_interval_ago: get_block(height_for_pricing + interval).ema_irys_price,
+        };
+        assert_eq!(&expected_price_snapshot, ema_snapshot.as_ref());
     }
 }
 
