@@ -270,18 +270,64 @@ pub fn create_ema_snapshot_from_chain_history(
 #[cfg(test)]
 mod snapshot_from_history {
     use super::*;
+    use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    /// Helper function to calculate deterministic price (matching test_utils::deterministic_price)
+    fn deterministic_price(height: u64) -> IrysTokenPrice {
+        use irys_types::storage_pricing::TOKEN_SCALE;
+        let amount = TOKEN_SCALE + IrysTokenPrice::token(Decimal::from(height)).unwrap().amount;
+        IrysTokenPrice::new(amount)
+    }
+
     /// Helper function to calculate oracle price for a given block height
     fn oracle_price_for_height(height: u64) -> IrysTokenPrice {
-        Amount::token(dec!(1.0) + dec!(0.1) * Decimal::from(height)).expect("Valid price")
+        Amount::new(
+            deterministic_price(height)
+                .amount
+                .saturating_add(421000.into()),
+        )
     }
 
     /// Helper function to calculate EMA price for a given block height
     fn ema_price_for_height(height: u64) -> IrysTokenPrice {
-        Amount::token(dec!(2.0) + dec!(0.2) * Decimal::from(height)).expect("Valid price")
+        deterministic_price(height)
+    }
+
+    /// Utility function to build blocks with their corresponding snapshots
+    fn build_blocks_with_snapshots(
+        max_height: u64,
+        config: &ConsensusConfig,
+    ) -> Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        let mut current_snapshot = EmaSnapshot::genesis(config);
+        let mut results: Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> = Vec::new();
+
+        for height in 0..=max_height {
+            let mut block = IrysBlockHeader::new_mock_header();
+            block.height = height;
+            // Special handling for genesis block to use config.genesis_price
+            if height == 0 {
+                block.oracle_irys_price = config.genesis_price;
+                block.ema_irys_price = config.genesis_price;
+            } else {
+                block.oracle_irys_price = oracle_price_for_height(height);
+                block.ema_irys_price = ema_price_for_height(height);
+            }
+
+            // For non-genesis blocks, create snapshot
+            if height > 0 {
+                let parent_block = &results.last().unwrap().0;
+                current_snapshot = current_snapshot
+                    .next_snapshot(&block, parent_block, config)
+                    .unwrap();
+            }
+
+            results.push((block, current_snapshot.clone()));
+        }
+
+        results
     }
 
     #[rstest]
@@ -341,32 +387,6 @@ mod snapshot_from_history {
         };
         assert_eq!(&expected_price_snapshot, ema_snapshot.as_ref());
     }
-}
-
-#[cfg(test)]
-mod iterative_snapshot_tests {
-    use super::*;
-    use irys_types::{ConsensusConfig, EmaConfig};
-    use rstest::rstest;
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-
-    /// Helper function to calculate deterministic price (matching test_utils::deterministic_price)
-    fn deterministic_price(height: u64) -> IrysTokenPrice {
-        use irys_types::storage_pricing::TOKEN_SCALE;
-        let amount = TOKEN_SCALE + IrysTokenPrice::token(Decimal::from(height)).unwrap().amount;
-        IrysTokenPrice::new(amount)
-    }
-
-    /// Helper function to calculate oracle price for a given block height
-    fn oracle_price_for_height(height: u64) -> IrysTokenPrice {
-        Amount::new(deterministic_price(height).amount.saturating_add(42.into()))
-    }
-
-    /// Helper function to calculate EMA price for a given block height
-    fn ema_price_for_height(height: u64) -> IrysTokenPrice {
-        deterministic_price(height)
-    }
 
     #[rstest]
     #[case(1, 0)]
@@ -385,34 +405,20 @@ mod iterative_snapshot_tests {
             ..ConsensusConfig::testnet()
         };
 
-        // Create blocks and build snapshots in the same loop
-        let mut current_snapshot = EmaSnapshot::genesis(&config);
-        let mut blocks = Vec::new();
-        
-        for height in 0..=max_block_height {
-            let mut block = IrysBlockHeader::new_mock_header();
-            block.height = height;
-            block.oracle_irys_price = oracle_price_for_height(height);
-            block.ema_irys_price = ema_price_for_height(height);
-            
-            // For non-genesis blocks, create snapshot
-            if height > 0 {
-                let parent_block = &blocks[blocks.len() - 1];
-                current_snapshot = current_snapshot
-                    .next_snapshot(&block, parent_block, &config)
-                    .unwrap();
-            }
-            
-            blocks.push(block);
-        }
+        // Build blocks and snapshots using utility function
+        let blocks_and_snapshots = build_blocks_with_snapshots(max_block_height, &config);
 
-        // Verify that the snapshot contains the expected EMA price for pricing
-        // by reading the actual block from the blocks array
-        let expected_block = blocks
+        // Get the last snapshot
+        let (_, current_snapshot) = blocks_and_snapshots
+            .last()
+            .expect("Should have at least one block");
+
+        // Find the expected block for pricing
+        let (expected_block, _) = blocks_and_snapshots
             .iter()
-            .find(|b| b.height == price_block_height)
+            .find(|(b, _)| b.height == price_block_height)
             .expect("Price block should exist in blocks array");
-        
+
         assert_eq!(
             current_snapshot.ema_for_public_pricing(),
             expected_block.ema_irys_price,
@@ -422,7 +428,7 @@ mod iterative_snapshot_tests {
     }
 
     #[test]
-    fn first_block() {
+    fn calculate_ema_for_new_block_first_block() {
         use rust_decimal_macros::dec;
 
         // Setup
@@ -467,7 +473,7 @@ mod iterative_snapshot_tests {
     #[case(10)]
     #[case(15)]
     #[case(19)]
-    fn first_and_second_adjustment_period(#[case] max_height: u64) {
+    fn calculate_ema_for_new_block_first_and_second_adjustment_period(#[case] max_height: u64) {
         // Setup
         let config = ConsensusConfig {
             ema: EmaConfig {
@@ -476,36 +482,15 @@ mod iterative_snapshot_tests {
             ..ConsensusConfig::testnet()
         };
 
-        // Start with genesis snapshot
-        let mut current_snapshot = EmaSnapshot::genesis(&config);
-        let mut blocks = Vec::new();
+        // Build blocks and snapshots using utility function
+        let blocks_and_snapshots = build_blocks_with_snapshots(max_height, &config);
 
-        // Create genesis block
-        let mut genesis_block = IrysBlockHeader::new_mock_header();
-        genesis_block.height = 0;
-        genesis_block.oracle_irys_price = oracle_price_for_height(0);
-        genesis_block.ema_irys_price = ema_price_for_height(0);
-        blocks.push(genesis_block);
-
-        // Build chain up to max_height
-        for height in 1..=max_height {
-            let mut new_block = IrysBlockHeader::new_mock_header();
-            new_block.height = height;
-            new_block.oracle_irys_price = oracle_price_for_height(height);
-            new_block.ema_irys_price = ema_price_for_height(height);
-
-            let parent_block = &blocks[blocks.len() - 1];
-
-            // Create snapshot for this block
-            current_snapshot = current_snapshot
-                .next_snapshot(&new_block, parent_block, &config)
-                .unwrap();
-
-            blocks.push(new_block);
-        }
+        // Get the last block and snapshot
+        let (parent_block, current_snapshot) = blocks_and_snapshots
+            .last()
+            .expect("Should have at least one block");
 
         // Test calculating EMA for the next block
-        let parent_block = &blocks[blocks.len() - 1];
         let new_oracle_price = oracle_price_for_height(max_height + 1);
 
         let ema_block = current_snapshot.calculate_ema_for_new_block(
@@ -552,35 +537,13 @@ mod iterative_snapshot_tests {
             ..ConsensusConfig::testnet()
         };
 
-        // Build chain up to max_height
-        let mut current_snapshot = EmaSnapshot::genesis(&config);
-        let mut blocks = Vec::new();
+        // Build blocks and snapshots using utility function
+        let blocks_and_snapshots = build_blocks_with_snapshots(max_height, &config);
 
-        // Create genesis block
-        let mut genesis_block = IrysBlockHeader::new_mock_header();
-        genesis_block.height = 0;
-        genesis_block.oracle_irys_price = oracle_price_for_height(0);
-        genesis_block.ema_irys_price = ema_price_for_height(0);
-        blocks.push(genesis_block);
-
-        // Build chain
-        for height in 1..=max_height {
-            let mut new_block = IrysBlockHeader::new_mock_header();
-            new_block.height = height;
-            new_block.oracle_irys_price = oracle_price_for_height(height);
-            new_block.ema_irys_price = ema_price_for_height(height);
-
-            let parent_block = &blocks[blocks.len() - 1];
-
-            current_snapshot = current_snapshot
-                .next_snapshot(&new_block, parent_block, &config)
-                .unwrap();
-
-            blocks.push(new_block);
-        }
-
-        // Get the last block's oracle price
-        let parent_block = &blocks[blocks.len() - 1];
+        // Get the last block and snapshot
+        let (parent_block, current_snapshot) = blocks_and_snapshots
+            .last()
+            .expect("Should have at least one block");
         let price_oracle_latest = parent_block.oracle_irys_price;
 
         // Create prices outside the safe range (10.1% above and below)
@@ -648,36 +611,16 @@ mod iterative_snapshot_tests {
             ..ConsensusConfig::testnet()
         };
 
-        // Build chain up to max_height
-        let mut current_snapshot = EmaSnapshot::genesis(&config);
-        let mut blocks = Vec::new();
+        // Build blocks and snapshots using utility function
+        let blocks_and_snapshots = build_blocks_with_snapshots(max_height, &config);
 
-        // Create genesis block
-        let mut genesis_block = IrysBlockHeader::new_mock_header();
-        genesis_block.height = 0;
-        genesis_block.oracle_irys_price = oracle_price_for_height(0);
-        genesis_block.ema_irys_price = ema_price_for_height(0);
-        blocks.push(genesis_block);
-
-        // Build chain
-        for height in 1..=max_height {
-            let mut new_block = IrysBlockHeader::new_mock_header();
-            new_block.height = height;
-            new_block.oracle_irys_price = oracle_price_for_height(height);
-            new_block.ema_irys_price = ema_price_for_height(height);
-
-            let parent_block = &blocks[blocks.len() - 1];
-
-            current_snapshot = current_snapshot
-                .next_snapshot(&new_block, parent_block, &config)
-                .unwrap();
-
-            blocks.push(new_block);
-        }
+        // Get the last block and snapshot
+        let (parent_block, current_snapshot) = blocks_and_snapshots
+            .last()
+            .expect("Should have at least one block");
 
         // Calculate EMA for the next block (which should be an EMA recalculation block)
         let new_block_height = max_height + 1;
-        let parent_block = &blocks[blocks.len() - 1];
         let new_oracle_price = oracle_price_for_height(new_block_height);
 
         // Verify this is an EMA recalculation block
@@ -709,24 +652,6 @@ mod iterative_snapshot_tests {
             new_block_height, prev_ema_predecessor_height, prev_ema_height
         );
     }
-}
-
-#[cfg(test)]
-mod iterative_vs_history_tests {
-    use super::*;
-    use rstest::rstest;
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-
-    /// Helper function to calculate oracle price for a given block height
-    fn oracle_price_for_height(height: u64) -> IrysTokenPrice {
-        Amount::token(dec!(1.0) + dec!(0.1) * Decimal::from(height)).expect("Valid price")
-    }
-
-    /// Helper function to calculate EMA price for a given block height
-    fn ema_price_for_height(height: u64) -> IrysTokenPrice {
-        Amount::token(dec!(2.0) + dec!(0.2) * Decimal::from(height)).expect("Valid price")
-    }
 
     #[rstest]
     #[case(1)]
@@ -749,38 +674,21 @@ mod iterative_vs_history_tests {
             ..ConsensusConfig::testnet()
         };
 
-        // Start with genesis snapshot
-        let mut current_snapshot = EmaSnapshot::genesis(&config);
-        let mut blocks = Vec::new();
-        let mut snapshots =
-            vec![Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone())];
+        // Build blocks and snapshots using utility function
+        let blocks_and_snapshots = build_blocks_with_snapshots(max_block_height, &config);
 
-        // Create genesis block
-        let mut genesis_block = IrysBlockHeader::new_mock_header();
-        genesis_block.height = 0;
-        genesis_block.oracle_irys_price = config.genesis_price;
-        genesis_block.ema_irys_price = config.genesis_price;
-        blocks.push(genesis_block);
+        // Extract blocks and snapshots into separate vectors for testing
+        let blocks: Vec<IrysBlockHeader> = blocks_and_snapshots
+            .iter()
+            .map(|(block, _)| block.clone())
+            .collect();
 
-        // Build chain iteratively and store all snapshots
-        for height in 1..=max_block_height {
-            let mut new_block = IrysBlockHeader::new_mock_header();
-            new_block.height = height;
-            new_block.oracle_irys_price = oracle_price_for_height(height);
-            new_block.ema_irys_price = ema_price_for_height(height);
-
-            let parent_block = &blocks[blocks.len() - 1];
-
-            // Create snapshot for this block using iterative approach
-            current_snapshot = current_snapshot
-                .next_snapshot(&new_block, parent_block, &config)
-                .unwrap();
-
-            blocks.push(new_block);
-            snapshots.push(
-                Arc::try_unwrap(current_snapshot.clone()).unwrap_or_else(|arc| (*arc).clone()),
-            );
-        }
+        let snapshots: Vec<EmaSnapshot> = blocks_and_snapshots
+            .iter()
+            .map(|(_, snapshot)| {
+                Arc::try_unwrap(snapshot.clone()).unwrap_or_else(|arc| (*arc).clone())
+            })
+            .collect();
 
         // Now verify that create_ema_snapshot_from_chain_history produces the same results
         for test_height in 1..=max_block_height {
