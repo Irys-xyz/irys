@@ -16,8 +16,11 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 10;
+    // setup config / testnet
+    let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
     // Create a signer (keypair) for the peer and fund it
     let peer1_signer = genesis_config.new_random_signer();
