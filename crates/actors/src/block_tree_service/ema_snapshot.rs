@@ -376,7 +376,7 @@ mod iterative_snapshot_tests {
     #[case(20, 9)] // use the 10th block price during 3rd EMA interval
     #[case(29, 9)]
     #[case(30, 19)]
-    fn get_ema_for_pricing(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
+    fn get_ema_for_pricing(#[case] max_block_height: u64, #[case] price_block_height: u64) {
         // setup
         let config = ConsensusConfig {
             ema: EmaConfig {
@@ -385,43 +385,39 @@ mod iterative_snapshot_tests {
             ..ConsensusConfig::testnet()
         };
 
-        // Start with genesis snapshot
+        // Create blocks and build snapshots in the same loop
         let mut current_snapshot = EmaSnapshot::genesis(&config);
         let mut blocks = Vec::new();
-
-        // Create genesis block
-        let mut genesis_block = IrysBlockHeader::new_mock_header();
-        genesis_block.height = 0;
-        genesis_block.oracle_irys_price = oracle_price_for_height(0);
-        genesis_block.ema_irys_price = ema_price_for_height(0);
-        blocks.push(genesis_block);
-
-        // Iteratively build snapshots using create_ema_snapshot_for_block
-        for height in 1..=max_block_height {
-            let mut new_block = IrysBlockHeader::new_mock_header();
-            new_block.height = height;
-            new_block.oracle_irys_price = oracle_price_for_height(height);
-            new_block.ema_irys_price = ema_price_for_height(height);
-
-            let parent_block = &blocks[blocks.len() - 1];
-
-            // Create snapshot for this block
-            current_snapshot = current_snapshot
-                .next_snapshot(&new_block, parent_block, &config)
-                .unwrap();
-
-            blocks.push(new_block);
+        
+        for height in 0..=max_block_height {
+            let mut block = IrysBlockHeader::new_mock_header();
+            block.height = height;
+            block.oracle_irys_price = oracle_price_for_height(height);
+            block.ema_irys_price = ema_price_for_height(height);
+            
+            // For non-genesis blocks, create snapshot
+            if height > 0 {
+                let parent_block = &blocks[blocks.len() - 1];
+                current_snapshot = current_snapshot
+                    .next_snapshot(&block, parent_block, &config)
+                    .unwrap();
+            }
+            
+            blocks.push(block);
         }
 
         // Verify that the snapshot contains the expected EMA price for pricing
-        // using the price_block_idx parameter to specify which block's EMA price to expect
-        let expected_ema_price = ema_price_for_height(price_block_idx as u64);
-
+        // by reading the actual block from the blocks array
+        let expected_block = blocks
+            .iter()
+            .find(|b| b.height == price_block_height)
+            .expect("Price block should exist in blocks array");
+        
         assert_eq!(
             current_snapshot.ema_for_public_pricing(),
-            expected_ema_price,
-            "Snapshot ema_for_public_pricing() should equal EMA price from block {} (deterministic_price({}))",
-            price_block_idx, price_block_idx
+            expected_block.ema_irys_price,
+            "Snapshot ema_for_public_pricing() should equal EMA price from block {}",
+            price_block_height
         );
     }
 
