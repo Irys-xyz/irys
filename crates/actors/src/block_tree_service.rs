@@ -36,9 +36,7 @@ use tokio::{
 use tracing::{debug, error, info};
 
 pub mod ema_snapshot;
-use ema_snapshot::{
-    create_ema_snapshot_for_block, create_ema_snapshot_from_chain_history, EmaSnapshot,
-};
+use ema_snapshot::{create_ema_snapshot_from_chain_history, EmaSnapshot};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -446,10 +444,9 @@ impl BlockTreeServiceInner {
         );
 
         // Create ema snapshot for this block
-        let ema_snapshot = create_ema_snapshot_for_block(
+        let ema_snapshot = parent_block.ema_snapshot.next_snapshot(
             &block,
             &parent_block.block,
-            &parent_block.ema_snapshot,
             &self.consensus_config,
         )?;
 
@@ -1022,13 +1019,9 @@ impl BlockTreeCache {
                 &commitment_state_guard,
             );
 
-            let arc_ema_snapshot = create_ema_snapshot_for_block(
-                &block,
-                &prev_block,
-                &prev_ema_snapshot,
-                &consensus_config,
-            )
-            .expect("failed to create EMA snapshot");
+            let arc_ema_snapshot = prev_ema_snapshot
+                .next_snapshot(&block, &prev_block, &consensus_config)
+                .expect("failed to create EMA snapshot");
 
             // Update commitment snapshot with new commitments if it's not an epoch block
             if block.height % consensus_config.epoch.num_blocks_in_epoch != 0 {

@@ -50,6 +50,58 @@ impl EmaSnapshot {
         })
     }
 
+    /// Create EMA cache for a block
+    pub fn next_snapshot(
+        &self,
+        new_block: &IrysBlockHeader,
+        parent_block: &IrysBlockHeader,
+        consensus_config: &ConsensusConfig,
+    ) -> eyre::Result<Arc<EmaSnapshot>> {
+        let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
+
+        // Check if we're at an EMA boundary where we shift intervals
+        // This happens at blocks 10, 20, 30, etc.
+        let crossing_interval_boundary =
+            new_block.height % blocks_in_interval == 0 && new_block.height > 0;
+
+        // Update the interval tracking
+        let (ema_price_2_intervals_ago, ema_price_1_interval_ago) = if crossing_interval_boundary {
+            // Shift the intervals:
+            // - What was 1 interval ago becomes 2 intervals ago
+            // - What was the last interval becomes 1 interval ago
+            (
+                self.ema_price_1_interval_ago,
+                self.ema_price_current_interval,
+            )
+        } else {
+            // Keep the same interval tracking
+            (
+                self.ema_price_2_intervals_ago,
+                self.ema_price_1_interval_ago,
+            )
+        };
+
+        // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
+        if is_ema_recalculation_block(new_block.height, blocks_in_interval) {
+            Ok(Arc::new(EmaSnapshot {
+                ema_price_2_intervals_ago,
+                ema_price_1_interval_ago,
+                oracle_price_parent_block: parent_block.oracle_irys_price,
+                oracle_price_for_current_ema_predecessor: parent_block.oracle_irys_price,
+                ema_price_current_interval: new_block.ema_irys_price,
+            }))
+        } else {
+            Ok(Arc::new(EmaSnapshot {
+                ema_price_2_intervals_ago,
+                ema_price_1_interval_ago,
+                ema_price_current_interval: self.ema_price_current_interval,
+                oracle_price_parent_block: parent_block.oracle_irys_price,
+                oracle_price_for_current_ema_predecessor: self
+                    .oracle_price_for_current_ema_predecessor,
+            }))
+        }
+    }
+
     /// Calculate EMA for a new block based on parent's cache
     pub fn calculate_ema_for_new_block(
         &self,
@@ -113,58 +165,6 @@ impl EmaSnapshot {
     /// This is the EMA from 2 intervals ago
     pub fn ema_for_public_pricing(&self) -> IrysTokenPrice {
         self.ema_price_2_intervals_ago
-    }
-}
-
-/// Create EMA cache for a block
-pub fn create_ema_snapshot_for_block(
-    new_block: &IrysBlockHeader,
-    parent_block: &IrysBlockHeader,
-    parent_ema_snapshot: &EmaSnapshot,
-    consensus_config: &ConsensusConfig,
-) -> eyre::Result<Arc<EmaSnapshot>> {
-    let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
-
-    // Check if we're at an EMA boundary where we shift intervals
-    // This happens at blocks 10, 20, 30, etc.
-    let crossing_interval_boundary =
-        new_block.height % blocks_in_interval == 0 && new_block.height > 0;
-
-    // Update the interval tracking
-    let (ema_price_2_intervals_ago, ema_price_1_interval_ago) = if crossing_interval_boundary {
-        // Shift the intervals:
-        // - What was 1 interval ago becomes 2 intervals ago
-        // - What was the last interval becomes 1 interval ago
-        (
-            parent_ema_snapshot.ema_price_1_interval_ago,
-            parent_ema_snapshot.ema_price_current_interval,
-        )
-    } else {
-        // Keep the same interval tracking
-        (
-            parent_ema_snapshot.ema_price_2_intervals_ago,
-            parent_ema_snapshot.ema_price_1_interval_ago,
-        )
-    };
-
-    // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
-    if is_ema_recalculation_block(new_block.height, blocks_in_interval) {
-        Ok(Arc::new(EmaSnapshot {
-            ema_price_2_intervals_ago,
-            ema_price_1_interval_ago,
-            oracle_price_parent_block: parent_block.oracle_irys_price,
-            oracle_price_for_current_ema_predecessor: parent_block.oracle_irys_price,
-            ema_price_current_interval: new_block.ema_irys_price,
-        }))
-    } else {
-        Ok(Arc::new(EmaSnapshot {
-            ema_price_2_intervals_ago,
-            ema_price_1_interval_ago,
-            ema_price_current_interval: parent_ema_snapshot.ema_price_current_interval,
-            oracle_price_parent_block: parent_block.oracle_irys_price,
-            oracle_price_for_current_ema_predecessor: parent_ema_snapshot
-                .oracle_price_for_current_ema_predecessor,
-        }))
     }
 }
 
@@ -419,9 +419,9 @@ mod iterative_snapshot_tests {
             let parent_block = &blocks[blocks.len() - 1];
 
             // Create snapshot for this block
-            current_snapshot =
-                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
-                    .unwrap();
+            current_snapshot = current_snapshot
+                .next_snapshot(&new_block, parent_block, &config)
+                .unwrap();
 
             blocks.push(new_block);
         }
@@ -514,9 +514,9 @@ mod iterative_snapshot_tests {
             let parent_block = &blocks[blocks.len() - 1];
 
             // Create snapshot for this block
-            current_snapshot =
-                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
-                    .unwrap();
+            current_snapshot = current_snapshot
+                .next_snapshot(&new_block, parent_block, &config)
+                .unwrap();
 
             blocks.push(new_block);
         }
@@ -589,9 +589,9 @@ mod iterative_snapshot_tests {
 
             let parent_block = &blocks[blocks.len() - 1];
 
-            current_snapshot =
-                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
-                    .unwrap();
+            current_snapshot = current_snapshot
+                .next_snapshot(&new_block, parent_block, &config)
+                .unwrap();
 
             blocks.push(new_block);
         }
@@ -685,9 +685,9 @@ mod iterative_snapshot_tests {
 
             let parent_block = &blocks[blocks.len() - 1];
 
-            current_snapshot =
-                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
-                    .unwrap();
+            current_snapshot = current_snapshot
+                .next_snapshot(&new_block, parent_block, &config)
+                .unwrap();
 
             blocks.push(new_block);
         }
@@ -789,9 +789,9 @@ mod iterative_vs_history_tests {
             let parent_block = &blocks[blocks.len() - 1];
 
             // Create snapshot for this block using iterative approach
-            current_snapshot =
-                create_ema_snapshot_for_block(&new_block, parent_block, &current_snapshot, &config)
-                    .unwrap();
+            current_snapshot = current_snapshot
+                .next_snapshot(&new_block, parent_block, &config)
+                .unwrap();
 
             blocks.push(new_block);
             snapshots.push(
