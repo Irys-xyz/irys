@@ -285,20 +285,21 @@ mod snapshot_from_history {
     }
 
     #[rstest]
-    #[case(0, 0, 0, 0)]
-    #[case(1, 0, 1, 0)]
-    #[case(10, 0, 10, 9)]
-    #[case(18, 0, 18, 17)]
-    #[case(19, 0, 19, 18)]
-    #[case(20, 9, 19, 18)]
-    #[case(85, 69, 79, 78)]
-    #[case(90, 79, 89, 88)]
-    #[case(99, 79, 99, 98)]
+    #[case(0, 0, 0, 0, 0)]
+    #[case(1, 0, 1, 0, 0)]
+    #[case(10, 0, 10, 9, 9)]
+    #[case(18, 0, 18, 17, 9)]
+    #[case(19, 0, 19, 18, 9)]
+    #[case(20, 9, 19, 18, 19)]
+    #[case(85, 69, 79, 78, 79)]
+    #[case(90, 79, 89, 88, 89)]
+    #[case(99, 79, 99, 98, 89)]
     fn test_valid_price_cache(
         #[case] height_latest_block: u64,
         #[case] height_for_pricing: u64,
         #[case] height_current_ema: u64,
         #[case] height_current_ema_predecessor: u64,
+        #[case] height_1_interval_ago: u64,
     ) {
         // setup
         let interval = 10;
@@ -336,7 +337,7 @@ mod snapshot_from_history {
             oracle_price_for_current_ema_predecessor: get_block(height_current_ema_predecessor)
                 .oracle_irys_price,
             ema_price_current_interval: get_block(height_current_ema).ema_irys_price,
-            ema_price_1_interval_ago: get_block(height_for_pricing + interval).ema_irys_price,
+            ema_price_1_interval_ago: get_block(height_1_interval_ago).ema_irys_price,
         };
         assert_eq!(&expected_price_snapshot, ema_snapshot.as_ref());
     }
