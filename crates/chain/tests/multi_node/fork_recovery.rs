@@ -96,10 +96,10 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(peer2_assignments.len(), 1);
 
     // Wait for the peers to receive & process the epoch block
-    let _block_hash = peer1_node
+    peer1_node
         .wait_until_height_on_chain(1, seconds_to_wait)
         .await?;
-    let _block_hash = peer2_node
+    peer2_node
         .wait_until_height_on_chain(1, seconds_to_wait)
         .await?;
 

@@ -381,14 +381,14 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         let result_genesis = poll_until_fetch_at_block_index_height(
             "genesis".to_owned(),
             &ctx_genesis_node.node_ctx,
-            (genesis_index_height + 1).try_into()?,
+            genesis_index_height + 1,
             20,
         )
         .await;
         let result_peer2 = poll_until_fetch_at_block_index_height(
             "peer2".to_owned(),
             &ctx_peer2_node.node_ctx,
-            (genesis_index_height + 1).try_into()?,
+            genesis_index_height + 1,
             20,
         )
         .await;
@@ -435,18 +435,14 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         let mut result_genesis = block_index_endpoint_request(
             &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
-            (genesis_starting_index_height + 1)
-                .try_into()
-                .expect("expected required_blocks_height to be valid u64"),
+            genesis_starting_index_height + 1,
         )
         .await;
 
         let result_peer1 = poll_until_fetch_at_block_index_height(
             "peer1".to_owned(),
             &ctx_peer1_node.node_ctx,
-            (genesis_starting_index_height + 1)
-                .try_into()
-                .expect("expected required_blocks_height to be valid u64"),
+            genesis_starting_index_height + 1,
             2000,
         )
         .await;
@@ -455,9 +451,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         let result_peer2 = poll_until_fetch_at_block_index_height(
             "peer2".to_owned(),
             &ctx_peer2_node.node_ctx,
-            (genesis_starting_index_height + 1)
-                .try_into()
-                .expect("expected required_blocks_height to be valid u64"),
+            genesis_starting_index_height + 1,
             2000,
         )
         .await;
