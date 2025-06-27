@@ -1798,7 +1798,7 @@ fn build_current_ema_snapshot_from_index(
     }
 
     // Build EMA snapshot using existing helper function
-    create_ema_snapshot_from_chain_history(&latest_block, &chain_blocks, config).unwrap_or_else(
+    create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(
         |err| {
             panic!("Failed to create EMA snapshot from chain history: {}", err);
         },

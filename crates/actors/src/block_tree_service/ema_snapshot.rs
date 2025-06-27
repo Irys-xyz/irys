@@ -204,54 +204,51 @@ pub fn bound_in_min_max_range(
 
 /// Create EMA snapshot for a block using chain history
 /// This is used for historical validation where we need to reconstruct the EMA state
+/// The blocks parameter should include all blocks up to and including the latest block
 pub fn create_ema_snapshot_from_chain_history(
-    latest_block: &IrysBlockHeader,
-    previous_blocks: &[IrysBlockHeader],
+    blocks: &[IrysBlockHeader],
     consensus_config: &ConsensusConfig,
 ) -> Result<Arc<EmaSnapshot>> {
+    let latest_block = blocks
+        .last()
+        .ok_or_else(|| eyre::eyre!("No blocks provided to create_ema_snapshot_from_chain_history"))?;
+    
     let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
     let latest_block_height = latest_block.height;
-    let previous_blocks = [previous_blocks, &[latest_block.clone()]].concat();
 
     let height_pricing_block =
         block_height_to_use_for_price(latest_block_height, blocks_in_interval);
     let height_latest_ema_block =
         if is_ema_recalculation_block(latest_block_height, blocks_in_interval) {
-            latest_block.height
+            latest_block_height
         } else {
             // Derive indexes
             previous_ema_recalculation_block_height(latest_block_height, blocks_in_interval)
         };
     let height_latest_ema_interval_predecessor = height_latest_ema_block.saturating_sub(1);
-    let height_parent_block = latest_block.height.saturating_sub(1);
+    let height_parent_block = latest_block_height.saturating_sub(1);
 
     // utility to get the block with the desired height
     let get_block_with_height = |desired_height: u64| {
-        let block = previous_blocks
+        let block = blocks
             .iter()
             .find(|b| b.height == desired_height)
-            .ok_or_else(|| eyre::eyre!("Pricing block not found in chain history"))?;
+            .ok_or_else(|| eyre::eyre!("Block with height {} not found in chain history", desired_height))?;
         Result::<_, eyre::Report>::Ok(block)
     };
 
     // Calculate the height for 1 interval ago
-    // This tracks which EMA value was active 1 interval ago
-    // The logic depends on whether we've crossed interval boundaries
+    // This is the last EMA recalculation block from the previous interval
     let height_1_interval_ago = if latest_block_height < blocks_in_interval {
         // First interval (0-9) - no previous interval, use genesis
         0
-    } else if latest_block_height < blocks_in_interval * 2 {
-        // Second interval (10-19) - 1 interval ago was the first interval's last EMA
-        // For blocks 10-19, the "1 interval ago" EMA is from block 9
-        blocks_in_interval - 1
     } else {
-        // Third interval and beyond
-        // We need the last EMA recalculation block from the previous interval
-        // For example:
-        // - At block 20-29: 1 interval ago is block 19
-        // - At block 30-39: 1 interval ago is block 29
-        let intervals_completed = latest_block_height / blocks_in_interval;
-        (intervals_completed - 1) * blocks_in_interval + (blocks_in_interval - 1)
+        // Get the last EMA block from the previous interval
+        // For blocks 10-19: returns 9 (last EMA of interval 0)
+        // For blocks 20-29: returns 19 (last EMA of interval 1)
+        // For blocks 30-39: returns 29 (last EMA of interval 2)
+        let current_interval = latest_block_height / blocks_in_interval;
+        (current_interval - 1) * blocks_in_interval + (blocks_in_interval - 1)
     };
 
     // Calculate new EMA if this is a recalculation block
@@ -369,12 +366,10 @@ mod snapshot_from_history {
                 block
             })
             .collect::<Vec<_>>();
-        let latest_block = blocks.last().cloned().unwrap();
-        let previous_blocks = &blocks;
 
         // action
         let ema_snapshot =
-            create_ema_snapshot_from_chain_history(&latest_block, previous_blocks, &config)
+            create_ema_snapshot_from_chain_history(&blocks, &config)
                 .unwrap();
 
         // assert
@@ -697,12 +692,10 @@ mod snapshot_from_history {
         // Now verify that create_ema_snapshot_from_chain_history produces the same results
         for test_height in 1..=max_block_height {
             let test_blocks = &blocks[0..=test_height as usize];
-            let latest_block = test_blocks.last().unwrap();
-            let previous_blocks = &test_blocks[0..test_blocks.len() - 1];
 
             // Create snapshot using chain history
             let history_snapshot =
-                create_ema_snapshot_from_chain_history(latest_block, previous_blocks, &config)
+                create_ema_snapshot_from_chain_history(test_blocks, &config)
                     .unwrap();
 
             // Get the iterative snapshot for this height
