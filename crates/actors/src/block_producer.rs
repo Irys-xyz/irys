@@ -625,10 +625,10 @@ pub trait BlockProdStrategy {
     async fn get_ema_price(
         &self,
         parent_block: &IrysBlockHeader,
-        prev_block_ema_snapshot: &EmaSnapshot,
+        parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<EmaBlock> {
         let oracle_irys_price = self.inner().price_oracle.current_price().await?;
-        let ema_irys_price = prev_block_ema_snapshot.calculate_ema_for_new_block(
+        let ema_irys_price = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
             self.inner().config.consensus.token_price_safe_range,

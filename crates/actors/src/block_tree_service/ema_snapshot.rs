@@ -131,7 +131,7 @@ impl EmaSnapshot {
 
         // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
         // During the first 2 intervals, every block is an EMA recalculation block
-        if is_ema_recalculation_block(new_block.height, blocks_in_interval) {
+        if new_block.is_ema_recalculation_block(blocks_in_interval) {
             Ok(Arc::new(EmaSnapshot {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
@@ -300,17 +300,13 @@ pub fn create_ema_snapshot_from_chain_history(
     })?;
 
     let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
-    let latest_block_height = latest_block.height;
 
-    let height_pricing_block =
-        block_height_to_use_for_price(latest_block_height, blocks_in_interval);
-    let height_latest_ema_block =
-        if is_ema_recalculation_block(latest_block_height, blocks_in_interval) {
-            latest_block_height
-        } else {
-            // Derive indexes
-            previous_ema_recalculation_block_height(latest_block_height, blocks_in_interval)
-        };
+    let height_pricing_block = latest_block.block_height_to_use_for_price(blocks_in_interval);
+    let height_latest_ema_block = if latest_block.is_ema_recalculation_block(blocks_in_interval) {
+        latest_block.height
+    } else {
+        latest_block.previous_ema_recalculation_block_height(blocks_in_interval)
+    };
     let height_latest_ema_interval_predecessor = height_latest_ema_block.saturating_sub(1);
 
     // utility to get the block with the desired height
@@ -329,7 +325,7 @@ pub fn create_ema_snapshot_from_chain_history(
 
     // Calculate the height for 1 interval ago
     // This is the last EMA recalculation block from the previous interval
-    let height_1_interval_ago = if latest_block_height < blocks_in_interval {
+    let height_1_interval_ago = if latest_block.height < blocks_in_interval {
         // First interval (0-9) - no previous interval, use genesis
         0
     } else {
@@ -337,7 +333,7 @@ pub fn create_ema_snapshot_from_chain_history(
         // For blocks 10-19: returns 9 (last EMA of interval 0)
         // For blocks 20-29: returns 19 (last EMA of interval 1)
         // For blocks 30-39: returns 29 (last EMA of interval 2)
-        let current_interval = latest_block_height / blocks_in_interval;
+        let current_interval = latest_block.height / blocks_in_interval;
         (current_interval - 1) * blocks_in_interval + (blocks_in_interval - 1)
     };
 

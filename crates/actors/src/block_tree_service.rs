@@ -846,8 +846,7 @@ impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
-    // #[cfg(feature = "test-utils")]
-    // todo - this code is only used for tests, we can get rid of EmaSnapshot::genesis
+    #[cfg(feature = "test-utils")]
     pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         let block_hash = genesis_block.block_hash;
         let solution_hash = genesis_block.solution_hash;
@@ -1798,11 +1797,9 @@ fn build_current_ema_snapshot_from_index(
     }
 
     // Build EMA snapshot using existing helper function
-    create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(
-        |err| {
-            panic!("Failed to create EMA snapshot from chain history: {}", err);
-        },
-    )
+    create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(|err| {
+        panic!("Failed to create EMA snapshot from chain history: {}", err);
+    })
 }
 
 pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
