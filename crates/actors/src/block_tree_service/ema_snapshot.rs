@@ -1,3 +1,40 @@
+//! # EMA (Exponential Moving Average) Snapshot System
+//!
+//! ## Overview
+//!
+//! The EMA system divides blockchain history into fixed-size intervals (configurable via the config)
+//! and calculates exponential moving averages of oracle prices to determine storage pricing.
+//!
+//! ## Interval System
+//!
+//! The system operates differently across three types of intervals:
+//!
+//! ### 1st-2nd Interval (blocks 0-19 assuming the pricing interval is 10)
+//! - Special handling: EMA is recalculated for EVERY block
+//! - Uses genesis price as initial EMA
+//! - Each block's EMA is based on its immediate predecessor
+//! - Example: Block 5 uses block 4's oracle price and EMA for calculation
+//!
+//! ### Nth Intervals (blocks 20+)
+//! - Standard operation: EMA only recalculated at interval boundaries
+//! - EMA updates happen at blocks 29, 39, 49, etc. (last block of each interval)
+//! - Uses oracle price from predecessor of previous EMA block
+//! - Example: Block 29's EMA uses block 18's oracle price + block 19's EMA
+//!
+//! ## Pricing vs Computation Blocks
+//!
+//! The system separates blocks used for pricing from those used for EMA computation:
+//!
+//! - **Pricing Blocks**: Always uses EMA from 2 intervals ago
+//!   - Blocks 0-19: Use genesis block (block 0) EMA
+//!   - Blocks 20-29: Use block 9's EMA
+//!   - Blocks 30-39: Use block 19's EMA
+//!   - Blocks 40-49: Use block 29's EMA
+//!
+//! - **Computation Blocks**: For calculating new EMA values
+//!   - First 2 intervals: Use immediate predecessor
+//!   - After block 20: Use predecessor of previous EMA recalculation block
+
 use eyre::Result;
 use irys_types::{
     block_height_to_use_for_price, is_ema_recalculation_block,
@@ -7,50 +44,61 @@ use irys_types::{
 };
 use std::sync::Arc;
 
+/// Snapshot of EMA-related pricing data for a specific block.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmaSnapshot {
-    /// EMA price to use for pricing (from block 2 intervals ago)
+    /// EMA price to use for public pricing operations (from block 2 intervals ago).
+    /// This is the "stable" price that external systems and users see.
     pub ema_price_2_intervals_ago: IrysTokenPrice,
 
-    /// The previous block's oracle price (for validation)
-    pub oracle_price_parent_block: IrysTokenPrice,
-
-    /// Oracle price of previous EMA recalculation blocks predecessor. Used of EMA calculations.
-    /// example EMA calculation on block 29:
-    /// 1. take the registered Oracle Irys price in block 18 (this value)
-    ///    and the stored EMA Irys price in block 19.
+    /// Oracle price of previous EMA recalculation block's predecessor.
+    /// This is used for EMA calculations in the standard (3rd+) intervals.
+    ///
+    /// Example: At block 29 (EMA recalculation block), this contains oracle price from block 18
     pub oracle_price_for_current_ema_predecessor: IrysTokenPrice,
 
-    /// Latest EMA value calculated at this block
-    /// example EMA calculation on block 29:
-    /// 1. take the registered Oracle Irys price in block 18
-    ///    and the stored EMA Irys price in block 19 (this value).
+    /// Latest EMA value calculated at the most recent EMA recalculation block.
+    /// This is the "current" EMA that will become the pricing EMA in 2 intervals.
+    ///
+    /// Example: At block 35, this contains the EMA calculated at block 29
     pub ema_price_current_interval: IrysTokenPrice,
 
-    /// EMA from the previous interval (1 interval ago)
-    /// This is needed to properly update ema_price_2_intervals_ago when crossing pricing boundaries
+    /// EMA from the previous interval (1 interval ago).
+    /// This is needed to properly shift values when crossing interval boundaries.
+    /// When we cross into a new interval, this becomes ema_price_2_intervals_ago.
+    ///
+    /// Note: this value is crucial only during the first 2 pricing intervals.
+    /// After the first 2 pricing intervals, it contains the same value as `ema_price_current_interval`
     pub ema_price_1_interval_ago: IrysTokenPrice,
 }
 
+/// Result of EMA calculation for a new block.
 #[derive(Debug)]
 pub struct EmaBlock {
+    /// Oracle price after applying safe range bounds.
+    /// If the original oracle price was outside the safe range, this will be capped.
     pub range_adjusted_oracle_price: IrysTokenPrice,
+
+    /// The newly calculated EMA value for the new block.
     pub ema: IrysTokenPrice,
 }
 
 impl EmaSnapshot {
-    /// Create EMA cache for genesis block
+    /// Create EMA snapshot for the genesis block.
+    ///
+    /// The genesis block is special: all price fields are initialized with the same value
+    /// from the genesis configuration. This provides the starting point for all future
+    /// EMA calculations.
     pub fn genesis(genesis_header: &IrysBlockHeader) -> Arc<Self> {
         Arc::new(Self {
             ema_price_2_intervals_ago: genesis_header.ema_irys_price,
-            oracle_price_parent_block: genesis_header.oracle_irys_price,
             oracle_price_for_current_ema_predecessor: genesis_header.oracle_irys_price,
             ema_price_current_interval: genesis_header.ema_irys_price,
             ema_price_1_interval_ago: genesis_header.ema_irys_price,
         })
     }
 
-    /// Create EMA cache for a block
+    /// Create the next EMA snapshot for a new block based on the current snapshot.
     pub fn next_snapshot(
         &self,
         new_block: &IrysBlockHeader,
@@ -82,11 +130,11 @@ impl EmaSnapshot {
         };
 
         // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
+        // During the first 2 intervals, every block is an EMA recalculation block
         if is_ema_recalculation_block(new_block.height, blocks_in_interval) {
             Ok(Arc::new(EmaSnapshot {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
-                oracle_price_parent_block: parent_block.oracle_irys_price,
                 oracle_price_for_current_ema_predecessor: parent_block.oracle_irys_price,
                 ema_price_current_interval: new_block.ema_irys_price,
             }))
@@ -95,14 +143,33 @@ impl EmaSnapshot {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
                 ema_price_current_interval: self.ema_price_current_interval,
-                oracle_price_parent_block: parent_block.oracle_irys_price,
+                // oracle_price_parent_block: parent_block.oracle_irys_price,
                 oracle_price_for_current_ema_predecessor: self
                     .oracle_price_for_current_ema_predecessor,
             }))
         }
     }
 
-    /// Calculate EMA for a new block based on parent's cache
+    /// Calculate EMA for a new block based on the current snapshot.
+    ///
+    /// This method implements the core EMA calculation logic, which differs based on
+    /// which interval we're in:
+    ///
+    /// ## First 2 Intervals (blocks 0-19)
+    /// - Uses the new oracle price directly for EMA calculation
+    /// - Each block's EMA is based on its immediate predecessor
+    ///
+    /// ## Standard Intervals (blocks 20+)
+    /// - Uses oracle price from the predecessor of the previous EMA recalculation block
+    /// - Example: Block 29 uses oracle price from block 18 (not block 28)
+    ///
+    /// ## Price Safety
+    /// The oracle price is always bounded within a safe range to prevent manipulation.
+    /// If the price change is too large, it's capped to the maximum allowed change.
+    ///
+    /// # Returns
+    ///
+    /// An `EmaBlock` containing the calculated EMA and the range-adjusted oracle price used
     pub fn calculate_ema_for_new_block(
         &self,
         parent_block: &IrysBlockHeader,
@@ -151,7 +218,10 @@ impl EmaSnapshot {
         }
     }
 
-    /// Validate oracle price is within safe range
+    /// Validate that an oracle price is within the safe range.
+    ///
+    /// This prevents sudden price spikes or drops that could be used for manipulation.
+    /// The safe range is typically ±n% from the previous oracle price, where n is configurable.
     pub fn oracle_price_is_valid(
         oracle_price: IrysTokenPrice,
         previous_oracle_price: IrysTokenPrice,
@@ -161,17 +231,25 @@ impl EmaSnapshot {
         oracle_price == capped
     }
 
-    /// Get the EMA price that should be used for public pricing
-    /// This is the EMA from 2 intervals ago
+    /// Get the EMA price that should be used for public pricing.
     pub fn ema_for_public_pricing(&self) -> IrysTokenPrice {
         self.ema_price_2_intervals_ago
     }
 }
 
-/// Cap the provided price value to fit within the max / min acceptable range.
-/// The range is defined by the `token_price_safe_range` percentile value.
+/// Cap the provided price value to fit within the max/min acceptable range.
 ///
-/// Use the previous blocks oracle price as the base value.
+/// # Returns
+///
+/// The original price if within range, or the capped price at the range boundary
+///
+/// # Example
+///
+/// If base_price = $1.00 and safe_range = 10%:
+/// - Allowed range: $0.90 to $1.10
+/// - Input $1.15 → Returns $1.10 (capped at max)
+/// - Input $0.85 → Returns $0.90 (capped at min)
+/// - Input $1.05 → Returns $1.05 (within range)
 #[tracing::instrument]
 pub fn bound_in_min_max_range(
     desired_price: IrysTokenPrice,
@@ -202,9 +280,17 @@ pub fn bound_in_min_max_range(
     desired_price
 }
 
-/// Create EMA snapshot for a block using chain history
-/// This is used for historical validation where we need to reconstruct the EMA state
-/// The blocks parameter should include all blocks up to and including the latest block
+/// Create EMA snapshot for a block using chain history.
+///
+/// The function identifies which blocks contain the relevant price data based on
+/// the current block height and interval configuration.
+///
+/// # Example
+///
+/// For block 30 with 10-block intervals:
+/// - Pricing uses block 19's EMA (2 intervals ago)
+/// - Current EMA is from block 29 (last recalculation in this interval)
+/// - 1 interval ago EMA from block 19 (end of previous interval)
 pub fn create_ema_snapshot_from_chain_history(
     blocks: &[IrysBlockHeader],
     consensus_config: &ConsensusConfig,
@@ -226,7 +312,6 @@ pub fn create_ema_snapshot_from_chain_history(
             previous_ema_recalculation_block_height(latest_block_height, blocks_in_interval)
         };
     let height_latest_ema_interval_predecessor = height_latest_ema_block.saturating_sub(1);
-    let height_parent_block = latest_block_height.saturating_sub(1);
 
     // utility to get the block with the desired height
     let get_block_with_height = |desired_height: u64| {
@@ -260,7 +345,6 @@ pub fn create_ema_snapshot_from_chain_history(
     Ok(Arc::new(EmaSnapshot {
         ema_price_2_intervals_ago: get_block_with_height(height_pricing_block)?.ema_irys_price,
         ema_price_1_interval_ago: get_block_with_height(height_1_interval_ago)?.ema_irys_price,
-        oracle_price_parent_block: get_block_with_height(height_parent_block)?.oracle_irys_price,
         oracle_price_for_current_ema_predecessor: get_block_with_height(
             height_latest_ema_interval_predecessor,
         )?
@@ -270,7 +354,7 @@ pub fn create_ema_snapshot_from_chain_history(
 }
 
 #[cfg(test)]
-mod snapshot_from_history {
+mod test {
     use super::*;
     use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
@@ -337,33 +421,37 @@ mod snapshot_from_history {
     }
 
     #[rstest]
+    // 1st interval - EMA calculated every block
     #[case(0, 0, 0, 0, 0)]
-    #[case(1, 0, 1, 0, 0)]
-    #[case(10, 0, 10, 9, 9)]
-    #[case(18, 0, 18, 17, 9)]
-    #[case(19, 0, 19, 18, 9)]
-    #[case(20, 9, 19, 18, 19)]
-    #[case(85, 69, 79, 78, 79)]
-    #[case(90, 79, 89, 88, 89)]
-    #[case(99, 79, 99, 98, 89)]
-    #[case(5, 0, 5, 4, 0)]
-    #[case(15, 0, 15, 14, 9)]
-    #[case(25, 9, 19, 18, 19)]
-    #[case(30, 19, 29, 28, 29)]
-    #[case(35, 19, 29, 28, 29)]
-    #[case(40, 29, 39, 38, 39)]
-    #[case(45, 29, 39, 38, 39)]
-    #[case(50, 39, 49, 48, 49)]
-    #[case(100, 89, 99, 98, 99)]
-    #[case(105, 89, 99, 98, 99)]
-    #[case(110, 99, 109, 108, 109)]
-    #[case(200, 189, 199, 198, 199)]
-    fn test_valid_price_cache(
+    #[case(1, 0, 0, 1, 0)]
+    #[case(5, 0, 0, 5, 4)]
+    #[case(9, 0, 0, 9, 8)]
+    // 2nd interval - still special handling
+    #[case(10, 0, 9, 10, 9)]
+    #[case(15, 0, 9, 15, 14)]
+    #[case(18, 0, 9, 18, 17)]
+    #[case(19, 0, 9, 19, 18)]
+    // 3rd interval - standard operation begins
+    #[case(20, 9, 19, 19, 18)]
+    #[case(25, 9, 19, 19, 18)]
+    #[case(30, 19, 29, 29, 28)]
+    #[case(35, 19, 29, 29, 28)]
+    #[case(40, 29, 39, 39, 38)]
+    #[case(45, 29, 39, 39, 38)]
+    #[case(50, 39, 49, 49, 48)]
+    #[case(85, 69, 79, 79, 78)]
+    #[case(90, 79, 89, 89, 88)]
+    #[case(99, 79, 89, 99, 98)]
+    #[case(100, 89, 99, 99, 98)]
+    #[case(105, 89, 99, 99, 98)]
+    #[case(110, 99, 109, 109, 108)]
+    #[case(200, 189, 199, 199, 198)]
+    fn test_valid_price_snapshots(
         #[case] height_latest_block: u64,
         #[case] height_for_pricing: u64,
+        #[case] height_1_interval_ago: u64,
         #[case] height_current_ema: u64,
         #[case] height_current_ema_predecessor: u64,
-        #[case] height_1_interval_ago: u64,
     ) {
         // setup
         let interval = 10;
@@ -404,8 +492,6 @@ mod snapshot_from_history {
 
         let expected_price_snapshot = EmaSnapshot {
             ema_price_2_intervals_ago: get_block(height_for_pricing).ema_irys_price,
-            oracle_price_parent_block: get_block(height_latest_block.saturating_sub(1))
-                .oracle_irys_price,
             oracle_price_for_current_ema_predecessor: get_block(height_current_ema_predecessor)
                 .oracle_irys_price,
             ema_price_current_interval: get_block(height_current_ema).ema_irys_price,
@@ -415,13 +501,13 @@ mod snapshot_from_history {
     }
 
     #[rstest]
-    #[case(1, 0)]
-    #[case(2, 0)]
-    #[case(9, 0)]
-    #[case(19, 0)]
-    #[case(20, 9)] // use the 10th block price during 3rd EMA interval
-    #[case(29, 9)]
-    #[case(30, 19)]
+    #[case(1, 0)] // Block 1: Uses genesis (block 0) for pricing
+    #[case(2, 0)] // Block 2: Still uses genesis
+    #[case(9, 0)] // Block 9: Still uses genesis (end of 1st interval)
+    #[case(19, 0)] // Block 19: Still uses genesis (end of 2nd interval)
+    #[case(20, 9)] // Block 20: NOW uses block 9's EMA (2 intervals ago)
+    #[case(29, 9)] // Block 29: Still uses block 9's EMA
+    #[case(30, 19)] // Block 30: NOW uses block 19's EMA (2 intervals ago)
     fn get_ema_for_pricing(#[case] max_block_height: u64, #[case] price_block_height: u64) {
         // setup
         let config = ConsensusConfig {
@@ -621,9 +707,9 @@ mod snapshot_from_history {
     }
 
     #[rstest]
-    #[case(28, 19, 18)]
-    #[case(38, 29, 28)]
-    #[case(168, 159, 158)]
+    #[case(28, 19, 18)] // Block 29 will use: oracle[18] + ema[19]
+    #[case(38, 29, 28)] // Block 39 will use: oracle[28] + ema[29]
+    #[case(168, 159, 158)] // Block 169 will use: oracle[158] + ema[159]
     fn nth_adjustment_period(
         #[case] max_height: u64,
         #[case] prev_ema_height: u64,

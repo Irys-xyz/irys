@@ -1511,7 +1511,7 @@ impl BlockTreeCache {
             .get(&self.tip)
             .expect("tip should exist in blocks")
             .ema_snapshot
-            .ema_price_2_intervals_ago
+            .ema_for_public_pricing()
     }
 
     /// Get EMA cache for the canonical chain tip
