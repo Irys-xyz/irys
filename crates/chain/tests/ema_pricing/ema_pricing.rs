@@ -1,9 +1,20 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::utils::{mine_block, IrysNodeTest};
-use irys_actors::block_tree_service::{get_block, get_canonical_chain, get_ema_snapshot};
-use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
+use irys_actors::block_tree_service::{get_canonical_chain, BlockTreeReadGuard};
+use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
 use rust_decimal_macros::dec;
+
+async fn get_block(
+    block_tree_read_guard: BlockTreeReadGuard,
+    block_hash: H256,
+) -> Option<Arc<IrysBlockHeader>> {
+    block_tree_read_guard
+        .read()
+        .get_block(&block_hash)
+        .cloned()
+        .map(Arc::new)
+}
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
@@ -23,8 +34,11 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
             .await
             .unwrap();
         let tip_hash = chain.last().unwrap().block_hash;
-        let ema_snapshot = get_ema_snapshot(ctx.node_ctx.block_tree_guard.clone(), tip_hash)
-            .await?
+        let ema_snapshot = ctx
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(&tip_hash)
             .expect("EMA snapshot should exist for tip");
         let returned_ema_price = ema_snapshot.ema_for_public_pricing();
 
@@ -73,8 +87,11 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
 
     // Get the current EMA price from the block tree
     let tip = ctx.node_ctx.block_tree_guard.read().tip;
-    let ema_snapshot = get_ema_snapshot(ctx.node_ctx.block_tree_guard.clone(), tip)
-        .await?
+    let ema_snapshot = ctx
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_ema_snapshot(&tip)
         .expect("EMA snapshot should exist for tip");
     let returned_ema_price = ema_snapshot.ema_for_public_pricing();
 
@@ -126,7 +143,6 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
     let genesis_block = get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash)
         .await
-        .unwrap()
         .unwrap();
     let mut price_prev = genesis_block.oracle_irys_price;
     for block in [header_1, header_2, header_3] {

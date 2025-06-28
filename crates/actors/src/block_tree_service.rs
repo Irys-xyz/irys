@@ -1504,24 +1504,6 @@ impl BlockTreeCache {
             .map(|entry| entry.ema_snapshot.clone())
     }
 
-    /// Get canonical EMA for pricing (from the tip of the chain)
-    pub fn canonical_ema_for_pricing(&self) -> IrysTokenPrice {
-        self.blocks
-            .get(&self.tip)
-            .expect("tip should exist in blocks")
-            .ema_snapshot
-            .ema_for_public_pricing()
-    }
-
-    /// Get EMA cache for the canonical chain tip
-    pub fn canonical_ema_cache(&self) -> Arc<EmaSnapshot> {
-        self.blocks
-            .get(&self.tip)
-            .expect("tip should exist in blocks")
-            .ema_snapshot
-            .clone()
-    }
-
     /// Returns the current possible set of candidate hashes for a given height.
     pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
         self.height_index.get(&height)
@@ -1847,61 +1829,6 @@ pub async fn get_canonical_chain(
     let canonical_chain =
         tokio::task::spawn_blocking(move || tree.read().get_canonical_chain()).await?;
     Ok(canonical_chain)
-}
-
-/// Returns the block from the block tree at a given block hash
-/// Uses spawn_blocking to prevent the read operation from blocking the async executor
-/// and locking other async tasks while accessing the block tree.
-/// Notably useful in single-threaded tokio based unittests.
-pub async fn get_block(
-    block_tree_read_guard: BlockTreeReadGuard,
-    block_hash: H256,
-) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
-    let res = tokio::task::spawn_blocking(move || {
-        block_tree_read_guard
-            .read()
-            .get_block(&block_hash)
-            .cloned()
-            .map(Arc::new)
-    })
-    .await?;
-    Ok(res)
-}
-
-/// Returns the EMA snapshot for a specific block
-/// Uses spawn_blocking to prevent the read operation from blocking the async executor
-pub async fn get_ema_snapshot(
-    block_tree_read_guard: BlockTreeReadGuard,
-    block_hash: H256,
-) -> eyre::Result<Option<Arc<EmaSnapshot>>> {
-    let res = tokio::task::spawn_blocking(move || {
-        block_tree_read_guard.read().get_ema_snapshot(&block_hash)
-    })
-    .await?;
-    Ok(res)
-}
-
-/// Returns the canonical EMA for pricing
-/// Uses spawn_blocking to prevent the read operation from blocking the async executor
-pub async fn get_canonical_ema_for_pricing(
-    block_tree_read_guard: BlockTreeReadGuard,
-) -> eyre::Result<IrysTokenPrice> {
-    let res = tokio::task::spawn_blocking(move || {
-        block_tree_read_guard.read().canonical_ema_for_pricing()
-    })
-    .await?;
-    Ok(res)
-}
-
-/// Returns the canonical EMA snapshot
-/// Uses spawn_blocking to prevent the read operation from blocking the async executor
-pub async fn get_canonical_ema_snapshot(
-    block_tree_read_guard: BlockTreeReadGuard,
-) -> eyre::Result<Arc<EmaSnapshot>> {
-    let res =
-        tokio::task::spawn_blocking(move || block_tree_read_guard.read().canonical_ema_cache())
-            .await?;
-    Ok(res)
 }
 
 /// Reconstructs the commitment snapshot for the current epoch by loading all commitment
