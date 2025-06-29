@@ -498,7 +498,7 @@ pub trait BlockProdStrategy {
                     tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                     tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                     max_chunk_offset: submit_max_chunk_offset,
-                    expires: Some(1622543200), // todo this should be updated `submit_ledger_epoch_length` from the config
+                    expires: Some(self.inner().config.consensus.epoch.submit_ledger_epoch_length), 
                     proofs: None,
                 },
             ],
