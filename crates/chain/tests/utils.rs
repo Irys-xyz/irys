@@ -471,6 +471,44 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    pub async fn wait_until_height_confirmed(
+        &self,
+        target_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<H256> {
+        let mut retries = 0;
+        let max_retries = max_seconds; // 1 second per retry
+
+        loop {
+            let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+                .await
+                .unwrap();
+            let latest_block = canonical_chain.0.last().unwrap();
+
+            let latest_height = latest_block.height;
+            let not_onchain_count = canonical_chain.1 as u64;
+            if (latest_height - not_onchain_count) >= target_height {
+                info!(
+                    "reached height {} after {} retries",
+                    target_height, &retries
+                );
+
+                return Ok(latest_block.block_hash);
+            }
+
+            if retries >= max_retries {
+                return Err(eyre::eyre!(
+                    "Failed to reach target height {} after {} retries",
+                    target_height,
+                    retries
+                ));
+            }
+
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+    }
+
     pub async fn wait_for_chunk(
         &self,
         app: &impl actix_web::dev::Service<
