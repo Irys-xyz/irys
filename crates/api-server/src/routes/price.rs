@@ -3,7 +3,7 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
-use irys_actors::ema_service::EmaServiceMessage;
+use eyre::OptionExt as _;
 use irys_types::{
     storage_pricing::{
         phantoms::{Irys, NetworkFee},
@@ -44,7 +44,6 @@ pub async fn get_price(
         DataLedger::Publish => {
             // If the cost calculation fails, return 400 with the error text
             let perm_storage_price = cost_of_perm_storage(state, bytes_to_store)
-                .await
                 .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
@@ -57,16 +56,17 @@ pub async fn get_price(
     }
 }
 
-async fn cost_of_perm_storage(
+fn cost_of_perm_storage(
     state: web::Data<ApiState>,
     bytes_to_store: u64,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
     // get the latest EMA to use for pricing
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    state
-        .ema_service
-        .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-    let current_ema = rx.await?;
+    let tree = state.block_tree.read();
+    let tip = tree.tip;
+    let ema = tree
+        .get_ema_snapshot(&tip)
+        .ok_or_eyre("tip block should still remain in state")?;
+    drop(tree);
 
     // Calculate the cost per GB (take into account replica count & cost per replica)
     // NOTE: this value can be memoised because it is deterministic based on the config
@@ -82,7 +82,7 @@ async fn cost_of_perm_storage(
 
     // calculate the cost of storing the bytes
     let price_with_network_reward = cost_per_gb
-        .base_network_fee(U256::from(bytes_to_store), current_ema)?
+        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?
         .add_multiplier(state.config.node_config.pricing.fee_percentage)?;
 
     Ok(price_with_network_reward)

@@ -1,8 +1,10 @@
 use crate::{
     block_discovery::{get_data_tx_in_parallel, BlockDiscoveredMessage, BlockDiscoveryActor},
-    block_tree_service::BlockTreeReadGuard,
+    block_tree_service::{
+        ema_snapshot::{EmaBlock, EmaSnapshot},
+        BlockTreeReadGuard,
+    },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    ema_service::EmaServiceMessage,
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -190,10 +192,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
-    async fn parent_irys_block(&self) -> eyre::Result<IrysBlockHeader> {
-        let (canonical_blocks, _not_onchain_count) =
-            self.inner().block_tree_guard.read().get_canonical_chain();
-        let prev = canonical_blocks.last().unwrap();
+    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        let (prev, ema_snapshot) = {
+            let read = self.inner().block_tree_guard.read();
+            let (canonical_blocks, _not_onchain_count) = read.get_canonical_chain();
+            let prev = canonical_blocks
+                .last()
+                .expect("canonical chain must contain at least 1 block");
+            let ema_snapshot = read
+                .get_ema_snapshot(&prev.block_hash)
+                .expect("every block must contain an EMA snapshot");
+            (prev.clone(), ema_snapshot)
+        };
         info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
 
         let (tx_prev, rx_prev) = oneshot::channel();
@@ -220,14 +230,14 @@ pub trait BlockProdStrategy {
                 })?,
         };
 
-        Ok(header)
+        Ok((header, ema_snapshot))
     }
 
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        let prev_block_header = self.parent_irys_block().await?;
+        let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
@@ -255,6 +265,7 @@ pub trait BlockProdStrategy {
                 current_timestamp,
                 block_reward,
                 evm_block,
+                &prev_block_ema_snapshot,
             )
             .await?;
 
@@ -353,6 +364,7 @@ pub trait BlockProdStrategy {
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
+        perv_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
@@ -437,7 +449,9 @@ pub trait BlockProdStrategy {
         };
         steps.push(solution.seed.0);
 
-        let ema_irys_price = self.get_ema_price(block_height).await?;
+        let ema_irys_price = self
+            .get_ema_price(prev_block_header, perv_block_ema_snapshot)
+            .await?;
 
         // Update the last_epoch_hash field, which tracks the most recent epoch boundary
         //
@@ -610,19 +624,17 @@ pub trait BlockProdStrategy {
 
     async fn get_ema_price(
         &self,
-        height_of_new_block: u64,
-    ) -> eyre::Result<crate::ema_service::NewBlockEmaResponse> {
+        parent_block: &IrysBlockHeader,
+        parent_block_ema_snapshot: &EmaSnapshot,
+    ) -> eyre::Result<EmaBlock> {
         let oracle_irys_price = self.inner().price_oracle.current_price().await?;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.inner()
-            .service_senders
-            .ema
-            .send(EmaServiceMessage::GetPriceDataForNewBlock {
-                response: tx,
-                height_of_new_block,
-                oracle_price: oracle_irys_price,
-            })?;
-        let ema_irys_price = rx.await??;
+        let ema_irys_price = parent_block_ema_snapshot.calculate_ema_for_new_block(
+            parent_block,
+            oracle_irys_price,
+            self.inner().config.consensus.token_price_safe_range,
+            self.inner().config.consensus.ema.price_adjustment_interval,
+        );
+
         Ok(ema_irys_price)
     }
 
