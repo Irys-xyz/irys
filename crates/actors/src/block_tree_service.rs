@@ -18,7 +18,7 @@ use irys_database::{
 use irys_types::{
     block_height_to_use_for_price, is_ema_recalculation_block,
     previous_ema_recalculation_block_height, Address, BlockHash, CommitmentTransaction, Config,
-    ConsensusConfig, DataLedger, DatabaseProvider, H256List, IrysBlockHeader, IrysTokenPrice,
+    ConsensusConfig, DataLedger, DatabaseProvider, H256List, IrysBlockHeader,
     IrysTransactionHeader, H256, U256,
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
@@ -861,7 +861,7 @@ impl BlockTreeCache {
         let commitment_snapshot = Arc::new(CommitmentSnapshot::default());
 
         // Create EMA cache for genesis block
-        let ema_snapshot = EmaSnapshot::genesis(&genesis_block);
+        let ema_snapshot = EmaSnapshot::genesis(genesis_block);
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
@@ -1736,9 +1736,11 @@ fn build_current_ema_snapshot_from_index(
 
     let Some(latest_item) = latest_item else {
         // If no blocks in index, create a minimal genesis header for EMA snapshot
-        let mut genesis_header = IrysBlockHeader::default();
-        genesis_header.oracle_irys_price = config.genesis_price;
-        genesis_header.ema_irys_price = config.genesis_price;
+        let genesis_header = IrysBlockHeader {
+            oracle_irys_price: config.genesis_price,
+            ema_irys_price: config.genesis_price,
+            ..Default::default()
+        };
         return EmaSnapshot::genesis(&genesis_header);
     };
 
@@ -1968,9 +1970,11 @@ mod tests {
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
         let config = irys_types::ConsensusConfig::testnet();
-        let mut genesis_header = IrysBlockHeader::default();
-        genesis_header.oracle_irys_price = config.genesis_price;
-        genesis_header.ema_irys_price = config.genesis_price;
+        let genesis_header = IrysBlockHeader {
+            oracle_irys_price: config.genesis_price,
+            ema_irys_price: config.genesis_price,
+            ..Default::default()
+        };
         EmaSnapshot::genesis(&genesis_header)
     }
 

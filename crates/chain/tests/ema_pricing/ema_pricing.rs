@@ -5,7 +5,7 @@ use irys_actors::block_tree_service::{get_canonical_chain, BlockTreeReadGuard};
 use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
 use rust_decimal_macros::dec;
 
-async fn get_block(
+fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,
 ) -> Option<Arc<IrysBlockHeader>> {
@@ -141,9 +141,8 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         .await
         .unwrap();
     assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
-    let genesis_block = get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash)
-        .await
-        .unwrap();
+    let genesis_block =
+        get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash).unwrap();
     let mut price_prev = genesis_block.oracle_irys_price;
     for block in [header_1, header_2, header_3] {
         let max_allowed_price = price_prev.add_multiplier(token_price_safe_range).unwrap();

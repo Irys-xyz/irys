@@ -37,8 +37,6 @@
 
 use eyre::Result;
 use irys_types::{
-    block_height_to_use_for_price, is_ema_recalculation_block,
-    previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
     ConsensusConfig, IrysBlockHeader, IrysTokenPrice,
 };
@@ -104,7 +102,7 @@ impl EmaSnapshot {
         new_block: &IrysBlockHeader,
         parent_block: &IrysBlockHeader,
         consensus_config: &ConsensusConfig,
-    ) -> eyre::Result<Arc<EmaSnapshot>> {
+    ) -> eyre::Result<Arc<Self>> {
         let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
 
         // Check if we're at an EMA boundary where we shift intervals
@@ -132,14 +130,14 @@ impl EmaSnapshot {
         // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
         // During the first 2 intervals, every block is an EMA recalculation block
         if new_block.is_ema_recalculation_block(blocks_in_interval) {
-            Ok(Arc::new(EmaSnapshot {
+            Ok(Arc::new(Self {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
                 oracle_price_for_current_ema_predecessor: parent_block.oracle_irys_price,
                 ema_price_current_interval: new_block.ema_irys_price,
             }))
         } else {
-            Ok(Arc::new(EmaSnapshot {
+            Ok(Arc::new(Self {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
                 ema_price_current_interval: self.ema_price_current_interval,
@@ -352,6 +350,7 @@ pub fn create_ema_snapshot_from_chain_history(
 #[cfg(test)]
 mod test {
     use super::*;
+    use irys_types::is_ema_recalculation_block;
     use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
     use rust_decimal::Decimal;
