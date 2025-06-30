@@ -2,6 +2,7 @@ use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
+use reth::network::Peers;
 use tracing::debug;
 
 #[actix_web::test]
@@ -317,5 +318,112 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
     // Wind down test
     tokio::join!(genesis_node.stop(), peer1_node.stop(), peer2_node.stop());
+    Ok(())
+}
+
+/// todo: A fork builds on top of a fork
+/// Reorg where there are 3 forks and the tip moves across all of them as each is extended longer than the other.
+///  We need to verify that all the balance changes that were applied in one fork are reverted during the Reorg and new balance changes applied based on the new canonical branch.
+/// It is important that we can reorg at a much faster rate than 1 block per blocktime.
+#[test_log::test(actix_web::test)]
+async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
+    initialize_tracing();
+
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 15;
+    let block_migration_depth = num_blocks_in_epoch - 1;
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+
+    let b_signer = genesis_config.new_random_signer();
+    let c_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
+
+    let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("NODE_A", seconds_to_wait)
+        .await;
+
+    let config_b = node_a.testnet_peer_with_signer(&c_signer);
+    let config_c = node_a.testnet_peer_with_signer(&b_signer);
+
+    let node_b = IrysNodeTest::new(config_b)
+        .start_and_wait_for_packing("NODE_B", seconds_to_wait)
+        .await;
+    let node_c = IrysNodeTest::new(config_c)
+        .start_and_wait_for_packing("NODE_C", seconds_to_wait)
+        .await;
+
+    let current_height = node_a.get_height().await;
+    node_b
+        .wait_until_height(current_height, seconds_to_wait)
+        .await?;
+    node_c
+        .wait_until_height(current_height, seconds_to_wait)
+        .await?;
+
+    let a_ctx = node_a.node_ctx.reth_node_adapter.clone();
+    let b_ctx = node_b.node_ctx.reth_node_adapter.clone();
+    let c_ctx = node_c.node_ctx.reth_node_adapter.clone();
+
+    let _a_peers = node_a.disconnect_all_peers().await?;
+    let _b_peers = node_b.disconnect_all_peers().await?;
+    let _c_peers = node_c.disconnect_all_peers().await?;
+
+    // Connect B <-> C directly
+    let b_info = node_b.node_ctx.config.node_config.reth_peer_info.clone();
+    let c_info = node_c.node_ctx.config.node_config.reth_peer_info.clone();
+    b_ctx
+        .inner
+        .network
+        .connect_peer(c_info.peer_id, c_info.peering_tcp_addr);
+    c_ctx
+        .inner
+        .network
+        .connect_peer(b_info.peer_id, b_info.peering_tcp_addr);
+
+    // Mine competing blocks on A and B without gossip
+    let (a_block, _) = node_a.mine_block_without_gossip().await?;
+    let (b_block1, _) = node_b.mine_block_without_gossip().await?;
+    let (b_block2, _) = node_b.mine_block_without_gossip().await?;
+
+    // Gossip B's blocks to C only
+    node_b.gossip_block(&b_block1)?;
+    node_b.gossip_block(&b_block2)?;
+
+    node_c.wait_for_block(&b_block1.block_hash, 10).await?;
+    node_c.wait_for_block(&b_block2.block_hash, 10).await?;
+
+    // Node C mines on top of B's chain
+    let (c_block, _) = node_c.mine_block_without_gossip().await?;
+
+    // Reconnect all nodes
+    a_ctx
+        .inner
+        .network
+        .connect_peer(b_info.peer_id, b_info.peering_tcp_addr);
+    a_ctx
+        .inner
+        .network
+        .connect_peer(c_info.peer_id, c_info.peering_tcp_addr);
+
+    // Gossip all blocks so everyone syncs
+    node_b.gossip_block(&b_block1)?;
+    node_b.gossip_block(&b_block2)?;
+    node_c.gossip_block(&c_block)?;
+    node_a.gossip_block(&a_block)?;
+
+    node_a
+        .wait_until_height(c_block.height, seconds_to_wait)
+        .await?;
+    node_b
+        .wait_until_height(c_block.height, seconds_to_wait)
+        .await?;
+    node_c
+        .wait_until_height(c_block.height, seconds_to_wait)
+        .await?;
+
+    // gracefully shutdown nodes
+    tokio::join!(node_a.stop(), node_b.stop(), node_c.stop(),);
     Ok(())
 }
