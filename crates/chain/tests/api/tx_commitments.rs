@@ -38,6 +38,10 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let mut config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    // set block_migration depth to one less than epoch depth
+    let block_migration_depth = num_blocks_in_epoch - 1;
+    // set block migration depth so epoch blocks go to index correctly
+    config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
     // Create multiple signers to test different commitment scenarios
     let signer1 = IrysSigner::random_signer(&config.consensus_config());
