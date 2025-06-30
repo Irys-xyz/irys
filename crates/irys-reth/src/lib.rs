@@ -5,13 +5,11 @@
 //! - Block rewards (must go to the Irys block producer)
 //! - Storage fee collection (balance decrements)
 //! - Stake management (release, stake)
-//! - Nonce reset (must always be the last shadow tx in a block)
 //!
 //! The CL must validate that:
 //! - Block rewards are paid to the correct block producer
 //! - Balance increments correspond to rewards
 //! - Balance decrements correspond to storage transaction fees
-//! - Every block ends with a nonce reset shadow tx
 
 use std::{sync::Arc, time::SystemTime};
 
@@ -1012,8 +1010,8 @@ mod tests {
     /// the state is correctly reverted and subsequent blocks can be built on the rolled-back state.
     ///
     /// Test scenario:
-    /// 1. Build 4 blocks with block rewards and nonce resets (balance +4, nonce reset to 0 each block)
-    /// 2. Verify state after 4 blocks: balance = initial + 4, nonce = 0
+    /// 1. Build 4 blocks with block rewards (balance +4)
+    /// 2. Verify state after 4 blocks: balance = initial + 4
     /// 3. Roll back to block 1 via forkchoice update (safe/finalized = block 1)
     /// 4. Build a new fork block (block 2) on top of the rolled-back state
     /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
@@ -1038,7 +1036,7 @@ mod tests {
         let mut block_hashes = vec![parent_blockhash];
 
         // Phase 1: Build 4 blocks with shadow transactions
-        tracing::info!("Phase 1: Building 4 blocks with block rewards and nonce resets");
+        tracing::info!("Phase 1: Building 4 blocks with block rewards");
         for block_number in 1..=4 {
             // Create block reward transaction
             let block_reward_tx = block_reward(ctx.block_producer_a.address());
@@ -1076,7 +1074,7 @@ mod tests {
             &node,
             ctx.block_producer_a.address(),
             0,
-            "Nonce should be 0 after nonce resets",
+            "Nonce should be 0",
         );
 
         // Phase 3: Roll back to block 1 (safe/finalized)
