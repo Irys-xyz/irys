@@ -453,9 +453,9 @@ pub fn poa_is_valid(
     Ok(())
 }
 
-/// Validates that the system transactions in the EVM block match the expected system transactions
+/// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data.
-pub async fn system_transactions_are_valid(
+pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
@@ -514,7 +514,7 @@ pub async fn system_transactions_are_valid(
     }
     let evm_block: Block = payload.try_into_block()?;
 
-    // 2. Extract system transactions from the beginning of the block
+    // 2. Extract shadow transactions from the beginning of the block
     let mut expect_shadow_txs = true;
     let actual_shadow_txs = evm_block
         .body
@@ -537,7 +537,7 @@ pub async fn system_transactions_are_valid(
                 );
                 Ok(Some(shadow_tx))
             } else {
-                // ensure that no other system txs are present in the block
+                // ensure that no other shadow txs are present in the block
                 let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
                 ensure!(
                     shadow_tx.is_err(),
@@ -548,7 +548,7 @@ pub async fn system_transactions_are_valid(
         })
         .filter_map(std::result::Result::transpose);
 
-    // 3. Generate expected system transactions
+    // 3. Generate expected shadow transactions
     let expected_txs =
         generate_expected_shadow_transactions_from_db(config, service_senders, block, db).await?;
 
@@ -608,7 +608,7 @@ async fn extract_commitment_txs(
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
     let commitment_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't generate system txs for commitment txs
+        // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
         vec![]
     } else {
         match &block.system_ledgers[..] {

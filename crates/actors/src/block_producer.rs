@@ -285,7 +285,7 @@ pub trait BlockProdStrategy {
     ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
-        // Generate expected system transactions using shared logic
+        // Generate expected shadow transactions using shared logic
         let shadow_txs = ShadowTxGenerator::new(
             &block_height,
             &self.inner().config.node_config.reward_address,

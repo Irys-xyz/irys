@@ -6,7 +6,7 @@
 //! Three concurrent validation stages:
 //! - **Recall Range**: Async data recall and storage proof verification
 //! - **POA**: Blocking cryptographic proof-of-access validation
-//! - **System Transactions**: Async Reth integration validation
+//! - **Shadow Transactions**: Async Reth integration validation
 //!
 //! ## Stage 2: Parent Dependency Resolution  
 //! After successful validation, tasks wait for parent block validation using
@@ -16,7 +16,7 @@ use crate::block_tree_service::{
     BlockState, BlockTreeReadGuard, BlockTreeServiceMessage, ChainState, ValidationResult,
 };
 use crate::block_validation::{
-    poa_is_valid, recall_recall_range_is_valid, system_transactions_are_valid, PayloadProvider,
+    poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid, PayloadProvider,
 };
 use crate::validation_service::ValidationServiceInner;
 use irys_types::{BlockHash, IrysBlockHeader};
@@ -206,11 +206,11 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
             }
         };
 
-        // System transaction validation
+        // Shadow transaction validation
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
         let system_tx_task = async move {
-            system_transactions_are_valid(
+            shadow_transactions_are_valid(
                 config,
                 service_senders,
                 block,
@@ -220,7 +220,7 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
             )
             .instrument(tracing::info_span!("system_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
             .await
-            .inspect_err(|err| tracing::error!(?err, "system transaction validation failed"))
+            .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         };

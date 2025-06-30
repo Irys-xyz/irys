@@ -460,7 +460,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
     let context = node.node_ctx.reth_node_adapter.clone();
 
-    // Verify block transactions - should only contain block reward system transaction
+    // Verify block transactions - should only contain block reward shadow transaction
     let block_txs = reth_exec_env
         .block()
         .body()
@@ -474,7 +474,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
         "Block should only contain one transaction (block reward)"
     );
 
-    // Verify it's a block reward system transaction
+    // Verify it's a block reward shadow transaction
     let shadow_tx =
         ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
@@ -544,7 +544,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
     let context = node.node_ctx.reth_node_adapter.clone();
 
-    // Verify block transactions - should only contain block reward system transaction
+    // Verify block transactions - should only contain block reward shadow transaction
     let block_txs = reth_exec_env
         .block()
         .body()
@@ -558,7 +558,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
         "Block should only contain one transaction (block reward)"
     );
 
-    // Verify it's a block reward system transaction
+    // Verify it's a block reward shadow transaction
     let shadow_tx =
         ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
@@ -759,7 +759,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         "Block should contain exactly 3 receipts: block reward, stake, and pledge"
     );
 
-    // Find and verify the stake system transaction receipt
+    // Find and verify the stake shadow transaction receipt
     let stake_receipt = receipts1
         .iter()
         .find(|r| {
@@ -772,7 +772,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     assert!(stake_receipt.success, "Stake transaction should succeed");
     assert_eq!(
         stake_receipt.cumulative_gas_used, 0,
-        "System tx should not consume gas"
+        "Shadow tx should not consume gas"
     );
     assert_eq!(
         stake_receipt.logs[0].address,
@@ -780,7 +780,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         "Stake transaction should target the peer's address"
     );
 
-    // Find and verify the pledge system transaction receipt (it's in the same block)
+    // Find and verify the pledge shadow transaction receipt (it's in the same block)
     let pledge_receipt = receipts1
         .iter()
         .find(|r| {
@@ -793,7 +793,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     assert!(pledge_receipt.success, "Pledge transaction should succeed");
     assert_eq!(
         pledge_receipt.cumulative_gas_used, 0,
-        "System tx should not consume gas"
+        "Shadow tx should not consume gas"
     );
     assert_eq!(
         pledge_receipt.logs[0].address,
@@ -841,7 +841,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     assert_eq!(
         receipts2[0].logs[0].topics()[0],
         *shadow_tx_topics::BLOCK_REWARD,
-        "Second block should only have block reward system tx"
+        "Second block should only have block reward shadow tx"
     );
 
     // Get the genesis nodes view of the peers assignments
@@ -882,7 +882,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Second transaction should be stake
     let stake_tx =
         ShadowTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Second transaction should be decodable as system transaction");
+            .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
@@ -893,7 +893,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Third transaction should be pledge
     let pledge_tx =
         ShadowTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Third transaction should be decodable as system transaction");
+            .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)

@@ -430,11 +430,11 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// Ensures that only the allowed system tx origin can submit system transactions.
+    /// Ensures that only the allowed shadow tx origin can submit shadow transactions.
     ///
     /// Steps:
-    /// - Setup: Use `setup_irys_reth` to launch node, `block_reward` to compose system tx, `sign_tx` to sign.
-    /// - Action: Inject system tx with invalid origin.
+    /// - Setup: Use `setup_irys_reth` to launch node, `block_reward` to compose shadow tx, `sign_tx` to sign.
+    /// - Action: Inject shadow tx with invalid origin.
     /// - Assertion: Tx is rejected with pool error.
     #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
     async fn external_users_cannot_submit_shadow_txs() -> eyre::Result<()> {
@@ -458,18 +458,18 @@ mod tests {
         Ok(())
     }
 
-    /// Ensures that stale system transactions are dropped from the pool after a commit or reorg event.
+    /// Ensures that stale shadow transactions are dropped from the pool after a commit or reorg event.
     ///
     /// Setup:
     /// - Create two nodes with the same block producer.
-    /// - Submit a normal tx to node a, and a system tx to node b.
+    /// - Submit a normal tx to node a, and a shadow tx to node b.
     ///
     /// Action:
     /// - Advance the block on node a.
     /// - Update forkchoice on node b to point to the new block that was created on node a.
     ///
     /// Assertion:
-    /// - The system tx from node b is not included in the block.
+    /// - The shadow tx from node b is not included in the block.
     /// - The normal tx from node a is included in the block.
     #[test_log::test(tokio::test)]
     async fn stale_shadow_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
@@ -489,7 +489,7 @@ mod tests {
         .await?;
         let payload_node_a = advance_block(&mut node_a, &shadow_tx_store_a, vec![]).await?;
 
-        // Submit system transaction to node b
+        // Submit shadow transaction to node b
         let shadow_tx = create_shadow_tx(BLOCK_REWARD_ID, ctx.block_producer_b.address());
         let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_b).await?;
         let shadow_tx_hash = *shadow_tx.hash();
@@ -499,7 +499,7 @@ mod tests {
         // Update forkchoice on node b
         node_b.sync_to(payload_node_a.block().hash()).await?;
 
-        // Assert system tx never touched the pool
+        // Assert shadow tx never touched the pool
         let pool_txs: Vec<_> = node_b
             .inner
             .pool
@@ -509,10 +509,10 @@ mod tests {
             .collect();
         assert!(
             !pool_txs.contains(&shadow_tx_hash),
-            "System tx should never enter the second node pool"
+            "Shadow tx should never enter the second node pool"
         );
 
-        // Assert system tx never touched the pool
+        // Assert shadow tx never touched the pool
         let pool_txs: Vec<_> = node_a
             .inner
             .pool
@@ -522,14 +522,14 @@ mod tests {
             .collect();
         assert!(
             !pool_txs.contains(&shadow_tx_hash),
-            "System tx should never enter the first node pool"
+            "Shadow tx should never enter the first node pool"
         );
 
-        // Assert system tx never touched the block
+        // Assert shadow tx never touched the block
         assert_txs_not_in_block(
             &payload_node_a,
             &[shadow_tx_hash],
-            "System tx should not be in block",
+            "Shadow tx should not be in block",
         );
         // Assert normal tx is in the block
         assert_txs_in_block(
@@ -591,7 +591,7 @@ mod tests {
         Ok(())
     }
 
-    // assert that "incrementing" system txs update account state
+    // assert that "incrementing" shadow txs update account state
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
     #[case::unstake(unstake, signer_b())]
@@ -646,7 +646,7 @@ mod tests {
         Ok(())
     }
 
-    // check if the "decrementing" system txs update account state
+    // check if the "decrementing" shadow txs update account state
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
     #[case::stake(stake, signer_b())]
@@ -674,7 +674,7 @@ mod tests {
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
 
         // Ensure all txs are included in the block
-        assert_txs_in_block(&block_payload, &tx_hashes, "System transactions");
+        assert_txs_in_block(&block_payload, &tx_hashes, "Shadow transactions");
 
         // Assert all txs have a corresponding log
         assert_topic_present_in_logs(block_execution, shadow_tx_topic, tx_count as u64);
@@ -689,7 +689,7 @@ mod tests {
             "Target balance should be reduced",
         );
 
-        // Assert balance for producer remains the same (system txs cost nothing)
+        // Assert balance for producer remains the same (shadow txs cost nothing)
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
@@ -726,7 +726,7 @@ mod tests {
         )
         .await?;
 
-        // Create system transactions with lower effective priority
+        // Create shadow transactions with lower effective priority
         let shadow_tx = create_shadow_tx(UNSTAKE_ID, ctx.target_account.address());
         let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
         let shadow_txs = vec![shadow_tx.clone(); 2];
@@ -760,7 +760,7 @@ mod tests {
             .unwrap();
         assert!(account.is_none(), "Test account should not exist");
 
-        // Create and submit a system transaction trying to decrement balance of non-existent account
+        // Create and submit a shadow transaction trying to decrement balance of non-existent account
         let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
             amount: U256::ONE,
             target: nonexistent_address,
@@ -783,11 +783,11 @@ mod tests {
         // Produce a new block
         let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
 
-        // // Verify the system transaction is NOT included
+        // // Verify the shadow transaction is NOT included
         assert_txs_not_in_block(
             &block_payload,
             &shadow_tx_hashes,
-            "System transaction for non-existent account should not be included in block",
+            "Shadow transaction for non-existent account should not be included in block",
         );
 
         // Verify the normal transaction IS included
@@ -813,7 +813,7 @@ mod tests {
             "Funded account should have nonzero balance"
         );
 
-        // Create a system tx that tries to decrement more than the balance
+        // Create a shadow tx that tries to decrement more than the balance
         let decrement_amount = funded_balance + U256::ONE;
         let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
             amount: decrement_amount,
@@ -826,14 +826,14 @@ mod tests {
         // Produce a new block
         let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
 
-        // Verify the system transaction IS included
+        // Verify the shadow transaction IS included
         assert_txs_in_block(
             &block_payload,
             &shadow_tx_hashes,
-            "System transaction should be included in block",
+            "Shadow transaction should be included in block",
         );
 
-        // Verify the receipt for the system tx is a revert/failure
+        // Verify the receipt for the shadow tx is a revert/failure
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
         let receipts = block_execution.receipts;
         let receipt = &receipts[1][0];
@@ -870,7 +870,7 @@ mod tests {
         let recipient = ctx.target_account.address();
 
         for block_number in 1..=5 {
-            // Block reward system tx
+            // Block reward shadow tx
             let shadow_tx = block_reward(ctx.block_producer_a.address());
             let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
 
@@ -916,7 +916,7 @@ mod tests {
             ctx.get_two_nodes()?;
         let reward_address = Address::random();
 
-        // Node A: advance 3 blocks, 2 system txs per block
+        // Node A: advance 3 blocks, 2 shadow txs per block
         let shadow_tx = block_reward(reward_address);
         let shadow_txs = vec![vec![shadow_tx; 2]; 3];
 
@@ -934,7 +934,7 @@ mod tests {
             .unwrap();
         let node_a_reward_balance = get_balance(&node_a.inner, reward_address);
 
-        // Node B: advance 4 blocks, 1 system tx per block
+        // Node B: advance 4 blocks, 1 shadow tx per block
         let shadow_tx = block_reward(reward_address);
         let shadow_txs = vec![vec![shadow_tx; 1]; 4];
         let _block_hashes_b = advance_blocks(
@@ -1037,7 +1037,7 @@ mod tests {
         let mut parent_blockhash = ctx.genesis_blockhash;
         let mut block_hashes = vec![parent_blockhash];
 
-        // Phase 1: Build 4 blocks with system transactions
+        // Phase 1: Build 4 blocks with shadow transactions
         tracing::info!("Phase 1: Building 4 blocks with block rewards and nonce resets");
         for block_number in 1..=4 {
             // Create block reward transaction
@@ -1180,25 +1180,25 @@ mod tests {
         Ok(())
     }
 
-    /// Tests that system transactions never enter the transaction pool when rolling back state to a past block.
+    /// Tests that shadow transactions never enter the transaction pool when rolling back state to a past block.
     ///
     /// Test scenario:
-    /// 1. Setup a node and create system transactions
-    /// 2. Mine blocks with system transactions to establish state
+    /// 1. Setup a node and create shadow transactions
+    /// 2. Mine blocks with shadow transactions to establish state
     /// 3. Rollback the state to a past block
-    /// 4. Verify that system transactions are never in the transaction pool past
+    /// 4. Verify that shadow transactions are never in the transaction pool past
     #[test_log::test(tokio::test)]
     async fn shadow_txs_never_in_pool_during_rollback() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
-        // Phase 1: Build initial blocks with system transactions
+        // Phase 1: Build initial blocks with shadow transactions
         let _initial_balance = get_balance(&node.inner, ctx.block_producer_a.address());
         let mut parent_blockhash = ctx.genesis_blockhash;
         let mut block_hashes = vec![parent_blockhash];
         let mut shadow_txs = vec![];
 
-        // Build 3 blocks with system transactions
+        // Build 3 blocks with shadow transactions
         for block_number in 1..=3 {
             let block_reward_tx = block_reward(ctx.block_producer_a.address());
             let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
@@ -1256,8 +1256,8 @@ mod tests {
         // Allow time for rollback to process
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // Phase 4: Verify system transactions never entered the pool during rollback
-        // The key invariant is that system txs should NEVER be in the transaction pool regardless of rollback state
+        // Phase 4: Verify shadow transactions never entered the pool during rollback
+        // The key invariant is that shadow txs should NEVER be in the transaction pool regardless of rollback state
         let pool_txs: Vec<_> = node
             .inner
             .pool
@@ -1269,7 +1269,7 @@ mod tests {
         for tx in shadow_txs {
             assert!(
                 !pool_txs.contains(tx.hash()),
-                "System tx should never be in the transaction pool during rollback"
+                "Shadow tx should never be in the transaction pool during rollback"
             );
             assert!(
                 pool_txs.is_empty(),
@@ -1278,7 +1278,7 @@ mod tests {
             );
         }
 
-        // Phase 5: Try to submit the future system transactions directly to the pool
+        // Phase 5: Try to submit the future shadow transactions directly to the pool
         // They should be rejected and never enter the pool
         let future_shadow_tx_1 = block_reward(ctx.block_producer_a.address());
         let mut tx_1_raw = compose_shadow_tx(1, &future_shadow_tx_1);
@@ -1292,12 +1292,12 @@ mod tests {
                 .encoded_2718()
                 .into();
 
-        // These should fail since system txs are not allowed in the pool
+        // These should fail since shadow txs are not allowed in the pool
         let tx_1_result = node.rpc.inject_tx(tx_1_envelope).await;
 
         assert!(
             tx_1_result.is_err(),
-            "System transaction should be rejected when submitted to pool"
+            "Shadow transaction should be rejected when submitted to pool"
         );
 
         // Phase 6: Final check - pool should still be empty
@@ -1311,19 +1311,19 @@ mod tests {
 
         assert!(
             final_pool_txs.is_empty(),
-            "Transaction pool should remain empty after attempted system tx submission, but contains: {:?}",
+            "Transaction pool should remain empty after attempted shadow tx submission, but contains: {:?}",
             final_pool_txs
         );
 
         Ok(())
     }
 
-    /// Tests that system transactions are executed in the exact order they were submitted.
+    /// Tests that shadow transactions are executed in the exact order they were submitted.
     /// This is verified by checking the transaction hashes in the receipts match the submission order.
     ///
     /// Test scenario:
-    /// 1. Create 5 different types of system transactions in a specific order
-    /// 2. Submit them to the system transaction store
+    /// 1. Create 5 different types of shadow transactions in a specific order
+    /// 2. Submit them to the shadow transaction store
     /// 3. Mine a block containing these transactions
     /// 4. Verify the receipts contain the transactions in the same order as submitted
     #[test_log::test(tokio::test)]
@@ -1336,7 +1336,7 @@ mod tests {
         let address_b = ctx.target_account.address();
         let address_c = ctx.normal_signer.address();
 
-        // Create 5 different system transactions in a specific order
+        // Create 5 different shadow transactions in a specific order
         let mut shadow_txs = Vec::new();
         let mut expected_tx_hashes = Vec::new();
 
@@ -1371,12 +1371,12 @@ mod tests {
         shadow_txs.push(stake_tx);
 
         tracing::info!(
-            "Created {} system transactions in order: {:?}",
+            "Created {} shadow transactions in order: {:?}",
             shadow_txs.len(),
             expected_tx_hashes
         );
 
-        // Mine a block with these system transactions
+        // Mine a block with these shadow transactions
         let block_payload = mine_block(&mut node, &shadow_tx_store, shadow_txs).await?;
 
         // Get execution results to verify receipt ordering
@@ -1394,7 +1394,7 @@ mod tests {
         assert_eq!(
             block_1_receipts.len(),
             expected_tx_hashes.len(),
-            "Should have exactly {} receipts for the {} system transactions",
+            "Should have exactly {} receipts for the {} shadow transactions",
             expected_tx_hashes.len(),
             expected_tx_hashes.len()
         );
@@ -1419,11 +1419,11 @@ mod tests {
             );
         }
 
-        // Verify all receipts are successful (system transactions should succeed)
+        // Verify all receipts are successful (shadow transactions should succeed)
         for (i, receipt) in block_1_receipts.iter().enumerate() {
             assert!(
                 receipt.success,
-                "Receipt at position {} should be successful for system transaction {:?}",
+                "Receipt at position {} should be successful for shadow transaction {:?}",
                 i, expected_tx_hashes[i]
             );
         }
@@ -1845,7 +1845,7 @@ pub mod test_utils {
         }
     }
 
-    /// Helper for creating and submitting system transactions
+    /// Helper for creating and submitting shadow transactions
     pub async fn sign_shadow_tx(
         shadow_tx: ShadowTransaction,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
@@ -2008,7 +2008,7 @@ pub mod test_utils {
 
         assert!(
             last_shadow_tx_pos < first_normal_tx_pos,
-            "System transactions should appear before normal transactions. Last system: {}, First normal: {}",
+            "Shadow transactions should appear before normal transactions. Last shadow: {}, First normal: {}",
             last_shadow_tx_pos,
             first_normal_tx_pos
         );
@@ -2075,7 +2075,7 @@ pub mod test_utils {
         assert_txs_in_block(
             &block_payload,
             &expected_shadow_tx_hashes,
-            "System transactions",
+            "Shadow transactions",
         );
         assert_txs_in_block(&block_payload, expected_normal_txs, "Normal transactions");
 
@@ -2090,7 +2090,7 @@ pub mod test_utils {
         Ok(block_payload)
     }
 
-    /// Helper to create system transaction based on type
+    /// Helper to create shadow transaction based on type
     pub fn create_shadow_tx(tx_type: u8, address: Address) -> ShadowTransaction {
         use crate::shadow_tx::*;
         match tx_type {
@@ -2104,7 +2104,7 @@ pub mod test_utils {
         }
     }
 
-    /// - store system txs in the store
+    /// - store shadow txs in the store
     /// - prepare a new payload
     /// - DOES NOT update the forkchoice
     pub async fn prepare_block(
@@ -2153,7 +2153,7 @@ pub mod test_utils {
         for shadow_txs_raw in shadow_txs {
             let mut shadow_txs = Vec::new();
             for shadow_tx in shadow_txs_raw {
-                // Use the system tx directly since metadata fields are removed
+                // Use the shadow tx directly since metadata fields are removed
                 let updated_shadow_tx = match shadow_tx {
                     ShadowTransaction::V1 { packet } => ShadowTransaction::new_v1(packet),
                 };
@@ -2169,7 +2169,7 @@ pub mod test_utils {
         Ok(block_payloads)
     }
 
-    /// Compose a system tx for unstaking.
+    /// Compose a shadow tx for unstaking.
     pub fn unstake(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::Unstake(shadow_tx::BalanceIncrement {
             amount: U256::ONE,
@@ -2178,7 +2178,7 @@ pub mod test_utils {
         }))
     }
 
-    /// Compose a system tx for block reward.
+    /// Compose a shadow tx for block reward.
     pub fn block_reward(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::BlockReward(
             shadow_tx::BlockRewardIncrement {
@@ -2188,7 +2188,7 @@ pub mod test_utils {
         ))
     }
 
-    /// Compose a system tx for staking.
+    /// Compose a shadow tx for staking.
     pub fn stake(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::Stake(shadow_tx::BalanceDecrement {
             amount: U256::ONE,
@@ -2197,7 +2197,7 @@ pub mod test_utils {
         }))
     }
 
-    /// Compose a system tx for storage fees.
+    /// Compose a shadow tx for storage fees.
     pub fn storage_fees(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::StorageFees(
             shadow_tx::BalanceDecrement {
@@ -2208,7 +2208,7 @@ pub mod test_utils {
         ))
     }
 
-    /// Compose a system tx for pledge.
+    /// Compose a shadow tx for pledge.
     pub fn pledge(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::Pledge(shadow_tx::BalanceDecrement {
             amount: U256::ONE,
@@ -2217,7 +2217,7 @@ pub mod test_utils {
         }))
     }
 
-    /// Compose a system tx for unpledge.
+    /// Compose a shadow tx for unpledge.
     pub fn unpledge(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::Unpledge(shadow_tx::BalanceIncrement {
             amount: U256::ONE,
@@ -2434,7 +2434,7 @@ pub mod test_utils {
     /// Launches and connects multiple Irys+reth nodes for integration tests.
     ///
     /// # Arguments
-    /// - `num_nodes`: Addresses for allowed system tx origins (one per node)
+    /// - `num_nodes`: Addresses for allowed shadow tx origins (one per node)
     /// - `chain_spec`: Chain spec to use
     /// - `is_dev`: Whether to run in dev mode
     /// - `attributes_generator`: Function to generate payload attributes
