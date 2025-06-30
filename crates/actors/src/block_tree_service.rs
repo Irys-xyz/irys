@@ -16,10 +16,8 @@ use irys_database::{
     SystemLedger,
 };
 use irys_types::{
-    block_height_to_use_for_price, is_ema_recalculation_block,
-    previous_ema_recalculation_block_height, Address, BlockHash, CommitmentTransaction, Config,
-    ConsensusConfig, DataLedger, DatabaseProvider, H256List, IrysBlockHeader,
-    IrysTransactionHeader, H256, U256,
+    Address, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DatabaseProvider, H256List, IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database as _;
@@ -965,12 +963,18 @@ impl BlockTreeCache {
 
         let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
 
-        // Create EMA cache for start block (genesis or later)
-        let ema_snapshot = build_current_ema_snapshot_from_index(
-            block_index_guard.clone(),
-            db.clone(),
-            &consensus_config,
-        );
+        // Get the latest block from index for EMA snapshot
+        let latest_block_hash = {
+            let block_index = block_index_guard.read();
+            block_index.get_item(end - 1).unwrap().block_hash
+        };
+        let latest_block = block_header_by_hash(&tx, &latest_block_hash, false)
+            .unwrap()
+            .unwrap();
+
+        // Create EMA cache for start block
+        let ema_snapshot =
+            build_current_ema_snapshot_from_index(&latest_block, db.clone(), &consensus_config);
 
         let block_entry = BlockEntry {
             block: start_block.clone(),
@@ -1727,61 +1731,31 @@ impl BlockTreeCache {
 }
 
 fn build_current_ema_snapshot_from_index(
-    block_index_read_guard: BlockIndexReadGuard,
+    latest_block_from_index: &IrysBlockHeader,
     db: DatabaseProvider,
     config: &ConsensusConfig,
 ) -> Arc<EmaSnapshot> {
-    let block_index = block_index_read_guard.read();
-    let latest_item = block_index.get_latest_item();
-
-    let Some(latest_item) = latest_item else {
-        // If no blocks in index, create a minimal genesis header for EMA snapshot
-        let genesis_header = IrysBlockHeader {
-            oracle_irys_price: config.genesis_price,
-            ema_irys_price: config.genesis_price,
-            ..Default::default()
-        };
-        return EmaSnapshot::genesis(&genesis_header);
-    };
-
     let tx = db.tx().unwrap();
 
-    let latest_block = block_header_by_hash(&tx, &latest_item.block_hash, false)
-        .unwrap()
-        .expect("block_index block to be in database");
+    // Start from the provided latest block
+    let mut current_block = latest_block_from_index.clone();
 
-    // Handle genesis block case
-    if latest_block.height == 0 {
-        return EmaSnapshot::genesis(&latest_block);
+    // Collect blocks by walking up the chain
+    let mut chain_blocks = vec![current_block.clone()];
+    let blocks_to_collect = config.ema.price_adjustment_interval * 3;
+
+    // Walk backwards through the chain, collecting blocks
+    while chain_blocks.len() < blocks_to_collect as usize && current_block.height > 0 {
+        current_block = block_header_by_hash(&tx, &current_block.previous_block_hash, false)
+            .unwrap()
+            .expect("previous block must be in database");
+        chain_blocks.push(current_block.clone());
     }
 
-    // Determine the minimum height we need for EMA calculation
-    let blocks_in_interval = config.ema.price_adjustment_interval;
-    let pricing_height = block_height_to_use_for_price(latest_block.height, blocks_in_interval);
-    let latest_ema_height = if is_ema_recalculation_block(latest_block.height, blocks_in_interval) {
-        latest_block.height
-    } else {
-        previous_ema_recalculation_block_height(latest_block.height, blocks_in_interval)
-    };
+    // Reverse to have oldest blocks first
+    chain_blocks.reverse();
 
-    // We need blocks from the pricing height up to the current height
-    let min_height = pricing_height.min(latest_ema_height.saturating_sub(1));
-
-    // Collect all necessary blocks from the chain history
-    let mut chain_blocks = Vec::new();
-    for height in min_height..=latest_block.height {
-        if let Some(item) = block_index.get_item(height) {
-            let block = block_header_by_hash(&tx, &item.block_hash, false)
-                .unwrap()
-                .expect("block_index block to be in database");
-            chain_blocks.push(block);
-        } else {
-            panic!("Missing block at height {} in block index", height);
-        }
-    }
-    drop(block_index);
-
-    // Build EMA snapshot using existing helper function
+    // Pass the collected blocks to create_ema_snapshot_from_chain_history
     create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(|err| {
         panic!("Failed to create EMA snapshot from chain history: {}", err);
     })

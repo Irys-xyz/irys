@@ -35,7 +35,7 @@
 //!   - First 2 intervals: Use immediate predecessor
 //!   - After block 20: Use predecessor of previous EMA recalculation block
 
-use eyre::Result;
+use eyre::{ensure, Result};
 use irys_types::{
     storage_pricing::{phantoms::Percentage, Amount},
     ConsensusConfig, IrysBlockHeader, IrysTokenPrice,
@@ -296,6 +296,15 @@ pub fn create_ema_snapshot_from_chain_history(
     let latest_block = blocks.last().ok_or_else(|| {
         eyre::eyre!("No blocks provided to create_ema_snapshot_from_chain_history")
     })?;
+
+    // Ensure the latest block has the highest height
+    let max_height = blocks.iter().map(|b| b.height).max().unwrap_or(0);
+    ensure!(
+        latest_block.height == max_height,
+        "Latest block (height {}) does not have the highest height in the provided blocks (max height: {})",
+        latest_block.height,
+        max_height
+    );
 
     let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
 

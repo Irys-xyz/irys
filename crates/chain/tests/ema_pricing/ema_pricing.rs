@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_actors::block_tree_service::{get_canonical_chain, BlockTreeReadGuard};
