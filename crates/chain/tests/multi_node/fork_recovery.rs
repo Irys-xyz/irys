@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use base58::ToBase58 as _;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
 use tracing::debug;
@@ -9,16 +8,16 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
         "RUST_LOG",
-        "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
+        "debug,irys_actors::block_validation=none,irys_p2p::server=none,irys_actors::mining=error",
     );
     initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
-    let num_blocks_in_epoch = 2;
+    let num_blocks_in_epoch: u64 = 2;
     let seconds_to_wait = 15;
     // setup config / testnet
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch as usize);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
@@ -70,17 +69,19 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         .wait_for_mempool(peer2_pledge_tx.id, seconds_to_wait)
         .await?;
 
-    // Mine a block to get the commitments included
-    genesis_node.mine_block().await.unwrap();
+    let mut expected_height = num_blocks_in_epoch;
 
-    // Mine another block to perform epoch tasks, and assign partition_hash's to the peers
-    genesis_node.mine_block().await.unwrap();
+    // Mine blocks to get the commitments included, epoch tasks performed, and assignments of partition_hash's to the peers
+    genesis_node.mine_blocks(expected_height as usize).await?;
 
     // wait for block mining to reach tree height
-    genesis_node.wait_until_height(2, seconds_to_wait).await?;
+    genesis_node
+        .wait_until_height(expected_height, seconds_to_wait)
+        .await?;
+
     // wait for migration to reach index height
     genesis_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_height_on_chain(expected_height - block_migration_depth, seconds_to_wait)
         .await?;
 
     // Get the genesis nodes view of the peers assignments
@@ -97,10 +98,10 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
     // Wait for the peers to receive & process the epoch block
     peer1_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_height_on_chain(expected_height - block_migration_depth, seconds_to_wait)
         .await?;
     peer2_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_height_on_chain(expected_height - block_migration_depth, seconds_to_wait)
         .await?;
 
     // Wait for them to pack their storage modules with the partition_hashes
@@ -148,20 +149,26 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     result1?;
     result2?;
 
+    expected_height += 1;
+
     // wait for block mining to reach tree height
-    peer1_node.wait_until_height(3, seconds_to_wait).await?;
-    peer2_node.wait_until_height(3, seconds_to_wait).await?;
-    // wait for migration to reach index height
     peer1_node
-        .wait_until_height_on_chain(2, seconds_to_wait)
+        .wait_until_height(expected_height, seconds_to_wait)
         .await?;
     peer2_node
-        .wait_until_height_on_chain(2, seconds_to_wait)
+        .wait_until_height(expected_height, seconds_to_wait)
+        .await?;
+    // wait for migration to reach index height
+    peer1_node
+        .wait_until_height_on_chain(expected_height - block_migration_depth, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_height_on_chain(expected_height - block_migration_depth, seconds_to_wait)
         .await?;
 
     // Validate the peer blocks create forks with different transactions
-    let peer1_block = peer1_node.get_block_by_height(3).await?;
-    let peer2_block = peer2_node.get_block_by_height(3).await?;
+    let peer1_block = peer1_node.get_block_by_height(expected_height).await?;
+    let peer2_block = peer2_node.get_block_by_height(expected_height).await?;
 
     let peer1_block_txids = &peer1_block.data_ledgers[DataLedger::Submit].tx_ids.0;
     assert!(peer1_block_txids.contains(&txid));
@@ -175,6 +182,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // that the peers prefer the first block they saw with this cumulative difficulty,
     // their own.
     assert_eq!(peer1_block.cumulative_diff, peer2_block.cumulative_diff);
+    // gossip peer1's block to the
 
     peer2_node.gossip_block(&peer2_block)?;
     peer1_node.gossip_block(&peer1_block)?;
@@ -185,26 +193,28 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     peer1_node.get_block_by_hash(&peer2_block.block_hash)?;
     peer2_node.get_block_by_hash(&peer1_block.block_hash)?;
 
-    let peer1_block_after = peer1_node.get_block_by_height(3).await?;
-    let peer2_block_after = peer2_node.get_block_by_height(3).await?;
+    let peer1_block_after = peer1_node.get_block_by_height(expected_height).await?;
+    let peer2_block_after = peer2_node.get_block_by_height(expected_height).await?;
 
     // Verify neither peer changed their blocks after receiving the other peers block
     // for the same height.
     assert_eq!(peer1_block_after.block_hash, peer1_block.block_hash);
     assert_eq!(peer2_block_after.block_hash, peer2_block.block_hash);
 
-    let _block_hash = genesis_node.wait_until_height(3, seconds_to_wait).await?;
-    let genesis_block = genesis_node.get_block_by_height(3).await?;
+    let _block_hash = genesis_node
+        .wait_until_height(expected_height, seconds_to_wait)
+        .await?;
+    let genesis_block = genesis_node.get_block_by_height(expected_height).await?;
 
     debug!(
         "\nPEER1\n    before: {} c_diff: {}\n    after:  {} c_diff: {}\nPEER2\n    before: {} c_diff: {}\n    after:  {} c_diff: {}",
-        peer1_block.block_hash.0.to_base58(),
+        peer1_block.block_hash,
         peer1_block.cumulative_diff,
-        peer1_block_after.block_hash.0.to_base58(),
+        peer1_block_after.block_hash,
         peer1_block_after.cumulative_diff,
-        peer2_block.block_hash.0.to_base58(),
+        peer2_block.block_hash,
         peer2_block.cumulative_diff,
-        peer2_block_after.block_hash.0.to_base58(),
+        peer2_block_after.block_hash,
         peer2_block_after.cumulative_diff,
     );
     debug!(
@@ -233,7 +243,8 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         _reorg_block_hash = peer1_block.block_hash;
         reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
         peer2_node.mine_block().await?;
-        peer2_node.get_block_by_height(4).await?
+        expected_height += 1;
+        peer2_node.get_block_by_height(expected_height).await?
     } else {
         debug!(
             "GENESIS: should ignore {} and should already be on {} height: {}",
@@ -242,11 +253,12 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         _reorg_block_hash = peer2_block.block_hash;
         reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
         peer1_node.mine_block().await?;
-        peer1_node.get_block_by_height(4).await?
+        expected_height += 1;
+        peer1_node.get_block_by_height(expected_height).await?
     };
 
     let reorg_event = reorg_future.await?;
-    let _genesis_block = genesis_node.get_block_by_height(4).await?;
+    let _genesis_block = genesis_node.get_block_by_height(expected_height).await?;
 
     debug!("{:?}", reorg_event);
     let canon = genesis_node
