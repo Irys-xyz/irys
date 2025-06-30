@@ -1,6 +1,7 @@
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
+use eyre::eyre;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, SystemLedger};
@@ -8,7 +9,7 @@ use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransac
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
@@ -55,6 +56,25 @@ impl Inner {
                 // proof, indicating it is promoted.
                 let mempool_state = &self.mempool_state.clone();
                 let mut mempool_state_write_guard = mempool_state.write().await;
+
+                // debug_assert!(
+                //     mempool_state_write_guard
+                //         .valid_submit_ledger_tx
+                //         .contains_key(&tx_header.id),
+                //     "assert failed: valid_submit_ledger_tx {} {}",
+                //     &tx_header.id,
+                //     &block.block_hash
+                // );
+
+                // debug_assert!(
+                //     mempool_state_write_guard
+                //         .recent_valid_tx
+                //         .contains(&tx_header.id),
+                //     "assert failed: recent_valid_tx {} {}",
+                //     &tx_header.id,
+                //     &block.block_hash
+                // );
+
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .insert(tx_header.id, tx_header.clone());
@@ -87,9 +107,65 @@ impl Inner {
         // 6. Similar work with commitment transactions (stake and pledge)
         //    - This may require adding some features to the commitment_snapshot so that stake/pledge tx can be rolled back and new ones applied
 
-        self.handle_data_tx_reorg(event.clone()).await?;
+        // currently done (`handle_confirmed_data_tx_reorg`)
 
-        self.handle_commitment_tx_reorg(event).await?;
+        // block confirmation does:
+        // 1.) grabs all publish txs, then
+        // for each publish tx:
+        // 1.1) grab their full header
+        // 1.2) add the proof into the header
+        // 1.3) update `valid_submit_ledger_tx` to include the published tx -- this is fine
+        // 1.4) update the `recent_valid_tx` to include the tx's ID
+
+        // reorg logic
+        // 1.) get the orphan transactions, by ledger, by comparing the old fork with the new fork
+        // and finding all the transactions that are in the old fork but not in the new
+        // for every orphan transaction:
+        // if it's part the [`DataLedger::Submit`]:
+        // 1.2) resubmit it to the mempool
+        // if it's part of [`DataLedger::Publish`]:
+        // (as `handle_block_confirmed_message` only processes Publish txs)
+        // 1.1) remove it from valid_submit_ledger_tx
+        // 1.2) remove it from recent_valid_tx
+        // 1.3) remove the ingress proof from the header
+        // 1.4) resubmit it to the mempool
+
+        // needs to be done:
+        // re-org support for migrated blocks
+
+        // block migration does:
+        // 1.) moves commitment transactions from tree to index
+        // this means:
+        // 1.1) get all commitment txs (ids -> full headers)
+        // 1.2) insert these into the database
+        // 1.3) remove the commitment tx from the mempool
+
+        // 2.) move submit transactions from tree to index
+        // for each submit tx:
+        // 2.1) get the full tx header from the mempool
+        // 2.2) insert it into the database
+
+        // 3.) publish txs: update submit transactions in the index now they have ingress proofs
+        // for each publish tx:
+        // 3.1) get the full tx header
+        // 3.2) insert it into the database
+
+        // 4.) Remove the submit tx from the pending valid_submit_ledger_tx pool
+        // for every submit tx:
+        // 4.1) remove it from the `valid_submit_ledger_tx` list
+        // 4.2) remove it from the `recent_valid_tx` list
+
+        // 5.) add block with optional poa chunk to index
+        // 5.1) grab the POA chunk from `prevalidated_blocks_poa`
+        // 5.2) insert it & the block header into the database
+
+        // 6.) Remove migrated block and poa chunk from mempool cache
+        // 6.1) remove the header from `prevalidated_blocks`
+        // 6.2) remove the the POA from `prevalidated_blocks_poa`
+
+        self.handle_confirmed_data_tx_reorg(event.clone()).await?;
+
+        // self.handle_commitment_tx_reorg(event).await?;
 
         tracing::info!("Reorg handled, new tip: {}", &new_tip);
         Ok(())
@@ -139,11 +215,8 @@ impl Inner {
         }
 
         // resubmit orphaned system txs
-        // as we reduce the fork blocks down in reverse order (oldest -> newest) and preserve the ordering,
-        // we shouldn't run into any issues resubmitting them in this order, as stakes should come before pledges
-        // (and we have an out-of-order commitment cache anyway)
 
-        // since these are orphaned from our ""current"" fork, they should be accessible (right?)
+        // since these are orphaned from our ""old"" fork, they should be accessible
         // extract orphaned from commitment snapshot
         let mut orphaned_full_commitment_txs =
             HashMap::<IrysTransactionId, CommitmentTransaction>::new();
@@ -178,26 +251,57 @@ impl Inner {
         );
 
         // resubmit each commitment tx
-        for (_, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
-            self.handle_ingress_commitment_tx_message(orphaned_full_commitment_tx)
+        for (id, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
+            let _ = self
+                .handle_ingress_commitment_tx_message(orphaned_full_commitment_tx)
                 .await
-                .unwrap(); // TODO: remove unwrap
+                .inspect_err(|e| {
+                    error!(
+                        "Error resubmitting orphaned commitment tx {}: {:?}",
+                        &id, &e
+                    )
+                });
         }
 
         Ok(())
     }
 
-    pub async fn handle_data_tx_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
+    pub async fn handle_confirmed_data_tx_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
 
+        // we check for orphaned confirmed transactions from our fork, against the entire block range of the new fork
+
+        // get the range of confirmed blocks from the old fork
+        // we will then reduce these down into a list of txids, which we will check against the *entire* new fork block range
+        // this is because a tx that is in the tip block of the old fork could be included in the base block of the new fork
+        let old_fork_confirmed = old_fork[0_usize
+            ..(self
+                .config
+                .consensus
+                .block_migration_depth
+                .min(old_fork.len().try_into()?))
+            .try_into()?]
+            .to_vec();
+
+        let new_fork_confirmed = new_fork[0_usize
+            ..(self
+                .config
+                .consensus
+                .block_migration_depth
+                .min(new_fork.len().try_into()?))
+            .try_into()?]
+            .to_vec();
+
         // reduce the old fork and new fork into a list of ledger-specific txids
         // todo: if we only use the reductions to produce orphaned_ledger_txs, combine the logic
-        let reduce_data_ledgers = |fork: Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<
+        let reduce_data_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<(
             HashMap<DataLedger, HashSet<IrysTransactionId>>,
-        > {
-            let mut hm = HashMap::<DataLedger, HashSet<IrysTransactionId>>::new();
+            HashMap<IrysTransactionId, Arc<IrysBlockHeader>>,
+        )> {
+            let mut hm = HashMap::new();
+            let mut tx_blk_map = HashMap::new();
             for ledger in DataLedger::ALL {
                 // blocks can not have a data ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
                 hm.insert(ledger, HashSet::new());
@@ -208,106 +312,128 @@ impl Inner {
                     hm.entry(ledger.ledger_id.try_into()?)
                         .or_default()
                         .extend(ledger.tx_ids.iter());
+                    ledger.tx_ids.iter().for_each(|tx_id| {
+                        tx_blk_map.insert(*tx_id, Arc::clone(block));
+                    });
                 }
             }
-            Ok(hm)
+            Ok((hm, tx_blk_map))
         };
 
-        let old_fork_red = reduce_data_ledgers(old_fork)?;
-        let new_fork_red = reduce_data_ledgers(new_fork)?;
+        // let old_fork_red = reduce_data_ledgers(old_fork)?;
+        // reduction of the confirmed txs of the old fork
+        let (old_fork_confirmed_reduction, _) = reduce_data_ledgers(&old_fork_confirmed.into())?;
+
+        let (new_fork_confirmed_reduction, new_fork_tx_blk_map) =
+            reduce_data_ledgers(&new_fork_confirmed.into())?;
 
         // diff the two
-        let mut orphaned_ledger_txs: HashMap<DataLedger, Vec<IrysTransactionId>> = HashMap::new();
+        let mut orphaned_confirmed_ledger_txs: HashMap<DataLedger, Vec<IrysTransactionId>> =
+            HashMap::new();
 
         for ledger in DataLedger::ALL {
-            let new_txs = new_fork_red.get(&ledger).expect("should be populated");
-            let old_txs = old_fork_red.get(&ledger).expect("should be populated");
+            let new_txs = new_fork_confirmed_reduction
+                .get(&ledger)
+                .expect("should be populated");
+            let old_txs = old_fork_confirmed_reduction
+                .get(&ledger)
+                .expect("should be populated");
             // get the txs in old that are not in new (orphans)
             // add them to the orphaned map
-            orphaned_ledger_txs
+            orphaned_confirmed_ledger_txs
                 .entry(ledger)
                 .or_default()
                 .extend(old_txs.difference(new_txs));
         }
 
-        // pass orphaned submit txs back through the mempool
-        let submit_txs = orphaned_ledger_txs
+        // if a SUBMIT a tx is CONFIRMED in the old fork, but orphaned in the new - resubmit it to the mempool
+        let submit_txs = orphaned_confirmed_ledger_txs
             .get(&DataLedger::Submit)
             .cloned()
             .unwrap_or_default();
 
-        // these txs should be present in the database still, as they're part of the (technically sort of still current) chain
-        let full_orphaned_submit_txs = self.handle_get_data_tx_message(submit_txs).await;
+        // these txs should be present in the database, as they're part of the (technically sort of still current) chain
+        let full_orphaned_submit_txs = self.handle_get_data_tx_message(submit_txs.clone()).await;
 
         // 2. Re-post any reorged submit ledger transactions though handle_tx_ingress_message so account balances and anchors are checked
         // 3. Filter out any invalidated transactions
-        for tx in full_orphaned_submit_txs {
+        for (idx, tx) in full_orphaned_submit_txs.clone().into_iter().enumerate() {
             if let Some(tx) = tx {
-                self.handle_data_tx_ingress_message(tx).await.unwrap(); // TODO: remove unwrap
+                let tx_id = tx.id;
+                self.handle_data_tx_ingress_message(tx)
+                    .await
+                    .map_err(|e| eyre!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e))?;
             } else {
-                warn!("Unable to get orphaned tx")
+                warn!("Unable to get orphaned tx {:?}", &submit_txs.get(idx))
             }
         }
-
-        let orphaned_publish_txs = orphaned_ledger_txs
-            .get(&DataLedger::Submit)
-            .cloned()
-            .unwrap_or_default();
 
         // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
 
-        // let full_orphaned_submit_txs = self.handle_get_data_tx_message(orphaned_publish_txs).await;
+        // get the confirmed (but not published) publish ledger txs from the old fork
+        let orphaned_confirmed_publish_txs = orphaned_confirmed_ledger_txs
+            .get(&DataLedger::Publish)
+            .cloned()
+            .unwrap_or_default();
 
-        // remove these transactions from the `valid_submit_ledger_tx` list
-        // we assume the fork doesn't touch any migrated blocks
+        // these txs have been confirmed, but NOT migrated
         {
             let mut mempool_state_write_guard = self.mempool_state.write().await;
 
-            for tx in orphaned_publish_txs
-            /* full_orphaned_submit_txs */
-            {
+            for tx in orphaned_confirmed_publish_txs {
+                // if the tx is in `valid_submit_ledger_tx`, update it so `ingress_proofs` is `none`
+                // note: sometimes txs are *not* in this list, and I don't currently understand why
+
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
-                    .remove(/* &tx.id */ &tx);
-                //
-                mempool_state_write_guard
-                    .recent_valid_tx
-                    .remove(/* &tx.id */ &tx);
+                    .entry(tx)
+                    .and_modify(|tx| tx.ingress_proofs = None);
+                // mempool_state_write_guard.recent_valid_tx.remove(&tx);
             }
         }
 
-        // // strip out the IngressProof entry in the tx headers
-        // for tx in full_orphaned_submit_txs {
-        //     match tx {
-        //         Some(tx) => {
-        //             if let Err(err) = insert_tx_header(&mut_tx, header) {
-        //                 error!(
-        //                     "Could not insert transaction header - txid: {} err: {}",
-        //                     header.id, err
-        //                 );
-        //             }
-        //         }
-        //         None => todo!(),
-        //     }
-        // }
-
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
 
-        let published_in_both: Vec<IrysTransactionId> = old_fork_red
+        let published_in_both: Vec<IrysTransactionId> = old_fork_confirmed_reduction
             .get(&DataLedger::Publish)
             .expect("data ledger entry")
             .difference(
-                new_fork_red
+                new_fork_confirmed_reduction
                     .get(&DataLedger::Publish)
                     .expect("data ledger entry"),
             )
             .copied()
             .collect();
 
-        let full_published_txs = self.handle_get_data_tx_message(published_in_both).await;
-        for tx in full_published_txs {
-            let _tx = tx.ok_or_eyre("Unable to get tx that was promoted in both forks")?;
-            // TODO: How do we get the "ingress proofs from the canonical fork"
+        let full_published_txs = self
+            .handle_get_data_tx_message(published_in_both.clone())
+            .await;
+        for (idx, tx) in full_published_txs.into_iter().enumerate() {
+            if let Some(mut tx) = tx {
+                let promoted_in_block = new_fork_tx_blk_map.get(&tx.id).unwrap();
+                let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
+                // get publish tx pos
+                let proof_idx = publish_ledger
+                    .tx_ids
+                    .iter()
+                    .position(|tx_id| *tx_id == tx.id)
+                    .unwrap();
+                let proofs = publish_ledger.proofs.clone().unwrap();
+                let proof = proofs.get(proof_idx).unwrap();
+                tx.ingress_proofs = Some(proof.clone());
+                // update entry
+                {
+                    let mut mempool_state_write_guard = self.mempool_state.write().await;
+                    mempool_state_write_guard
+                        .valid_submit_ledger_tx
+                        .insert(tx.id, tx);
+                }
+            } else {
+                eyre::bail!(
+                    "Unable to get dual-published tx {:?}",
+                    &published_in_both.get(idx)
+                );
+            }
         }
 
         Ok(())
@@ -427,6 +553,10 @@ impl Inner {
         {
             let mut mempool_state_write_guard = mempool_state.write().await;
             for txid in submit_tx_ids.iter() {
+                debug!(
+                    "JESSEDEBUG2 REMOVING TX {} {}",
+                    &txid, &migrated_block.block_hash
+                );
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .remove(txid);
