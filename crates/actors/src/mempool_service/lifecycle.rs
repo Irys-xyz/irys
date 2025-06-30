@@ -360,9 +360,12 @@ impl Inner {
         for (idx, tx) in full_orphaned_submit_txs.clone().into_iter().enumerate() {
             if let Some(tx) = tx {
                 let tx_id = tx.id;
-                self.handle_data_tx_ingress_message(tx)
+                // TODO: handle errors better
+                // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
+                let _ = self
+                    .handle_data_tx_ingress_message(tx)
                     .await
-                    .map_err(|e| eyre!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e))?;
+                    .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e));
             } else {
                 warn!("Unable to get orphaned tx {:?}", &submit_txs.get(idx))
             }
