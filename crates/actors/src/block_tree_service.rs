@@ -1779,6 +1779,7 @@ fn build_current_ema_snapshot_from_index(
             panic!("Missing block at height {} in block index", height);
         }
     }
+    drop(block_index);
 
     // Build EMA snapshot using existing helper function
     create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(|err| {

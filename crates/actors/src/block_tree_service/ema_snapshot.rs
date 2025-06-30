@@ -106,7 +106,7 @@ impl EmaSnapshot {
         let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
 
         // Check if we're at an EMA boundary where we shift intervals
-        // This happens at blocks 10, 20, 30, etc.
+        // This happens at blocks 10, 20, 30, etc. (assuming the price adj interval is 10 blocks)
         let crossing_interval_boundary =
             new_block.height % blocks_in_interval == 0 && new_block.height > 0;
 

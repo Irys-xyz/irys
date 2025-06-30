@@ -27,7 +27,9 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
     // action
     // we start at 1 because the genesis block is already mined
     for expected_height in 1..(price_adjustment_interval * 2) {
-        let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+        ctx.mine_block().await?;
+        ctx.wait_until_height(expected_height, 10).await?;
+        let header = ctx.get_block_by_height(expected_height).await?;
 
         // Get the current EMA price from the block tree
         let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
@@ -76,14 +78,20 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         ctx.node_ctx.config.consensus.genesis_price,
     )];
     // mine 6 blocks
-    for _expected_height in 1..(price_adjustment_interval * 2) {
-        let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    for expected_height in 1..(price_adjustment_interval * 2) {
+        ctx.mine_block().await?;
+        ctx.wait_until_height(expected_height, 10).await?;
+        let header = ctx.get_block_by_height(expected_height).await?;
         registered_prices.push((header.oracle_irys_price, header.ema_irys_price));
     }
 
     // action -- mine a new block. This pushes the system to use a new EMA rather than the genesis EMA
-    let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    ctx.mine_block().await?;
+    ctx.wait_until_height(price_adjustment_interval * 2, 10)
+        .await?;
+    let header = ctx
+        .get_block_by_height(price_adjustment_interval * 2)
+        .await?;
 
     // Get the current EMA price from the block tree
     let tip = ctx.node_ctx.block_tree_guard.read().tip;
