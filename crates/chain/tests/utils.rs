@@ -800,7 +800,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(block);
             }
 
-            sleep(Duration::from_millis((1 / retries_per_second) as u64)).await;
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
             retries += 1;
         }
 
