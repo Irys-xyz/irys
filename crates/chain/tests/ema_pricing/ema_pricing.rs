@@ -1,12 +1,20 @@
-use std::time::Duration;
+use std::sync::Arc;
 
 use crate::utils::{mine_block, IrysNodeTest};
-use irys_actors::{
-    block_tree_service::{get_block, get_canonical_chain},
-    ema_service::EmaServiceMessage,
-};
-use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
+use irys_actors::block_tree_service::{get_canonical_chain, BlockTreeReadGuard};
+use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
 use rust_decimal_macros::dec;
+
+fn get_block(
+    block_tree_read_guard: BlockTreeReadGuard,
+    block_hash: H256,
+) -> Option<Arc<IrysBlockHeader>> {
+    block_tree_read_guard
+        .read()
+        .get_block(&block_hash)
+        .cloned()
+        .map(Arc::new)
+}
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
@@ -19,13 +27,22 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
     // action
     // we start at 1 because the genesis block is already mined
     for expected_height in 1..(price_adjustment_interval * 2) {
-        let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.node_ctx
-            .service_senders
-            .ema
-            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-        let returned_ema_price = rx.await?;
+        ctx.mine_block().await?;
+        ctx.wait_until_height(expected_height, 10).await?;
+        let header = ctx.get_block_by_height(expected_height).await?;
+
+        // Get the current EMA price from the block tree
+        let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap();
+        let tip_hash = chain.last().unwrap().block_hash;
+        let ema_snapshot = ctx
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(&tip_hash)
+            .expect("EMA snapshot should exist for tip");
+        let returned_ema_price = ema_snapshot.ema_for_public_pricing();
 
         // assert each new block that we mine
         assert_eq!(header.height, expected_height);
@@ -61,20 +78,30 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         ctx.node_ctx.config.consensus.genesis_price,
     )];
     // mine 6 blocks
-    for _expected_height in 1..(price_adjustment_interval * 2) {
-        let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    for expected_height in 1..(price_adjustment_interval * 2) {
+        ctx.mine_block().await?;
+        ctx.wait_until_height(expected_height, 10).await?;
+        let header = ctx.get_block_by_height(expected_height).await?;
         registered_prices.push((header.oracle_irys_price, header.ema_irys_price));
     }
 
     // action -- mine a new block. This pushes the system to use a new EMA rather than the genesis EMA
-    let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ctx.node_ctx
-        .service_senders
-        .ema
-        .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
-    let returned_ema_price = rx.await?;
+    ctx.mine_block().await?;
+    ctx.wait_until_height(price_adjustment_interval * 2, 10)
+        .await?;
+    let header = ctx
+        .get_block_by_height(price_adjustment_interval * 2)
+        .await?;
+
+    // Get the current EMA price from the block tree
+    let tip = ctx.node_ctx.block_tree_guard.read().tip;
+    let ema_snapshot = ctx
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_ema_snapshot(&tip)
+        .expect("EMA snapshot should exist for tip");
+    let returned_ema_price = ema_snapshot.ema_for_public_pricing();
 
     // assert
     assert_eq!(
@@ -122,10 +149,8 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         .await
         .unwrap();
     assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
-    let genesis_block = get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash)
-        .await
-        .unwrap()
-        .unwrap();
+    let genesis_block =
+        get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash).unwrap();
     let mut price_prev = genesis_block.oracle_irys_price;
     for block in [header_1, header_2, header_3] {
         let max_allowed_price = price_prev.add_multiplier(token_price_safe_range).unwrap();

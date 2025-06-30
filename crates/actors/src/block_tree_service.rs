@@ -1,7 +1,6 @@
 use crate::{
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
     chunk_migration_service::ChunkMigrationService,
-    ema_service::EmaServiceMessage,
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -33,6 +32,9 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, error, info};
+
+pub mod ema_snapshot;
+use ema_snapshot::{create_ema_snapshot_from_chain_history, EmaSnapshot};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -223,7 +225,7 @@ impl BlockTreeServiceInner {
                 commitment_txs,
                 response,
             } => {
-                let result = self.on_block_prevalidated(block, commitment_txs).await;
+                let result = self.on_block_prevalidated(block, commitment_txs);
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::BlockValidationFinished {
@@ -312,10 +314,6 @@ impl BlockTreeServiceInner {
                 confirmed_block.clone(),
             ))
             .expect("mempool service has unexpectedly become unreachable");
-        self.service_senders
-            .ema
-            .send(EmaServiceMessage::BlockConfirmed)
-            .expect("EMA service has unexpectedly become unreachable");
     }
 
     /// Checks if a block that is `block_migration_depth` blocks behind `arc_block`
@@ -407,86 +405,81 @@ impl BlockTreeServiceInner {
     }
 
     /// Handles pre-validated blocks received from the validation service.
-    async fn on_block_prevalidated(
+    fn on_block_prevalidated(
         &mut self,
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
     ) -> eyre::Result<()> {
         let miner_address = self.miner_address;
-        let ema_service = self.service_senders.ema.clone();
         let block_hash = &block.block_hash;
 
-        let should_update_ema = {
-            let mut cache = self.cache.write().expect("cache lock poisoned");
+        let mut cache = self.cache.write().expect("cache lock poisoned");
 
-            // Early return if block already exists
-            if let Some(existing) = cache.get_block(block_hash) {
-                debug!(
-                    "on_block_prevalidated: {} at height: {} already in block_tree",
-                    existing.block_hash, existing.height
-                );
-                return Ok(());
-            }
-
-            // Get previous block's commitment snapshot
-            let prev_commitment_snapshot = cache
-                .blocks
-                .get(&block.previous_block_hash)
-                .expect("previous block to be in block tree")
-                .commitment_snapshot
-                .clone();
-
-            // Create commitment snapshot for this block
-            let commitment_snapshot = create_commitment_snapshot_for_block(
-                &block,
-                &commitment_txs,
-                &prev_commitment_snapshot,
-                &self.consensus_config,
-                &self.commitment_state_guard,
+        // Early return if block already exists
+        if let Some(existing) = cache.get_block(block_hash) {
+            debug!(
+                "on_block_prevalidated: {} at height: {} already in block_tree",
+                existing.block_hash, existing.height
             );
+            return Ok(());
+        }
 
-            // Add block based on origin (local vs peer)
-            let add_result = if block.miner_address == miner_address {
-                cache.add_local_block(
-                    &block,
-                    ChainState::Validated(BlockState::Unknown),
-                    commitment_snapshot,
-                )
-            } else {
-                cache.add_peer_block(&block, commitment_snapshot)
-            };
+        let parent_block = cache
+            .blocks
+            .get(&block.previous_block_hash)
+            .expect("previous block to be in block tree");
 
-            if add_result.is_err() {
-                false
-            } else {
-                // Schedule validation and mark as scheduled
-                self.service_senders
-                    .validation_service
-                    .send(ValidationServiceMessage::ValidateBlock {
-                        block: block.clone(),
-                    })
-                    .context("validation service unreachable!")?;
+        // Get previous block's commitment snapshot
+        let prev_commitment_snapshot = parent_block.commitment_snapshot.clone();
 
-                if cache
-                    .mark_block_as_validation_scheduled(block_hash)
-                    .is_err()
-                {
-                    error!("Unable to mark block as ValidationScheduled");
-                }
+        // Create commitment snapshot for this block
+        let commitment_snapshot = create_commitment_snapshot_for_block(
+            &block,
+            &commitment_txs,
+            &prev_commitment_snapshot,
+            &self.consensus_config,
+            &self.commitment_state_guard,
+        );
 
-                debug!(
-                    "scheduling block for validation: {} height: {}",
-                    block_hash, block.height
-                );
-                true
-            }
+        // Create ema snapshot for this block
+        let ema_snapshot = parent_block.ema_snapshot.next_snapshot(
+            &block,
+            &parent_block.block,
+            &self.consensus_config,
+        )?;
+
+        // Add block based on origin (local vs peer)
+        let add_result = if block.miner_address == miner_address {
+            cache.add_local_block(
+                &block,
+                ChainState::Validated(BlockState::Unknown),
+                commitment_snapshot,
+                ema_snapshot,
+            )
+        } else {
+            cache.add_peer_block(&block, commitment_snapshot, ema_snapshot)
         };
 
-        // Update EMA if block was successfully added
-        if should_update_ema {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
-            rx.await?;
+        if add_result.is_ok() {
+            // Schedule validation and mark as scheduled
+            self.service_senders
+                .validation_service
+                .send(ValidationServiceMessage::ValidateBlock {
+                    block: block.clone(),
+                })
+                .context("validation service unreachable!")?;
+
+            if cache
+                .mark_block_as_validation_scheduled(block_hash)
+                .is_err()
+            {
+                error!("Unable to mark block as ValidationScheduled");
+            }
+
+            debug!(
+                "scheduling block for validation: {} height: {}",
+                block_hash, block.height
+            );
         }
 
         Ok(())
@@ -809,6 +802,7 @@ pub struct BlockEntry {
     timestamp: SystemTime,
     children: HashSet<H256>,
     commitment_snapshot: Arc<CommitmentSnapshot>,
+    ema_snapshot: Arc<EmaSnapshot>,
 }
 
 /// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
@@ -850,7 +844,7 @@ impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
-    // #[cfg(feature = "test-utils")]
+    #[cfg(any(feature = "test-utils", test))]
     pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         let block_hash = genesis_block.block_hash;
         let solution_hash = genesis_block.solution_hash;
@@ -862,7 +856,10 @@ impl BlockTreeCache {
         let mut height_index = BTreeMap::new();
 
         // Create a dummy commitment snapshot
-        let snapshot = Arc::new(CommitmentSnapshot::default());
+        let commitment_snapshot = Arc::new(CommitmentSnapshot::default());
+
+        // Create EMA cache for genesis block
+        let ema_snapshot = EmaSnapshot::genesis(genesis_block);
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
@@ -871,7 +868,8 @@ impl BlockTreeCache {
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
-            commitment_snapshot: snapshot,
+            commitment_snapshot,
+            ema_snapshot,
         };
 
         // Initialize all indices
@@ -956,7 +954,7 @@ impl BlockTreeCache {
         };
 
         // Initialize commitment snapshot and add start block
-        let mut commitment_snapshot = build_current_snapshot_from_index(
+        let mut commitment_snapshot = build_current_commitment_snapshot_from_index(
             block_index_guard.clone(),
             commitment_state_guard.clone(),
             db.clone(),
@@ -964,12 +962,27 @@ impl BlockTreeCache {
         );
 
         let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
+
+        // Get the latest block from index for EMA snapshot
+        let latest_block_hash = {
+            let block_index = block_index_guard.read();
+            block_index.get_item(end - 1).unwrap().block_hash
+        };
+        let latest_block = block_header_by_hash(&tx, &latest_block_hash, false)
+            .unwrap()
+            .unwrap();
+
+        // Create EMA cache for start block
+        let ema_snapshot =
+            build_current_ema_snapshot_from_index(&latest_block, db.clone(), &consensus_config);
+
         let block_entry = BlockEntry {
             block: start_block.clone(),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
             commitment_snapshot: arc_commitment_snapshot.clone(),
+            ema_snapshot: ema_snapshot.clone(),
         };
 
         block_tree_cache
@@ -983,6 +996,8 @@ impl BlockTreeCache {
             .insert(start_block.height, HashSet::from([start_block_hash]));
 
         let mut prev_commitment_snapshot = arc_commitment_snapshot;
+        let mut prev_ema_snapshot = ema_snapshot;
+        let mut prev_block = start_block;
 
         // Process remaining blocks
         for block_height in (start + 1)..end {
@@ -1008,6 +1023,10 @@ impl BlockTreeCache {
                 &commitment_state_guard,
             );
 
+            let arc_ema_snapshot = prev_ema_snapshot
+                .next_snapshot(&block, &prev_block, &consensus_config)
+                .expect("failed to create EMA snapshot");
+
             // Update commitment snapshot with new commitments if it's not an epoch block
             if block.height % consensus_config.epoch.num_blocks_in_epoch != 0 {
                 for commitment_tx in &commitment_txs {
@@ -1018,11 +1037,14 @@ impl BlockTreeCache {
             }
 
             prev_commitment_snapshot = arc_commitment_snapshot.clone();
+            prev_ema_snapshot = arc_ema_snapshot.clone();
+            prev_block = block.clone();
             block_tree_cache
                 .add_local_block(
                     &block,
                     ChainState::Validated(BlockState::ValidBlock),
                     arc_commitment_snapshot,
+                    arc_ema_snapshot,
                 )
                 .unwrap();
         }
@@ -1050,6 +1072,7 @@ impl BlockTreeCache {
         hash: BlockHash,
         block: &IrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
+        ema_snapshot: Arc<EmaSnapshot>,
         chain_state: ChainState,
     ) -> eyre::Result<()> {
         let prev_hash = block.previous_block_hash;
@@ -1091,6 +1114,7 @@ impl BlockTreeCache {
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
                 commitment_snapshot,
+                ema_snapshot,
             },
         );
 
@@ -1111,6 +1135,7 @@ impl BlockTreeCache {
         &mut self,
         block: &IrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
+        ema_snapshot: Arc<EmaSnapshot>,
     ) -> eyre::Result<()> {
         let hash = block.block_hash;
 
@@ -1126,10 +1151,12 @@ impl BlockTreeCache {
             debug!(?hash, "already part of the main chian state");
             return Ok(());
         }
+
         self.add_common(
             hash,
             block,
             commitment_snapshot,
+            ema_snapshot,
             ChainState::NotOnchain(BlockState::Unknown),
         )
     }
@@ -1153,6 +1180,7 @@ impl BlockTreeCache {
         block: &IrysBlockHeader,
         chain_state: ChainState,
         commitment_snapshot: Arc<CommitmentSnapshot>,
+        ema_snapshot: Arc<EmaSnapshot>,
     ) -> eyre::Result<()> {
         let hash = block.block_hash;
         let prev_hash = block.previous_block_hash;
@@ -1172,7 +1200,7 @@ impl BlockTreeCache {
             "Previous block not validated"
         );
 
-        self.add_common(hash, block, commitment_snapshot, chain_state)
+        self.add_common(hash, block, commitment_snapshot, ema_snapshot, chain_state)
     }
 
     /// Helper function to delete a single block without recursion
@@ -1473,6 +1501,13 @@ impl BlockTreeCache {
         }
     }
 
+    /// Get EMA cache for a specific block
+    pub fn get_ema_snapshot(&self, block_hash: &BlockHash) -> Option<Arc<EmaSnapshot>> {
+        self.blocks
+            .get(block_hash)
+            .map(|entry| entry.ema_snapshot.clone())
+    }
+
     /// Returns the current possible set of candidate hashes for a given height.
     pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
         self.height_index.get(&height)
@@ -1695,6 +1730,37 @@ impl BlockTreeCache {
     }
 }
 
+fn build_current_ema_snapshot_from_index(
+    latest_block_from_index: &IrysBlockHeader,
+    db: DatabaseProvider,
+    config: &ConsensusConfig,
+) -> Arc<EmaSnapshot> {
+    let tx = db.tx().unwrap();
+
+    // Start from the provided latest block
+    let mut current_block = latest_block_from_index.clone();
+
+    // Collect blocks by walking up the chain
+    let mut chain_blocks = vec![current_block.clone()];
+    let blocks_to_collect = config.ema.price_adjustment_interval * 3;
+
+    // Walk backwards through the chain, collecting blocks
+    while chain_blocks.len() < blocks_to_collect as usize && current_block.height > 0 {
+        current_block = block_header_by_hash(&tx, &current_block.previous_block_hash, false)
+            .unwrap()
+            .expect("previous block must be in database");
+        chain_blocks.push(current_block.clone());
+    }
+
+    // Reverse to have oldest blocks first
+    chain_blocks.reverse();
+
+    // Pass the collected blocks to create_ema_snapshot_from_chain_history
+    create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(|err| {
+        panic!("Failed to create EMA snapshot from chain history: {}", err);
+    })
+}
+
 pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
     let canonical_chain = tokio::task::spawn_blocking(move || {
         let cache = tree.read();
@@ -1742,25 +1808,6 @@ pub async fn get_canonical_chain(
     Ok(canonical_chain)
 }
 
-/// Returns the block from the block tree at a given block hash
-/// Uses spawn_blocking to prevent the read operation from blocking the async executor
-/// and locking other async tasks while accessing the block tree.
-/// Notably useful in single-threaded tokio based unittests.
-pub async fn get_block(
-    block_tree_read_guard: BlockTreeReadGuard,
-    block_hash: H256,
-) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
-    let res = tokio::task::spawn_blocking(move || {
-        block_tree_read_guard
-            .read()
-            .get_block(&block_hash)
-            .cloned()
-            .map(Arc::new)
-    })
-    .await?;
-    Ok(res)
-}
-
 /// Reconstructs the commitment snapshot for the current epoch by loading all commitment
 /// transactions from blocks since the last epoch boundary.
 ///
@@ -1771,7 +1818,7 @@ pub async fn get_block(
 ///
 /// # Returns
 /// Initialized commitment snapshot containing all commitments from the current epoch
-pub fn build_current_snapshot_from_index(
+pub fn build_current_commitment_snapshot_from_index(
     block_index_guard: BlockIndexReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     db: DatabaseProvider,
@@ -1896,6 +1943,16 @@ mod tests {
     use assert_matches::assert_matches;
     use eyre::ensure;
 
+    fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
+        let config = irys_types::ConsensusConfig::testnet();
+        let genesis_header = IrysBlockHeader {
+            oracle_irys_price: config.genesis_price,
+            ema_irys_price: config.genesis_price,
+            ..Default::default()
+        };
+        EmaSnapshot::genesis(&genesis_header)
+    }
+
     #[actix::test]
     async fn test_block_cache() {
         let b1 = random_block(U256::from(0));
@@ -1939,7 +1996,10 @@ mod tests {
         b1_test.data_ledgers[DataLedger::Submit]
             .tx_ids
             .push(H256::random());
-        assert_matches!(cache.add_peer_block(&b1_test, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b1_test, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
@@ -1964,7 +2024,10 @@ mod tests {
 
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -1980,7 +2043,10 @@ mod tests {
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -2012,10 +2078,16 @@ mod tests {
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
 
         println!(
             "b1:   {} cdiff: {} solution_hash: {}",
@@ -2147,15 +2219,24 @@ mod tests {
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
         let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
-        assert_matches!(cache.add_peer_block(&b1_2, comm_cache.clone()), Ok(()));
-        assert_matches!(cache.add_peer_block(&b2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
+        assert_matches!(
+            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_2, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2_2, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2172,7 +2253,10 @@ mod tests {
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b2_3, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b2_3, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2190,7 +2274,8 @@ mod tests {
             cache.add_local_block(
                 &b2_2,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2215,12 +2300,16 @@ mod tests {
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b3, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b3, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(
             cache.add_local_block(
                 &b3,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2247,7 +2336,10 @@ mod tests {
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
-        assert_matches!(cache.add_peer_block(&b4, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b4, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2381,7 +2473,10 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
@@ -2403,7 +2498,8 @@ mod tests {
             cache.add_local_block(
                 &b13,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2448,7 +2544,10 @@ mod tests {
 
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
-        assert_matches!(cache.add_peer_block(&b14, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b14, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_eq!(
             cache
                 .get_earliest_not_onchain_in_longest_chain()
@@ -2530,7 +2629,10 @@ mod tests {
 
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
-        assert_matches!(cache.add_peer_block(&b15, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b15, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(
             check_earliest_not_onchain(
                 &b14.block_hash,
@@ -2546,7 +2648,8 @@ mod tests {
             cache.add_local_block(
                 &b14,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2567,7 +2670,10 @@ mod tests {
 
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
-        assert_matches!(cache.add_peer_block(&b16, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b16, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
             Ok(())
@@ -2619,7 +2725,10 @@ mod tests {
         let b11 = random_block(U256::zero());
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
-        assert_matches!(cache.add_peer_block(&b12, comm_cache.clone()), Ok(()));
+        assert_matches!(
+            cache.add_peer_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
+            Ok(())
+        );
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
@@ -2632,7 +2741,8 @@ mod tests {
             cache.add_local_block(
                 &b12,
                 ChainState::Validated(BlockState::ValidationScheduled),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2659,7 +2769,8 @@ mod tests {
             cache.add_local_block(
                 &b12,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2675,7 +2786,8 @@ mod tests {
             cache.add_local_block(
                 &b13a,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2683,7 +2795,8 @@ mod tests {
             cache.add_local_block(
                 &b13b,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache.clone()
+                comm_cache.clone(),
+                dummy_ema_snapshot()
             ),
             Ok(())
         );
@@ -2699,7 +2812,8 @@ mod tests {
             cache.add_local_block(
                 &b14b,
                 ChainState::Validated(BlockState::ValidBlock),
-                comm_cache
+                comm_cache,
+                dummy_ema_snapshot()
             ),
             Ok(())
         );

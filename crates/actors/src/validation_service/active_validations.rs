@@ -13,6 +13,9 @@
 //! - Completed tasks immediately removed to free resources
 
 use crate::block_tree_service::{BlockTreeCache, BlockTreeReadGuard, ChainState};
+
+#[cfg(test)]
+use crate::block_tree_service::test_utils::dummy_ema_snapshot;
 use futures::future::poll_immediate;
 use irys_types::BlockHash;
 use priority_queue::PriorityQueue;
@@ -419,6 +422,7 @@ mod tests {
                 fork_block_11.block_hash,
                 &fork_block_11,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
             .unwrap();
@@ -426,6 +430,7 @@ mod tests {
                 fork_block_12.block_hash,
                 &fork_block_12,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
             .unwrap();
@@ -433,6 +438,7 @@ mod tests {
                 extension_block_21.block_hash,
                 &extension_block_21,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
             .unwrap();
@@ -440,6 +446,7 @@ mod tests {
                 extension_block_22.block_hash,
                 &extension_block_22,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
             .unwrap();
@@ -710,6 +717,7 @@ mod tests {
                     header.block_hash,
                     &header,
                     Arc::new(CommitmentSnapshot::default()),
+                    dummy_ema_snapshot(),
                     ChainState::NotOnchain(BlockState::ValidationScheduled),
                 )
                 .unwrap();
@@ -754,6 +762,7 @@ mod tests {
                     header.block_hash,
                     &header,
                     Arc::new(CommitmentSnapshot::default()),
+                    dummy_ema_snapshot(),
                     ChainState::NotOnchain(BlockState::ValidationScheduled),
                 )
                 .unwrap();

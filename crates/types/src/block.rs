@@ -229,6 +229,10 @@ impl IrysBlockHeader {
         previous_ema_recalculation_block_height(self.height, blocks_in_price_adjustment_interval)
     }
 
+    pub fn block_height_to_use_for_price(&self, blocks_in_price_adjustment_interval: u64) -> u64 {
+        block_height_to_use_for_price(self.height, blocks_in_price_adjustment_interval)
+    }
+
     /// get storage ledger txs from blocks data ledger
     pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
         let mut commitment_txids = Vec::new();
