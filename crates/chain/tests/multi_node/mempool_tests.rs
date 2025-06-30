@@ -225,7 +225,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
 #[actix_web::test]
-async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
         "RUST_LOG",
