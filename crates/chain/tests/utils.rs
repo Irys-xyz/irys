@@ -51,6 +51,7 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use reth::network::{PeerInfo, Peers};
 use reth::payload::EthBuiltPayload;
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
 use sha2::{Digest as _, Sha256};
@@ -744,6 +745,32 @@ impl IrysNodeTest<IrysNodeCtx> {
             .commitment_state_guard
             .is_staked(commitment_tx.signer);
         commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
+    }
+
+    // wait for block to be available via block tree guard
+    pub async fn wait_for_block(
+        &self,
+        hash: &H256,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<IrysBlockHeader> {
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+        let mut retries = 0;
+
+        for _ in 0..max_retries {
+            if let Ok(block) = self.get_block_by_hash(hash) {
+                info!("block found in block tree after {} retries", &retries);
+                return Ok(block);
+            }
+
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+            retries += 1;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate block in block tree after {} retries",
+            retries
+        ))
     }
 
     /// wait for tx to appear in the mempool or be found in the database
