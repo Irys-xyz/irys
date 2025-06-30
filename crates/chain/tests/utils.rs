@@ -752,8 +752,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         hash: &H256,
         seconds_to_wait: usize,
     ) -> eyre::Result<IrysBlockHeader> {
-        let restries_per_second = 50;
-        let max_retries = seconds_to_wait * restries_per_second;
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
         let mut retries = 0;
 
         for _ in 0..max_retries {
@@ -762,7 +762,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(block);
             }
 
-            sleep(Duration::from_millis((1 / restries_per_second) as u64)).await;
+            sleep(Duration::from_millis((1 / retries_per_second) as u64)).await;
             retries += 1;
         }
 
