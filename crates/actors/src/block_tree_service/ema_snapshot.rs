@@ -1,39 +1,52 @@
 //! # EMA (Exponential Moving Average) Snapshot System
 //!
-//! ## Overview
+//! ## Problem Being Solved
 //!
-//! The EMA system divides blockchain history into fixed-size intervals (configurable via the config)
-//! and calculates exponential moving averages of oracle prices to determine storage pricing.
+//! **Core Challenge**: Storage fees are quoted in USD but paid in $IRYS tokens, creating a pricing stability problem:
+//! - Token prices fluctuate constantly
+//! - Users need predictable storage costs when submitting transactions
+//! - Transactions submitted in one interval might be confirmed in the next
+//! - If token price suddenly increases, pending transactions become underfunded and fail
 //!
-//! ## Interval System
+//! ## Solution: 2-Interval Lookahead Pricing
 //!
-//! The system operates differently across three types of intervals:
+//! The EMA system provides stable, predictable pricing by:
+//! - **Using EMA from 2 intervals ago**: Miners and users know the exact token price that will be used
+//! - **Publishing future prices in block headers**: Each interval's EMA is recorded for future use
+//! - **Preventing transaction failures**: Even if submitted in interval N, transaction remains valid in interval N+1
 //!
-//! ### 1st-2nd Interval (blocks 0-19 assuming the pricing interval is 10)
-//! - Special handling: EMA is recalculated for EVERY block
-//! - Uses genesis price as initial EMA
-//! - Each block's EMA is based on its immediate predecessor
-//! - Example: Block 5 uses block 4's oracle price and EMA for calculation
+//! ## Behaviour
 //!
-//! ### Nth Intervals (blocks 20+)
-//! - Standard operation: EMA only recalculated at interval boundaries
-//! - EMA updates happen at blocks 29, 39, 49, etc. (last block of each interval)
-//! - Uses oracle price from predecessor of previous EMA block
-//! - Example: Block 29's EMA uses block 18's oracle price + block 19's EMA
+//! ### Why 2 Intervals Ahead?
+//! - **Interval 1**: Transaction is submitted (uses price from 2 intervals ago)
+//! - **Interval 2**: Transaction might still be pending (same price still applies)
+//! - **Price Stability**: Both miners and users can quote/pay using a known, fixed token price
 //!
-//! ## Pricing vs Computation Blocks
+//! ### Special Handling for First 2 Intervals
 //!
-//! The system separates blocks used for pricing from those used for EMA computation:
+//! **Problem**: System needs historical data to calculate "2 intervals ago" pricing
+//! **Solution**: Different behavior during bootstrap:
 //!
-//! - **Pricing Blocks**: Always uses EMA from 2 intervals ago
-//!   - Blocks 0-19: Use genesis block (block 0) EMA
-//!   - Blocks 20-29: Use block 9's EMA
-//!   - Blocks 30-39: Use block 19's EMA
-//!   - Blocks 40-49: Use block 29's EMA
+//! - **Intervals 1-2 (blocks 0-19)**:
+//!   - EMA recalculated EVERY block (not just interval boundaries)
+//!   - Uses genesis price for all fee calculations
+//!   - Builds up historical EMA data for future use
 //!
-//! - **Computation Blocks**: For calculating new EMA values
-//!   - First 2 intervals: Use immediate predecessor
-//!   - After block 20: Use predecessor of previous EMA recalculation block
+//! - **Interval 3+ (blocks 20+)**:
+//!   - Standard operation begins
+//!   - EMA recalculated only at interval boundaries (blocks 29, 39, 49...)
+//!   - Fee calculations use EMA from 2 intervals ago
+//!
+//! ## Example Flow (10-block intervals)
+//!
+//! - **Block 0-9**: Fees use genesis price, EMA calculated each block
+//! - **Block 9**: Records EMA (E9) in header for future use
+//! - **Block 10-19**: Still uses genesis price, EMA calculated each block
+//! - **Block 19**: Records EMA (E19) in header
+//! - **Block 20-29**: NOW uses E9 for fees (recorded 2 intervals ago)
+//! - **Block 29**: Records EMA (E29) using oracle[18] + ema[19]
+//! - **Block 30-39**: Uses E19 for fees
+//! - **Block 40-49**: Uses E29 for fees
 
 use eyre::{ensure, Result};
 use irys_types::{
