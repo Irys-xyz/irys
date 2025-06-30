@@ -372,6 +372,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_node
     }
 
+    /// get block height in block index
     pub async fn wait_until_height_on_chain(
         &self,
         target_height: u64,

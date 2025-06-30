@@ -4,10 +4,13 @@ use irys_types::{NodeConfig, H256};
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_mining_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
-    let num_blocks_in_epoch = 2;
+    let num_blocks_in_epoch = 7;
     let seconds_to_wait = 20;
+    // setup config / testnet
+    let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
     // Create a signer (keypair) for the peer and fund it
     let peer_signer = genesis_config.new_random_signer();
@@ -44,7 +47,10 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     genesis_node.mine_block().await.unwrap();
 
     // Mine another block to perform epoch tasks
-    genesis_node.mine_block().await.unwrap();
+    genesis_node.mine_blocks(block_migration_depth).await?;
+    genesis_node
+        .wait_until_height_on_chain(1, seconds_to_wait)
+        .await?;
 
     // Get the genesis nodes view of the peers assignments
     let peer_assignments = genesis_node
@@ -55,7 +61,9 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     assert_eq!(peer_assignments.len(), 1);
 
     // Wait for the peer to receive & process the epoch block
-    let _block_hash = peer_node.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer_node
+        .wait_until_height(num_blocks_in_epoch.try_into()?, seconds_to_wait)
+        .await?;
     peer_node.wait_for_packing(seconds_to_wait).await;
 
     // Verify that the peer has the same view of its own assignments
@@ -68,8 +76,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     assert_eq!(peer_assignments_on_peer[0], peer_assignments[0]);
 
     // Mine two more blocks on the peer to trigger an epoch
-    peer_node.mine_block().await?;
-    peer_node.mine_block().await?;
+    peer_node.mine_blocks(block_migration_depth).await?;
 
     // Validate the genesis node processes the peers blocks without errors
     let _block_hash = genesis_node.wait_until_height(4, seconds_to_wait).await?;
