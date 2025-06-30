@@ -7,8 +7,8 @@ use irys_actors::block_tree_service::ChainState;
 use irys_actors::mempool_service::TxIngressError;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
-use irys_reth_node_bridge::irys_reth::system_tx::{
-    system_tx_topics, SystemTransaction, TransactionPacket,
+use irys_reth_node_bridge::irys_reth::shadow_tx::{
+    shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_types::{irys::IrysSigner, NodeConfig};
@@ -70,7 +70,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(block_reward_receipt.logs.len(), 1);
     assert_eq!(
         block_reward_receipt.logs[0].topics()[0],
-        *system_tx_topics::BLOCK_REWARD,
+        *shadow_tx_topics::BLOCK_REWARD,
     );
     assert_eq!(block_reward_receipt.cumulative_gas_used, 0);
     assert_eq!(
@@ -84,7 +84,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(storage_tx_receipt.logs.len(), 1);
     assert_eq!(
         storage_tx_receipt.logs[0].topics()[0],
-        *system_tx_topics::STORAGE_FEES,
+        *shadow_tx_topics::STORAGE_FEES,
     );
     assert_eq!(storage_tx_receipt.cumulative_gas_used, 0);
     assert_eq!(storage_tx_receipt.logs[0].address, user_account.address());
@@ -332,7 +332,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(block_txs.len(), 3);
     // Assert block reward (should be the first receipt)
     let block_reward_systx =
-        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(matches!(
         block_reward_systx.as_v1().unwrap(),
@@ -341,7 +341,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     // Assert storage tx is included in the receipts (should be the second receipt)
     let storage_tx_systx =
-        SystemTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
+        ShadowTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(matches!(
         storage_tx_systx.as_v1().unwrap(),
@@ -475,12 +475,12 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward system transaction
-    let system_tx =
-        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+    let shadow_tx =
+        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(
         matches!(
-            system_tx.as_v1().unwrap(),
+            shadow_tx.as_v1().unwrap(),
             TransactionPacket::BlockReward(_)
         ),
         "Single transaction should be a block reward"
@@ -559,12 +559,12 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward system transaction
-    let system_tx =
-        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+    let shadow_tx =
+        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(
         matches!(
-            system_tx.as_v1().unwrap(),
+            shadow_tx.as_v1().unwrap(),
             TransactionPacket::BlockReward(_)
         ),
         "Single transaction should be a block reward"
@@ -649,7 +649,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     );
     assert_eq!(
         block_reward_receipt.logs[0].topics()[0],
-        *system_tx_topics::BLOCK_REWARD,
+        *shadow_tx_topics::BLOCK_REWARD,
         "First transaction should be block reward"
     );
 
@@ -661,7 +661,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     );
     assert_eq!(
         storage_fee_receipt.logs[0].topics()[0],
-        *system_tx_topics::STORAGE_FEES,
+        *shadow_tx_topics::STORAGE_FEES,
         "Second transaction should be storage fees"
     );
     assert_eq!(
@@ -751,7 +751,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .receipts_by_block(HashOrNumber::Hash(reth_exec_env1.block().hash()))?
         .unwrap();
 
-    // Verify block contains all expected system transactions
+    // Verify block contains all expected shadow transactions
     // Based on the logs, both stake and pledge are included in the same block
     assert_eq!(
         receipts1.len(),
@@ -765,9 +765,9 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .find(|r| {
             r.logs
                 .iter()
-                .any(|log| log.topics()[0] == *system_tx_topics::STAKE)
+                .any(|log| log.topics()[0] == *shadow_tx_topics::STAKE)
         })
-        .expect("Stake system transaction receipt not found");
+        .expect("Stake shadow transaction receipt not found");
 
     assert!(stake_receipt.success, "Stake transaction should succeed");
     assert_eq!(
@@ -786,9 +786,9 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .find(|r| {
             r.logs
                 .iter()
-                .any(|log| log.topics()[0] == *system_tx_topics::PLEDGE)
+                .any(|log| log.topics()[0] == *shadow_tx_topics::PLEDGE)
         })
-        .expect("Pledge system transaction receipt not found");
+        .expect("Pledge shadow transaction receipt not found");
 
     assert!(pledge_receipt.success, "Pledge transaction should succeed");
     assert_eq!(
@@ -840,7 +840,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
     assert_eq!(
         receipts2[0].logs[0].topics()[0],
-        *system_tx_topics::BLOCK_REWARD,
+        *shadow_tx_topics::BLOCK_REWARD,
         "Second block should only have block reward system tx"
     );
 
@@ -852,7 +852,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Verify that one partition has been assigned to the peer to match its pledge
     assert_eq!(peer_assignments.len(), 1);
 
-    // Verify block transactions contain the expected system transactions in the correct order
+    // Verify block transactions contain the expected shadow transactions in the correct order
     let block_txs1 = reth_exec_env1
         .block()
         .body()
@@ -869,8 +869,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // First transaction should be block reward
     let block_reward_tx =
-        SystemTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
-            .expect("First transaction should be decodable as system transaction");
+        ShadowTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
+            .expect("First transaction should be decodable as shadow transaction");
     assert!(
         matches!(
             block_reward_tx.as_v1().unwrap(),
@@ -881,7 +881,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Second transaction should be stake
     let stake_tx =
-        SystemTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
+        ShadowTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
             .expect("Second transaction should be decodable as system transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
@@ -892,7 +892,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Third transaction should be pledge
     let pledge_tx =
-        SystemTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
+        ShadowTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
             .expect("Third transaction should be decodable as system transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());

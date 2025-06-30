@@ -10,7 +10,7 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes};
 use irys_reth::{
-    payload::{DeterministicSystemTxKey, SystemTxStore},
+    payload::{DeterministicShadowTxKey, ShadowTxStore},
     IrysEthereumNode,
 };
 use irys_types::Address;
@@ -24,7 +24,7 @@ use reth_provider::BlockReaderIdExt as _;
 #[derive(Clone)]
 pub struct IrysRethNodeAdapter {
     pub reth_node: Arc<NodeTestContext<RethNodeAdapter, RethNodeAddOns>>,
-    pub system_tx_store: SystemTxStore,
+    pub shadow_tx_store: ShadowTxStore,
 }
 
 impl std::fmt::Debug for IrysRethNodeAdapter {
@@ -34,11 +34,11 @@ impl std::fmt::Debug for IrysRethNodeAdapter {
 }
 
 impl IrysRethNodeAdapter {
-    pub async fn new(node: RethNode, system_tx_store: SystemTxStore) -> eyre::Result<Self> {
+    pub async fn new(node: RethNode, shadow_tx_store: ShadowTxStore) -> eyre::Result<Self> {
         let reth_node = NodeTestContext::new(node, eth_payload_attributes).await?;
         Ok(Self {
             reth_node: Arc::new(reth_node),
-            system_tx_store,
+            shadow_tx_store,
         })
     }
 }
@@ -88,7 +88,7 @@ impl IrysRethNodeAdapter {
 
     /// this should be used for testing only, as it doesn't use the payload builder
     /// and instead uses the attributes generator directly.
-    /// Also, it doesn't use the system txs.
+    /// Also, it doesn't use the shadow txs.
     /// Also, it doesn't set a proper parent beacon block root.
     pub async fn advance_block_testing(
         &mut self,
@@ -121,11 +121,11 @@ impl IrysRethNodeAdapter {
         &self,
         parent_block_hash: B256,
         payload_attrs: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_txs: Vec<EthPooledTransaction>,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
         let payload = self
-            .build_submit_payload_irys(parent_block_hash, payload_attrs, system_txs)
+            .build_submit_payload_irys(parent_block_hash, payload_attrs, shadow_txs)
             .await?;
 
         // trigger forkchoice update via engine api to commit the block to the blockchain
@@ -143,12 +143,12 @@ impl IrysRethNodeAdapter {
         &self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_txs: Vec<EthPooledTransaction>,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
         let attributes = EthPayloadBuilderAttributes::new(parent, attributes);
-        let key = DeterministicSystemTxKey::new(attributes.payload_id());
-        self.system_tx_store.set_system_txs(key, system_txs);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        self.shadow_tx_store.set_shadow_txs(key, shadow_txs);
         let payload_id = self
             .reth_node
             .payload
@@ -198,11 +198,11 @@ impl IrysRethNodeAdapter {
         &self,
         parent: B256,
         attributes: <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_txs: Vec<EthPooledTransaction>,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
         let payload = self
-            .new_payload_irys(parent, attributes, system_txs)
+            .new_payload_irys(parent, attributes, shadow_txs)
             .await?;
         let _block_hash = self.reth_node.submit_payload(payload.clone()).await?;
         Ok(payload)

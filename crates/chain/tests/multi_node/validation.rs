@@ -165,7 +165,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
 // The assertion will fail (block will be discarded) because during validation, the system will detect
 // that the EVM block contains transactions not accounted for in the Irys block, breaking the 1:1 mapping requirement.
 #[test_log::test(actix_web::test)]
-async fn heavy_block_system_txs_misalignment_block_rejected() -> eyre::Result<()> {
+async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub extra_tx: IrysTransactionHeader,
@@ -254,7 +254,7 @@ async fn heavy_block_system_txs_misalignment_block_rejected() -> eyre::Result<()
 // The assertion will fail (block will be discarded) because transaction ordering must be preserved between
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
 #[test_log::test(actix_web::test)]
-async fn heavy_block_system_txs_different_order_of_txs() -> eyre::Result<()> {
+async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }

@@ -8,7 +8,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
-    system_tx_generator::SystemTxGenerator,
+    shadow_tx_generator::ShadowTxGenerator,
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
@@ -19,7 +19,7 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
-use irys_reth::system_tx::SystemTransaction;
+use irys_reth::shadow_tx::ShadowTransaction;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
@@ -515,33 +515,33 @@ pub async fn system_transactions_are_valid(
     let evm_block: Block = payload.try_into_block()?;
 
     // 2. Extract system transactions from the beginning of the block
-    let mut expect_system_txs = true;
-    let actual_system_txs = evm_block
+    let mut expect_shadow_txs = true;
+    let actual_shadow_txs = evm_block
         .body
         .transactions
         .into_iter()
         .map(|tx| {
-            if expect_system_txs {
-                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+            if expect_shadow_txs {
+                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
                 let tx_signer = tx.into_signed().recover_signer()?;
-                let Ok(system_tx) = system_tx else {
-                    // after reaching first non-system tx, we scan the rest of the
-                    // txs to check if we don't have any stray system txs in there
-                    expect_system_txs = false;
+                let Ok(shadow_tx) = shadow_tx else {
+                    // after reaching first non-shadow tx, we scan the rest of the
+                    // txs to check if we don't have any stray shadow txs in there
+                    expect_shadow_txs = false;
                     return Ok(None);
                 };
 
                 ensure!(
                     block.miner_address == tx_signer,
-                    "System tx signer is not the miner"
+                    "Shadow tx signer is not the miner"
                 );
-                Ok(Some(system_tx))
+                Ok(Some(shadow_tx))
             } else {
                 // ensure that no other system txs are present in the block
-                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
                 ensure!(
-                    system_tx.is_err(),
-                    "system tx injected in the middle of the block"
+                    shadow_tx.is_err(),
+                    "shadow tx injected in the middle of the block"
                 );
                 Ok(None)
             }
@@ -550,20 +550,20 @@ pub async fn system_transactions_are_valid(
 
     // 3. Generate expected system transactions
     let expected_txs =
-        generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
+        generate_expected_shadow_transactions_from_db(config, service_senders, block, db).await?;
 
     // 4. Validate they match
-    validate_system_transactions_match(actual_system_txs, expected_txs.into_iter())
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter())
 }
 
-/// Generates expected system transactions by looking up required data from the mempool or database
+/// Generates expected shadow transactions by looking up required data from the mempool or database
 #[tracing::instrument(skip_all, err)]
-async fn generate_expected_system_transactions_from_db<'a>(
+async fn generate_expected_shadow_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<SystemTransaction>> {
+) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
     let prev_block = {
         let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
@@ -588,16 +588,16 @@ async fn generate_expected_system_transactions_from_db<'a>(
     // Lookup data txs
     let data_txs = extract_data_txs(service_senders, block, db).await?;
 
-    let system_txs = SystemTxGenerator::new(
+    let shadow_txs = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
         &prev_block,
     );
-    let system_txs = system_txs
+    let shadow_txs = shadow_txs
         .generate_all(&commitment_txs, &data_txs)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(system_txs)
+    Ok(shadow_txs)
 }
 
 async fn extract_commitment_txs(
@@ -657,24 +657,24 @@ async fn extract_data_txs(
     Ok(txs)
 }
 
-/// Validates  the actual system transactions match the expected ones
+/// Validates  the actual shadow transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
-fn validate_system_transactions_match(
-    actual: impl Iterator<Item = eyre::Result<SystemTransaction>>,
-    expected: impl Iterator<Item = SystemTransaction>,
+fn validate_shadow_transactions_match(
+    actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
+    expected: impl Iterator<Item = ShadowTransaction>,
 ) -> eyre::Result<()> {
-    // Validate each expected system transaction
+    // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
-            // If either of the system txs is not present, it means it was not generated as `expected`
+            // If either of the shadow txs is not present, it means it was not generated as `expected`
             // or it was not included in the block. either way - an error
-            tracing::warn!(?data, "system tx len mismatch");
-            eyre::bail!("actual and expected system txs lens differ");
+            tracing::warn!(?data, "shadow tx len mismatch");
+            eyre::bail!("actual and expected shadow txs lens differ");
         };
         let actual = actual?;
         ensure!(
             actual == expected,
-            "System transaction mismatch at idx {}. expected {:?}, got {:?}",
+            "Shadow transaction mismatch at idx {}. expected {:?}, got {:?}",
             idx,
             expected,
             actual

@@ -1,17 +1,17 @@
 //! # Irys Reth Node
 //!
-//! ## System Transactions
-//! System transactions are special EVM transactions used to encode protocol-level actions such as:
+//! ## Shadow Transactions
+//! Shadow transactions are special EVM transactions used to encode protocol-level actions such as:
 //! - Block rewards (must go to the Irys block producer)
 //! - Storage fee collection (balance decrements)
 //! - Stake management (release, stake)
-//! - Nonce reset (must always be the last system tx in a block)
+//! - Nonce reset (must always be the last shadow tx in a block)
 //!
 //! The CL must validate that:
 //! - Block rewards are paid to the correct block producer
 //! - Balance increments correspond to rewards
 //! - Balance decrements correspond to storage transaction fees
-//! - Every block ends with a nonce reset system tx
+//! - Every block ends with a nonce reset shadow tx
 
 use std::{sync::Arc, time::SystemTime};
 
@@ -55,11 +55,11 @@ use reth_transaction_pool::{
 };
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use reth_trie_db::MerklePatriciaTrie;
-use system_tx::SystemTransaction;
+use shadow_tx::ShadowTransaction;
 use tracing::info;
 
 use crate::{
-    payload::SystemTxStore, payload_builder_builder::IrysPayloadBuilderBuilder,
+    payload::ShadowTxStore, payload_builder_builder::IrysPayloadBuilderBuilder,
     payload_service_builder::IyrsPayloadServiceBuilder,
 };
 
@@ -67,31 +67,31 @@ pub mod evm;
 pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
-pub mod system_tx;
+pub mod shadow_tx;
 
 #[must_use]
-pub fn compose_system_tx(chain_id: u64, system_tx: &SystemTransaction) -> TxLegacy {
-    // allocate 512 bytes for the system tx rlp, misc optimisation
-    let mut system_tx_rlp = Vec::with_capacity(512);
-    system_tx.encode(&mut system_tx_rlp);
+pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLegacy {
+    // allocate 512 bytes for the shadow tx rlp, misc optimisation
+    let mut shadow_tx_rlp = Vec::with_capacity(512);
+    shadow_tx.encode(&mut shadow_tx_rlp);
     TxLegacy {
         // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
         value: U256::ZERO,
-        // nonce is always 0 for system txs
+        // nonce is always 0 for shadow txs
         nonce: 0_u64,
         // large enough to not be rejected by the payload builder
         gas_price: DEFAULT_TX_FEE_CAP_WEI,
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
-        input: system_tx_rlp.into(),
+        input: shadow_tx_rlp.into(),
     }
 }
 
 /// Type configuration for an Irys-Ethereum node.
 #[derive(Debug, Clone)]
 pub struct IrysEthereumNode {
-    pub system_tx_store: SystemTxStore,
+    pub shadow_tx_store: ShadowTxStore,
 }
 
 impl NodeTypes for IrysEthereumNode {
@@ -128,7 +128,7 @@ impl IrysEthereumNode {
             .pool(IrysPoolBuilder::default())
             .executor(IrysExecutorBuilder)
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
-                system_tx_store: self.system_tx_store.clone(),
+                shadow_tx_store: self.shadow_tx_store.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -190,7 +190,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
     }
 }
 
-/// A custom pool builder for Irys system transaction validation and pool configuration.
+/// A custom pool builder for Irys shadow transaction validation and pool configuration.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct IrysPoolBuilder;
@@ -202,14 +202,14 @@ pub struct IrysPoolBuilder;
 /// Original code from:
 /// <https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322>
 ///
-/// Notable changes from the original: we reject all system txs, as they are not allowed to land in a the pool.
+/// Notable changes from the original: we reject all shadow txs, as they are not allowed to land in a the pool.
 impl<Node> PoolBuilder<Node> for IrysPoolBuilder
 where
     Node: FullNodeTypes<Types = IrysEthereumNode>,
 {
     type Pool = Pool<
         TransactionValidationTaskExecutor<
-            IrysSystemTxValidator<Node::Provider, EthPooledTransaction>,
+            IrysShadowTxValidator<Node::Provider, EthPooledTransaction>,
         >,
         CoinbaseTipOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
@@ -253,7 +253,7 @@ where
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
         let validator = TransactionValidationTaskExecutor {
-            validator: IrysSystemTxValidator {
+            validator: IrysShadowTxValidator {
                 eth_tx_validator: validator.validator,
             },
             to_validation_task: validator.to_validation_task,
@@ -323,11 +323,11 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct IrysSystemTxValidator<Client, T> {
+pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: EthTransactionValidator<Client, T>,
 }
 
-impl<Client, Tx> TransactionValidator for IrysSystemTxValidator<Client, Tx>
+impl<Client, Tx> TransactionValidator for IrysShadowTxValidator<Client, Tx>
 where
     Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
     Tx: EthPoolTransaction,
@@ -339,14 +339,14 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        // Try to decode as a system transaction
+        // Try to decode as a shadow transaction
         let input = transaction.input();
-        let Ok(_system_tx) = SystemTransaction::decode(&mut &input[..]) else {
-            tracing::trace!(hash = ?transaction.hash(), "non system tx, passing to eth validator");
+        let Ok(_shadow_tx) = ShadowTransaction::decode(&mut &input[..]) else {
+            tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
             return self.eth_tx_validator.validate_one(origin, transaction);
         };
 
-        tracing::trace!("system txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
+        tracing::trace!("shadow txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
         TransactionValidationOutcome::Invalid(
             transaction,
             reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
@@ -403,8 +403,8 @@ where
 mod tests {
     use super::*;
 
-    use crate::system_tx::{
-        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, SystemTransaction,
+    use crate::shadow_tx::{
+        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction,
         TransactionPacket, BLOCK_REWARD_ID, UNSTAKE_ID,
     };
     use crate::test_utils::*;
@@ -437,19 +437,19 @@ mod tests {
     /// - Action: Inject system tx with invalid origin.
     /// - Assertion: Tx is rejected with pool error.
     #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
-    async fn external_users_cannot_submit_system_txs() -> eyre::Result<()> {
+    async fn external_users_cannot_submit_shadow_txs() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
         let ((node, _systemtx_rx), ctx) = ctx.get_single_node()?;
 
-        let system_tx = block_reward(ctx.block_producer_a.address());
-        let mut system_tx_raw = compose_system_tx(1, &system_tx);
+        let shadow_tx = block_reward(ctx.block_producer_a.address());
+        let mut shadow_tx_raw = compose_shadow_tx(1, &shadow_tx);
         let signed_tx = ctx
             .target_account
-            .sign_transaction(&mut system_tx_raw)
+            .sign_transaction(&mut shadow_tx_raw)
             .await
             .unwrap();
-        let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(system_tx_raw.into_signed(signed_tx))
+        let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(shadow_tx_raw.into_signed(signed_tx))
             .encoded_2718()
             .into();
 
@@ -472,9 +472,9 @@ mod tests {
     /// - The system tx from node b is not included in the block.
     /// - The normal tx from node a is included in the block.
     #[test_log::test(tokio::test)]
-    async fn stale_system_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
+    async fn stale_shadow_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (((mut node_a, system_tx_store_a), (mut node_b, system_tx_store_b)), ctx) =
+        let (((mut node_a, shadow_tx_store_a), (mut node_b, shadow_tx_store_b)), ctx) =
             ctx.get_two_nodes()?;
 
         // Submit normal transaction to node a
@@ -487,14 +487,14 @@ mod tests {
             &ctx.normal_signer,
         )
         .await?;
-        let payload_node_a = advance_block(&mut node_a, &system_tx_store_a, vec![]).await?;
+        let payload_node_a = advance_block(&mut node_a, &shadow_tx_store_a, vec![]).await?;
 
         // Submit system transaction to node b
-        let system_tx = create_system_tx(BLOCK_REWARD_ID, ctx.block_producer_b.address());
-        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_b).await?;
-        let system_tx_hash = *system_tx.hash();
+        let shadow_tx = create_shadow_tx(BLOCK_REWARD_ID, ctx.block_producer_b.address());
+        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_b).await?;
+        let shadow_tx_hash = *shadow_tx.hash();
         let _payload_node_b =
-            advance_block(&mut node_b, &system_tx_store_b, vec![system_tx]).await?;
+            advance_block(&mut node_b, &shadow_tx_store_b, vec![shadow_tx]).await?;
 
         // Update forkchoice on node b
         node_b.sync_to(payload_node_a.block().hash()).await?;
@@ -508,7 +508,7 @@ mod tests {
             .map(|tx| *tx.hash())
             .collect();
         assert!(
-            !pool_txs.contains(&system_tx_hash),
+            !pool_txs.contains(&shadow_tx_hash),
             "System tx should never enter the second node pool"
         );
 
@@ -521,14 +521,14 @@ mod tests {
             .map(|tx| *tx.hash())
             .collect();
         assert!(
-            !pool_txs.contains(&system_tx_hash),
+            !pool_txs.contains(&shadow_tx_hash),
             "System tx should never enter the first node pool"
         );
 
         // Assert system tx never touched the block
         assert_txs_not_in_block(
             &payload_node_a,
-            &[system_tx_hash],
+            &[shadow_tx_hash],
             "System tx should not be in block",
         );
         // Assert normal tx is in the block
@@ -541,26 +541,26 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn block_with_system_txs_gets_broadcasted_between_peers() -> eyre::Result<()> {
+    async fn block_with_shadow_txs_gets_broadcasted_between_peers() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let (((mut node_a, system_tx_store_a), (mut node_b, _system_tx_store_b)), ctx) =
+        let (((mut node_a, shadow_tx_store_a), (mut node_b, _shadow_tx_store_b)), ctx) =
             ctx.get_two_nodes()?;
 
         let initial_balance = get_balance(&node_a.inner, ctx.block_producer_a.address());
 
         let amount = U256::from(7000000000000000000_u64);
-        let system_tx = compose_system_tx(
+        let shadow_tx = compose_shadow_tx(
             1,
-            &SystemTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+            &ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount,
                 target: ctx.block_producer_a.address(),
             })),
         );
-        let system_tx = sign_tx(system_tx, &ctx.block_producer_a).await;
-        let system_tx_hash = *system_tx.hash();
+        let shadow_tx = sign_tx(shadow_tx, &ctx.block_producer_a).await;
+        let shadow_tx_hash = *shadow_tx.hash();
 
         // make the node advance
-        let payload = advance_block(&mut node_a, &system_tx_store_a, vec![system_tx]).await?;
+        let payload = advance_block(&mut node_a, &shadow_tx_store_a, vec![shadow_tx]).await?;
 
         let block_hash = payload.block().hash();
         let block_number = payload.block().number;
@@ -568,7 +568,7 @@ mod tests {
 
         // assert the block has been committed to the blockchain
         node_a
-            .assert_new_block(system_tx_hash, block_hash, block_number)
+            .assert_new_block(shadow_tx_hash, block_hash, block_number)
             .await?;
 
         // only send forkchoice update to second node
@@ -576,7 +576,7 @@ mod tests {
 
         // expect second node advanced via p2p gossip
         node_b
-            .assert_new_block(system_tx_hash, block_hash, block_number)
+            .assert_new_block(shadow_tx_hash, block_hash, block_number)
             .await?;
 
         assert_balance_change(
@@ -598,27 +598,27 @@ mod tests {
     #[case::unstake_init_no_balance(unstake, signer_random())]
     #[case::block_reward(block_reward, signer_b())]
     #[case::block_reward_init_no_balance(block_reward, signer_random())]
-    async fn incr_system_txs(
-        #[case] system_tx: impl Fn(Address) -> SystemTransaction,
+    async fn incr_shadow_txs(
+        #[case] shadow_tx: impl Fn(Address) -> ShadowTransaction,
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let initial_balance = get_balance(&node.inner, target_signer.address());
         let initial_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
 
         let tx_count = 5;
-        let system_tx = system_tx(target_signer.address());
-        let system_tx_topic = system_tx.topic().into();
-        let system_tx = sign_system_tx(system_tx, &target_signer).await?;
-        let system_txs = vec![system_tx.clone(); tx_count];
+        let shadow_tx = shadow_tx(target_signer.address());
+        let shadow_tx_topic = shadow_tx.topic().into();
+        let shadow_tx = sign_shadow_tx(shadow_tx, &target_signer).await?;
+        let shadow_txs = vec![shadow_tx.clone(); tx_count];
 
         let _block_payload =
-            mine_block_and_validate(&mut node, &system_tx_store, system_txs, &[]).await?;
+            mine_block_and_validate(&mut node, &shadow_tx_store, shadow_txs, &[]).await?;
 
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
-        assert_topic_present_in_logs(block_execution, system_tx_topic, tx_count as u64);
+        assert_topic_present_in_logs(block_execution, shadow_tx_topic, tx_count as u64);
 
         assert_balance_change(
             &node,
@@ -651,24 +651,24 @@ mod tests {
     #[rstest::rstest]
     #[case::stake(stake, signer_b())]
     #[case::storage_fees(storage_fees, signer_b())]
-    async fn decr_system_txs(
-        #[case] system_tx: impl Fn(Address) -> SystemTransaction,
+    async fn decr_shadow_txs(
+        #[case] shadow_tx: impl Fn(Address) -> ShadowTransaction,
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let initial_balance = get_balance(&node.inner, target_signer.address());
         let initial_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
 
         let tx_count = 2;
-        let system_tx = system_tx(target_signer.address());
-        let system_tx_topic = system_tx.topic().into();
-        let system_tx = sign_system_tx(system_tx, &target_signer).await?;
-        let system_txs = vec![system_tx.clone(); tx_count];
-        let tx_hashes = system_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
+        let shadow_tx = shadow_tx(target_signer.address());
+        let shadow_tx_topic = shadow_tx.topic().into();
+        let shadow_tx = sign_shadow_tx(shadow_tx, &target_signer).await?;
+        let shadow_txs = vec![shadow_tx.clone(); tx_count];
+        let tx_hashes = shadow_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
         let block_payload =
-            mine_block_and_validate(&mut node, &system_tx_store, system_txs, &[]).await?;
+            mine_block_and_validate(&mut node, &shadow_tx_store, shadow_txs, &[]).await?;
 
         // Assertions
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
@@ -677,7 +677,7 @@ mod tests {
         assert_txs_in_block(&block_payload, &tx_hashes, "System transactions");
 
         // Assert all txs have a corresponding log
-        assert_topic_present_in_logs(block_execution, system_tx_topic, tx_count as u64);
+        assert_topic_present_in_logs(block_execution, shadow_tx_topic, tx_count as u64);
 
         // Assert balance for target is decremented
         assert_balance_change(
@@ -709,11 +709,11 @@ mod tests {
         Ok(())
     }
 
-    // expect that system txs get executed first, no matter what. Normal txs get executed only afterwards
+    // expect that shadow txs get executed first, no matter what. Normal txs get executed only afterwards
     #[test_log::test(tokio::test)]
-    async fn test_system_tx_ordering() -> eyre::Result<()> {
+    async fn test_shadow_tx_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Create normal transactions with high gas price
         let normal_tx_hashes = create_and_submit_multiple_normal_txs(
@@ -727,18 +727,18 @@ mod tests {
         .await?;
 
         // Create system transactions with lower effective priority
-        let system_tx = create_system_tx(UNSTAKE_ID, ctx.target_account.address());
-        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
-        let system_txs = vec![system_tx.clone(); 2];
-        let system_tx_hashes = system_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
+        let shadow_tx = create_shadow_tx(UNSTAKE_ID, ctx.target_account.address());
+        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
+        let shadow_txs = vec![shadow_tx.clone(); 2];
+        let shadow_tx_hashes = shadow_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
 
         let block_payload =
-            mine_block_and_validate(&mut node, &system_tx_store, system_txs, &normal_tx_hashes)
+            mine_block_and_validate(&mut node, &shadow_tx_store, shadow_txs, &normal_tx_hashes)
                 .await?;
 
-        assert_txs_in_block(&block_payload, &system_tx_hashes, "System transactions");
+        assert_txs_in_block(&block_payload, &shadow_tx_hashes, "System transactions");
         assert_txs_in_block(&block_payload, &normal_tx_hashes, "Normal transactions");
-        assert_system_txs_before_normal_txs(&block_payload, &system_tx_hashes, &normal_tx_hashes);
+        assert_shadow_txs_before_normal_txs(&block_payload, &shadow_tx_hashes, &normal_tx_hashes);
 
         Ok(())
     }
@@ -747,7 +747,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Create a random address that has never existed on chain
         let nonexistent_address = Address::random();
@@ -761,13 +761,13 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create and submit a system transaction trying to decrement balance of non-existent account
-        let system_tx = SystemTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
+        let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
             amount: U256::ONE,
             target: nonexistent_address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
-        let system_tx_hashes = vec![*system_tx.hash()];
+        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
+        let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
         // Submit a normal transaction to ensure block is produced
         let normal_tx_hash = create_and_submit_normal_tx(
@@ -781,12 +781,12 @@ mod tests {
         .await?;
 
         // Produce a new block
-        let block_payload = mine_block(&mut node, &system_tx_store, vec![system_tx]).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
 
         // // Verify the system transaction is NOT included
         assert_txs_not_in_block(
             &block_payload,
-            &system_tx_hashes,
+            &shadow_tx_hashes,
             "System transaction for non-existent account should not be included in block",
         );
 
@@ -804,7 +804,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let funded_balance = get_balance(&node.inner, ctx.normal_signer.address());
 
@@ -815,21 +815,21 @@ mod tests {
 
         // Create a system tx that tries to decrement more than the balance
         let decrement_amount = funded_balance + U256::ONE;
-        let system_tx = SystemTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
+        let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
             amount: decrement_amount,
             target: ctx.normal_signer.address(),
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
-        let system_tx_hashes = vec![*system_tx.hash()];
+        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
+        let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
         // Produce a new block
-        let block_payload = mine_block(&mut node, &system_tx_store, vec![system_tx]).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
 
         // Verify the system transaction IS included
         assert_txs_in_block(
             &block_payload,
-            &system_tx_hashes,
+            &shadow_tx_hashes,
             "System transaction should be included in block",
         );
 
@@ -839,7 +839,7 @@ mod tests {
         let receipt = &receipts[1][0];
         assert!(
             !receipt.success,
-            "Expected a revert/failure receipt for system tx with insufficient balance"
+            "Expected a revert/failure receipt for shadow tx with insufficient balance"
         );
 
         Ok(())
@@ -865,14 +865,14 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn mine_5_blocks_with_system_and_normal_tx() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let recipient = ctx.target_account.address();
 
         for block_number in 1..=5 {
             // Block reward system tx
-            let system_tx = block_reward(ctx.block_producer_a.address());
-            let system_tx = sign_system_tx(system_tx, &ctx.block_producer_a).await?;
+            let shadow_tx = block_reward(ctx.block_producer_a.address());
+            let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
 
             // Normal tx
             let normal_tx_hash = create_and_submit_normal_tx(
@@ -888,8 +888,8 @@ mod tests {
             // Mine block
             let _block_payload = mine_block_and_validate(
                 &mut node,
-                &system_tx_store,
-                vec![system_tx],
+                &shadow_tx_store,
+                vec![shadow_tx],
                 &[normal_tx_hash],
             )
             .await?;
@@ -912,18 +912,18 @@ mod tests {
     async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
         // Setup nodes and context
         let ctx = TestContext::new().await?;
-        let (((mut node_a, system_tx_store_node_a), (mut node_b, system_tx_store_node_b)), ctx) =
+        let (((mut node_a, shadow_tx_store_node_a), (mut node_b, shadow_tx_store_node_b)), ctx) =
             ctx.get_two_nodes()?;
         let reward_address = Address::random();
 
         // Node A: advance 3 blocks, 2 system txs per block
-        let system_tx = block_reward(reward_address);
-        let system_txs = vec![vec![system_tx; 2]; 3];
+        let shadow_tx = block_reward(reward_address);
+        let shadow_txs = vec![vec![shadow_tx; 2]; 3];
 
         let _block_hashes_a = advance_blocks(
             &mut node_a,
-            &system_tx_store_node_a,
-            system_txs,
+            &shadow_tx_store_node_a,
+            shadow_txs,
             &ctx.block_producer_a,
         )
         .await?;
@@ -935,12 +935,12 @@ mod tests {
         let node_a_reward_balance = get_balance(&node_a.inner, reward_address);
 
         // Node B: advance 4 blocks, 1 system tx per block
-        let system_tx = block_reward(reward_address);
-        let system_txs = vec![vec![system_tx; 1]; 4];
+        let shadow_tx = block_reward(reward_address);
+        let shadow_txs = vec![vec![shadow_tx; 1]; 4];
         let _block_hashes_b = advance_blocks(
             &mut node_b,
-            &system_tx_store_node_b,
-            system_txs,
+            &shadow_tx_store_node_b,
+            shadow_txs,
             &ctx.block_producer_b,
         )
         .await?;
@@ -1030,7 +1030,7 @@ mod tests {
         };
 
         let ctx = TestContext::new_with_payload_attributes(payload_attributes).await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Initial setup and baseline measurements
         let initial_balance = get_balance(&node.inner, ctx.block_producer_a.address());
@@ -1042,11 +1042,11 @@ mod tests {
         for block_number in 1..=4 {
             // Create block reward transaction
             let block_reward_tx = block_reward(ctx.block_producer_a.address());
-            let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
 
             // Mine the block
             let payload =
-                mine_block_and_validate(&mut node, &system_tx_store, vec![block_reward_tx], &[])
+                mine_block_and_validate(&mut node, &shadow_tx_store, vec![block_reward_tx], &[])
                     .await?;
             parent_blockhash = payload.block().hash();
             block_hashes.push(parent_blockhash);
@@ -1105,8 +1105,8 @@ mod tests {
                                    // Update parent tracker for payload attributes
         *parent_tracker.lock().unwrap() = rollback_target;
         let fork_reward_tx = block_reward(ctx.block_producer_a.address());
-        let fork_reward_tx = sign_system_tx(fork_reward_tx, &ctx.block_producer_a).await?;
-        let fork_payload = prepare_block(&mut node, &system_tx_store, vec![fork_reward_tx]).await?;
+        let fork_reward_tx = sign_shadow_tx(fork_reward_tx, &ctx.block_producer_a).await?;
+        let fork_payload = prepare_block(&mut node, &shadow_tx_store, vec![fork_reward_tx]).await?;
         let fork_block_hash = fork_payload.block().hash();
 
         tracing::info!(
@@ -1188,21 +1188,21 @@ mod tests {
     /// 3. Rollback the state to a past block
     /// 4. Verify that system transactions are never in the transaction pool past
     #[test_log::test(tokio::test)]
-    async fn system_txs_never_in_pool_during_rollback() -> eyre::Result<()> {
+    async fn shadow_txs_never_in_pool_during_rollback() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Phase 1: Build initial blocks with system transactions
         let _initial_balance = get_balance(&node.inner, ctx.block_producer_a.address());
         let mut parent_blockhash = ctx.genesis_blockhash;
         let mut block_hashes = vec![parent_blockhash];
-        let mut system_txs = vec![];
+        let mut shadow_txs = vec![];
 
         // Build 3 blocks with system transactions
         for block_number in 1..=3 {
             let block_reward_tx = block_reward(ctx.block_producer_a.address());
-            let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
-            system_txs.push(block_reward_tx.clone());
+            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
+            shadow_txs.push(block_reward_tx.clone());
 
             let normal_tx = create_and_submit_normal_tx(
                 &mut node,
@@ -1216,7 +1216,7 @@ mod tests {
 
             let payload = mine_block_and_validate(
                 &mut node,
-                &system_tx_store,
+                &shadow_tx_store,
                 vec![block_reward_tx],
                 &[normal_tx],
             )
@@ -1266,7 +1266,7 @@ mod tests {
             .map(|tx| *tx.hash())
             .collect();
 
-        for tx in system_txs {
+        for tx in shadow_txs {
             assert!(
                 !pool_txs.contains(tx.hash()),
                 "System tx should never be in the transaction pool during rollback"
@@ -1280,8 +1280,8 @@ mod tests {
 
         // Phase 5: Try to submit the future system transactions directly to the pool
         // They should be rejected and never enter the pool
-        let future_system_tx_1 = block_reward(ctx.block_producer_a.address());
-        let mut tx_1_raw = compose_system_tx(1, &future_system_tx_1);
+        let future_shadow_tx_1 = block_reward(ctx.block_producer_a.address());
+        let mut tx_1_raw = compose_shadow_tx(1, &future_shadow_tx_1);
         let signed_tx_1 = ctx
             .block_producer_a
             .sign_transaction(&mut tx_1_raw)
@@ -1327,9 +1327,9 @@ mod tests {
     /// 3. Mine a block containing these transactions
     /// 4. Verify the receipts contain the transactions in the same order as submitted
     #[test_log::test(tokio::test)]
-    async fn test_system_tx_execution_order_via_receipts() -> eyre::Result<()> {
+    async fn test_shadow_tx_execution_order_via_receipts() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Create different addresses for different transaction types
         let address_a = ctx.block_producer_a.address();
@@ -1337,47 +1337,47 @@ mod tests {
         let address_c = ctx.normal_signer.address();
 
         // Create 5 different system transactions in a specific order
-        let mut system_txs = Vec::new();
+        let mut shadow_txs = Vec::new();
         let mut expected_tx_hashes = Vec::new();
 
         // 1. Block reward
         let block_reward_tx = block_reward(address_a);
-        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*block_reward_tx.hash());
-        system_txs.push(block_reward_tx);
+        shadow_txs.push(block_reward_tx);
 
         // 2. Unstake
         let unstake_tx = unstake(address_b);
-        let unstake_tx = sign_system_tx(unstake_tx, &ctx.block_producer_a).await?;
+        let unstake_tx = sign_shadow_tx(unstake_tx, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*unstake_tx.hash());
-        system_txs.push(unstake_tx);
+        shadow_txs.push(unstake_tx);
 
         // 3. Storage fees
         let storage_fees_tx = storage_fees(address_c);
-        let storage_fees_tx = sign_system_tx(storage_fees_tx, &ctx.block_producer_a).await?;
+        let storage_fees_tx = sign_shadow_tx(storage_fees_tx, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*storage_fees_tx.hash());
-        system_txs.push(storage_fees_tx);
+        shadow_txs.push(storage_fees_tx);
 
         // 4. Another block reward
         let block_reward_2_tx = block_reward(address_b);
-        let block_reward_2_tx = sign_system_tx(block_reward_2_tx, &ctx.block_producer_a).await?;
+        let block_reward_2_tx = sign_shadow_tx(block_reward_2_tx, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*block_reward_2_tx.hash());
-        system_txs.push(block_reward_2_tx);
+        shadow_txs.push(block_reward_2_tx);
 
         // 5. Stake transaction
         let stake_tx = stake(address_a);
-        let stake_tx = sign_system_tx(stake_tx, &ctx.block_producer_a).await?;
+        let stake_tx = sign_shadow_tx(stake_tx, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*stake_tx.hash());
-        system_txs.push(stake_tx);
+        shadow_txs.push(stake_tx);
 
         tracing::info!(
             "Created {} system transactions in order: {:?}",
-            system_txs.len(),
+            shadow_txs.len(),
             expected_tx_hashes
         );
 
         // Mine a block with these system transactions
-        let block_payload = mine_block(&mut node, &system_tx_store, system_txs).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, shadow_txs).await?;
 
         // Get execution results to verify receipt ordering
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
@@ -1435,34 +1435,34 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_pledge_balance_decrement() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let target_address = ctx.target_account.address();
 
         // First, give the account some initial balance to allow pledge
         let initial_funding = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
         let block_reward_tx =
-            SystemTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: initial_funding,
                 target: target_address,
             }));
-        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
-        mine_block(&mut node, &system_tx_store, vec![block_reward_tx]).await?;
+        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        mine_block(&mut node, &shadow_tx_store, vec![block_reward_tx]).await?;
 
         let initial_balance = get_balance(&node.inner, target_address);
 
         // Create pledge transaction
         let pledge_amount = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
-        let pledge_tx = SystemTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
+        let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
             amount: pledge_amount,
             target: target_address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.block_producer_a).await?;
         let pledge_tx_hash = *pledge_tx.hash();
 
         // Mine block with pledge transaction
-        let block_payload = mine_block(&mut node, &system_tx_store, vec![pledge_tx]).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![pledge_tx]).await?;
 
         // Verify transaction is included in block
         assert_txs_in_block(&block_payload, &[pledge_tx_hash], "Pledge transaction");
@@ -1484,35 +1484,35 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_unpledge_balance_increment() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let target_address = ctx.target_account.address();
 
         // First, give the account some balance with a block reward
         let initial_balance_amount = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
         let block_reward_tx =
-            SystemTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: initial_balance_amount,
                 target: target_address,
             }));
-        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
-        mine_block(&mut node, &system_tx_store, vec![block_reward_tx]).await?;
+        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        mine_block(&mut node, &shadow_tx_store, vec![block_reward_tx]).await?;
 
         let balance_after_initial_funding = get_balance(&node.inner, target_address);
 
         // Now create unpledge transaction
         let unpledge_amount = U256::from(3_000_000_000_000_000_000_u64); // 3 ETH
         let unpledge_tx =
-            SystemTransaction::new_v1(TransactionPacket::Unpledge(BalanceIncrement {
+            ShadowTransaction::new_v1(TransactionPacket::Unpledge(BalanceIncrement {
                 amount: unpledge_amount,
                 target: target_address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }));
-        let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
 
         // Mine block with unpledge transaction
-        let block_payload = mine_block(&mut node, &system_tx_store, vec![unpledge_tx]).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![unpledge_tx]).await?;
 
         // Verify transaction is included in block
         assert_txs_in_block(&block_payload, &[unpledge_tx_hash], "Unpledge transaction");
@@ -1534,46 +1534,46 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_pledge_unpledge_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let target_address = ctx.target_account.address();
 
         // First, give the account some initial balance to allow pledge operations
         let initial_funding = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
         let block_reward_tx =
-            SystemTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: initial_funding,
                 target: target_address,
             }));
-        let block_reward_tx = sign_system_tx(block_reward_tx, &ctx.block_producer_a).await?;
-        mine_block(&mut node, &system_tx_store, vec![block_reward_tx]).await?;
+        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        mine_block(&mut node, &shadow_tx_store, vec![block_reward_tx]).await?;
 
         let initial_balance = get_balance(&node.inner, target_address);
 
         // Create multiple pledge and unpledge transactions
-        let mut system_txs = Vec::new();
+        let mut shadow_txs = Vec::new();
         let mut expected_tx_hashes = Vec::new();
 
         // 1. Pledge transaction
         let pledge_tx = pledge(target_address);
-        let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*pledge_tx.hash());
-        system_txs.push(pledge_tx);
+        shadow_txs.push(pledge_tx);
 
         // 2. Another pledge transaction
         let pledge_tx2 = pledge(target_address);
-        let pledge_tx2 = sign_system_tx(pledge_tx2, &ctx.block_producer_a).await?;
+        let pledge_tx2 = sign_shadow_tx(pledge_tx2, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*pledge_tx2.hash());
-        system_txs.push(pledge_tx2);
+        shadow_txs.push(pledge_tx2);
 
         // 3. Unpledge transaction
         let unpledge_tx = unpledge(target_address);
-        let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
         expected_tx_hashes.push(*unpledge_tx.hash());
-        system_txs.push(unpledge_tx);
+        shadow_txs.push(unpledge_tx);
 
         // Mine block with all transactions
-        let block_payload = mine_block(&mut node, &system_tx_store, system_txs).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, shadow_txs).await?;
 
         // Verify all transactions are included in block in correct order
         assert_txs_in_block(
@@ -1615,7 +1615,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_unpledge_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Create a random address that has never existed on chain
         let nonexistent_address = Address::random();
@@ -1631,16 +1631,16 @@ mod tests {
         // Create unpledge transaction for non-existent account
         let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 ETH
         let unpledge_tx =
-            SystemTransaction::new_v1(TransactionPacket::Unpledge(BalanceIncrement {
+            ShadowTransaction::new_v1(TransactionPacket::Unpledge(BalanceIncrement {
                 amount: unpledge_amount,
                 target: nonexistent_address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }));
-        let unpledge_tx = sign_system_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
 
         // Produce a new block
-        let block_payload = mine_block(&mut node, &system_tx_store, vec![unpledge_tx]).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![unpledge_tx]).await?;
 
         // Verify the unpledge transaction IS included (balance increments can create accounts)
         assert_txs_in_block(
@@ -1663,7 +1663,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_pledge_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
-        let ((mut node, system_tx_store), ctx) = ctx.get_single_node()?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Create a random address that has never existed on chain
         let nonexistent_address = Address::random();
@@ -1677,12 +1677,12 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create pledge transaction for non-existent account
-        let pledge_tx = SystemTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
+        let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
             amount: U256::ONE,
             target: nonexistent_address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let pledge_tx = sign_system_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.block_producer_a).await?;
         let pledge_tx_hash = *pledge_tx.hash();
 
         // Submit a normal transaction to ensure block is produced
@@ -1697,7 +1697,7 @@ mod tests {
         .await?;
 
         // Produce a new block
-        let block_payload = mine_block(&mut node, &system_tx_store, vec![pledge_tx]).await?;
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![pledge_tx]).await?;
 
         // Verify the pledge transaction is NOT included
         assert_txs_not_in_block(
@@ -1721,8 +1721,8 @@ mod tests {
 /// Test Utilities for Irys Reth node
 pub mod test_utils {
     use super::*;
-    use crate::payload::DeterministicSystemTxKey;
-    use crate::system_tx::{SystemTransaction, TransactionPacket};
+    use crate::payload::DeterministicShadowTxKey;
+    use crate::shadow_tx::{ShadowTransaction, TransactionPacket};
     use alloy_consensus::EthereumTxEnvelope;
     use alloy_consensus::{SignableTransaction as _, TxEip4844, TxLegacy};
     use alloy_genesis::Genesis;
@@ -1751,7 +1751,7 @@ pub mod test_utils {
 
     /// Common setup for tests - creates wallets, nodes, and returns initialized context
     pub struct TestContext {
-        pub nodes: Vec<(NodeHelperType<IrysEthereumNode>, SystemTxStore)>,
+        pub nodes: Vec<(NodeHelperType<IrysEthereumNode>, ShadowTxStore)>,
         pub block_producer_a: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub block_producer_b: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
@@ -1819,20 +1819,20 @@ pub mod test_utils {
 
         pub fn get_single_node(
             mut self,
-        ) -> eyre::Result<((NodeHelperType<IrysEthereumNode>, SystemTxStore), Self)> {
+        ) -> eyre::Result<((NodeHelperType<IrysEthereumNode>, ShadowTxStore), Self)> {
             if self.nodes.is_empty() {
                 return Err(eyre::eyre!("No nodes available"));
             }
-            let (node, system_tx_receiver) = self.nodes.remove(0);
-            Ok(((node, system_tx_receiver), self))
+            let (node, shadow_tx_receiver) = self.nodes.remove(0);
+            Ok(((node, shadow_tx_receiver), self))
         }
 
         pub fn get_two_nodes(
             mut self,
         ) -> eyre::Result<(
             (
-                (NodeHelperType<IrysEthereumNode>, SystemTxStore),
-                (NodeHelperType<IrysEthereumNode>, SystemTxStore),
+                (NodeHelperType<IrysEthereumNode>, ShadowTxStore),
+                (NodeHelperType<IrysEthereumNode>, ShadowTxStore),
             ),
             Self,
         )> {
@@ -1846,29 +1846,29 @@ pub mod test_utils {
     }
 
     /// Helper for creating and submitting system transactions
-    pub async fn sign_system_tx(
-        system_tx: SystemTransaction,
+    pub async fn sign_shadow_tx(
+        shadow_tx: ShadowTransaction,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<EthPooledTransaction> {
-        let system_tx_raw = compose_system_tx(1, &system_tx);
-        let system_pooled_tx = sign_tx(system_tx_raw, signer).await;
-        Ok(system_pooled_tx)
+        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx);
+        let shadow_pooled_tx = sign_tx(shadow_tx_raw, signer).await;
+        Ok(shadow_pooled_tx)
     }
 
-    /// Helper for creating and submitting multiple system transactions
-    pub async fn create_multiple_system_txs(
-        system_tx_store: &SystemTxStore,
-        system_tx: &SystemTransaction,
+    /// Helper for creating and submitting multiple shadow transactions
+    pub async fn create_multiple_shadow_txs(
+        shadow_tx_store: &ShadowTxStore,
+        shadow_tx: &ShadowTransaction,
         count: u64,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
-        key: DeterministicSystemTxKey,
+        key: DeterministicShadowTxKey,
     ) -> eyre::Result<Vec<EthPooledTransaction>> {
         let mut txs = Vec::new();
         for _ in 0..count {
-            let tx = sign_system_tx(system_tx.clone(), signer).await?;
+            let tx = sign_shadow_tx(shadow_tx.clone(), signer).await?;
             txs.push(tx);
         }
-        system_tx_store.set_system_txs(key, txs.clone());
+        shadow_tx_store.set_shadow_txs(key, txs.clone());
         Ok(txs)
     }
 
@@ -1981,9 +1981,9 @@ pub mod test_utils {
     }
 
     /// Helper for asserting transaction ordering in blocks
-    pub fn assert_system_txs_before_normal_txs(
+    pub fn assert_shadow_txs_before_normal_txs(
         block_payload: &EthBuiltPayload,
-        system_txs: &[alloy_primitives::FixedBytes<32>],
+        shadow_txs: &[alloy_primitives::FixedBytes<32>],
         normal_txs: &[alloy_primitives::FixedBytes<32>],
     ) {
         let block_txs: Vec<_> = block_payload
@@ -1994,12 +1994,12 @@ pub mod test_utils {
             .map(|tx| *tx.hash())
             .collect();
 
-        let mut last_system_tx_pos = 0;
+        let mut last_shadow_tx_pos = 0;
         let mut first_normal_tx_pos = block_txs.len();
 
         for (pos, tx_hash) in block_txs.iter().enumerate() {
-            if system_txs.contains(tx_hash) {
-                last_system_tx_pos = last_system_tx_pos.max(pos);
+            if shadow_txs.contains(tx_hash) {
+                last_shadow_tx_pos = last_shadow_tx_pos.max(pos);
             }
             if normal_txs.contains(tx_hash) {
                 first_normal_tx_pos = first_normal_tx_pos.min(pos);
@@ -2007,9 +2007,9 @@ pub mod test_utils {
         }
 
         assert!(
-            last_system_tx_pos < first_normal_tx_pos,
+            last_shadow_tx_pos < first_normal_tx_pos,
             "System transactions should appear before normal transactions. Last system: {}, First normal: {}",
-            last_system_tx_pos,
+            last_shadow_tx_pos,
             first_normal_tx_pos
         );
     }
@@ -2055,34 +2055,34 @@ pub mod test_utils {
     /// Helper for block mining and validation
     pub async fn mine_block(
         node: &mut NodeHelperType<IrysEthereumNode>,
-        system_tx_store: &SystemTxStore,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_tx_store: &ShadowTxStore,
+        shadow_txs: Vec<EthPooledTransaction>,
     ) -> eyre::Result<EthBuiltPayload> {
-        let block_payload = advance_block(node, system_tx_store, system_txs).await?;
+        let block_payload = advance_block(node, shadow_tx_store, shadow_txs).await?;
         Ok(block_payload)
     }
 
     /// Helper for block mining and validation
     pub async fn mine_block_and_validate(
         node: &mut NodeHelperType<IrysEthereumNode>,
-        system_tx_store: &SystemTxStore,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_tx_store: &ShadowTxStore,
+        shadow_txs: Vec<EthPooledTransaction>,
         expected_normal_txs: &[alloy_primitives::FixedBytes<32>],
     ) -> eyre::Result<EthBuiltPayload> {
-        let expected_system_tx_hashes = system_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
-        let block_payload = advance_block(node, system_tx_store, system_txs).await?;
+        let expected_shadow_tx_hashes = shadow_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
+        let block_payload = advance_block(node, shadow_tx_store, shadow_txs).await?;
 
         assert_txs_in_block(
             &block_payload,
-            &expected_system_tx_hashes,
+            &expected_shadow_tx_hashes,
             "System transactions",
         );
         assert_txs_in_block(&block_payload, expected_normal_txs, "Normal transactions");
 
-        if !expected_system_tx_hashes.is_empty() && !expected_normal_txs.is_empty() {
-            assert_system_txs_before_normal_txs(
+        if !expected_shadow_tx_hashes.is_empty() && !expected_normal_txs.is_empty() {
+            assert_shadow_txs_before_normal_txs(
                 &block_payload,
-                &expected_system_tx_hashes,
+                &expected_shadow_tx_hashes,
                 expected_normal_txs,
             );
         }
@@ -2091,8 +2091,8 @@ pub mod test_utils {
     }
 
     /// Helper to create system transaction based on type
-    pub fn create_system_tx(tx_type: u8, address: Address) -> SystemTransaction {
-        use crate::system_tx::*;
+    pub fn create_shadow_tx(tx_type: u8, address: Address) -> ShadowTransaction {
+        use crate::shadow_tx::*;
         match tx_type {
             BLOCK_REWARD_ID => block_reward(address),
             UNSTAKE_ID => unstake(address),
@@ -2100,7 +2100,7 @@ pub mod test_utils {
             STORAGE_FEES_ID => storage_fees(address),
             PLEDGE_ID => pledge(address),
             UNPLEDGE_ID => unpledge(address),
-            _ => panic!("Unknown system transaction type: {}", tx_type),
+            _ => panic!("Unknown shadow transaction type: {}", tx_type),
         }
     }
 
@@ -2109,13 +2109,13 @@ pub mod test_utils {
     /// - DOES NOT update the forkchoice
     pub async fn prepare_block(
         node: &mut NodeHelperType<IrysEthereumNode>,
-        system_tx_store: &SystemTxStore,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_tx_store: &ShadowTxStore,
+        shadow_txs: Vec<EthPooledTransaction>,
     ) -> Result<EthBuiltPayload, eyre::Error> {
         node.payload.timestamp += 1;
         let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
-        let key = DeterministicSystemTxKey::new(attributes.payload_id());
-        system_tx_store.set_system_txs(key, system_txs);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, shadow_txs);
         node.payload
             .payload_builder
             .send_new_payload(attributes.clone())
@@ -2132,10 +2132,10 @@ pub mod test_utils {
 
     pub async fn advance_block(
         node: &mut NodeHelperType<IrysEthereumNode>,
-        system_tx_store: &SystemTxStore,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_tx_store: &ShadowTxStore,
+        shadow_txs: Vec<EthPooledTransaction>,
     ) -> Result<EthBuiltPayload, eyre::Error> {
-        let payload = prepare_block(node, system_tx_store, system_txs).await?;
+        let payload = prepare_block(node, shadow_tx_store, shadow_txs).await?;
         node.update_forkchoice(payload.block().hash(), payload.block().hash())
             .await?;
 
@@ -2144,25 +2144,25 @@ pub mod test_utils {
 
     pub async fn advance_blocks(
         node: &mut NodeHelperType<IrysEthereumNode>,
-        system_tx_store: &SystemTxStore,
-        system_txs: Vec<Vec<SystemTransaction>>,
+        shadow_tx_store: &ShadowTxStore,
+        shadow_txs: Vec<Vec<ShadowTransaction>>,
         signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
     ) -> Result<Vec<EthBuiltPayload>, eyre::Error> {
         let mut block_payloads = Vec::new();
 
-        for system_txs_raw in system_txs {
-            let mut system_txs = Vec::new();
-            for system_tx in system_txs_raw {
+        for shadow_txs_raw in shadow_txs {
+            let mut shadow_txs = Vec::new();
+            for shadow_tx in shadow_txs_raw {
                 // Use the system tx directly since metadata fields are removed
-                let updated_system_tx = match system_tx {
-                    SystemTransaction::V1 { packet } => SystemTransaction::new_v1(packet),
+                let updated_shadow_tx = match shadow_tx {
+                    ShadowTransaction::V1 { packet } => ShadowTransaction::new_v1(packet),
                 };
 
-                let system_tx = sign_system_tx(updated_system_tx, signer).await?;
-                system_txs.push(system_tx);
+                let shadow_tx = sign_shadow_tx(updated_shadow_tx, signer).await?;
+                shadow_txs.push(shadow_tx);
             }
 
-            let block_payload = advance_block(node, system_tx_store, system_txs).await?;
+            let block_payload = advance_block(node, shadow_tx_store, shadow_txs).await?;
             block_payloads.push(block_payload);
         }
 
@@ -2170,8 +2170,8 @@ pub mod test_utils {
     }
 
     /// Compose a system tx for unstaking.
-    pub fn unstake(address: Address) -> SystemTransaction {
-        SystemTransaction::new_v1(TransactionPacket::Unstake(system_tx::BalanceIncrement {
+    pub fn unstake(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(TransactionPacket::Unstake(shadow_tx::BalanceIncrement {
             amount: U256::ONE,
             target: address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
@@ -2179,9 +2179,9 @@ pub mod test_utils {
     }
 
     /// Compose a system tx for block reward.
-    pub fn block_reward(address: Address) -> SystemTransaction {
-        SystemTransaction::new_v1(TransactionPacket::BlockReward(
-            system_tx::BlockRewardIncrement {
+    pub fn block_reward(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+            shadow_tx::BlockRewardIncrement {
                 amount: U256::ONE,
                 target: address,
             },
@@ -2189,8 +2189,8 @@ pub mod test_utils {
     }
 
     /// Compose a system tx for staking.
-    pub fn stake(address: Address) -> SystemTransaction {
-        SystemTransaction::new_v1(TransactionPacket::Stake(system_tx::BalanceDecrement {
+    pub fn stake(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(TransactionPacket::Stake(shadow_tx::BalanceDecrement {
             amount: U256::ONE,
             target: address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
@@ -2198,9 +2198,9 @@ pub mod test_utils {
     }
 
     /// Compose a system tx for storage fees.
-    pub fn storage_fees(address: Address) -> SystemTransaction {
-        SystemTransaction::new_v1(TransactionPacket::StorageFees(
-            system_tx::BalanceDecrement {
+    pub fn storage_fees(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(TransactionPacket::StorageFees(
+            shadow_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
@@ -2209,8 +2209,8 @@ pub mod test_utils {
     }
 
     /// Compose a system tx for pledge.
-    pub fn pledge(address: Address) -> SystemTransaction {
-        SystemTransaction::new_v1(TransactionPacket::Pledge(system_tx::BalanceDecrement {
+    pub fn pledge(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(TransactionPacket::Pledge(shadow_tx::BalanceDecrement {
             amount: U256::ONE,
             target: address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
@@ -2218,8 +2218,8 @@ pub mod test_utils {
     }
 
     /// Compose a system tx for unpledge.
-    pub fn unpledge(address: Address) -> SystemTransaction {
-        SystemTransaction::new_v1(TransactionPacket::Unpledge(system_tx::BalanceIncrement {
+    pub fn unpledge(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(TransactionPacket::Unpledge(shadow_tx::BalanceIncrement {
             amount: U256::ONE,
             target: address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
@@ -2449,7 +2449,7 @@ pub mod test_utils {
         is_dev: bool,
         attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
     ) -> eyre::Result<(
-        Vec<(NodeHelperType<IrysEthereumNode>, SystemTxStore)>,
+        Vec<(NodeHelperType<IrysEthereumNode>, ShadowTxStore)>,
         TaskManager,
         Wallet,
     )>
@@ -2471,7 +2471,7 @@ pub mod test_utils {
         };
 
         // Create nodes and peer them
-        let mut nodes: Vec<(NodeTestContext<_, _>, SystemTxStore)> =
+        let mut nodes: Vec<(NodeTestContext<_, _>, ShadowTxStore)> =
             Vec::with_capacity(num_nodes.len());
 
         for (idx, _producer) in num_nodes.iter().enumerate() {
@@ -2484,8 +2484,8 @@ pub mod test_utils {
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();
 
-            // Create the MPSC channel for system transaction requests
-            let (system_tx_store, _system_tx_receiver) = SystemTxStore::new_with_notifications();
+            // Create the MPSC channel for shadow transaction requests
+            let (shadow_tx_store, _shadow_tx_receiver) = ShadowTxStore::new_with_notifications();
 
             let NodeHandle {
                 node,
@@ -2493,7 +2493,7 @@ pub mod test_utils {
             } = NodeBuilder::new(node_config.clone())
                 .testing_node(exec.clone())
                 .node(IrysEthereumNode {
-                    system_tx_store: system_tx_store.clone(),
+                    shadow_tx_store: shadow_tx_store.clone(),
                 })
                 .launch()
                 .await?;
@@ -2512,7 +2512,7 @@ pub mod test_utils {
                 }
             }
 
-            nodes.push((node, system_tx_store));
+            nodes.push((node, shadow_tx_store));
         }
 
         Ok((
