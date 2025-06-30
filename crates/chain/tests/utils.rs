@@ -12,17 +12,13 @@ use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
 use eyre::OptionExt as _;
 use futures::future::select;
-use irys_actors::block_tree_service::{BlockState, ChainState, ReorgEvent};
-
-use irys_actors::mempool_service::MempoolTxs;
-use irys_actors::EpochServiceMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
-    block_tree_service::get_canonical_chain,
+    block_tree_service::{get_canonical_chain, BlockState, ChainState, ReorgEvent},
     block_validation,
-    mempool_service::{MempoolServiceMessage, TxIngressError},
+    mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
-    SetTestBlocksRemainingMessage,
+    EpochServiceMessage, SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
@@ -38,11 +34,9 @@ use irys_primitives::CommitmentType;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::irys::IrysSigner;
-use irys_types::partition::PartitionAssignment;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, Address, DataLedger,
-    GossipBroadcastMessage, H256List, H256,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List, H256,
 };
 use irys_types::{
     Base64, CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, IrysTransaction,
@@ -1289,6 +1283,40 @@ impl IrysNodeTest<IrysNodeCtx> {
                 response.status(),
                 serde_json::to_string_pretty(&commitment_tx).unwrap()
             );
+        }
+    }
+
+    // disconnect all peers from network
+    // return Vec<PeerInfo>> as it was prior to disconnect
+    pub async fn disconnect_all_peers(&self) -> eyre::Result<Vec<PeerInfo>> {
+        let ctx = self.node_ctx.reth_node_adapter.clone();
+
+        let all_peers_prior = ctx.inner.network.get_all_peers().await?;
+        for peer in all_peers_prior.iter() {
+            ctx.inner.network.disconnect_peer(peer.remote_id);
+        }
+
+        while !ctx.inner.network.get_all_peers().await?.is_empty() {
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let all_peers_after = ctx.inner.network.get_all_peers().await?;
+        assert!(
+            all_peers_after.is_empty(),
+            "the peer should be completely disconnected",
+        );
+
+        Ok(all_peers_prior)
+    }
+
+    // Reconnect peers passed to fn
+    pub fn reconnect_all_peers(&self, peers: &Vec<PeerInfo>) {
+        for peer in peers {
+            self.node_ctx
+                .reth_node_adapter
+                .inner
+                .network
+                .connect_peer(peer.remote_id, peer.remote_addr);
         }
     }
 }
