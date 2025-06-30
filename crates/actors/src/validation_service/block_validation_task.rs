@@ -209,7 +209,7 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
         // Shadow transaction validation
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
-        let system_tx_task = async move {
+        let shadow_tx_task = async move {
             shadow_transactions_are_valid(
                 config,
                 service_senders,
@@ -218,7 +218,7 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
             )
-            .instrument(tracing::info_span!("system_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
+            .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
             .map(|()| ValidationResult::Valid)
@@ -226,10 +226,10 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
         };
 
         // Wait for all three tasks to complete
-        let (recall_result, poa_result, system_tx_result) =
-            tokio::join!(recall_task, poa_task, system_tx_task);
+        let (recall_result, poa_result, shadow_tx_result) =
+            tokio::join!(recall_task, poa_task, shadow_tx_task);
 
-        match (recall_result, poa_result, system_tx_result) {
+        match (recall_result, poa_result, shadow_tx_result) {
             (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
                 tracing::debug!("block validation successful");
                 Ok(ValidationResult::Valid)

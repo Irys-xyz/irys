@@ -440,7 +440,7 @@ mod tests {
     async fn external_users_cannot_submit_shadow_txs() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
-        let ((node, _systemtx_rx), ctx) = ctx.get_single_node()?;
+        let ((node, _shadow_tx_rx), ctx) = ctx.get_single_node()?;
 
         let shadow_tx = block_reward(ctx.block_producer_a.address());
         let mut shadow_tx_raw = compose_shadow_tx(1, &shadow_tx);
@@ -736,7 +736,7 @@ mod tests {
             mine_block_and_validate(&mut node, &shadow_tx_store, shadow_txs, &normal_tx_hashes)
                 .await?;
 
-        assert_txs_in_block(&block_payload, &shadow_tx_hashes, "System transactions");
+        assert_txs_in_block(&block_payload, &shadow_tx_hashes, "Shadow transactions");
         assert_txs_in_block(&block_payload, &normal_tx_hashes, "Normal transactions");
         assert_shadow_txs_before_normal_txs(&block_payload, &shadow_tx_hashes, &normal_tx_hashes);
 
@@ -858,12 +858,12 @@ mod tests {
         Arc::new(PrivateKeySigner::random())
     }
 
-    /// Mines 5 blocks, each with a system (block reward) and a normal tx.
+    /// Mines 5 blocks, each with a shadow (block reward) and a normal tx.
     /// Asserts both txs are present in every block.
     /// Verifies sequential block production and tx inclusion.
     /// Expects latest block number to be 5 at the end.
     #[test_log::test(tokio::test)]
-    async fn mine_5_blocks_with_system_and_normal_tx() -> eyre::Result<()> {
+    async fn mine_5_blocks_with_shadow_and_normal_tx() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
