@@ -5,7 +5,7 @@ serial = { max-threads = 1 }
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 5 }
 threads-required = 1
-retries = 2
+retries = 1
 
 # serial tests
 [[profile.default.overrides]]

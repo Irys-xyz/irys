@@ -104,9 +104,13 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
+    // setup config / testnet
+    let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
+    // set block migration depth so epoch blocks go to index correctly
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
     let peer_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_signer]);

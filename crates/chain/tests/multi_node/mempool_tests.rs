@@ -43,6 +43,11 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         .await;
     let app = genesis_node.start_public_api().await;
 
+    // retrieve block_migration_depth for use later
+    let mut consensus = genesis_node.cfg.consensus.clone();
+    let block_migration_depth = consensus.get_mut().block_migration_depth;
+
+    // chunks
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();
     for chunk in chunks.iter() {
@@ -57,14 +62,17 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     post_chunk(&app, &tx, 1, &chunks).await;
     post_chunk(&app, &tx, 2, &chunks).await;
 
-    // Then post the tx
+    // Then post the tx (deliberately after the chunks)
     post_data_tx(&app, &tx).await;
 
     // wait for chunks to be in CachedChunks table
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
     // Mine some blocks to trigger block and chunk migration
-    genesis_node.mine_blocks(2).await?;
+    genesis_node
+        .mine_blocks((1 + block_migration_depth).try_into()?)
+        .await?;
+    genesis_node.wait_until_height_on_chain(1, 5).await?;
 
     // Finally verify the chunks didn't get dropped
     genesis_node
