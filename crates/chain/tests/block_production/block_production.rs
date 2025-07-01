@@ -3,11 +3,12 @@ use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
+use irys_actors::block_tree_service::ChainState;
 use irys_actors::mempool_service::TxIngressError;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
-use irys_reth_node_bridge::irys_reth::system_tx::{
-    system_tx_topics, SystemTransaction, TransactionPacket,
+use irys_reth_node_bridge::irys_reth::shadow_tx::{
+    shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_types::{irys::IrysSigner, NodeConfig};
@@ -18,7 +19,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::utils::{mine_block, AddTxError, IrysNodeTest};
+use crate::utils::{
+    mine_block, mine_block_and_wait_for_validation, read_block_from_state, AddTxError,
+    BlockValidationOutcome, IrysNodeTest,
+};
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -66,7 +70,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(block_reward_receipt.logs.len(), 1);
     assert_eq!(
         block_reward_receipt.logs[0].topics()[0],
-        *system_tx_topics::BLOCK_REWARD,
+        *shadow_tx_topics::BLOCK_REWARD,
     );
     assert_eq!(block_reward_receipt.cumulative_gas_used, 0);
     assert_eq!(
@@ -80,7 +84,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(storage_tx_receipt.logs.len(), 1);
     assert_eq!(
         storage_tx_receipt.logs[0].topics()[0],
-        *system_tx_topics::STORAGE_FEES,
+        *shadow_tx_topics::STORAGE_FEES,
     );
     assert_eq!(storage_tx_receipt.cumulative_gas_used, 0);
     assert_eq!(storage_tx_receipt.logs[0].address, user_account.address());
@@ -140,6 +144,9 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
+    // Collect block hashes as we mine
+    let mut block_hashes = Vec::new();
+
     for i in 1..10 {
         info!("manually producing block {}", i);
         let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
@@ -156,9 +163,27 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
         // check irys DB for built block
         let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-        // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
-        sleep(Duration::from_millis(1500)).await;
+
+        // Collect block hash for later verification
+        block_hashes.push(block.block_hash);
     }
+
+    // Verify all collected blocks are on-chain
+    for (idx, hash) in block_hashes.iter().enumerate() {
+        let state = read_block_from_state(&node.node_ctx, hash).await;
+        assert_eq!(
+            state,
+            BlockValidationOutcome::StoredOnNode(ChainState::Onchain),
+            "Block {} with hash {:?} should be on-chain",
+            idx + 1,
+            hash
+        );
+
+        // Also verify the block can be retrieved from the database
+        let db_block = node.get_block_by_hash(hash).unwrap();
+        assert_eq!(db_block.height, (idx + 1) as u64);
+    }
+
     node.stop().await;
     Ok(())
 }
@@ -170,8 +195,16 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     node.node_ctx.start_mining().await?;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
+    // Collect block hashes as we mine
+    let mut block_hashes = Vec::new();
+
     for i in 1..10 {
-        node.wait_until_height(i + 1, 60).await?;
+        let block_hash = node.wait_until_height(i + 1, 60).await?;
+        let state = read_block_from_state(&node.node_ctx, &block_hash).await;
+        assert_eq!(
+            state,
+            BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
+        );
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
@@ -181,7 +214,27 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
         let db_irys_block = node.get_block_by_height(i).await.unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+
+        // Collect block hash for later verification
+        block_hashes.push(db_irys_block.block_hash);
     }
+
+    // Verify all collected blocks are on-chain
+    for (idx, hash) in block_hashes.iter().enumerate() {
+        let state = read_block_from_state(&node.node_ctx, hash).await;
+        assert_eq!(
+            state,
+            BlockValidationOutcome::StoredOnNode(ChainState::Onchain),
+            "Block {} with hash {:?} should be on-chain",
+            idx + 1,
+            hash
+        );
+
+        // Also verify the block can be retrieved from the database
+        let db_block = node.get_block_by_hash(hash).unwrap();
+        assert_eq!(db_block.height, (idx + 1) as u64);
+    }
+
     node.stop().await;
     Ok(())
 }
@@ -190,7 +243,11 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
+    let (block, _, outcome) = mine_block_and_wait_for_validation(&node.node_ctx).await?;
+    assert_eq!(
+        outcome,
+        BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
+    );
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
@@ -207,6 +264,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     // check irys DB for built block
     let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+    tokio::time::sleep(Duration::from_secs(3)).await;
     node.stop().await;
 
     Ok(())
@@ -221,7 +279,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     config.consensus.get_mut().num_partitions_per_slot = 1;
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
-    config.consensus.get_mut().chunk_migration_depth = 1;
+    config.consensus.get_mut().block_migration_depth = 1;
 
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
@@ -274,7 +332,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(block_txs.len(), 3);
     // Assert block reward (should be the first receipt)
     let block_reward_systx =
-        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(matches!(
         block_reward_systx.as_v1().unwrap(),
@@ -283,7 +341,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     // Assert storage tx is included in the receipts (should be the second receipt)
     let storage_tx_systx =
-        SystemTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
+        ShadowTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(matches!(
         storage_tx_systx.as_v1().unwrap(),
@@ -345,21 +403,6 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
             .unwrap();
         let new_ts = reth_block.header.timestamp as u128;
 
-        // on every block *after* genesis, validate the reward shadow
-        if let Some(old_ts) = prev_ts {
-            // expected reward according to the protocol's reward curve
-            let _expected_reward = node
-                .node_ctx
-                .reward_curve
-                .reward_between(old_ts, new_ts)
-                .unwrap();
-            // todo
-            // assert!(
-            //     reward_shadow_found,
-            //     "BlockReward shadow transaction not found in receipts"
-            // );
-        }
-
         // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
         _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
@@ -417,7 +460,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
     let context = node.node_ctx.reth_node_adapter.clone();
 
-    // Verify block transactions - should only contain block reward system transaction
+    // Verify block transactions - should only contain block reward shadow transaction
     let block_txs = reth_exec_env
         .block()
         .body()
@@ -431,13 +474,13 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
         "Block should only contain one transaction (block reward)"
     );
 
-    // Verify it's a block reward system transaction
-    let system_tx =
-        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+    // Verify it's a block reward shadow transaction
+    let shadow_tx =
+        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(
         matches!(
-            system_tx.as_v1().unwrap(),
+            shadow_tx.as_v1().unwrap(),
             TransactionPacket::BlockReward(_)
         ),
         "Single transaction should be a block reward"
@@ -501,7 +544,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
     let context = node.node_ctx.reth_node_adapter.clone();
 
-    // Verify block transactions - should only contain block reward system transaction
+    // Verify block transactions - should only contain block reward shadow transaction
     let block_txs = reth_exec_env
         .block()
         .body()
@@ -515,13 +558,13 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
         "Block should only contain one transaction (block reward)"
     );
 
-    // Verify it's a block reward system transaction
-    let system_tx =
-        SystemTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
+    // Verify it's a block reward shadow transaction
+    let shadow_tx =
+        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
             .unwrap();
     assert!(
         matches!(
-            system_tx.as_v1().unwrap(),
+            shadow_tx.as_v1().unwrap(),
             TransactionPacket::BlockReward(_)
         ),
         "Single transaction should be a block reward"
@@ -606,7 +649,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     );
     assert_eq!(
         block_reward_receipt.logs[0].topics()[0],
-        *system_tx_topics::BLOCK_REWARD,
+        *shadow_tx_topics::BLOCK_REWARD,
         "First transaction should be block reward"
     );
 
@@ -618,7 +661,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     );
     assert_eq!(
         storage_fee_receipt.logs[0].topics()[0],
-        *system_tx_topics::STORAGE_FEES,
+        *shadow_tx_topics::STORAGE_FEES,
         "Second transaction should be storage fees"
     );
     assert_eq!(
@@ -708,7 +751,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .receipts_by_block(HashOrNumber::Hash(reth_exec_env1.block().hash()))?
         .unwrap();
 
-    // Verify block contains all expected system transactions
+    // Verify block contains all expected shadow transactions
     // Based on the logs, both stake and pledge are included in the same block
     assert_eq!(
         receipts1.len(),
@@ -716,20 +759,20 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         "Block should contain exactly 3 receipts: block reward, stake, and pledge"
     );
 
-    // Find and verify the stake system transaction receipt
+    // Find and verify the stake shadow transaction receipt
     let stake_receipt = receipts1
         .iter()
         .find(|r| {
             r.logs
                 .iter()
-                .any(|log| log.topics()[0] == *system_tx_topics::STAKE)
+                .any(|log| log.topics()[0] == *shadow_tx_topics::STAKE)
         })
-        .expect("Stake system transaction receipt not found");
+        .expect("Stake shadow transaction receipt not found");
 
     assert!(stake_receipt.success, "Stake transaction should succeed");
     assert_eq!(
         stake_receipt.cumulative_gas_used, 0,
-        "System tx should not consume gas"
+        "Shadow tx should not consume gas"
     );
     assert_eq!(
         stake_receipt.logs[0].address,
@@ -737,20 +780,20 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         "Stake transaction should target the peer's address"
     );
 
-    // Find and verify the pledge system transaction receipt (it's in the same block)
+    // Find and verify the pledge shadow transaction receipt (it's in the same block)
     let pledge_receipt = receipts1
         .iter()
         .find(|r| {
             r.logs
                 .iter()
-                .any(|log| log.topics()[0] == *system_tx_topics::PLEDGE)
+                .any(|log| log.topics()[0] == *shadow_tx_topics::PLEDGE)
         })
-        .expect("Pledge system transaction receipt not found");
+        .expect("Pledge shadow transaction receipt not found");
 
     assert!(pledge_receipt.success, "Pledge transaction should succeed");
     assert_eq!(
         pledge_receipt.cumulative_gas_used, 0,
-        "System tx should not consume gas"
+        "Shadow tx should not consume gas"
     );
     assert_eq!(
         pledge_receipt.logs[0].address,
@@ -797,8 +840,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
     assert_eq!(
         receipts2[0].logs[0].topics()[0],
-        *system_tx_topics::BLOCK_REWARD,
-        "Second block should only have block reward system tx"
+        *shadow_tx_topics::BLOCK_REWARD,
+        "Second block should only have block reward shadow tx"
     );
 
     // Get the genesis nodes view of the peers assignments
@@ -809,7 +852,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Verify that one partition has been assigned to the peer to match its pledge
     assert_eq!(peer_assignments.len(), 1);
 
-    // Verify block transactions contain the expected system transactions in the correct order
+    // Verify block transactions contain the expected shadow transactions in the correct order
     let block_txs1 = reth_exec_env1
         .block()
         .body()
@@ -826,8 +869,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // First transaction should be block reward
     let block_reward_tx =
-        SystemTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
-            .expect("First transaction should be decodable as system transaction");
+        ShadowTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
+            .expect("First transaction should be decodable as shadow transaction");
     assert!(
         matches!(
             block_reward_tx.as_v1().unwrap(),
@@ -838,8 +881,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Second transaction should be stake
     let stake_tx =
-        SystemTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Second transaction should be decodable as system transaction");
+        ShadowTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
+            .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
@@ -849,8 +892,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Third transaction should be pledge
     let pledge_tx =
-        SystemTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Third transaction should be decodable as system transaction");
+        ShadowTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
+            .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)

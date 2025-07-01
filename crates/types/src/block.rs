@@ -229,6 +229,10 @@ impl IrysBlockHeader {
         previous_ema_recalculation_block_height(self.height, blocks_in_price_adjustment_interval)
     }
 
+    pub fn block_height_to_use_for_price(&self, blocks_in_price_adjustment_interval: u64) -> u64 {
+        block_height_to_use_for_price(self.height, blocks_in_price_adjustment_interval)
+    }
+
     /// get storage ledger txs from blocks data ledger
     pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
         let mut commitment_txids = Vec::new();
@@ -252,23 +256,6 @@ impl IrysBlockHeader {
             );
         }
         data_txids
-    }
-
-    /// get both submit and publish storage ledger txs from blocks data ledger
-    pub fn get_storage_ledger_tx_ids(&self) -> Vec<H256> {
-        let mut storage_txids = Vec::new();
-        // Because of a circular dependency the types crate can't import the DataLedger enum
-        // DataLedger::Publish = 0, DataLedger::Submit = 1,
-        let storage_ledger = self
-            .data_ledgers
-            .iter()
-            .find(|l| l.ledger_id == 0 || l.ledger_id == 1);
-
-        if let Some(storage_ledger) = storage_ledger {
-            storage_txids = storage_ledger.tx_ids.0.clone();
-        }
-
-        storage_txids
     }
 }
 
@@ -550,6 +537,18 @@ pub enum DataLedger {
     /// An expiring term ledger used for submitting to the publish ledger
     Submit = 1,
     // Add more term ledgers as they exist
+}
+
+impl PartialEq<u32> for DataLedger {
+    fn eq(&self, other: &u32) -> bool {
+        self.get_id() == *other
+    }
+}
+
+impl PartialEq<DataLedger> for u32 {
+    fn eq(&self, other: &DataLedger) -> bool {
+        *self == other.get_id()
+    }
 }
 
 impl Default for DataLedger {

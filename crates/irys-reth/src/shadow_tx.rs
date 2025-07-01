@@ -1,6 +1,6 @@
-//! # System Transactions
+//! # Shadow Transactions
 //!
-//! This module defines the system transaction types used in the Irys protocol. System transactions
+//! This module defines the shadow transaction types used in the Irys protocol. Shadow transactions
 //! are special EVM transactions that encode protocol-level actions, such as block rewards, storage
 //! fee collection, stake and pledge management. The Irys Consensus Layer (CL) is responsible
 //! for validating these transactions in every block, ensuring protocol rules are enforced:
@@ -19,24 +19,20 @@ use alloy_rlp::{RlpDecodable, RlpEncodable};
 use bytes;
 use std::sync::LazyLock;
 
-/// Version constants for SystemTransaction
-pub const SYSTEM_TX_VERSION_V1: u8 = 1;
+/// Version constants for ShadowTransaction
+pub const SHADOW_TX_VERSION_V1: u8 = 1;
 
-/// Current version of SystemTransaction
-pub const CURRENT_SYSTEM_TX_VERSION: u8 = SYSTEM_TX_VERSION_V1;
+/// Current version of ShadowTransaction
+pub const CURRENT_SHADOW_TX_VERSION: u8 = SHADOW_TX_VERSION_V1;
 
-/// A versioned system transaction, valid for a single block, encoding a protocol-level action.
+/// A versioned shadow transaction, valid for a single block, encoding a protocol-level action.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 #[non_exhaustive]
-pub enum SystemTransaction {
-    /// Version 1 system transaction format
+pub enum ShadowTransaction {
+    /// Version 1 shadow transaction format
     ///
     V1 {
-        /// The block height for which this system tx is valid.
-        valid_for_block_height: u64,
-        /// The parent block hash to ensure the tx is not replayed on forks.
-        parent_blockhash: FixedBytes<32>,
-        /// The actual system transaction packet.
+        /// The actual shadow transaction packet.
         packet: TransactionPacket,
     },
 }
@@ -46,7 +42,7 @@ pub enum TransactionPacket {
     /// Unstake funds to an account (balance increment). Used for unstaking or protocol rewards.
     Unstake(BalanceIncrement),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
-    BlockReward(BalanceIncrement),
+    BlockReward(BlockRewardIncrement),
     /// Stake funds from an account (balance decrement). Used for staking operations.
     Stake(BalanceDecrement),
     /// Collect storage fees from an account (balance decrement). Must match storage usage.
@@ -57,65 +53,36 @@ pub enum TransactionPacket {
     Unpledge(BalanceIncrement),
 }
 
-/// Topics for system transaction logs
+/// Topics for shadow transaction logs
 #[expect(
     clippy::module_name_repetitions,
     reason = "module name in type name provides clarity"
 )]
-pub mod system_tx_topics {
+pub mod shadow_tx_topics {
     use super::*;
 
-    pub static UNSTAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_UNSTAKE").0);
+    pub static UNSTAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_UNSTAKE").0);
     pub static BLOCK_REWARD: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SYSTEM_TX_BLOCK_REWARD").0);
-    pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_STAKE").0);
+        LazyLock::new(|| keccak256("SHADOW_TX_BLOCK_REWARD").0);
+    pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_STAKE").0);
     pub static STORAGE_FEES: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SYSTEM_TX_STORAGE_FEES").0);
-    pub static PLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_PLEDGE").0);
-    pub static UNPLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SYSTEM_TX_UNPLEDGE").0);
+        LazyLock::new(|| keccak256("SHADOW_TX_STORAGE_FEES").0);
+    pub static PLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_PLEDGE").0);
+    pub static UNPLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE").0);
 }
 
-impl SystemTransaction {
-    /// Create a new V1 system transaction
+impl ShadowTransaction {
+    /// Create a new V1 shadow transaction
     #[must_use]
-    pub fn new_v1(
-        valid_for_block_height: u64,
-        parent_blockhash: FixedBytes<32>,
-        packet: TransactionPacket,
-    ) -> Self {
-        Self::V1 {
-            valid_for_block_height,
-            parent_blockhash,
-            packet,
-        }
+    pub fn new_v1(packet: TransactionPacket) -> Self {
+        Self::V1 { packet }
     }
 
-    /// Get the version of this system transaction
+    /// Get the version of this shadow transaction
     #[must_use]
     pub fn version(&self) -> u8 {
         match self {
-            Self::V1 { .. } => SYSTEM_TX_VERSION_V1,
-        }
-    }
-
-    /// Get the block height for which this system tx is valid
-    #[must_use]
-    pub fn valid_for_block_height(&self) -> u64 {
-        match self {
-            Self::V1 {
-                valid_for_block_height,
-                ..
-            } => *valid_for_block_height,
-        }
-    }
-
-    /// Get the parent block hash
-    #[must_use]
-    pub fn parent_blockhash(&self) -> FixedBytes<32> {
-        match self {
-            Self::V1 {
-                parent_blockhash, ..
-            } => *parent_blockhash,
+            Self::V1 { .. } => SHADOW_TX_VERSION_V1,
         }
     }
 
@@ -127,19 +94,11 @@ impl SystemTransaction {
         }
     }
 
-    /// Get the topic for this system transaction.
+    /// Get the topic for this shadow transaction.
     #[must_use]
     pub fn topic(&self) -> FixedBytes<32> {
         match self {
             Self::V1 { packet, .. } => packet.topic(),
-        }
-    }
-
-    /// Get the encoded topic for this system transaction.
-    #[must_use]
-    pub fn encoded_topic(&self) -> [u8; 32] {
-        match self {
-            Self::V1 { packet, .. } => packet.encoded_topic(),
         }
     }
 }
@@ -148,7 +107,7 @@ impl TransactionPacket {
     /// Get the topic for this transaction packet.
     #[must_use]
     pub fn topic(&self) -> FixedBytes<32> {
-        use system_tx_topics::*;
+        use shadow_tx_topics::*;
         match self {
             Self::Unstake(_) => (*UNSTAKE).into(),
             Self::BlockReward(_) => (*BLOCK_REWARD).into(),
@@ -156,33 +115,6 @@ impl TransactionPacket {
             Self::StorageFees(_) => (*STORAGE_FEES).into(),
             Self::Pledge(_) => (*PLEDGE).into(),
             Self::Unpledge(_) => (*UNPLEDGE).into(),
-        }
-    }
-
-    /// Get the encoded topic for this transaction packet.
-    #[must_use]
-    pub fn encoded_topic(&self) -> [u8; 32] {
-        match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(bi.amount, 256),
-                    DynSolValue::Address(bi.target),
-                ])
-                .abi_encode_packed()
-                .try_into()
-                .unwrap_or_default()
-            }
-            Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => {
-                use alloy_dyn_abi::DynSolValue;
-                DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(bd.amount, 256),
-                    DynSolValue::Address(bd.target),
-                ])
-                .abi_encode_packed()
-                .try_into()
-                .unwrap_or_default()
-            }
         }
     }
 }
@@ -199,28 +131,18 @@ pub const UNPLEDGE_ID: u8 = 0x06;
     clippy::arithmetic_side_effects,
     reason = "length calculation is safe for small values"
 )]
-impl Encodable for SystemTransaction {
+impl Encodable for ShadowTransaction {
     fn length(&self) -> usize {
         1 + // version byte
         match self {
-            Self::V1 { valid_for_block_height, parent_blockhash, packet } => {
-                valid_for_block_height.length() +
-                parent_blockhash.length() +
-                packet.length()
-            }
+            Self::V1 { packet } => packet.length()
         }
     }
 
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
-            Self::V1 {
-                valid_for_block_height,
-                parent_blockhash,
-                packet,
-            } => {
-                out.put_u8(SYSTEM_TX_VERSION_V1);
-                valid_for_block_height.encode(out);
-                parent_blockhash.encode(out);
+            Self::V1 { packet } => {
+                out.put_u8(SHADOW_TX_VERSION_V1);
                 packet.encode(out);
             }
         }
@@ -234,7 +156,8 @@ impl Encodable for SystemTransaction {
 impl Encodable for TransactionPacket {
     fn length(&self) -> usize {
         1 + match self {
-            Self::Unstake(bi) | Self::BlockReward(bi) | Self::Unpledge(bi) => bi.length(),
+            Self::Unstake(bi) | Self::Unpledge(bi) => bi.length(),
+            Self::BlockReward(br) => br.length(),
             Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => bd.length(),
         }
     }
@@ -273,7 +196,7 @@ impl Encodable for TransactionPacket {
     clippy::indexing_slicing,
     reason = "buffer bounds are checked before indexing"
 )]
-impl Decodable for SystemTransaction {
+impl Decodable for ShadowTransaction {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         if buf.is_empty() {
             return Err(alloy_rlp::Error::InputTooShort);
@@ -282,18 +205,12 @@ impl Decodable for SystemTransaction {
         *buf = &buf[1..]; // advance past the version byte
 
         match version {
-            SYSTEM_TX_VERSION_V1 => {
-                let valid_for_block_height = u64::decode(buf)?;
-                let parent_blockhash = FixedBytes::<32>::decode(buf)?;
+            SHADOW_TX_VERSION_V1 => {
                 let packet = TransactionPacket::decode(buf)?;
-                Ok(Self::V1 {
-                    valid_for_block_height,
-                    parent_blockhash,
-                    packet,
-                })
+                Ok(Self::V1 { packet })
             }
             _ => Err(alloy_rlp::Error::Custom(
-                "Unknown system transaction version",
+                "Unknown shadow transaction version",
             )),
         }
     }
@@ -317,7 +234,7 @@ impl Decodable for TransactionPacket {
                 Ok(Self::Unstake(inner))
             }
             BLOCK_REWARD_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
+                let inner = BlockRewardIncrement::decode(buf)?;
                 Ok(Self::BlockReward(inner))
             }
             STAKE_ID => {
@@ -337,7 +254,7 @@ impl Decodable for TransactionPacket {
                 Ok(Self::Unpledge(inner))
             }
             _ => Err(alloy_rlp::Error::Custom(
-                "Unknown system transaction discriminant",
+                "Unknown shadow transaction discriminant",
             )),
         }
     }
@@ -347,9 +264,9 @@ impl Decodable for TransactionPacket {
     clippy::unimplemented,
     reason = "intentional panic to prevent silent bugs"
 )]
-impl Default for SystemTransaction {
+impl Default for ShadowTransaction {
     fn default() -> Self {
-        unimplemented!("relying on the default impl for `SystemTransaction` is a critical bug")
+        unimplemented!("relying on the default impl for `ShadowTransaction` is a critical bug")
     }
 }
 
@@ -363,7 +280,7 @@ impl Default for TransactionPacket {
     }
 }
 
-/// Balance decrement: used for staking and storage fee collection system txs.
+/// Balance decrement: used for staking and storage fee collection shadow txs.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -383,9 +300,11 @@ pub struct BalanceDecrement {
     pub amount: U256,
     /// Target account address.
     pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this shadow tx.
+    pub irys_ref: FixedBytes<32>,
 }
 
-/// Balance increment: used for block rewards and unstake system txs.
+/// Balance increment: used for unstake shadow txs.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -401,6 +320,30 @@ pub struct BalanceDecrement {
     arbitrary::Arbitrary,
 )]
 pub struct BalanceIncrement {
+    /// Amount to increment to the target account.
+    pub amount: U256,
+    /// Target account address.
+    pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this shadow tx.
+    pub irys_ref: FixedBytes<32>,
+}
+
+/// Block reward increment: used for block reward shadow txs (no irys_ref needed).
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    RlpEncodable,
+    RlpDecodable,
+    arbitrary::Arbitrary,
+)]
+pub struct BlockRewardIncrement {
     /// Amount to increment to the target account.
     pub amount: U256,
     /// Target account address.

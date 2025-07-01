@@ -3,7 +3,6 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
-use assert_matches::assert_matches;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_chain::IrysNodeCtx;
 use irys_reth_node_bridge::{
@@ -11,9 +10,7 @@ use irys_reth_node_bridge::{
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, LedgerChunkOffset, NodeConfig, H256,
-};
+use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 use k256::ecdsa::SigningKey;
 use reth::{
     network::{PeerInfo, Peers as _},
@@ -46,6 +43,11 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         .await;
     let app = genesis_node.start_public_api().await;
 
+    // retrieve block_migration_depth for use later
+    let mut consensus = genesis_node.cfg.consensus.clone();
+    let block_migration_depth = consensus.get_mut().block_migration_depth;
+
+    // chunks
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();
     for chunk in chunks.iter() {
@@ -60,20 +62,30 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     post_chunk(&app, &tx, 1, &chunks).await;
     post_chunk(&app, &tx, 2, &chunks).await;
 
-    // Then post the tx
-    post_storage_tx(&app, &tx).await;
+    // Then post the tx (deliberately after the chunks)
+    post_data_tx(&app, &tx).await;
 
-    // Mine some blocks to trigger chunk migration
-    genesis_node.mine_blocks(2).await?;
+    // wait for chunks to be in CachedChunks table
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+
+    // Mine some blocks to trigger block and chunk migration
+    genesis_node
+        .mine_blocks((1 + block_migration_depth).try_into()?)
+        .await?;
+    genesis_node.wait_until_height_on_chain(1, 5).await?;
 
     // Finally verify the chunks didn't get dropped
-    let c1 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(0)).await;
-    let c2 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(1)).await;
-    let c3 = get_chunk(&app, DataLedger::Submit, LedgerChunkOffset::from(2)).await;
-    assert_matches!(c1, Some(_));
-    assert_matches!(c2, Some(_));
-    assert_matches!(c3, Some(_));
+    genesis_node
+        .wait_for_chunk(&app, DataLedger::Submit, 0, 5)
+        .await?;
+    genesis_node
+        .wait_for_chunk(&app, DataLedger::Submit, 1, 5)
+        .await?;
+    genesis_node
+        .wait_for_chunk(&app, DataLedger::Submit, 2, 5)
+        .await?;
 
+    // teardown
     genesis_node.stop().await;
 
     Ok(())
@@ -170,18 +182,14 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 
     // post storage tx
     let storage_tx = genesis_node
-        .post_storage_tx_without_gossip(H256::zero(), data, &signer)
+        .post_data_tx_without_gossip(H256::zero(), data, &signer)
         .await;
-
-    let expected_txs = vec![storage_tx.header.clone()];
-    let result = genesis_node.wait_for_confirmed_txs(expected_txs, 20).await;
-    assert!(result.is_ok());
 
     // Restart the node
     tracing::info!("Restarting node");
     let restarted_node = genesis_node.stop().await.start().await;
 
-    // confirm the mempool tx have appeared back in the mempool after a restart
+    // confirm the mempool data tx have appeared back in the mempool after a restart
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let get_tx_msg = MempoolServiceMessage::GetDataTxs(vec![storage_tx.header.id], oneshot_tx);
     if let Err(err) = restarted_node
@@ -192,13 +200,17 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     {
         tracing::error!("error sending message to mempool: {:?}", err);
     }
-    let tx_from_mempool = oneshot_rx.await.expect("expected result");
-    assert!(tx_from_mempool
+    let data_tx_from_mempool = oneshot_rx.await.expect("expected result");
+    assert!(data_tx_from_mempool
         .first()
         .expect("expected a data tx")
         .is_some());
 
-    // TODO: once mempool does not write directly to db, confirm commitment txs appear back in mempool after restart
+    // confirm the commitment tx has appeared back in the mempool after a restart
+    let result = restarted_node
+        .wait_for_mempool_commitment_txs(vec![pledge_tx.id], 10)
+        .await;
+    assert!(result.is_ok());
 
     restarted_node.stop().await;
 
@@ -237,7 +249,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .entropy_packing_iterations = 1_000;
-    genesis_config.consensus.get_mut().chunk_migration_depth = 1;
+    genesis_config.consensus.get_mut().block_migration_depth = 1;
 
     // Create signers for the test accounts
     let peer1_signer = genesis_config.new_random_signer();
@@ -324,8 +336,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     genesis.mine_block().await.unwrap();
 
     // Wait for peers to sync and start packing
-    peer1.wait_until_height(2, seconds_to_wait).await?;
-    peer2.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer1.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer2.wait_until_height(2, seconds_to_wait).await?;
     peer1.wait_for_packing(seconds_to_wait).await;
     peer2.wait_for_packing(seconds_to_wait).await;
 
@@ -388,8 +400,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 
-    peer1.wait_until_height(3, seconds_to_wait).await?;
-    peer2.wait_until_height(3, seconds_to_wait).await?;
+    let _block_hash = peer1.wait_until_height(3, seconds_to_wait).await?;
+    let _block_hash = peer2.wait_until_height(3, seconds_to_wait).await?;
 
     // ensure the change is there
     let mut expected_recipient1_balance = U256::from(123);
@@ -524,7 +536,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let data: Vec<u8> = chunks.concat();
 
     let _peer2_tx = peer2
-        .post_storage_tx_without_gossip(H256::zero(), data, &recipient2)
+        .post_data_tx_without_gossip(H256::zero(), data, &recipient2)
         .await;
 
     // call get best txs from the mempool
@@ -543,7 +555,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_previous = rx.await?;
     // previous block does not have the fund tx, the tx should not be present
     assert_eq!(
-        best_previous.storage_tx.len(),
+        best_previous.submit_tx.len(),
         0,
         "there should not be a storage tx (lack of funding due to changed parent EVM block)"
     );
@@ -558,7 +570,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_current = rx.await?;
     // latest block has the fund tx, so it should be present
     assert_eq!(
-        best_current.storage_tx.len(),
+        best_current.submit_tx.len(),
         1,
         "There should be a storage tx"
     );
@@ -572,8 +584,8 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         peer2.wait_until_height(height + 1, 20)
     );
 
-    gen?;
-    p2?;
+    let _block_hash = gen?;
+    let _block_hash = p2?;
 
     // the storage tx shouldn't be in the best mempool txs due to the fork change
 
@@ -586,7 +598,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     let best_current = rx.await?;
 
     assert_eq!(
-        best_current.storage_tx.len(),
+        best_current.submit_tx.len(),
         0,
         "There shouldn't be a storage tx"
     );

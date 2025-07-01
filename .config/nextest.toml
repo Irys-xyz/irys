@@ -5,20 +5,18 @@ serial = { max-threads = 1 }
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 5 }
 threads-required = 1
-retries = 2
+retries = 1
 
 # serial tests
 [[profile.default.overrides]]
 filter = 'test(/.*serial_.*/)'
 test-group = 'serial'
 
-
 # slow tests
 [[profile.default.overrides]]
 filter = 'test(/.*slow_.*/)'
 threads-required = 2
 priority = 100
-
 
 # heavy tests
 [[profile.default.overrides]]

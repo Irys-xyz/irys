@@ -18,7 +18,7 @@ irys-vdf.workspace = true
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
-
+priority-queue.workspace = true
 tokio.workspace = true
 lru.workspace = true
 reth-db.workspace = true
@@ -44,6 +44,8 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 reth-transaction-pool.workspace = true
 itertools.workspace = true
+reth-ethereum-primitives.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

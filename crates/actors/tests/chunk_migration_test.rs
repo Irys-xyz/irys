@@ -45,7 +45,7 @@
 //         miner_address: Address::random(),
 //         min_writes_before_sync: 1,
 //         entropy_packing_iterations: 1,
-//         chunk_migration_depth: 1, // Testnet / single node config
+//         block_migration_depth: 1, // Testnet / single node config
 //     };
 //     let chunk_size = storage_config.chunk_size;
 

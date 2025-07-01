@@ -51,7 +51,8 @@ pub async fn proxy(
         actix_web::http::Method::OPTIONS => client.options(target_uri),
         actix_web::http::Method::PATCH => client.patch(target_uri),
         _ => return Err(ProxyError::MethodNotAllowed),
-    };
+    }
+    .no_decompress(); // <- very important!
 
     // Forward relevant headers
     for (header_name, header_value) in req.headers() {
@@ -86,17 +87,17 @@ pub async fn proxy(
     Ok(client_response.streaming(response))
 }
 
-fn is_hop_by_hop_header(header: &str) -> bool {
-    let hop_by_hop_headers = [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
-    ];
+const HOP_BY_HOP_HEADERS: [&str; 8] = [
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+];
 
-    hop_by_hop_headers.contains(&header.to_lowercase().as_str())
+fn is_hop_by_hop_header(header: &str) -> bool {
+    HOP_BY_HOP_HEADERS.contains(&header.to_lowercase().as_str())
 }

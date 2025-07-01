@@ -121,7 +121,7 @@ lru = "0.14"
 paste = "1.0.15"
 async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
-
+priority-queue = "2.5"
 
 # Reth & Alloy deps
 # These should be kept in lockstep with the Reth dependencies - for compatability and built times
@@ -195,7 +195,6 @@ reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85
 reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
 
-
 # just used (for local testing)
 
 # reth = { path = "./ext/reth/bin/reth" }
@@ -233,7 +232,6 @@ reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev 
 # reth-chain-state = { path = "./ext/reth/crates/chain-state" }
 # reth-errors = { path = "./ext/reth/crates/errors" }
 # reth-ethereum-payload-builder = { path = "./ext/reth/crates/ethereum/payload" }
-
 
 # all deps + used
 
@@ -366,7 +364,7 @@ reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev 
 [profile.dev]
 panic = "unwind"
 
-# below inspired from https://github.com/oxidecomputer/omicron/blob/main/Cargo.toml 
+# below inspired from https://github.com/oxidecomputer/omicron/blob/main/Cargo.toml
 
 # See https://github.com/oxidecomputer/omicron/issues/4009 for some background context here.
 # By reducing the debug level (though keeping enough to have meaningful
@@ -402,15 +400,12 @@ opt-level = 3
 # rust.missing_debug_implementations = "warn"
 # rust.missing_docs = "warn"
 # rust.rust_2018_idioms = { level = "deny", priority = -1 }
-# rustdoc.all = "warn"
-# rust.unnameable-types = "warn"
 
 rust.unreachable_pub = "warn"
 rust.unused_must_use = "deny"
 rust.unused_imports = "warn"
 
 [workspace.lints.clippy]
-
 # cargo = { priority = -1, level = "deny" } # for some reason enabling this cargo lint category causes clippy fix to hang
 complexity = { priority = -2, level = "deny" }
 perf = { priority = -3, level = "deny" }
@@ -420,7 +415,6 @@ style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
 pedantic = { priority = -8, level = "allow" }    # cherry pick
 nursery = { priority = -9, level = "allow" }     # cherry pick
-
 
 module_inception = "allow"
 doc-overindented-list-items = "allow"
@@ -434,7 +428,6 @@ too-many-arguments = "allow"
 # map_unwrap_or = "deny"
 # missing_asserts_for_indexing = "deny"
 
-
 # need to update clippy for these two
 # doc_comment_double_space_linebreaks = "deny"
 # elidable_lifetime_names = "deny"
@@ -445,7 +438,6 @@ bind_instead_of_map = "deny"
 bool_assert_comparison = "deny"
 cloned_instead_of_copied = "deny"
 explicit_into_iter_loop = "deny"
-ignored_unit_patterns = "deny"
 implicit_clone = "deny"
 inefficient_to_string = "deny"
 manual_instant_elapsed = "deny"
@@ -486,7 +478,7 @@ use_self = "deny"
 # deref_by_slicing = "deny" # reduces clarity
 # assertions_on_result_states = "deny" # keeping the asserts helps to improve test clarity
 # needless_collect = "deny" # reduces clarity
-
+# ignored_unit_patterns = "deny" # unnecessary & no findings
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]

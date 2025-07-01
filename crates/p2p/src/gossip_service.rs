@@ -8,7 +8,7 @@
 )]
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
-use crate::cache::GossipCacheKey;
+use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::PeerList;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
@@ -23,12 +23,12 @@ use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem};
+use irys_types::{Address, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -106,7 +106,8 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    mempool_data_receiver: Option<UnboundedReceiver<GossipData>>,
+    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
+    broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
@@ -127,7 +128,8 @@ impl P2PService {
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
         mining_address: Address,
-        broadcast_data_receiver: UnboundedReceiver<GossipData>,
+        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
+        broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -137,7 +139,8 @@ impl P2PService {
         Self {
             client,
             cache,
-            mempool_data_receiver: Some(broadcast_data_receiver),
+            broadcast_data_receiver: Some(broadcast_data_receiver),
+            broadcast_data_sender,
             sync_state: SyncState::new(true),
         }
     }
@@ -159,6 +162,7 @@ impl P2PService {
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
+        execution_payload_provider: ExecutionPayloadProvider<P>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -170,8 +174,11 @@ impl P2PService {
             db,
             peer_list.clone(),
             block_discovery,
+            mempool.clone(),
             self.sync_state.clone(),
             block_status_provider,
+            execution_payload_provider.clone(),
+            self.broadcast_data_sender.clone(),
         );
 
         let server_data_handler = GossipServerDataHandler {
@@ -183,6 +190,7 @@ impl P2PService {
             peer_list: peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: Span::current(),
+            execution_payload_provider,
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
@@ -190,7 +198,7 @@ impl P2PService {
         let server_handle = server.handle();
 
         let mempool_data_receiver =
-            self.mempool_data_receiver
+            self.broadcast_data_receiver
                 .take()
                 .ok_or(GossipError::Internal(
                     InternalGossipError::BroadcastReceiverShutdown,
@@ -214,7 +222,11 @@ impl P2PService {
         Ok(gossip_service_handle)
     }
 
-    async fn broadcast_data<P>(&self, data: &GossipData, peer_list: &P) -> GossipResult<()>
+    async fn broadcast_data<P>(
+        &self,
+        broadcast_message: &GossipBroadcastMessage,
+        peer_list: &P,
+    ) -> GossipResult<()>
     where
         P: PeerList,
     {
@@ -223,7 +235,10 @@ impl P2PService {
             return Ok(());
         }
 
-        debug!("Broadcasting data to peers: {}", data.data_type_and_id());
+        debug!(
+            "Broadcasting data to peers: {}",
+            broadcast_message.data_type_and_id()
+        );
 
         // Get all active peers except the source
         let mut peers: Vec<(Address, PeerListItem)> = peer_list
@@ -240,7 +255,7 @@ impl P2PService {
 
         while !peers.is_empty() {
             // Remove peers that seen the data since the last iteration
-            let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
+            let peers_that_seen_data = self.cache.peers_that_have_seen(&broadcast_message.key)?;
             peers.retain(|(peer_miner_address, _peer)| {
                 !peers_that_seen_data.contains(peer_miner_address)
             });
@@ -267,7 +282,7 @@ impl P2PService {
                         .client
                         .send_data_and_update_score(
                             (peer_miner_address, peer_entry),
-                            data,
+                            &broadcast_message.data,
                             peer_list,
                         )
                         .await
@@ -281,7 +296,7 @@ impl P2PService {
                     // Record as seen anyway, so we don't rebroadcast to them
                     if let Err(error) = self
                         .cache
-                        .record_seen(*peer_miner_address, GossipCacheKey::from(data))
+                        .record_seen(*peer_miner_address, broadcast_message.key)
                     {
                         error!(
                             "Failed to record data in cache for peer {}: {}",
@@ -336,7 +351,7 @@ fn spawn_cache_pruning_task(
 }
 
 fn spawn_broadcast_task<P>(
-    mut mempool_data_receiver: UnboundedReceiver<GossipData>,
+    mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     service: P2PService,
     task_executor: &TaskExecutor,
     peer_list: P,

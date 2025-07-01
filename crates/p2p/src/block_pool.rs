@@ -1,11 +1,17 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
+use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
-use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader};
+use irys_types::{
+    BlockHash, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
+    IrysBlockHeader,
+};
 use lru::LruCache;
+use reth::revm::primitives::B256;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -16,6 +22,7 @@ const BLOCK_POOL_CACHE_SIZE: usize = 1000;
 #[derive(Debug, Clone)]
 pub enum BlockPoolError {
     DatabaseError(String),
+    MempoolError(String),
     OtherInternal(String),
     BlockError(String),
     AlreadyProcessed(BlockHash),
@@ -30,10 +37,11 @@ impl From<PeerListFacadeError> for BlockPoolError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BlockPool<P, B>
+pub(crate) struct BlockPool<P, B, M>
 where
     P: PeerList,
     B: BlockDiscoveryFacade,
+    M: MempoolFacade,
 {
     /// Database provider for accessing transaction headers and related data.
     db: DatabaseProvider,
@@ -41,17 +49,22 @@ where
     blocks_cache: BlockCache,
 
     block_discovery: B,
+    mempool: M,
     peer_list: P,
 
     sync_state: SyncState,
 
     block_status_provider: BlockStatusProvider,
+    execution_payload_provider: ExecutionPayloadProvider<P>,
+
+    gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
 }
 
 #[derive(Clone, Debug)]
 struct BlockCacheInner {
     pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, IrysBlockHeader>,
     pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
+    pub(crate) requested_blocks: HashSet<BlockHash>,
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +127,22 @@ impl BlockCache {
             .get(block_hash)
             .cloned()
     }
+
+    async fn mark_block_as_requested(&self, block_hash: BlockHash) {
+        self.inner.write().await.requested_blocks.insert(block_hash);
+    }
+
+    async fn remove_requested_block(&self, block_hash: &BlockHash) {
+        self.inner.write().await.requested_blocks.remove(block_hash);
+    }
+
+    async fn is_block_requested(&self, block_hash: &BlockHash) -> bool {
+        self.inner
+            .write()
+            .await
+            .requested_blocks
+            .contains(block_hash)
+    }
 }
 
 impl BlockCacheInner {
@@ -125,6 +154,7 @@ impl BlockCacheInner {
             block_hash_to_parent_hash: LruCache::new(
                 NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
             ),
+            requested_blocks: HashSet::new(),
         }
     }
 
@@ -152,25 +182,32 @@ impl BlockCacheInner {
     }
 }
 
-impl<P, B> BlockPool<P, B>
+impl<P, B, M> BlockPool<P, B, M>
 where
     P: PeerList,
     B: BlockDiscoveryFacade,
+    M: MempoolFacade,
 {
     pub(crate) fn new(
         db: DatabaseProvider,
         peer_list: P,
         block_discovery: B,
+        mempool: M,
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
+        execution_payload_provider: ExecutionPayloadProvider<P>,
+        gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
     ) -> Self {
         Self {
             db,
             blocks_cache: BlockCache::new(),
             peer_list,
             block_discovery,
+            mempool,
             sync_state,
             block_status_provider,
+            execution_payload_provider,
+            gossip_broadcast_sender,
         }
     }
 
@@ -228,6 +265,10 @@ where
                 "Block pool: Block {:?} has been processed",
                 current_block_hash
             );
+
+            // Request the execution payload for the block if it is not already stored locally
+            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash);
+
             self.sync_state
                 .mark_processed(current_block_height as usize);
             self.blocks_cache
@@ -254,6 +295,40 @@ where
 
         self.request_parent_block_to_be_gossiped(block_header.previous_block_hash)
             .await
+    }
+
+    /// Requests the execution payload for the given EVM block hash if it is not already stored
+    /// locally. After that, it waits for the payload to arrive and broadcasts it.
+    /// This function spawns a new task to fire the request without waiting for the response.
+    pub(crate) fn handle_execution_payload_for_prevalidated_block(&self, evm_block_hash: B256) {
+        let execution_payload_provider = self.execution_payload_provider.clone();
+        let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
+        tokio::spawn(async move {
+            if let Some(sealed_block) = execution_payload_provider
+                .wait_for_sealed_block(&evm_block_hash)
+                .await
+            {
+                let evm_block = sealed_block.into_block();
+                if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
+                    GossipCacheKey::ExecutionPayload(evm_block_hash),
+                    GossipData::ExecutionPayload(evm_block),
+                )) {
+                    error!(
+                        "Failed to broadcast execution payload for block {:?}: {:?}",
+                        evm_block_hash, err
+                    );
+                } else {
+                    debug!(
+                        "Execution payload for block {:?} has been broadcasted",
+                        evm_block_hash
+                    );
+                }
+            }
+        });
+    }
+
+    pub(crate) async fn is_block_requested(&self, block_hash: &BlockHash) -> bool {
+        self.blocks_cache.is_block_requested(block_hash).await
     }
 
     pub(crate) async fn is_block_processing_or_processed(
@@ -330,6 +405,7 @@ where
         &self,
         block_hash: BlockHash,
     ) -> Result<(), BlockPoolError> {
+        self.blocks_cache.mark_block_as_requested(block_hash).await;
         match self
             .peer_list
             .request_block_from_the_network(block_hash)
@@ -344,6 +420,7 @@ where
             }
             Err(error) => {
                 error!("Error while trying to fetch parent block {:?}: {:?}. Removing the block from the pool", block_hash, error);
+                self.blocks_cache.remove_requested_block(&block_hash).await;
                 self.blocks_cache.remove_block(&block_hash).await;
                 Err(error.into())
             }
@@ -356,6 +433,17 @@ where
     ) -> Result<Option<IrysBlockHeader>, BlockPoolError> {
         if let Some(header) = self.blocks_cache.get_block_header_cloned(block_hash).await {
             return Ok(Some(header));
+        }
+
+        match self.mempool.get_block_header(*block_hash, true).await {
+            Ok(Some(header)) => return Ok(Some(header)),
+            Ok(None) => {}
+            Err(err) => {
+                return Err(BlockPoolError::MempoolError(format!(
+                    "Mempool error: {:?}",
+                    err
+                )))
+            }
         }
 
         self.db

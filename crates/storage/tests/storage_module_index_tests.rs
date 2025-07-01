@@ -33,7 +33,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
         chunk_size: 32,
         num_chunks_in_partition: 20,
-        chunk_migration_depth: 1,
+        block_migration_depth: 1,
         num_chunks_in_recall_range: 5,
         num_partitions_per_slot: 1,
         entropy_packing_iterations: 1,

@@ -107,7 +107,10 @@ impl BlockStatusProvider {
     pub async fn mock(node_config: &NodeConfig) -> Self {
         Self {
             block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
-                BlockTreeCache::new(&IrysBlockHeader::new_mock_header()),
+                BlockTreeCache::new(
+                    &IrysBlockHeader::new_mock_header(),
+                    node_config.consensus_config(),
+                ),
             ))),
             block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
                 BlockIndex::new(node_config)
@@ -222,11 +225,16 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::CommitmentCache;
+        use irys_actors::block_tree_service::ema_snapshot::EmaSnapshot;
+        use irys_database::CommitmentSnapshot;
 
         self.block_tree_read_guard
             .write()
-            .add_peer_block(block, Arc::new(CommitmentCache::default()))
+            .add_peer_block(
+                block,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EmaSnapshot::default()),
+            )
             .expect("to add block to the tree");
     }
 

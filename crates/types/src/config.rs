@@ -112,7 +112,10 @@ pub struct ConsensusConfig {
     pub chunk_size: u64,
 
     /// Defines how many blocks must pass before a block is marked as finalized
-    pub chunk_migration_depth: u32,
+    pub block_migration_depth: u32,
+
+    /// Number of blocks to retain in cache from chain head
+    pub block_cache_depth: u64,
 
     /// Number of chunks that make up a single partition
     pub num_chunks_in_partition: u64,
@@ -538,7 +541,8 @@ impl ConsensusConfig {
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
-            chunk_migration_depth: 1,
+            block_migration_depth: 6,
+            block_cache_depth: 50,
             epoch: EpochConfig {
                 capacity_scalar: 100,
                 num_blocks_in_epoch: 100,
@@ -763,6 +767,19 @@ impl NodeConfig {
     pub fn vdf_steps_dir(&self) -> PathBuf {
         self.base_directory.join("vdf_steps")
     }
+
+    /// Get the PeerAddress for this node configuration
+    pub fn peer_address(&self) -> PeerAddress {
+        PeerAddress {
+            api: format!("{}:{}", self.http.public_ip, self.http.public_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            gossip: format!("{}:{}", self.gossip.public_ip, self.gossip.public_port)
+                .parse()
+                .expect("valid SocketAddr expected"),
+            execution: self.reth_peer_info,
+        }
+    }
 }
 
 pub mod serde_utils {
@@ -887,7 +904,8 @@ mod tests {
         annual_cost_per_gb = 0.01
         decay_rate = 0.01
         chunk_size = 262144
-        chunk_migration_depth = 1
+        block_migration_depth = 6
+        block_cache_depth = 50
         num_chunks_in_partition = 10
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1

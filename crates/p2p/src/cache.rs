@@ -5,7 +5,8 @@
 )]
 use crate::types::{GossipError, GossipResult};
 use core::time::Duration;
-use irys_types::{Address, BlockHash, ChunkPathHash, GossipData, IrysTransactionId, H256};
+use irys_types::{Address, BlockHash, ChunkPathHash, GossipCacheKey, IrysTransactionId, H256};
+use reth::revm::primitives::B256;
 use std::collections::HashSet;
 use std::{
     collections::HashMap,
@@ -20,24 +21,7 @@ pub(crate) struct GossipCache {
     chunks: Arc<RwLock<HashMap<ChunkPathHash, HashMap<Address, Instant>>>>,
     transactions: Arc<RwLock<HashMap<IrysTransactionId, HashMap<Address, Instant>>>>,
     blocks: Arc<RwLock<HashMap<BlockHash, HashMap<Address, Instant>>>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum GossipCacheKey {
-    Chunk(ChunkPathHash),
-    Transaction(IrysTransactionId),
-    Block(BlockHash),
-}
-
-impl From<&GossipData> for GossipCacheKey {
-    fn from(data: &GossipData) -> Self {
-        match data {
-            GossipData::Chunk(chunk) => Self::Chunk(chunk.chunk_path_hash()),
-            GossipData::Transaction(transaction) => Self::Transaction(transaction.id),
-            GossipData::CommitmentTransaction(comm_tx) => Self::Transaction(comm_tx.id),
-            GossipData::Block(block) => Self::Block(block.block_hash),
-        }
-    }
+    payloads: Arc<RwLock<HashMap<B256, HashMap<Address, Instant>>>>,
 }
 
 impl GossipCache {
@@ -53,6 +37,18 @@ impl GossipCache {
             .map_err(|error| GossipError::Cache(error.to_string()))?;
 
         Ok(blocks.contains_key(block_hash))
+    }
+
+    pub(crate) fn seen_execution_payload_from_any_peer(
+        &self,
+        evm_block_hash: &B256,
+    ) -> GossipResult<bool> {
+        let blocks = self
+            .payloads
+            .read()
+            .map_err(|error| GossipError::Cache(error.to_string()))?;
+
+        Ok(blocks.contains_key(evm_block_hash))
     }
 
     pub(crate) fn seen_transaction_from_any_peer(
@@ -103,40 +99,50 @@ impl GossipCache {
                 let peer_map = blocks.entry(irys_block_hash).or_default();
                 peer_map.insert(miner_address, now);
             }
+            GossipCacheKey::ExecutionPayload(payload_block_hash) => {
+                let mut payloads = self
+                    .payloads
+                    .write()
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
+                let peer_map = payloads.entry(payload_block_hash).or_default();
+                peer_map.insert(miner_address, now);
+            }
         }
         Ok(())
     }
 
-    pub(crate) fn peers_that_have_seen(&self, data: &GossipData) -> GossipResult<HashSet<Address>> {
-        let result = match data {
-            GossipData::Chunk(unpacked_chunk) => {
-                let chunk_path_hash = unpacked_chunk.chunk_path_hash();
+    pub(crate) fn peers_that_have_seen(
+        &self,
+        cache_key: &GossipCacheKey,
+    ) -> GossipResult<HashSet<Address>> {
+        let result = match cache_key {
+            GossipCacheKey::Chunk(chunk_path_hash) => {
                 let chunks = self
                     .chunks
                     .read()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
-                chunks.get(&chunk_path_hash).cloned().unwrap_or_default()
+                chunks.get(chunk_path_hash).cloned().unwrap_or_default()
             }
-            GossipData::Transaction(transaction) => {
+            GossipCacheKey::Transaction(transaction_id) => {
                 let txs = self
                     .transactions
                     .read()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
-                txs.get(&transaction.id).cloned().unwrap_or_default()
+                txs.get(transaction_id).cloned().unwrap_or_default()
             }
-            GossipData::CommitmentTransaction(commitment_tx) => {
-                let txs = self
-                    .transactions
-                    .read()
-                    .map_err(|error| GossipError::Cache(error.to_string()))?;
-                txs.get(&commitment_tx.id).cloned().unwrap_or_default()
-            }
-            GossipData::Block(block) => {
+            GossipCacheKey::Block(block_hash) => {
                 let blocks = self
                     .blocks
                     .read()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
-                blocks.get(&block.block_hash).cloned().unwrap_or_default()
+                blocks.get(block_hash).cloned().unwrap_or_default()
+            }
+            GossipCacheKey::ExecutionPayload(evm_block_hash) => {
+                let payloads = self
+                    .payloads
+                    .read()
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
+                payloads.get(evm_block_hash).cloned().unwrap_or_default()
             }
         };
 

@@ -15,13 +15,12 @@ use tracing::debug;
 async fn heavy_data_promotion_test() {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
-    config.consensus.get_mut().chunk_migration_depth = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
     config.consensus.get_mut().num_partitions_per_slot = 1;
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
-    config.consensus.get_mut().chunk_migration_depth = 1; // Testnet / single node config
+    config.consensus.get_mut().block_migration_depth = 1; // Testnet / single node config
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
@@ -81,9 +80,9 @@ async fn heavy_data_promotion_test() {
         assert_eq!(status, StatusCode::OK);
     }
 
-    // Wait for all the transactions to be confirmed
-    let result = node.wait_for_confirmed_txs(unconfirmed_tx, 20).await;
-    // Verify all transactions are confirmed
+    // Wait for all the transactions to be in the index
+    let result = node.wait_for_migrated_txs(unconfirmed_tx, 10).await;
+    // Verify all transactions are in the index
     assert!(result.is_ok());
 
     // ==============================

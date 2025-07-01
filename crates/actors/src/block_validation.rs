@@ -1,36 +1,50 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
-    block_discovery::get_commitment_tx_in_parallel,
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_index_service::BlockIndexReadGuard,
-    ema_service::{EmaServiceMessage, PriceStatus},
+    block_tree_service::ema_snapshot::EmaSnapshot,
     epoch_service::PartitionAssignmentsReadGuard,
+    mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
-    system_tx_generator::SystemTxGenerator,
+    shadow_tx_generator::ShadowTxGenerator,
 };
 use alloy_consensus::Transaction as _;
-use alloy_eips::HashOrNumber;
+use alloy_eips::eip7685::{Requests, RequestsOrHash};
+use alloy_rpc_types_engine::ExecutionData;
+use async_trait::async_trait;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
-use irys_reth::system_tx::SystemTransaction;
+use irys_reth::shadow_tx::ShadowTransaction;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::providers::TransactionsProvider as _;
+use reth::revm::primitives::B256;
+use reth::rpc::api::EngineApiClient as _;
+use reth::rpc::types::engine::ExecutionPayload;
+use reth_ethereum_primitives::Block;
 use tracing::{debug, info};
+
+/// Trait for providing execution payloads for block validation
+#[async_trait]
+pub trait PayloadProvider: Clone + Send + Sync + 'static {
+    /// Waits for the execution payload to arrive over gossip. This method will first check the local
+    /// cache, then try to retrieve the payload from the network if it is not found locally.
+    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData>;
+}
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -39,7 +53,7 @@ pub async fn prevalidate_block(
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
-    ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    parent_ema_snapshot: &EmaSnapshot,
 ) -> eyre::Result<()> {
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
@@ -99,36 +113,29 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    let vdf_checkpoint_valid = async {
-        last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "last_step_checkpoints_is_valid",
-        );
-        Result::<_, eyre::Report>::Ok(())
-    };
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+
     // Check that the oracle price does not exceed the EMA pricing parameters
-    let oracle_price_valid = async {
-        check_valid_oracle_price(&block, &ema_service_sender).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "check_valid_oracle_price",
-        );
-        Result::<_, eyre::Report>::Ok(())
-    };
+    let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
+        block.oracle_irys_price,
+        previous_block.oracle_irys_price,
+        config.consensus.token_price_safe_range,
+    );
+    ensure!(oracle_price_valid, "Oracle price must be valid");
+
     // Check that the EMA has been correctly calculated
-    let ema_valid = async {
-        check_valid_ema_calculation(&block, &ema_service_sender).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "check_valid_ema_calculation",
-        );
-        Result::<_, eyre::Report>::Ok(())
+    let ema_valid = {
+        let res = parent_ema_snapshot
+            .calculate_ema_for_new_block(
+                &previous_block,
+                block.oracle_irys_price,
+                config.consensus.token_price_safe_range,
+                config.consensus.ema.price_adjustment_interval,
+            )
+            .ema;
+        res == block.ema_irys_price
     };
-    futures::try_join!(vdf_checkpoint_valid, oracle_price_valid, ema_valid)?;
+    ensure!(ema_valid, "EMA must be valid");
 
     // Check valid curve price
     let reward = reward_curve.reward_between(
@@ -149,40 +156,6 @@ pub async fn prevalidate_block(
     // we just accept any valid signature.
     ensure!(block.is_signature_valid(), "block signature is not valid");
 
-    Ok(())
-}
-
-async fn check_valid_oracle_price(
-    block: &IrysBlockHeader,
-    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
-) -> eyre::Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_serviece_sendr.send(EmaServiceMessage::ValidateOraclePrice {
-        block_height: block.height,
-        oracle_price: block.oracle_irys_price,
-        response: tx,
-    })?;
-    let response = rx.await??;
-    ensure!(
-        response == PriceStatus::Valid,
-        "Oracle price exceeds the defined bounds"
-    );
-    Ok(())
-}
-
-async fn check_valid_ema_calculation(
-    block: &IrysBlockHeader,
-    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
-) -> eyre::Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_serviece_sendr.send(EmaServiceMessage::ValidateEmaPrice {
-        block_height: block.height,
-        ema_price: block.ema_irys_price,
-        oracle_price: block.oracle_irys_price,
-        response: tx,
-    })?;
-    let response = rx.await??;
-    ensure!(response == PriceStatus::Valid, "EMA price is invalid");
     Ok(())
 }
 
@@ -300,8 +273,7 @@ pub fn solution_hash_is_valid(
     }
 }
 
-/// Returns Ok if the provided `PoA` is valid, Err otherwise
-/// Check recall range is valid
+/// Returns Ok if the vdf recall range in the block is valid
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
@@ -481,101 +453,151 @@ pub fn poa_is_valid(
     Ok(())
 }
 
-/// Validates that the system transactions in the EVM block match the expected system transactions
+/// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data.
-pub async fn system_transactions_are_valid(
+pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
+    payload_provider: impl PayloadProvider,
 ) -> eyre::Result<()> {
-    // pending work:
-    // the local reth node does not have access to the incoming evm block.
-    // the responsibility for providing this evm block data is on the CL (irys)
-    // we need to propagate ExecutioinPayload in Irys gossip, and provide it here.
-    // The interactoin with the reth node then becomes:
-    //
-    // todo: we need to validate the executeion paylad (check that no `withdrawls` are present)
-    // let engine_api = reth_adapter.inner.engine_http_client();
-    // let result = engine_api
-    //     .new_payload_v3(
-    //         execution_payload_v3,
-    //         vec![], // blob version hashes are empty
-    //         parent_irys_block_hash,
-    //     )
-    //     .await?;
-    // // todo if result.is_syncing() we need to postpone the validation and attempt later
-    // ensure!(result.is_valid());
+    // 1. Validate that the evm block is valid
+    let payload = payload_provider
+        .wait_for_payload(&block.evm_block_hash)
+        .await
+        .ok_or_eyre("reth execution payload never arrived")?;
 
-    // 1. Fetch EVM block transactions
-    let block_txs = reth_adapter
-        .inner
-        .provider
-        .transactions_by_block(HashOrNumber::Hash(block.evm_block_hash))?
-        // todo add a test what happens with an invalid evm block
-        .ok_or_eyre("Block not found in reth")?;
+    let engine_api_client = reth_adapter.inner.engine_http_client();
+    let ExecutionData { payload, sidecar } = payload;
 
-    // 2. Extract system transactions from the beginning of the block
-    let mut system_txs = Vec::new();
-    for tx in block_txs {
-        // Try to decode as system transaction
-        if let Ok(system_tx) = SystemTransaction::decode(&mut tx.input().as_ref()) {
-            let tx_signer = tx.into_signed().recover_signer()?;
-            ensure!(
-                block.miner_address == tx_signer,
-                "System tx signer is not the miner"
-            );
-            system_txs.push(system_tx);
-        } else {
-            // If we can't decode as system tx, we've reached the regular transactions
-            break;
+    let ExecutionPayload::V3(payload) = payload else {
+        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+    };
+    ensure!(
+        payload.withdrawals().is_empty(),
+        "withdrawals must always be empty"
+    );
+
+    let versioned_hashes = sidecar
+        .versioned_hashes()
+        .ok_or_eyre("version hashes must be present")?
+        .clone();
+    loop {
+        let payload = engine_api_client
+            .new_payload_v4(
+                payload.clone(),
+                versioned_hashes.clone(),
+                block.previous_block_hash.into(),
+                RequestsOrHash::Requests(Requests::new(vec![])),
+            )
+            .await?;
+        match payload.status {
+            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
+                return Err(eyre::Report::msg(validation_error))
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
+                tracing::debug!("syncing extra blocks to validate payload");
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
+                tracing::info!("reth payload already known & is valid");
+                break;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
+                tracing::info!("accepted a side-chain (fork) payload");
+                break;
+            }
         }
     }
+    let evm_block: Block = payload.try_into_block()?;
 
-    // 3. Generate expected system transactions
+    // 2. Extract shadow transactions from the beginning of the block
+    let mut expect_shadow_txs = true;
+    let actual_shadow_txs = evm_block
+        .body
+        .transactions
+        .into_iter()
+        .map(|tx| {
+            if expect_shadow_txs {
+                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
+                let tx_signer = tx.into_signed().recover_signer()?;
+                let Ok(shadow_tx) = shadow_tx else {
+                    // after reaching first non-shadow tx, we scan the rest of the
+                    // txs to check if we don't have any stray shadow txs in there
+                    expect_shadow_txs = false;
+                    return Ok(None);
+                };
+
+                ensure!(
+                    block.miner_address == tx_signer,
+                    "Shadow tx signer is not the miner"
+                );
+                Ok(Some(shadow_tx))
+            } else {
+                // ensure that no other shadow txs are present in the block
+                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
+                ensure!(
+                    shadow_tx.is_err(),
+                    "shadow tx injected in the middle of the block"
+                );
+                Ok(None)
+            }
+        })
+        .filter_map(std::result::Result::transpose);
+
+    // 3. Generate expected shadow transactions
     let expected_txs =
-        generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
+        generate_expected_shadow_transactions_from_db(config, service_senders, block, db).await?;
 
     // 4. Validate they match
-    validate_system_transactions_match(system_txs.into_iter(), expected_txs.into_iter())
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter())
 }
 
-/// Generates expected system transactions by looking up required data from the database
+/// Generates expected shadow transactions by looking up required data from the mempool or database
 #[tracing::instrument(skip_all, err)]
-async fn generate_expected_system_transactions_from_db<'a>(
+async fn generate_expected_shadow_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<SystemTransaction>> {
+) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
-    let prev_block = db
-        .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
-        .ok_or_eyre("Previous block not found")?;
+    let prev_block = {
+        let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
+        service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block.previous_block_hash,
+                false,
+                tx_prev,
+            ))?;
+        match rx_prev.await? {
+            Some(h) => h,
+            None => db
+                .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
+                .ok_or_eyre("Previous block not found")?,
+        }
+    };
 
     // Look up commitment txs
     let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
 
-    // Look up submit transaction headers
-    let _submit_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
-        .ok_or_eyre("Submit ledger not found")?;
-    // todo: read the data txs from db and mempool
-    let submit_txs = [];
+    // Lookup data txs
+    let data_txs = extract_data_txs(service_senders, block, db).await?;
 
-    let system_txs = SystemTxGenerator::new(
+    let shadow_txs = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
         &prev_block,
     );
-    let system_txs = system_txs
-        .generate_all(&commitment_txs, &submit_txs)
+    let shadow_txs = shadow_txs
+        .generate_all(&commitment_txs, &data_txs)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(system_txs)
+    Ok(shadow_txs)
 }
 
 async fn extract_commitment_txs(
@@ -586,7 +608,7 @@ async fn extract_commitment_txs(
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
     let commitment_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't genertae system txs for commitment txs
+        // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
         vec![]
     } else {
         match &block.system_ledgers[..] {
@@ -595,7 +617,6 @@ async fn extract_commitment_txs(
                     ledger.ledger_id == SystemLedger::Commitment,
                     "only commitment ledger supported"
                 );
-                // ledger
 
                 get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
                     .await?
@@ -611,23 +632,49 @@ async fn extract_commitment_txs(
     Ok(commitment_txs)
 }
 
-/// Validates that the actual system transactions match the expected ones
+async fn extract_data_txs(
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
+    let txs = match &block.data_ledgers[..] {
+        [publish_ledger, submit_ledger] => {
+            ensure!(
+                publish_ledger.ledger_id == DataLedger::Publish,
+                "Publish ledger must be the first ledger in the data ledgers"
+            );
+            ensure!(
+                submit_ledger.ledger_id == DataLedger::Submit,
+                "Submit ledger must be the second ledger in the data ledgers"
+            );
+            // we only access the submit ledger data. Publish ledger does not require billing the user extra
+            get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                .await?
+        }
+        // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
+        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
+    };
+    Ok(txs)
+}
+
+/// Validates  the actual shadow transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
-fn validate_system_transactions_match(
-    actual: impl Iterator<Item = SystemTransaction>,
-    expected: impl Iterator<Item = SystemTransaction>,
+fn validate_shadow_transactions_match(
+    actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
+    expected: impl Iterator<Item = ShadowTransaction>,
 ) -> eyre::Result<()> {
-    // Validate each expected system transaction
+    // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
-            // If either of the systxs is not present, it means it was not generated as `expected`
-            // or it was not it was not included in the block. either way - an error
-            tracing::warn!(?data, "system tx len mismatch");
-            eyre::bail!("actual and expected system txs lens differ");
+            // If either of the shadow txs is not present, it means it was not generated as `expected`
+            // or it was not included in the block. either way - an error
+            tracing::warn!(?data, "shadow tx len mismatch");
+            eyre::bail!("actual and expected shadow txs lens differ");
         };
+        let actual = actual?;
         ensure!(
             actual == expected,
-            "System transaction mismatch at idx {}. expected {:?}, got {:?}",
+            "Shadow transaction mismatch at idx {}. expected {:?}, got {:?}",
             idx,
             expected,
             actual
@@ -641,12 +688,9 @@ fn validate_system_transactions_match(
 mod tests {
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        epoch_service::{
-            EpochServiceActor, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
-            NewEpochMessage,
-        },
+        epoch_service::EpochServiceInner,
         services::ServiceSenders,
-        BlockFinalizedMessage,
+        BlockFinalizedMessage, EpochServiceMessage,
     };
     use actix::{prelude::*, SystemRegistry};
 
@@ -700,7 +744,7 @@ mod tests {
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
             entropy_packing_iterations: 1_000,
-            chunk_migration_depth: 1,
+            block_migration_depth: 1,
             ..node_config.consensus_config()
         };
 
@@ -720,29 +764,32 @@ mod tests {
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
         let service_senders = ServiceSenders::new().0;
-        let epoch_service =
-            EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
-        let epoch_service_addr = epoch_service.start();
+        let mut epoch_service =
+            EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
 
         // Tell the epoch service to initialize the ledgers
-        let msg = NewEpochMessage {
+        let (sender, _rx) = tokio::sync::oneshot::channel();
+        match epoch_service.handle_message(EpochServiceMessage::NewEpoch {
+            new_epoch_block: arc_genesis.clone(),
             previous_epoch_block: None,
-            epoch_block: arc_genesis.clone(),
             commitments: Arc::new(commitments),
-        };
-        match epoch_service_addr.send(msg).await {
+            sender,
+        }) {
             Ok(_) => info!("Genesis Epoch tasks complete."),
             Err(_) => panic!("Failed to perform genesis epoch tasks"),
         }
 
-        let ledgers_guard = epoch_service_addr
-            .send(GetLedgersGuardMessage)
-            .await
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetLedgersGuard(sender))
             .unwrap();
-        let partitions_guard = epoch_service_addr
-            .send(GetPartitionAssignmentsGuardMessage)
-            .await
+        let ledgers_guard = rx.await.unwrap();
+
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        epoch_service
+            .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
             .unwrap();
+        let partitions_guard = rx.await.unwrap();
 
         let partition_hash = {
             let ledgers = ledgers_guard.read();
