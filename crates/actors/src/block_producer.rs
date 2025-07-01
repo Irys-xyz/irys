@@ -208,6 +208,23 @@ pub trait BlockProdStrategy {
                 (parent_block.clone(), *status, ema_snapshot)
             };
 
+            // Closure to fetch full block header from mempool or database
+            let fetch_block_header = async move |block_hash: H256| {
+                let (tx_prev, rx_prev) = oneshot::channel();
+                self.inner().service_senders.mempool.send(
+                    MempoolServiceMessage::GetBlockHeader(block_hash, false, tx_prev),
+                )?;
+                let header = match rx_prev.await? {
+                    Some(header) => header,
+                    None => self
+                        .inner()
+                        .db
+                        .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+                        .ok_or_else(|| eyre!("No block header found for hash {}", block_hash,))?,
+                };
+                Ok::<_, eyre::Error>(header)
+            };
+
             match status {
                 ChainState::Onchain
                 | ChainState::Validated(BlockState::ValidBlock)
@@ -215,41 +232,18 @@ pub trait BlockProdStrategy {
                     // Block is ready to use as parent
                     info!(?parent_block.block_hash, ?parent_block.height, "Starting block production, previous block");
 
-                    // Fetch full block header from mempool or database
-                    let (tx_prev, rx_prev) = oneshot::channel();
-                    self.inner().service_senders.mempool.send(
-                        MempoolServiceMessage::GetBlockHeader(
-                            parent_block.block_hash,
-                            false,
-                            tx_prev,
-                        ),
-                    )?;
-                    let header = match rx_prev.await? {
-                        Some(header) => header,
-                        None => self
-                            .inner()
-                            .db
-                            .view_eyre(|tx| {
-                                block_header_by_hash(tx, &parent_block.block_hash, false)
-                            })?
-                            .ok_or_else(|| {
-                                eyre!(
-                                    "No block header found for hash {} ({})",
-                                    parent_block.block_hash,
-                                    parent_block.height + 1
-                                )
-                            })?,
-                    };
-
+                    let header = fetch_block_header(parent_block.block_hash).await?;
                     return Ok((header, ema_snapshot));
                 }
-                ChainState::Validated(BlockState::Unknown)
-                | ChainState::NotOnchain(BlockState::Unknown) => {
-                    // Block validation not yet started, wait briefly
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
+                // todo: this can be simplified if the block tree service did the following:
+                // - report that VDF is valid (adding an intermediary state between ValidationScheduled and Valid).
+                //   That way we can eliminate duplicate code for vdf validation.
+                // - subscribing to "block updates" via a channel, thus eliminating extra sleeps.
+                //   ValidationService would also benefit from this
                 ChainState::Validated(BlockState::ValidationScheduled)
-                | ChainState::NotOnchain(BlockState::ValidationScheduled) => {
+                | ChainState::NotOnchain(BlockState::ValidationScheduled)
+                | ChainState::Validated(BlockState::Unknown)
+                | ChainState::NotOnchain(BlockState::Unknown) => {
                     // Wait for VDF steps to catch up before continuing.
                     let vdf_info = &parent_block.vdf_limiter_info;
                     let first_step_number = vdf_info.first_step_number();
@@ -258,6 +252,25 @@ pub trait BlockProdStrategy {
                         .vdf_steps_guard
                         .wait_for_step(prev_output_step_number)
                         .await;
+                    let stored_previous_step = self
+                        .inner()
+                        .vdf_steps_guard
+                        .get_step(prev_output_step_number)
+                        .expect("to get the step, since we've just waited for it");
+
+                    if stored_previous_step != vdf_info.prev_output {
+                        // VDF mismatch - block will be marked invalid soon
+                        debug!(?parent_block.block_hash, ?stored_previous_step, ?vdf_info.prev_output, "VDF step mismatch, waiting for block invalidation");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        // Continue loop to re-fetch latest canonical entry
+                        continue;
+                    }
+
+                    // VDF chain is valid, continue with building on this block
+                    info!(?parent_block.block_hash, ?parent_block.height, "Starting block production, previous block (after VDF validation)");
+
+                    let header = fetch_block_header(parent_block.block_hash).await?;
+                    return Ok((header, ema_snapshot));
                 }
             }
         }
