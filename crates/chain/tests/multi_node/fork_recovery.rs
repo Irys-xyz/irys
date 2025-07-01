@@ -80,7 +80,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     genesis_node.wait_until_height(2, seconds_to_wait).await?;
     // wait for migration to reach index height
     genesis_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_block_index_height(1, seconds_to_wait)
         .await?;
 
     // Get the genesis nodes view of the peers assignments
@@ -97,10 +97,10 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
     // Wait for the peers to receive & process the epoch block
     peer1_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_block_index_height(1, seconds_to_wait)
         .await?;
     peer2_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_block_index_height(1, seconds_to_wait)
         .await?;
 
     // Wait for them to pack their storage modules with the partition_hashes
@@ -153,10 +153,10 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     peer2_node.wait_until_height(3, seconds_to_wait).await?;
     // wait for migration to reach index height
     peer1_node
-        .wait_until_height_on_chain(2, seconds_to_wait)
+        .wait_until_block_index_height(2, seconds_to_wait)
         .await?;
     peer2_node
-        .wait_until_height_on_chain(2, seconds_to_wait)
+        .wait_until_block_index_height(2, seconds_to_wait)
         .await?;
 
     // Validate the peer blocks create forks with different transactions
@@ -203,7 +203,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     //wait for genesis block index height 2
     // FIXME: genesis_node.wait_until_height_on_chain(2) sometimes fails
     genesis_node
-        .wait_until_height_on_chain(2, seconds_to_wait)
+        .wait_until_block_index_height(2, seconds_to_wait)
         .await
         .expect("expected genesis to index block 2");
 

@@ -21,7 +21,7 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
     ctx.mine_block().await?;
     let header_1 = ctx.get_block_by_height(1).await?;
     ctx.mine_blocks(block_migration_depth.try_into()?).await?;
-    ctx.wait_until_height_on_chain(1, 5).await?;
+    ctx.wait_until_block_index_height(1, 5).await?;
 
     // restart the node
     let ctx = ctx.stop().await.start().await;
@@ -72,7 +72,7 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     ctx.mine_block().await?;
     let header_1 = ctx.get_block_by_height(1).await?;
     ctx.mine_blocks(block_migration_depth.try_into()?).await?;
-    ctx.wait_until_height_on_chain(1, 5).await?;
+    ctx.wait_until_block_index_height(1, 5).await?;
     // stop the node
     ctx.stop().await;
 
