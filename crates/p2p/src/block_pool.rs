@@ -512,6 +512,7 @@ where
     /// locally. After that, it waits for the payload to arrive and broadcasts it.
     /// This function spawns a new task to fire the request without waiting for the response.
     pub(crate) fn handle_execution_payload_for_prevalidated_block(&self, evm_block_hash: B256) {
+        debug!("Handling execution payload for EVM block hash: {:?}", evm_block_hash);
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
         tokio::spawn(async move {
