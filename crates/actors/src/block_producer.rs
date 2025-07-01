@@ -53,7 +53,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn, Span};
+use tracing::{debug, error, info, warn, Instrument, Span};
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -145,6 +145,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let span = self.span.clone();
+        let span2 = span.clone();
         let _span = span.enter();
         let solution = msg.0;
         info!(
@@ -169,6 +170,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     .fully_produce_new_block(solution)
                     .await
             }
+            .instrument(span2)
             .into_actor(self)
             .map(move |result, actor, _ctx| {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
