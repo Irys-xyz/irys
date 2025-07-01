@@ -9,6 +9,9 @@ use irys_types::{
     BlockHash, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
     IrysBlockHeader,
 };
+use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
+use irys_vdf::VdfStep;
 use lru::LruCache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
@@ -28,6 +31,7 @@ pub enum BlockPoolError {
     AlreadyProcessed(BlockHash),
     TryingToReprocessFinalizedBlock(BlockHash),
     PreviousBlockDoesNotMatch(String),
+    VdfFFError(String),
 }
 
 impl From<PeerListFacadeError> for BlockPoolError {
@@ -58,6 +62,8 @@ where
     execution_payload_provider: ExecutionPayloadProvider<P>,
 
     gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+    vdf_state: VdfStateReadonly,
+    vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
 }
 
 #[derive(Clone, Debug)]
@@ -197,6 +203,8 @@ where
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
         gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+        vdf_state: VdfStateReadonly,
+        vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
     ) -> Self {
         Self {
             db,
@@ -208,13 +216,112 @@ where
             block_status_provider,
             execution_payload_provider,
             gossip_broadcast_sender,
+            vdf_state,
+            vdf_ff_sender,
         }
+    }
+
+    /// Fast tracks a block by migrating it to the mempool without performing any validation.
+    /// This is useful when syncing a block from a node you trust
+    async fn fast_track_block(&self, block_header: IrysBlockHeader) -> Result<(), BlockPoolError> {
+        let block_height = block_header.height;
+        let block_hash = block_header.block_hash;
+        debug!(
+            "Fast tracking block {:?} (height {})",
+            block_header.block_hash, block_height,
+        );
+
+        // Check if the block is already processed or being processed
+        if self
+            .is_block_processing_or_processed(&block_header.block_hash, block_header.height)
+            .await
+        {
+            debug!(
+                "Block {:?} (height {}) is already processed or being processed",
+                block_header.block_hash, block_header.height,
+            );
+            return Ok(());
+        }
+
+        // First, wait for the previous VDF step to be available
+        let first_step_number = block_header.vdf_limiter_info.first_step_number();
+        let prev_output_step_number = first_step_number.saturating_sub(1);
+        debug!(
+            "Block pool: Waiting for VDF step number {}",
+            prev_output_step_number
+        );
+        self.vdf_state.wait_for_step(prev_output_step_number).await;
+
+        debug!(
+            "Block pool: Fast forwarding VDF steps for block {:?}",
+            block_header.block_hash
+        );
+        fast_forward_vdf_steps_from_block(&block_header.vdf_limiter_info, &self.vdf_ff_sender)
+            .map_err(|report| BlockPoolError::VdfFFError(report.to_string()))?;
+
+        if let Some(chunk) = &block_header.poa.chunk {
+            debug!(
+                "Block pool: Inserting POA chunk for block {:?}",
+                block_header.block_hash
+            );
+            self.mempool
+                .insert_poa_chunk(block_header.block_hash, chunk.clone())
+                .await
+                .map_err(|report| BlockPoolError::MempoolError(report.to_string()))?;
+        };
+
+        if block_height > 0 {
+            debug!(
+                "Block pool: Fast tracking block {:?}: Checking if the parent block is in the index",
+                block_header.block_hash,
+            );
+            if !self
+                .block_status_provider
+                .is_height_in_the_index(block_height - 1)
+            {
+                debug!(
+                    "Block pool: Parent block {:?} is not in the index, waiting for it to appear",
+                    block_height - 1
+                );
+                self.block_status_provider
+                    .wait_for_block_to_appear_in_index(block_height - 1)
+                    .await;
+            }
+        } else {
+            return Err(BlockPoolError::BlockError(
+                "Cannot fast track genesis block".to_string(),
+            ));
+        }
+
+        debug!("Block pool: Migrating block {:?}", block_header.block_hash);
+        self.mempool
+            .migrate_block(block_header)
+            .await
+            .map_err(|err| {
+                BlockPoolError::MempoolError(format!("Mempool migration error: {:?}", err))
+            })?;
+
+        debug!(
+            "Block pool: Block {:?} successfully fast tracked",
+            block_hash
+        );
+        self.sync_state.mark_processed(block_height as usize);
+        Ok(())
     }
 
     pub(crate) async fn process_block(
         &self,
         block_header: IrysBlockHeader,
+        skip_validation_for_fast_track: bool,
     ) -> Result<(), BlockPoolError> {
+        if skip_validation_for_fast_track {
+            debug!(
+                "Block pool: The block block {:?} (height {}) is marked for fast track, skipping validation",
+                block_header.block_hash, block_header.height,
+            );
+            return self.fast_track_block(block_header).await;
+        }
+
         check_block_status(
             &self.block_status_provider,
             block_header.block_hash,
@@ -363,7 +470,7 @@ where
                 orphaned_block.block_hash
             );
 
-            self.process_block(orphaned_block).await
+            self.process_block(orphaned_block, false).await
         } else {
             info!(
                 "No orphaned ancestor block found for block: {:?}",
@@ -408,7 +515,10 @@ where
         self.blocks_cache.mark_block_as_requested(block_hash).await;
         match self
             .peer_list
-            .request_block_from_the_network(block_hash)
+            .request_block_from_the_network(
+                block_hash,
+                self.sync_state.is_syncing_from_a_trusted_peer(),
+            )
             .await
         {
             Ok(()) => {

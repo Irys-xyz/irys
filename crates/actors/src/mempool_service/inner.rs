@@ -100,6 +100,7 @@ pub enum MempoolServiceMessage {
     ),
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
+    InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
 }
 
 impl Inner {
@@ -182,6 +183,16 @@ impl Inner {
                 MempoolServiceMessage::IngestDataTx(tx, response) => {
                     let response_value = self.handle_data_tx_ingress_message(tx).await;
                     if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::InsertPoAChunk(block_hash, chunk_data, response) => {
+                    self.mempool_state
+                        .write()
+                        .await
+                        .prevalidated_blocks_poa
+                        .insert(block_hash, chunk_data);
+                    if let Err(e) = response.send(()) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }

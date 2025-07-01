@@ -15,6 +15,8 @@ use irys_types::{
     Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
     NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
+use irys_vdf::state::{VdfState, VdfStateReadonly};
+use irys_vdf::VdfStep;
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
@@ -119,6 +121,8 @@ struct MockedServices {
         Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
     >,
     mempool_stub: MempoolStub,
+    vdf_state_stub: VdfStateReadonly,
+    vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
 }
 
 impl MockedServices {
@@ -153,6 +157,31 @@ impl MockedServices {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);
 
+        let vdf_state_stub = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
+            global_step: 0,
+            capacity: 0,
+            seeds: Default::default(),
+            mining_state_sender: None,
+        })));
+        let (vdf_sender, mut vdf_receiver) = tokio::sync::mpsc::unbounded_channel::<VdfStep>();
+        let vdf_state = vdf_state_stub.clone();
+        tokio::spawn(async move {
+            loop {
+                match vdf_receiver.recv().await {
+                    Some(step) => {
+                        debug!("Received VDF step: {:?}", step);
+                        let state = vdf_state.into_inner_cloned();
+                        let mut lock = state.write().unwrap();
+                        lock.global_step = step.global_step_number;
+                    }
+                    None => {
+                        debug!("VDF receiver channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+
         Self {
             block_status_provider_mock,
             block_discovery_stub,
@@ -160,6 +189,8 @@ impl MockedServices {
             db,
             execution_payload_provider,
             mempool_stub,
+            vdf_state_stub,
+            vdf_ff_sender: vdf_sender,
         }
     }
 }
@@ -175,11 +206,13 @@ async fn should_process_block() {
         db,
         execution_payload_provider,
         mempool_stub,
+        vdf_state_stub,
+        vdf_ff_sender,
     } = MockedServices::new(&config).await;
 
     let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
         tokio::sync::mpsc::unbounded_channel();
-    let sync_state = SyncState::new(false);
+    let sync_state = SyncState::new(false, false);
     let service = BlockPool::new(
         db.clone(),
         peer_addr,
@@ -189,6 +222,8 @@ async fn should_process_block() {
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
         gossip_broadcast_sender,
+        vdf_state_stub,
+        vdf_ff_sender,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
@@ -205,7 +240,7 @@ async fn should_process_block() {
     );
 
     service
-        .process_block(test_header.clone())
+        .process_block(test_header.clone(), false)
         .await
         .expect("can't process block");
 
@@ -266,6 +301,8 @@ async fn should_process_block_with_intermediate_block_in_api() {
         db,
         execution_payload_provider,
         mempool_stub,
+        vdf_state_stub,
+        vdf_ff_sender,
     } = MockedServices::new(&config).await;
 
     // Set the mock client to return block2 when requested
@@ -287,7 +324,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .await
         .expect("can't send message to peer list");
 
-    let sync_state = SyncState::new(false);
+    let sync_state = SyncState::new(false, false);
     let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
         tokio::sync::mpsc::unbounded_channel();
 
@@ -300,6 +337,8 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
         gossip_broadcast_sender,
+        vdf_state_stub,
+        vdf_ff_sender,
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
@@ -311,7 +350,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
         tokio::spawn(async move {
             debug!("Send block to block pool");
-            pool.process_block(block.clone())
+            pool.process_block(block.clone(), false)
                 .await
                 .expect("to process block");
         });
@@ -323,7 +362,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     // Process block3
     block_pool
-        .process_block(block3.clone())
+        .process_block(block3.clone(), false)
         .await
         .expect("can't process block");
 
@@ -353,9 +392,11 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         db,
         execution_payload_provider,
         mempool_stub,
+        vdf_state_stub,
+        vdf_ff_sender,
     } = MockedServices::new(&config).await;
 
-    let sync_state = SyncState::new(false);
+    let sync_state = SyncState::new(false, false);
     let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
         tokio::sync::mpsc::unbounded_channel();
 
@@ -368,6 +409,8 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         block_status_provider_mock.clone(),
         execution_payload_provider,
         gossip_broadcast_sender,
+        vdf_state_stub,
+        vdf_ff_sender,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -404,7 +447,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     );
 
     let res = block_pool
-        .process_block(header_building_on_very_old_block.clone())
+        .process_block(header_building_on_very_old_block.clone(), false)
         .await;
 
     assert!(res.is_err());
@@ -425,6 +468,8 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         db,
         execution_payload_provider,
         mempool_stub,
+        vdf_state_stub,
+        vdf_ff_sender,
     } = MockedServices::new(&config).await;
 
     let gossip_server = FakeGossipServer::new();
@@ -454,7 +499,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         .await
         .expect("can't send message to peer list");
 
-    let sync_state = SyncState::new(false);
+    let sync_state = SyncState::new(false, false);
     let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
         tokio::sync::mpsc::unbounded_channel();
 
@@ -467,6 +512,8 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
         gossip_broadcast_sender,
+        vdf_state_stub,
+        vdf_ff_sender,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -520,7 +567,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         if let Some(block) = block {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                let res = pool.process_block(block.clone()).await;
+                let res = pool.process_block(block.clone(), false).await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
                     errors_sender.send(err).unwrap();
@@ -536,7 +583,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     });
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
-    let res = block_pool.process_block(bogus_block).await;
+    let res = block_pool.process_block(bogus_block, false).await;
 
     assert!(res.is_ok());
     let processing_error = error_receiver.recv_timeout(Duration::from_secs(5)).unwrap();

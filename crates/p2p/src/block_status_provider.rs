@@ -98,6 +98,31 @@ impl BlockStatusProvider {
             BlockStatus::NotProcessed
         }
     }
+
+    pub async fn wait_for_block_to_appear_in_index(&self, block_height: u64) {
+        const ATTEMPTS_PER_SECOND: u64 = 5;
+
+        loop {
+            {
+                let binding = self.block_index_read_guard.read();
+                let index_item = binding.get_item(block_height);
+                if index_item.is_some() {
+                    return;
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                1000 / ATTEMPTS_PER_SECOND,
+            ))
+            .await;
+        }
+    }
+
+    pub fn is_height_in_the_index(&self, block_height: u64) -> bool {
+        let binding = self.block_index_read_guard.read();
+        let index_item = binding.get_item(block_height);
+        index_item.is_some()
+    }
 }
 
 /// Testing utilities for `BlockStatusProvider` to simulate different tree/index states.

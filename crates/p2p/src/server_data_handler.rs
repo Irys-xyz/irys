@@ -256,6 +256,7 @@ where
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
+        data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
         let span = self.span.clone();
         let _span = span.enter();
@@ -406,8 +407,18 @@ where
             }
         }
 
+        // TODO: Also check that we're within the block is withing the range
+        //   Or better yet, set sync_state.is_trusted_sync to false
+        let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
+
+        let skip_block_validation = is_syncing_from_a_trusted_peer
+            && self
+                .peer_list
+                .is_a_trusted_peer(source_miner_address, data_source_ip.ip())
+                .await?;
+
         self.block_pool
-            .process_block(block_header)
+            .process_block(block_header, skip_block_validation)
             .await
             .map_err(GossipError::BlockPool)?;
         Ok(())

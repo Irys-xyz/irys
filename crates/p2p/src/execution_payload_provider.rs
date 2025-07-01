@@ -201,7 +201,10 @@ where
             .put(evm_block_hash, ());
         if let Err(peer_list_error) = self
             .peer_list
-            .request_data_from_the_network(GossipDataRequest::ExecutionPayload(evm_block_hash))
+            .request_data_from_the_network(
+                GossipDataRequest::ExecutionPayload(evm_block_hash),
+                false,
+            )
             .await
         {
             self.cache

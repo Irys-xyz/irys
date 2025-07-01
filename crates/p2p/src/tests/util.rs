@@ -26,6 +26,8 @@ use irys_types::{
     PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
     VersionRequest, H256,
 };
+use irys_vdf::state::{VdfState, VdfStateReadonly};
+use irys_vdf::VdfStep;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -127,6 +129,17 @@ impl MempoolFacade for MempoolStub {
         _include_chunk: bool,
     ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
         Ok(None)
+    }
+
+    async fn migrate_block(
+        &self,
+        _irys_block_header: IrysBlockHeader,
+    ) -> std::result::Result<usize, TxIngressError> {
+        Ok(1)
+    }
+
+    async fn insert_poa_chunk(&self, _block_hash: H256, _chunk_data: Base64) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -283,6 +296,8 @@ pub(crate) struct GossipServiceTestFixture {
     pub block_status_provider: BlockStatusProvider,
     pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
     pub config: Config,
+    pub vdf_state_stub: VdfStateReadonly,
+    pub vdf_sender: mpsc::UnboundedSender<VdfStep>,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +369,31 @@ impl GossipServiceTestFixture {
             RethBlockProvider::Mock(mocked_execution_payloads),
         );
 
+        let vdf_state_stub = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
+            global_step: 0,
+            capacity: 0,
+            seeds: Default::default(),
+            mining_state_sender: None,
+        })));
+        let (vdf_sender, mut vdf_receiver) = tokio::sync::mpsc::unbounded_channel::<VdfStep>();
+        let vdf_state = vdf_state_stub.clone();
+        tokio::spawn(async move {
+            loop {
+                match vdf_receiver.recv().await {
+                    Some(step) => {
+                        debug!("Received VDF step: {:?}", step);
+                        let state = vdf_state.into_inner_cloned();
+                        let mut lock = state.write().unwrap();
+                        lock.global_step = step.global_step_number;
+                    }
+                    None => {
+                        debug!("VDF receiver channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+
         Self {
             // temp_dir,
             gossip_port,
@@ -373,6 +413,8 @@ impl GossipServiceTestFixture {
             block_status_provider: block_status_provider_mock,
             execution_payload_provider,
             config,
+            vdf_state_stub,
+            vdf_sender,
         }
     }
 
@@ -420,6 +462,8 @@ impl GossipServiceTestFixture {
                 gossip_listener,
                 self.block_status_provider.clone(),
                 execution_payload_provider,
+                self.vdf_state_stub.clone(),
+                self.vdf_sender.clone(),
             )
             .expect("failed to run gossip service");
 

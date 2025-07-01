@@ -347,7 +347,7 @@ impl IrysNode {
                 // Create a new genesis block for network initialization
                 self.create_new_genesis_block(genesis_block.clone())
             }
-            NodeMode::PeerSync => {
+            NodeMode::PeerSync | NodeMode::TrustedPeerSync => {
                 // Fetch genesis data from trusted peer when joining network
                 self.fetch_genesis_from_trusted_peer().await
             }
@@ -944,7 +944,7 @@ impl IrysNode {
             &config,
             &service_senders,
         );
-        let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
+        let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
@@ -1009,6 +1009,8 @@ impl IrysNode {
             gossip_listener,
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
             execution_payload_provider,
+            vdf_state_readonly.clone(),
+            service_senders.vdf_fast_forward.clone(),
         )?;
 
         // set up the price oracle

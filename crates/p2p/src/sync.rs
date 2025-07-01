@@ -16,15 +16,17 @@ const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 #[derive(Clone, Debug, Default)]
 pub struct SyncState {
     syncing: Arc<AtomicBool>,
+    trusted_sync: Arc<AtomicBool>,
     sync_target_height: Arc<AtomicUsize>,
     highest_processed_block: Arc<AtomicUsize>,
 }
 
 impl SyncState {
     /// Creates a new SyncState with given syncing flag and sync_height = 0
-    pub fn new(is_syncing: bool) -> Self {
+    pub fn new(is_syncing: bool, is_trusted_sync: bool) -> Self {
         Self {
             syncing: Arc::new(AtomicBool::new(is_syncing)),
+            trusted_sync: Arc::new(AtomicBool::new(is_trusted_sync)),
             sync_target_height: Arc::new(AtomicUsize::new(0)),
             highest_processed_block: Arc::new(AtomicUsize::new(0)),
         }
@@ -145,6 +147,18 @@ impl SyncState {
         .await
         .expect("Sync checking task failed");
     }
+
+    pub fn set_trusted_sync(&self, is_trusted_sync: bool) {
+        self.trusted_sync.store(is_trusted_sync, Ordering::Relaxed);
+    }
+
+    pub fn is_trusted_sync(&self) -> bool {
+        self.trusted_sync.load(Ordering::Relaxed)
+    }
+
+    pub fn is_syncing_from_a_trusted_peer(&self) -> bool {
+        self.is_syncing() && self.is_trusted_sync()
+    }
 }
 
 pub async fn sync_chain(
@@ -160,10 +174,18 @@ pub async fn sync_chain(
     if start_sync_from_height == 0 {
         start_sync_from_height = 1;
     }
+    let trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
     sync_state.set_syncing_from(start_sync_from_height);
+    sync_state.set_trusted_sync(trusted_mode);
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
 
-    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}", node_mode, start_sync_from_height);
+    if matches!(node_mode, NodeMode::TrustedPeerSync) {
+        sync_state.set_trusted_sync(true);
+    } else {
+        sync_state.set_trusted_sync(false);
+    }
+
+    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", node_mode, start_sync_from_height, sync_state.is_trusted_sync());
 
     if is_in_genesis_mode && sync_state.sync_target_height() <= 1 {
         debug!("Sync task: The node is a genesis node with no blocks, skipping the sync task");
@@ -224,7 +246,7 @@ pub async fn sync_chain(
             sync_state.sync_target_height()
         );
         match peer_list
-            .request_block_from_the_network(block.block_hash)
+            .request_block_from_the_network(block.block_hash, sync_state.is_trusted_sync())
             .await
         {
             Ok(()) => {
@@ -355,7 +377,7 @@ mod tests {
         async fn should_sync_and_change_status() -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;
-            let sync_state = SyncState::new(true);
+            let sync_state = SyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
                 open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())

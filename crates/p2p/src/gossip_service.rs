@@ -24,6 +24,8 @@ use core::time::Duration;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
+use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::VdfStep;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
@@ -141,7 +143,7 @@ impl P2PService {
             cache,
             broadcast_data_receiver: Some(broadcast_data_receiver),
             broadcast_data_sender,
-            sync_state: SyncState::new(true),
+            sync_state: SyncState::new(true, false),
         }
     }
 
@@ -163,6 +165,8 @@ impl P2PService {
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
+        vdf_state: VdfStateReadonly,
+        vdf_ff_sender: UnboundedSender<VdfStep>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -179,6 +183,8 @@ impl P2PService {
             block_status_provider,
             execution_payload_provider.clone(),
             self.broadcast_data_sender.clone(),
+            vdf_state,
+            vdf_ff_sender,
         );
 
         let server_data_handler = GossipServerDataHandler {
