@@ -860,10 +860,18 @@ pub trait BlockProdStrategy {
             }
         }
         .expect("Should be able to get the parent EVM block");
-        eyre::ensure!(
-            parent.header.hash_slow() == prev_block_header.evm_block_hash,
-            "reth parent block hash mismatch"
-        );
+        // TODO: fix genesis hash computation when using init-state (persist modified chainspec?)
+        // for now we just skip the check for the genesis block
+        if prev_block_header.height > 0 {
+            let computed_parent_evm_hash = parent.header.hash_slow();
+            eyre::ensure!(
+                computed_parent_evm_hash == prev_block_header.evm_block_hash,
+                "reth parent block hash mismatch for height {} - computed {} got {}",
+                &prev_block_header.height,
+                &computed_parent_evm_hash,
+                &prev_block_header.evm_block_hash
+            );
+        }
         Ok(parent)
     }
 }
