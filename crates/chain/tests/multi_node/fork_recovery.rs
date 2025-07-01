@@ -331,6 +331,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // config variables
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 15;
+    let genesis_block_hash = H256::zero();
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
@@ -343,10 +344,14 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let c_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
 
-    // genesis node
+    // genesis node / node_a
     let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("NODE_A", seconds_to_wait)
         .await;
+
+    // Post stake + pledge commitments to node_a
+    let peer_a_stake_tx = node_a.post_stake_commitment(genesis_block_hash).await;
+    let peer_a_pledge_tx = node_a.post_pledge_commitment(genesis_block_hash).await;
 
     // additional configs for peers
     let config_b = node_a.testnet_peer_with_signer(&c_signer);
@@ -360,8 +365,9 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .start_and_wait_for_packing("NODE_C", seconds_to_wait)
         .await;
 
-    // check peer heights match genesis - ie.e that we are all in sync
+    // check peer heights match genesis - i.e. that we are all in sync
     let current_height = node_a.get_height().await;
+    assert_eq!(current_height, 0);
     node_b
         .wait_until_height(current_height, seconds_to_wait)
         .await?;
@@ -391,10 +397,30 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .network
         .connect_peer(b_info.peer_id, b_info.peering_tcp_addr);
 
+    // peer a generates txs in isolation after block 0
+    let peer_a_b1_stake_tx = node_a.post_stake_commitment(genesis_block_hash).await;
+    let peer_a_b1_pledge_tx = node_a.post_pledge_commitment(genesis_block_hash).await;
+
+    // confirm node_a has txs in mempool
+    node_a
+        .wait_for_mempool_commitment_txs(
+            vec![peer_a_b1_stake_tx.id, peer_a_b1_pledge_tx.id],
+            seconds_to_wait,
+        )
+        .await?;
+
+    // peer b generates txs in isolation after block 0
+    let peer_b_b1_stake_tx = node_b.post_stake_commitment(genesis_block_hash).await;
+    let peer_b_b1_pledge_tx = node_b.post_pledge_commitment(genesis_block_hash).await;
+
+    // peer c generates txs in isolation after block 0
+    let peer_c_c1_stake_tx = node_c.post_stake_commitment(genesis_block_hash).await;
+    let peer_c_c1_pledge_tx = node_c.post_pledge_commitment(genesis_block_hash).await;
+
     // Mine competing blocks on A and B without gossip
-    let (a_block, _) = node_a.mine_block_without_gossip().await?;
-    let (b_block1, _) = node_b.mine_block_without_gossip().await?;
-    let (b_block2, _) = node_b.mine_block_without_gossip().await?;
+    let (a_block1, _) = node_a.mine_block_without_gossip().await?; // block a1
+    let (b_block1, _) = node_b.mine_block_without_gossip().await?; // block b1
+    let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
 
     // Gossip B's blocks to C only
     node_b.gossip_block(&b_block1)?;
@@ -403,9 +429,9 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     node_c.wait_for_block(&b_block1.block_hash, 10).await?;
     node_c.wait_for_block(&b_block2.block_hash, 10).await?;
 
-    // Node C mines on top of B's chain
-    let (c_block, _) = node_c.mine_block_without_gossip().await?;
-    assert_eq!(c_block.height, 3);
+    // Node C mines on top of B's chain and does not gossip it back to B
+    let (c_block3, _) = node_c.mine_block_without_gossip().await?;
+    assert_eq!(c_block3.height, 3); // block c3
 
     // Reconnect all nodes
     a_ctx
@@ -420,24 +446,24 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // Gossip all blocks so everyone syncs
     node_b.gossip_block(&b_block1)?;
     node_b.gossip_block(&b_block2)?;
-    node_c.gossip_block(&c_block)?;
-    node_a.gossip_block(&a_block)?;
+    node_c.gossip_block(&c_block3)?;
+    node_a.gossip_block(&a_block1)?;
 
     // confirm all three nodes are at the expected height
     node_a
-        .wait_until_height(c_block.height, seconds_to_wait)
+        .wait_until_height(c_block3.height, seconds_to_wait)
         .await?;
     node_b
-        .wait_until_height(c_block.height, seconds_to_wait)
+        .wait_until_height(c_block3.height, seconds_to_wait)
         .await?;
     node_c
-        .wait_until_height(c_block.height, seconds_to_wait)
+        .wait_until_height(c_block3.height, seconds_to_wait)
         .await?;
 
     // confirm block_c is the heighest block on all three nodes
-    let c_a = node_a.get_block_by_height(c_block.height).await?;
-    let c_b = node_b.get_block_by_height(c_block.height).await?;
-    let c_c = node_c.get_block_by_height(c_block.height).await?;
+    let c_a = node_a.get_block_by_height(c_block3.height).await?;
+    let c_b = node_b.get_block_by_height(c_block3.height).await?;
+    let c_c = node_c.get_block_by_height(c_block3.height).await?;
     assert_eq!(c_a, c_b);
     assert_eq!(c_a, c_c);
 
