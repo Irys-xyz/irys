@@ -369,13 +369,15 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .wait_until_height(current_height, seconds_to_wait)
         .await?;
 
-    let a_ctx = node_a.node_ctx.reth_node_adapter.clone();
-    let b_ctx = node_b.node_ctx.reth_node_adapter.clone();
-    let c_ctx = node_c.node_ctx.reth_node_adapter.clone();
-
+    // disconnect peers so they cannot gossip to each other
     let _a_peers = node_a.disconnect_all_peers().await?;
     let _b_peers = node_b.disconnect_all_peers().await?;
     let _c_peers = node_c.disconnect_all_peers().await?;
+
+    // prepare for direct connects
+    let a_ctx = node_a.node_ctx.reth_node_adapter.clone();
+    let b_ctx = node_b.node_ctx.reth_node_adapter.clone();
+    let c_ctx = node_c.node_ctx.reth_node_adapter.clone();
 
     // Connect B <-> C directly
     let b_info = node_b.node_ctx.config.node_config.reth_peer_info.clone();
