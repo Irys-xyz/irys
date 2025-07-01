@@ -235,40 +235,9 @@ pub trait BlockProdStrategy {
                     let header = fetch_block_header(parent_block.block_hash).await?;
                     return Ok((header, ema_snapshot));
                 }
-                // todo: this can be simplified if the block tree service did the following:
-                // - report that VDF is valid (adding an intermediary state between ValidationScheduled and Valid).
-                //   That way we can eliminate duplicate code for vdf validation.
-                // - subscribing to "block updates" via a channel, thus eliminating extra sleeps.
-                //   ValidationService would also benefit from this
-                ChainState::Validated(BlockState::ValidationScheduled | BlockState::Unknown)
-                | ChainState::NotOnchain(BlockState::ValidationScheduled | BlockState::Unknown) => {
-                    // Wait for VDF steps to catch up before continuing.
-                    let vdf_info = &parent_block.vdf_limiter_info;
-                    let first_step_number = vdf_info.first_step_number();
-                    let prev_output_step_number = first_step_number.saturating_sub(1);
-                    self.inner()
-                        .vdf_steps_guard
-                        .wait_for_step(prev_output_step_number)
-                        .await;
-                    let stored_previous_step = self
-                        .inner()
-                        .vdf_steps_guard
-                        .get_step(prev_output_step_number)
-                        .expect("to get the step, since we've just waited for it");
-
-                    if stored_previous_step != vdf_info.prev_output {
-                        // VDF mismatch - block will be marked invalid soon
-                        debug!(?parent_block.block_hash, ?stored_previous_step, ?vdf_info.prev_output, "VDF step mismatch, waiting for block invalidation");
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        // Continue loop to re-fetch latest canonical entry
-                        continue;
-                    }
-
-                    // VDF chain is valid, continue with building on this block
-                    info!(?parent_block.block_hash, ?parent_block.height, "Starting block production, previous block (after VDF validation)");
-
-                    let header = fetch_block_header(parent_block.block_hash).await?;
-                    return Ok((header, ema_snapshot));
+                _ => {
+                    // Block is not yet marked as ValidBlock, wait briefly
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
