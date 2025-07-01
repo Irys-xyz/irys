@@ -764,8 +764,12 @@ mod tests {
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
         let service_senders = ServiceSenders::new().0;
-        let mut epoch_service =
-            EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+        let mut epoch_service = EpochServiceInner::new(
+            &service_senders,
+            &storage_submodules_config,
+            &config,
+            System::current(),
+        );
 
         // Tell the epoch service to initialize the ledgers
         let (sender, _rx) = tokio::sync::oneshot::channel();

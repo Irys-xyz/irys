@@ -5,7 +5,7 @@ use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
 use tracing::debug;
 
 #[actix_web::test]
-async fn heavy_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
         "RUST_LOG",

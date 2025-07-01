@@ -1,4 +1,4 @@
-use actix::Actor as _;
+use actix::{Actor as _, System};
 use base58::ToBase58 as _;
 use irys_actors::epoch_service::EpochReplayData;
 
@@ -59,8 +59,12 @@ async fn genesis_test() {
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
-    let mut epoch_service =
-        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+    let mut epoch_service = EpochServiceInner::new(
+        &service_senders,
+        &storage_submodules_config,
+        &config,
+        System::current(),
+    );
     let miner_address = config.node_config.miner_address();
 
     // Process genesis message directly instead of through actor system
@@ -227,8 +231,12 @@ async fn add_slots_test() {
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
-    let mut epoch_service =
-        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+    let mut epoch_service = EpochServiceInner::new(
+        &service_senders,
+        &storage_submodules_config,
+        &config,
+        System::current(),
+    );
 
     let _ = epoch_service.initialize(genesis_block.clone(), commitments);
 
@@ -353,8 +361,12 @@ async fn partition_expiration_and_repacking_test() {
     // Create epoch service
     let storage_submodules_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
-    let mut epoch_service =
-        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+    let mut epoch_service = EpochServiceInner::new(
+        &service_senders,
+        &storage_submodules_config,
+        &config,
+        System::current(),
+    );
     let storage_module_infos = epoch_service
         .initialize(genesis_block.clone(), commitments)
         .unwrap();
@@ -725,8 +737,12 @@ async fn epoch_blocks_reinitialization_test() {
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
     let service_senders = ServiceSenders::new().0;
-    let mut epoch_service =
-        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+    let mut epoch_service = EpochServiceInner::new(
+        &service_senders,
+        &storage_submodules_config,
+        &config,
+        System::current(),
+    );
 
     // Initialize genesis block at height 0
     let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -866,8 +882,12 @@ async fn epoch_blocks_reinitialization_test() {
 
     let service_senders = ServiceSenders::new().0;
     // Get the genesis storage modules and their assigned partitions
-    let mut epoch_service =
-        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+    let mut epoch_service = EpochServiceInner::new(
+        &service_senders,
+        &storage_submodules_config,
+        &config,
+        System::current(),
+    );
     let storage_module_infos = epoch_service
         .initialize(genesis_block, commitments)
         .unwrap();
@@ -933,8 +953,12 @@ async fn partitions_assignment_determinism_test() {
 
     let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
     let service_senders = ServiceSenders::new().0;
-    let mut epoch_service =
-        EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
+    let mut epoch_service = EpochServiceInner::new(
+        &service_senders,
+        &storage_submodules_config,
+        &config,
+        System::current(),
+    );
 
     let _ = epoch_service.initialize(genesis_block.clone(), commitments);
 

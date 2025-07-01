@@ -284,6 +284,7 @@ pub fn create_and_apply_fork(
         fork_parent,
         new_tip,
         timestamp: SystemTime::now(),
+        db: None,
     };
 
     (reorg_event, fork_prices)

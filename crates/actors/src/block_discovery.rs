@@ -501,6 +501,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                                 ))
                             })?;
 
+                        // FIXME: this should be done only if this extends the canonical chain
                         let (oneshot_tx, rx) = tokio::sync::oneshot::channel();
                         epoch_sender
                             .send(crate::EpochServiceMessage::NewEpoch {

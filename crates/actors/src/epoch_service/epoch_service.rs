@@ -2,7 +2,7 @@ use actix::{System, SystemService as _};
 use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::{data_ledger::*, SystemLedger};
+use irys_database::{block_header_by_hash, data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
@@ -16,6 +16,7 @@ use irys_types::{
 use irys_types::{Config, H256List};
 use openssl::sha;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use reth_db::Database;
 use std::{
     collections::VecDeque,
     pin::pin,
@@ -29,15 +30,15 @@ use tokio::{
 use tracing::{debug, error, trace, warn, Span};
 
 use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
-use crate::StorageModuleServiceMessage;
 use crate::{block_tree_service::ReorgEvent, services::ServiceSenders};
 use crate::{
     broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
     EpochServiceMessage,
 };
+use crate::{mempool_service::MempoolServiceMessage, StorageModuleServiceMessage};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EpochServiceInner {
     /// Source of randomness derived from previous epoch
     pub last_epoch_hash: H256,
@@ -61,6 +62,10 @@ pub struct EpochServiceInner {
     pub span: Span,
     /// Current actix system (temp hack until broadcast mining actor is a broadcast)
     pub system: System,
+    /// Keeps a snapshot of the previous epoch state to simplify the logic of reorgs
+    pub previous_epoch_snapshot: Option<Box<(H256, EpochServiceInner)>>,
+    /// Hold onto a copy of the genesis block from initialization
+    genesis_block: Option<IrysBlockHeader>,
 }
 
 /// Reasons why the epoch service actors epoch tasks might fail
@@ -90,6 +95,7 @@ impl EpochServiceInner {
         service_senders: &ServiceSenders,
         storage_submodules_config: &StorageSubmodulesConfig,
         config: &Config,
+        system: System,
     ) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
@@ -102,7 +108,9 @@ impl EpochServiceInner {
             config: config.clone(),
             commitment_state: Default::default(),
             span: Span::current(),
-            system: System::current(),
+            system,
+            previous_epoch_snapshot: None,
+            genesis_block: None,
         }
     }
     pub fn initialize(
@@ -121,6 +129,8 @@ impl EpochServiceInner {
             }
         }
 
+        self.genesis_block = Some(genesis_block);
+
         let storage_module_info =
             self.map_storage_modules_to_partition_assignments(&self.storage_submodules_config);
 
@@ -134,7 +144,7 @@ impl EpochServiceInner {
         let span = self.span.clone();
         let _span = span.enter();
         // Initialize as None for the first iteration
-        let mut previous_epoch_block: Option<IrysBlockHeader> = None;
+        let mut previous_epoch_block: Option<IrysBlockHeader> = self.genesis_block.clone();
 
         for replay_data in epoch_replay_data {
             let block_header = replay_data.epoch_block;
@@ -232,6 +242,8 @@ impl EpochServiceInner {
             block_hash = %new_epoch_block.block_hash.0.to_base58(),
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
+
+        self.store_previous_epoch_snapshot(previous_epoch_block, new_epoch_block);
 
         self.compute_commitment_state(new_epoch_commitments);
 
@@ -601,6 +613,48 @@ impl EpochServiceInner {
         slots_to_add
     }
 
+    /// Stores a deep copy of the current epoch state as a snapshot before transitioning to a new epoch.
+    /// Skips storage for genesis blocks. Creates independent copies of shared data structures
+    /// (ledgers, partition assignments, commitment state) to preserve historical state.
+    pub fn store_previous_epoch_snapshot(
+        &mut self,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
+    ) {
+        if new_epoch_block.is_genesis() {
+            return;
+        }
+
+        let mut snapshot = self.clone();
+
+        // Deep copy the ledgers
+        let ledgers = self.ledgers.read().unwrap().clone();
+        // Replace the entire Arc with a new one containing the cloned data
+        snapshot.ledgers = Arc::new(RwLock::new(ledgers));
+
+        // Deep copy the partition assignments
+        let pa = self.partition_assignments.read().unwrap().clone();
+        snapshot.partition_assignments = Arc::new(RwLock::new(pa));
+
+        // Deep copy the commitment state
+        let commitment_state = self.commitment_state.read().unwrap().clone();
+        snapshot.commitment_state = Arc::new(RwLock::new(commitment_state));
+
+        // Store the deep copied snapshot state as the previous epoch snapshot
+        debug!(
+            "{:?}\n{:?}",
+            previous_epoch_block.as_ref().map(|block| &block.block_hash),
+            new_epoch_block.block_hash
+        );
+
+        if previous_epoch_block.is_none() {
+            debug!("It's none");
+        }
+
+        let block_hash = previous_epoch_block.as_ref().unwrap().block_hash;
+        self.previous_epoch_snapshot = Some(Box::new((block_hash, snapshot)));
+    }
+
     /// Computes the commitment state based on an epoch block and commitment transactions
     ///
     /// This function processes stake and pledge commitments to build a complete
@@ -944,18 +998,6 @@ impl EpochServiceInner {
 
         module_infos
     }
-
-    fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
-        tracing::debug!(
-            "Processing reorg: {} orphaned blocks from height {}",
-            event.old_fork.len(),
-            event.fork_parent.height
-        );
-
-        tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
-
-        Ok(())
-    }
 }
 
 /// SHA256 hash the message parameter
@@ -988,6 +1030,7 @@ impl EpochService {
         let service_senders = service_senders.clone();
         let storage_submodules_config = storage_submodules_config.clone();
         let system = System::current();
+        let block_hash = genesis_block.block_hash;
 
         exec.spawn_critical_with_graceful_shutdown_signal("Epoch Service", |shutdown| async move {
             let mut pending_epoch_service = Self {
@@ -1000,12 +1043,22 @@ impl EpochService {
                     partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
                     all_active_partitions: Vec::new(),
                     unassigned_partitions: Vec::new(),
-                    service_senders,
+                    service_senders: service_senders.clone(),
                     storage_submodules_config: storage_submodules_config.clone(),
                     config: config.clone(),
                     commitment_state: Default::default(),
                     span: Span::current(),
-                    system,
+                    system: system.clone(),
+                    previous_epoch_snapshot: Some(Box::new((
+                        block_hash,
+                        EpochServiceInner::new(
+                            &service_senders,
+                            &storage_submodules_config,
+                            &config,
+                            system,
+                        ),
+                    ))),
+                    genesis_block: None,
                 },
             };
 
@@ -1017,10 +1070,12 @@ impl EpochService {
                 Err(e) => panic!("{}", e),
             }
 
-            pending_epoch_service
-                .start()
-                .await
-                .expect("Epoch Service encountered an irrecoverable error")
+            match pending_epoch_service.start().await {
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::error!("EpochService encountered an irrecoverable error: {}", err)
+                }
+            };
         })
     }
 
@@ -1044,7 +1099,8 @@ impl EpochService {
                 // Handle reorg events
                 reorg_result = self.reorg_rx.recv() => {
                     if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
-                        self.inner.handle_reorg(event)?;
+                        let mempool = self.inner.service_senders.mempool.clone();
+                        handle_reorg(&mut self.inner, &mempool, event).await?;
                     }
                 }
 
@@ -1067,6 +1123,77 @@ impl EpochService {
         tracing::info!("shutting down epoch service");
         Ok(())
     }
+}
+
+/// Handles blockchain reorganization events by detecting epoch blocks in the new canonical chain.
+/// If an epoch block is found, restores the previous epoch snapshot and re-executes epoch tasks
+/// to maintain consistent epoch state after the reorg.
+async fn handle_reorg(
+    inner: &mut EpochServiceInner,
+    mempool: &tokio::sync::mpsc::UnboundedSender<MempoolServiceMessage>,
+    event: ReorgEvent,
+) -> eyre::Result<()> {
+    tracing::debug!(
+        "Processing reorg: {} orphaned blocks from height {}",
+        event.old_fork.len(),
+        event.fork_parent.height
+    );
+
+    // Check to see if the new canonical chain contains an epoch block
+    let new_epoch_block = event
+        .new_fork
+        .iter()
+        .find(|bh| inner.is_epoch_block(bh).is_ok());
+
+    if let Some(new_epoch_block) = new_epoch_block {
+        // If it does, collect the commitment tx headers and previous epoch block
+        let commitment_tx_ids = new_epoch_block.get_commitment_ledger_tx_ids();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        mempool.send(MempoolServiceMessage::GetCommitmentTxs {
+            commitment_tx_ids,
+            response: tx,
+        })?;
+
+        let commitment_txs = rx.await?.values().cloned().collect::<Vec<_>>();
+
+        // Get the last epoch block header by hash
+        let block_hash = inner.previous_epoch_snapshot.as_ref().unwrap().0;
+
+        // Check the mempool first
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        mempool.send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
+        let mut previous_epoch_block = rx.await?;
+
+        // Then check the DB if necessary
+        if previous_epoch_block.is_none() {
+            previous_epoch_block = match event
+                .db
+                .expect("db should be initialized in the ReorgEvent")
+                .view(|tx| block_header_by_hash(tx, &block_hash, false))
+                .unwrap()
+            {
+                Ok(bh) => bh,
+                Err(err) => {
+                    return Err(eyre::eyre!(
+                        "Failed to find previous epoch block: {:?}",
+                        err
+                    ))
+                }
+            };
+        }
+
+        // Restore the previous epoch snapshot
+        *inner = inner.previous_epoch_snapshot.as_ref().unwrap().1.clone();
+
+        // re-perform the epoch tasks to compute a new canonical state
+        inner
+            .perform_epoch_tasks(&previous_epoch_block, &new_epoch_block, commitment_txs)
+            .map_err(|err| eyre::eyre!("Failed to perform epoch tasks: {:?}", err))?;
+    }
+
+    tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
+
+    Ok(())
 }
 
 fn handle_broadcast_recv<T>(

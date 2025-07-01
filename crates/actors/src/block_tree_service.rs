@@ -116,6 +116,7 @@ pub struct ReorgEvent {
     pub fork_parent: Arc<IrysBlockHeader>,
     pub new_tip: BlockHash,
     pub timestamp: SystemTime,
+    pub db: Option<DatabaseProvider>,
 }
 
 #[derive(Debug, Clone)]
@@ -577,7 +578,8 @@ impl BlockTreeServiceInner {
                             let fork_height = fork_block.height;
 
                             // Populate `old_canonical` by converting each orphaned block into a `ChainCacheEntry`.
-                            let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
+                            let mut old_canonical: Vec<BlockTreeEntry> =
+                                Vec::with_capacity(orphaned_blocks.len());
                             for block in &orphaned_blocks {
                                 let entry = make_block_tree_entry(block);
                                 old_canonical.push(entry);
@@ -620,6 +622,7 @@ impl BlockTreeServiceInner {
                                 fork_parent: Arc::new(fork_block.clone()),
                                 new_tip: block_hash,
                                 timestamp: SystemTime::now(),
+                                db: Some(self.db.clone()),
                             };
 
                             // Broadcast reorg event using the shared sender

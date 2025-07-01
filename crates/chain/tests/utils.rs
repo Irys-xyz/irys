@@ -728,8 +728,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn mine_block(&self) -> eyre::Result<()> {
-        self.mine_blocks(1).await
+    pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
+        let height = self.get_height().await;
+        self.mine_blocks(1).await?;
+        let hash = self.wait_until_height(height + 1, 10).await?;
+        self.get_block_by_hash(&hash)
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -1214,6 +1217,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await;
     }
 
+    pub async fn post_commitment_tx_raw_without_gossip(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) {
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        self.post_commitment_tx_request(&api_uri, commitment_tx)
+            .await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+    }
+
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let pledge_tx = CommitmentTransaction {
             commitment_type: CommitmentType::Pledge,
@@ -1229,6 +1244,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, &pledge_tx).await;
 
+        pledge_tx
+    }
+
+    pub async fn post_pledge_commitment_without_gossip(
+        &self,
+        anchor: H256,
+    ) -> CommitmentTransaction {
+        let pledge_tx = CommitmentTransaction {
+            commitment_type: CommitmentType::Pledge,
+            anchor,
+            fee: 1,
+            ..Default::default()
+        };
+        let signer = self.cfg.signer();
+        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        self.post_commitment_tx_raw_without_gossip(&pledge_tx).await;
         pledge_tx
     }
 
