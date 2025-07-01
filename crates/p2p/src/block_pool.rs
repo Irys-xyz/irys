@@ -315,6 +315,8 @@ where
             ));
         }
 
+        self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, true);
+
         debug!("Block pool: Migrating block {:?}", block_header.block_hash);
         self.mempool
             .migrate_block(block_header.clone())
@@ -377,6 +379,7 @@ where
             block_hash
         );
 
+        let mut process_ancestor = false;
         if let Some(switch_to_full_validation_at_height) =
             self.sync_state.full_validation_switch_height()
         {
@@ -404,11 +407,25 @@ where
                         err
                     ))
                 })?;
+                debug!("Block pool: Reloaded block tree cache");
+                process_ancestor = true;
             }
         }
 
         self.sync_state.mark_processed(block_height as usize);
         self.blocks_cache.remove_block(&block_hash).await;
+        if process_ancestor {
+            debug!("BlockPool: Checking if fast tracked block has orphaned ancestors");
+            let fut = Box::pin(self.process_orphaned_ancestor(block_hash));
+            if let Err(err) = fut.await {
+                // Ancestor processing doesn't affect the current block processing,
+                //  but it still is important to log the error
+                error!(
+                    "Error processing orphaned ancestor for block {:?}: {:?}",
+                    block_hash, err
+                );
+            }
+        }
         Ok(())
     }
 
@@ -484,7 +501,10 @@ where
             );
 
             // Request the execution payload for the block if it is not already stored locally
-            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash);
+            self.handle_execution_payload_for_prevalidated_block(
+                block_header.evm_block_hash,
+                false,
+            );
 
             debug!(
                 "Block pool: Marking block {:?} as processed",
@@ -521,7 +541,11 @@ where
     /// Requests the execution payload for the given EVM block hash if it is not already stored
     /// locally. After that, it waits for the payload to arrive and broadcasts it.
     /// This function spawns a new task to fire the request without waiting for the response.
-    pub(crate) fn handle_execution_payload_for_prevalidated_block(&self, evm_block_hash: B256) {
+    pub(crate) fn handle_execution_payload_for_prevalidated_block(
+        &self,
+        evm_block_hash: B256,
+        skip_validation_and_submit_payload: bool,
+    ) {
         debug!(
             "Block pool: Handling execution payload for EVM block hash: {:?}",
             evm_block_hash
@@ -530,9 +554,25 @@ where
         let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
         tokio::spawn(async move {
             if let Some(sealed_block) = execution_payload_provider
-                .wait_for_sealed_block(&evm_block_hash)
+                .wait_for_sealed_block(&evm_block_hash, skip_validation_and_submit_payload)
                 .await
             {
+                if skip_validation_and_submit_payload {
+                    debug!(
+                        "Block pool: Skipping validation and submitting payload for block {:?}",
+                        evm_block_hash
+                    );
+                    if let Err(err) = execution_payload_provider
+                        .dangerously_submit_validated_payload(sealed_block.clone())
+                        .await
+                    {
+                        error!(
+                            "Failed to submit payload for block {:?}: {:?}",
+                            evm_block_hash, err
+                        );
+                    }
+                }
+
                 let evm_block = sealed_block.into_block();
                 if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
                     GossipCacheKey::ExecutionPayload(evm_block_hash),

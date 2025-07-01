@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use irys_actors::block_validation::PayloadProvider;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
-use reth::builder::Block as _;
+use reth::builder::{BeaconOnNewPayloadError, Block as _};
 use reth::core::primitives::SealedBlock;
 use reth::network::types::HashOrNumber;
 use reth::primitives::Block;
@@ -28,6 +28,20 @@ pub enum RethBlockProvider {
     IrysRethAdapter(IrysRethNodeAdapter),
     #[cfg(test)]
     Mock(Arc<std::sync::RwLock<HashMap<B256, Block>>>),
+}
+
+#[derive(Debug)]
+pub enum ExecutionPayloadProviderError {
+    ProviderError(reth::providers::ProviderError),
+    PayloadNotFound(B256),
+    BeaconOnNewPayloadError(BeaconOnNewPayloadError),
+    UpdateForkchoiceError(eyre::Report),
+}
+
+impl From<BeaconOnNewPayloadError> for ExecutionPayloadProviderError {
+    fn from(err: BeaconOnNewPayloadError) -> Self {
+        Self::BeaconOnNewPayloadError(err)
+    }
 }
 
 impl RethBlockProvider {
@@ -64,6 +78,47 @@ impl RethBlockProvider {
             .ok()??;
 
         Some(evm_block)
+    }
+
+    /// Submits a validated execution payload to the beacon engine. As the name implies,
+    /// you should validate the payload before submitting it.
+    pub async fn submit_validated_payload(
+        &self,
+        payload: ExecutionData,
+    ) -> Result<(), ExecutionPayloadProviderError> {
+        let payload_block_hash = payload.block_hash();
+        match self {
+            Self::IrysRethAdapter(adapter) => {
+                debug!("Submitting payload {payload_block_hash:?} to the beacon engine");
+                adapter
+                    .inner
+                    .add_ons_handle
+                    .beacon_engine_handle
+                    .new_payload(payload)
+                    .await?;
+                debug!("Successfully submitted payload {payload_block_hash:?}");
+
+                // trigger forkchoice update via engine api to commit the block to the blockchain
+                adapter
+                    .update_forkchoice_full(
+                        payload_block_hash,
+                        // TODO: we mark this block as confirmed because we produced it?
+                        Some(payload_block_hash),
+                        // TODO: marking a block as finalized is handled by a different service - not sure about this
+                        None,
+                    )
+                    .await
+                    .map_err(ExecutionPayloadProviderError::UpdateForkchoiceError)?;
+
+                debug!("Successfully updated forkchoice after submitting payload {payload_block_hash:?}");
+                Ok(())
+            }
+            #[cfg(test)]
+            Self::Mock(_) => {
+                debug!("Mock provider does not support submitting payloads");
+                Ok(())
+            }
+        }
     }
 
     #[cfg(test)]
@@ -176,24 +231,33 @@ where
     /// let evm_block_hash = irys_block.evm_block_hash;
     /// ```
     pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        self.wait_for_sealed_block(evm_block_hash).await.map(|sealed_block| {
+        self.wait_for_sealed_block(evm_block_hash, false).await.map(|sealed_block| {
             <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block)
         })
     }
 
     /// Same as [ExecutionPayloadProvider::wait_for_payload], but returns the sealed block instead
     /// of the execution data.
-    pub async fn wait_for_sealed_block(&self, evm_block_hash: &B256) -> Option<SealedBlock<Block>> {
+    pub async fn wait_for_sealed_block(
+        &self,
+        evm_block_hash: &B256,
+        request_only_from_trusted_peers: bool,
+    ) -> Option<SealedBlock<Block>> {
         if let Some(sealed_block) = self.get_locally_stored_sealed_block(evm_block_hash).await {
             return Some(sealed_block);
         }
 
         let receiver = self.block_receiver(*evm_block_hash).await;
-        self.request_payload_from_the_network(*evm_block_hash).await;
+        self.request_payload_from_the_network(*evm_block_hash, request_only_from_trusted_peers)
+            .await;
         receiver.await.ok()
     }
 
-    pub async fn request_payload_from_the_network(&self, evm_block_hash: B256) {
+    pub async fn request_payload_from_the_network(
+        &self,
+        evm_block_hash: B256,
+        use_trusted_peers_only: bool,
+    ) {
         self.cache
             .write()
             .await
@@ -203,7 +267,7 @@ where
             .peer_list
             .request_data_from_the_network(
                 GossipDataRequest::ExecutionPayload(evm_block_hash),
-                false,
+                use_trusted_peers_only,
             )
             .await
         {
@@ -257,6 +321,19 @@ where
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    /// This method is dangerous because it allows you to submit a payload without validating it.
+    /// Use at your own risk!
+    pub async fn dangerously_submit_validated_payload(
+        &self,
+        sealed_block: SealedBlock<Block>,
+    ) -> Result<(), ExecutionPayloadProviderError> {
+        let execution_data = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
+
+        self.reth_payload_provider
+            .submit_validated_payload(execution_data)
+            .await
     }
 }
 
