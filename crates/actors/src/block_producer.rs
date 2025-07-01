@@ -193,75 +193,74 @@ pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        let (prev, ema_snapshot) = {
-            let read = self.inner().block_tree_guard.read();
-            let parent_entry = read.get_latest_canonical_entry();
-            let (parent_block, status) = read
-                .get_block_and_status(&parent_entry.block_hash)
-                .expect("block to be present");
+        loop {
+            // hold guard briefly to get latest canonical chain state
+            let (parent_block, status, ema_snapshot) = {
+                let read = self.inner().block_tree_guard.read();
+                let parent_entry = read.get_latest_canonical_entry();
+                let (parent_block, status) = read
+                    .get_block_and_status(&parent_entry.block_hash)
+                    .ok_or_else(|| eyre!("Parent block not found in block tree"))?;
+                let ema_snapshot = read
+                    .get_ema_snapshot(&parent_block.block_hash)
+                    .ok_or_else(|| eyre!("EMA snapshot not found for parent block"))?;
 
-            loop {
-                match status {
-                    ChainState::Onchain => {
-                        // block is valid, included on the chain. Safe to build upon.
-                        break;
-                    }
-                    ChainState::Validated(BlockState::Unknown) => {
-                        // noop, sleep and wait
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                    }
-                    ChainState::Validated(BlockState::ValidationScheduled) => {
-                        // wait for vdf steps to catch up
-                        let vdf_info = &parent_block.vdf_limiter_info;
-                        let first_step_number = vdf_info.first_step_number();
-                        let prev_output_step_number = first_step_number.saturating_sub(1);
-                        self.inner()
-                            .vdf_steps_guard
-                            .wait_for_step(prev_output_step_number)
-                            .await;
-                        continue;
-                    }
-                    ChainState::Validated(BlockState::ValidBlock) => {
-                        break;
-                    }
-                    ChainState::NotOnchain(_block_state) => {
-                        panic!("canonical tip should never be NotOnchain")
-                    }
+                (parent_block.clone(), *status, ema_snapshot)
+            };
+
+            match status {
+                ChainState::Onchain
+                | ChainState::Validated(BlockState::ValidBlock)
+                | ChainState::NotOnchain(BlockState::ValidBlock) => {
+                    // Block is ready to use as parent
+                    info!(?parent_block.block_hash, ?parent_block.height, "Starting block production, previous block");
+
+                    // Fetch full block header from mempool or database
+                    let (tx_prev, rx_prev) = oneshot::channel();
+                    self.inner().service_senders.mempool.send(
+                        MempoolServiceMessage::GetBlockHeader(
+                            parent_block.block_hash,
+                            false,
+                            tx_prev,
+                        ),
+                    )?;
+                    let header = match rx_prev.await? {
+                        Some(header) => header,
+                        None => self
+                            .inner()
+                            .db
+                            .view_eyre(|tx| {
+                                block_header_by_hash(tx, &parent_block.block_hash, false)
+                            })?
+                            .ok_or_else(|| {
+                                eyre!(
+                                    "No block header found for hash {} ({})",
+                                    parent_block.block_hash,
+                                    parent_block.height + 1
+                                )
+                            })?,
+                    };
+
+                    return Ok((header, ema_snapshot));
+                }
+                ChainState::Validated(BlockState::Unknown)
+                | ChainState::NotOnchain(BlockState::Unknown) => {
+                    // Block validation not yet started, wait briefly
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                ChainState::Validated(BlockState::ValidationScheduled)
+                | ChainState::NotOnchain(BlockState::ValidationScheduled) => {
+                    // Wait for VDF steps to catch up before continuing.
+                    let vdf_info = &parent_block.vdf_limiter_info;
+                    let first_step_number = vdf_info.first_step_number();
+                    let prev_output_step_number = first_step_number.saturating_sub(1);
+                    self.inner()
+                        .vdf_steps_guard
+                        .wait_for_step(prev_output_step_number)
+                        .await;
                 }
             }
-            let ema_snapshot = read
-                .get_ema_snapshot(&parent_block.block_hash)
-                .expect("every block must contain an EMA snapshot");
-
-            (parent_block.clone(), ema_snapshot)
-        };
-        info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
-
-        let (tx_prev, rx_prev) = oneshot::channel();
-        self.inner()
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(
-                prev.block_hash,
-                false,
-                tx_prev,
-            ))?;
-        let header = match rx_prev.await? {
-            Some(header) => header,
-            None => self
-                .inner()
-                .db
-                .view_eyre(|tx| block_header_by_hash(tx, &prev.block_hash, false))?
-                .ok_or_else(|| {
-                    eyre!(
-                        "No block header found for hash {} ({})",
-                        prev.block_hash,
-                        prev.height + 1
-                    )
-                })?,
-        };
-
-        Ok((header, ema_snapshot))
+        }
     }
 
     async fn fully_produce_new_block(
