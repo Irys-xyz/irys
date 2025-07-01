@@ -259,4 +259,5 @@ pub struct NodeInfo {
     pub blocks: u64,
     pub is_syncing: bool,
     pub current_sync_height: usize,
+    pub current_block_pool_height: u64
 }
