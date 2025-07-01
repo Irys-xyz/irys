@@ -53,7 +53,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn, Span};
+use tracing::{debug, error, info, warn, Instrument, Span};
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -145,6 +145,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let span = self.span.clone();
+        let span2 = span.clone();
         let _span = span.enter();
         let solution = msg.0;
         info!(
@@ -169,6 +170,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     .fully_produce_new_block(solution)
                     .await
             }
+            .instrument(span2)
             .into_actor(self)
             .map(move |result, actor, _ctx| {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
@@ -191,6 +193,27 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 #[async_trait::async_trait(?Send)]
 pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
+
+    /// Creates PoA data from the solution context
+    /// Returns (PoaData, chunk_hash)
+    fn create_poa_data(
+        &self,
+        solution: &SolutionContext,
+        ledger_id: Option<u32>,
+    ) -> eyre::Result<(PoaData, H256)> {
+        let poa_chunk = Base64(solution.chunk.clone());
+        let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
+        let poa = PoaData {
+            tx_path: solution.tx_path.clone().map(Base64),
+            data_path: solution.data_path.clone().map(Base64),
+            chunk: Some(poa_chunk),
+            recall_chunk_index: solution.recall_chunk_index,
+            ledger_id,
+            partition_chunk_offset: solution.chunk_offset,
+            partition_hash: solution.partition_hash,
+        };
+        Ok((poa, poa_chunk_hash))
+    }
 
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         loop {
@@ -437,17 +460,8 @@ pub trait BlockProdStrategy {
             .unwrap();
         let ledger_id = rx.await?.and_then(|pa| pa.ledger_id);
 
-        let poa_chunk = Base64(solution.chunk);
-        let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
-        let poa = PoaData {
-            tx_path: solution.tx_path.map(Base64),
-            data_path: solution.data_path.map(Base64),
-            chunk: Some(poa_chunk),
-            recall_chunk_index: solution.recall_chunk_index,
-            ledger_id,
-            partition_chunk_offset: solution.chunk_offset,
-            partition_hash: solution.partition_hash,
-        };
+        // Create PoA data using the trait method
+        let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
 
         let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1
             > solution.vdf_step - 1
