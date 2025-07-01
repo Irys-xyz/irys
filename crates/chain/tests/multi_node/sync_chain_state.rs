@@ -7,7 +7,10 @@ use irys_chain::{
     IrysNodeCtx,
 };
 use irys_database::block_header_by_hash;
-use irys_types::{irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, NodeInfo, NodeMode, PeerAddress, H256};
+use irys_types::{
+    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, NodeInfo,
+    NodeMode, PeerAddress, H256,
+};
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
