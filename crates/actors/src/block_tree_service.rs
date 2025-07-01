@@ -1710,7 +1710,7 @@ impl BlockTreeCache {
                 let max_height = earliest_height + (max_tree_depth / 2);
                 height <= max_height
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     /// Gets block with matching solution hash, excluding specified block.
