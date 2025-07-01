@@ -8,7 +8,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    system_tx_generator::SystemTxGenerator,
+    shadow_tx_generator::ShadowTxGenerator,
     EpochServiceMessage,
 };
 use actix::prelude::*;
@@ -27,7 +27,7 @@ use irys_database::{
     tables::IngressProofs, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
-use irys_reth::compose_system_tx;
+use irys_reth::compose_shadow_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
@@ -285,24 +285,24 @@ pub trait BlockProdStrategy {
     ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
-        // Generate expected system transactions using shared logic
-        let system_txs = SystemTxGenerator::new(
+        // Generate expected shadow transactions using shared logic
+        let shadow_txs = ShadowTxGenerator::new(
             &block_height,
             &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
         );
-        let system_txs = system_txs
+        let shadow_txs = shadow_txs
             .generate_all(commitment_txs_to_bill, submit_txs)
             .map(|tx_result| {
                 let tx = tx_result?;
-                let mut tx_raw = compose_system_tx(self.inner().config.consensus.chain_id, &tx);
+                let mut tx_raw = compose_shadow_tx(self.inner().config.consensus.chain_id, &tx);
                 let signature = local_signer
                     .sign_transaction_sync(&mut tx_raw)
-                    .expect("system tx must always be signable");
+                    .expect("shadow tx must always be signable");
                 let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
                     .try_into_recovered()
-                    .expect("system tx must always be signable");
+                    .expect("shadow tx must always be signable");
 
                 Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx, 300))
             })
@@ -311,7 +311,7 @@ pub trait BlockProdStrategy {
         self.build_and_submit_reth_payload(
             prev_block_header,
             timestamp_ms,
-            system_txs,
+            shadow_txs,
             perv_evm_block.header.mix_hash,
         )
         .await
@@ -322,7 +322,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         timestamp_ms: u128,
-        system_txs: Vec<EthPooledTransaction>,
+        shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
     ) -> eyre::Result<EthBuiltPayload> {
         // generate payload attributes
@@ -337,7 +337,7 @@ pub trait BlockProdStrategy {
         let payload = self
             .inner()
             .reth_node_adapter
-            .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, system_txs)
+            .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
             .await?;
 
         // trigger forkchoice update via engine api to commit the block to the blockchain

@@ -2,7 +2,7 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{
-    evm::IrysEvmConfig, payload::SystemTxStore, IrysEthereumNode, IrysSystemTxValidator,
+    evm::IrysEvmConfig, payload::ShadowTxStore, IrysEthereumNode, IrysShadowTxValidator,
 };
 use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
@@ -53,7 +53,7 @@ pub type RethNodeAdapter = NodeAdapter<
         NetworkHandle,
         reth::transaction_pool::Pool<
             TransactionValidationTaskExecutor<
-                IrysSystemTxValidator<
+                IrysShadowTxValidator<
                     BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
@@ -111,7 +111,7 @@ pub async fn run_node(
     _provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
-    system_tx_store: SystemTxStore,
+    shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
@@ -149,12 +149,12 @@ pub async fn run_node(
 
     let handle = builder
         .node(IrysEthereumNode {
-            system_tx_store: system_tx_store.clone(),
+            shadow_tx_store: shadow_tx_store.clone(),
         })
         .launch_with_debug_capabilities()
         .await?;
 
-    let context = IrysRethNodeAdapter::new(handle.node.clone(), system_tx_store).await?;
+    let context = IrysRethNodeAdapter::new(handle.node.clone(), shadow_tx_store).await?;
     // check that the latest height lines up with the expected latest height from irys
 
     let latest = context

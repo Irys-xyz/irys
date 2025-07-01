@@ -6,7 +6,7 @@
 //! Three concurrent validation stages:
 //! - **Recall Range**: Async data recall and storage proof verification
 //! - **POA**: Blocking cryptographic proof-of-access validation
-//! - **System Transactions**: Async Reth integration validation
+//! - **Shadow Transactions**: Async Reth integration validation
 //!
 //! ## Stage 2: Parent Dependency Resolution  
 //! After successful validation, tasks wait for parent block validation using
@@ -16,7 +16,7 @@ use crate::block_tree_service::{
     BlockState, BlockTreeReadGuard, BlockTreeServiceMessage, ChainState, ValidationResult,
 };
 use crate::block_validation::{
-    poa_is_valid, recall_recall_range_is_valid, system_transactions_are_valid, PayloadProvider,
+    poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid, PayloadProvider,
 };
 use crate::validation_service::ValidationServiceInner;
 use irys_types::{BlockHash, IrysBlockHeader};
@@ -206,11 +206,11 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
             }
         };
 
-        // System transaction validation
+        // Shadow transaction validation
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
-        let system_tx_task = async move {
-            system_transactions_are_valid(
+        let shadow_tx_task = async move {
+            shadow_transactions_are_valid(
                 config,
                 service_senders,
                 block,
@@ -218,18 +218,18 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
             )
-            .instrument(tracing::info_span!("system_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
+            .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
             .await
-            .inspect_err(|err| tracing::error!(?err, "system transaction validation failed"))
+            .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         };
 
         // Wait for all three tasks to complete
-        let (recall_result, poa_result, system_tx_result) =
-            tokio::join!(recall_task, poa_task, system_tx_task);
+        let (recall_result, poa_result, shadow_tx_result) =
+            tokio::join!(recall_task, poa_task, shadow_tx_task);
 
-        match (recall_result, poa_result, system_tx_result) {
+        match (recall_result, poa_result, shadow_tx_result) {
             (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
                 tracing::debug!("block validation successful");
                 Ok(ValidationResult::Valid)
