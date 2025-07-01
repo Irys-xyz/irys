@@ -361,6 +361,10 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .start_and_wait_for_packing("NODE_C", seconds_to_wait)
         .await;
 
+    //
+    // Stage 1: STARTING STATE CHECKS
+    //
+
     // check peer heights match genesis - i.e. that we are all in sync
     let current_height = node_a.get_height().await;
     assert_eq!(current_height, 0);
@@ -371,11 +375,19 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .wait_until_height(current_height, seconds_to_wait)
         .await?;
 
+    //
+    // Stage 2: MINE BLOCK
+    //
+
     // mine a single block, and let everyone sync so future txs start at block height 1.
     node_a.mine_block().await?; // mine block a1
     let a_block1 = node_a.get_block_by_height(1).await?; // get block a1
     node_b.wait_for_block(&a_block1.block_hash, 10).await?;
     node_c.wait_for_block(&a_block1.block_hash, 10).await?;
+
+    //
+    // Stage 3: ISOLATE NODES (reth)
+    //
 
     // disconnect peers so reth cannot gossip to each other
     let _a_peers = node_a.disconnect_all_peers().await?;
@@ -419,18 +431,26 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         )
         .await?;
 
-    // peer b generates txs in isolation after block 0
-    //let peer_b_b1_stake_tx = node_b.post_stake_commitment(genesis_block_hash).await;
-    //let peer_b_b1_pledge_tx = node_b.post_pledge_commitment(genesis_block_hash).await;
+    // node_b generates txs in isolation after block 0
+    let peer_b_b1_stake_tx = node_b
+        .post_stake_commitment_without_gossip(genesis_block_hash)
+        .await;
+    let peer_b_b1_pledge_tx = node_b
+        .post_pledge_commitment_without_gossip(genesis_block_hash)
+        .await;
 
-    // peer c generates txs in isolation after block 0
-    //let peer_c_c1_stake_tx = node_c.post_stake_commitment(genesis_block_hash).await;
-    //let peer_c_c1_pledge_tx = node_c.post_pledge_commitment(genesis_block_hash).await;
+    // node_c generates txs in isolation after block 0
+    let peer_c_c1_stake_tx = node_c.post_stake_commitment(genesis_block_hash).await;
+    let peer_c_c1_pledge_tx = node_c.post_pledge_commitment(genesis_block_hash).await;
+
+    //
+    // Stage 4: MINE FORK A and B TO HEIGHT 2 and 3
+    //
 
     // Mine competing blocks on A and B without gossip
-    let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a1
-    let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b1
-    let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b2
+    let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
 
     // Gossip B's blocks to C only
     node_b.gossip_block(&b_block2)?;
@@ -438,6 +458,10 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     node_c.wait_for_block(&b_block2.block_hash, 10).await?;
     node_c.wait_for_block(&b_block3.block_hash, 10).await?;
+
+    //
+    // Stage 5: MINE FORK C TO HEIGHT 4
+    //
 
     // Node C mines on top of B's chain and does not gossip it back to B
     let (c_block4, _) = node_c.mine_block_without_gossip().await?;
@@ -453,11 +477,19 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .network
         .connect_peer(c_info.peer_id, c_info.peering_tcp_addr);
 
+    //
+    // Stage 6: FINAL SYNC / RE-ORGs
+    //
+
     // Gossip all blocks so everyone syncs
     node_b.gossip_block(&b_block2)?;
     node_b.gossip_block(&b_block3)?;
     node_c.gossip_block(&c_block4)?;
     node_a.gossip_block(&a_block2)?;
+
+    //
+    // Stage 7: FINAL STATE CHECKS
+    //
 
     // confirm all three nodes are at the expected height
     node_a
@@ -478,12 +510,37 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     assert_eq!(a_latest_height, b_latest_height);
     assert_eq!(a_latest_height, c_latest_height);
 
-    // confirm blocks at this height match c3
+    // confirm blocks at this height match c4
     let a3 = node_a.get_block_by_height(c_block4.height).await?;
     let b3 = node_b.get_block_by_height(c_block4.height).await?;
     let c3 = node_c.get_block_by_height(c_block4.height).await?;
     assert_eq!(a3, b3);
     assert_eq!(a3, c3);
+
+    // confirm mempool txs in nodes have remained in the mempool
+    // TODO: check for: these will not have been gossiped, and so only the canonical chain txs will have been synced
+    node_a
+        .wait_for_mempool_commitment_txs(
+            vec![peer_a_b1_stake_tx.id, peer_a_b1_pledge_tx.id],
+            seconds_to_wait,
+        )
+        .await?;
+
+    node_b
+        .wait_for_mempool_commitment_txs(
+            vec![peer_b_b1_stake_tx.id, peer_b_b1_pledge_tx.id],
+            seconds_to_wait,
+        )
+        .await?;
+
+    node_c
+        .wait_for_mempool_commitment_txs(
+            vec![peer_c_c1_stake_tx.id, peer_c_c1_pledge_tx.id],
+            seconds_to_wait,
+        )
+        .await?;
+
+    // TODO: stretch goal, make original chain B the longest chain again and see if txs come back
 
     // gracefully shutdown nodes
     tokio::join!(node_a.stop(), node_b.stop(), node_c.stop(),);
