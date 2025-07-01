@@ -377,6 +377,22 @@ where
             block_hash
         );
 
+        if let Some(switch_to_full_validation_at_height) = self.sync_state.full_validation_switch_height() {
+            // mark_processed called on the current block height will set trust sync to false
+            let switch_at_the_next_block = block_height as usize == switch_to_full_validation_at_height;
+            if switch_at_the_next_block {
+                let (tx, rx) = oneshot::channel();
+                self.block_tree_sender.send(BlockTreeServiceMessage::ReloadCacheFromDb { response: tx }).map_err(|err| {
+                    error!("Failed to send ReloadCacheFromDb message: {:?}", err);
+                    BlockPoolError::OtherInternal(format!("Failed to send ReloadCacheFromDb message: {:?}", err))
+                })?;
+                rx.await.map_err(|err| {
+                    error!("Failed to receive response for ReloadCacheFromDb: {:?}", err);
+                    BlockPoolError::OtherInternal(format!("Failed to receive response for ReloadCacheFromDb: {:?}", err))
+                })?;
+            }
+        }
+
         self.sync_state.mark_processed(block_height as usize);
         self.blocks_cache.remove_block(&block_hash).await;
         Ok(())

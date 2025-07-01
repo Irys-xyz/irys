@@ -82,6 +82,9 @@ pub enum BlockTreeServiceMessage {
         block_header: IrysBlockHeader,
         response: oneshot::Sender<eyre::Result<()>>,
     },
+    ReloadCacheFromDb {
+        response: oneshot::Sender<()>,
+    },
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -248,8 +251,26 @@ impl BlockTreeServiceInner {
                     .await;
                 let _ = response.send(result);
             }
+            BlockTreeServiceMessage::ReloadCacheFromDb {
+                response,
+            } => {
+                self.reload_cache_from_db();
+                let _ = response.send(());
+            }
         }
         Ok(())
+    }
+
+    fn reload_cache_from_db(&self) {
+        debug!("Reloading block tree cache from database");
+        let new_index = BlockTreeCache::restore_from_db(
+            self.block_index_guard.clone(),
+            self.commitment_state_guard.clone(),
+            self.reth_service_actor.clone(),
+            self.db.clone(),
+            self.consensus_config.clone(),
+        );
+        *self.cache.write().unwrap() = new_index;
     }
 
     /// Fast tracks the storage finalization of a block by retrieving transaction headers. Do

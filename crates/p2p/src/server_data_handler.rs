@@ -407,11 +407,13 @@ where
             }
         }
 
-        // TODO: Also check that we're within the block is within the range
-        //   Or better yet, set sync_state.is_trusted_sync to false
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
+        let is_in_the_trusted_sync_range = self
+            .sync_state
+            .is_in_trusted_sync_range(block_header.height as usize);
 
         let skip_block_validation = is_syncing_from_a_trusted_peer
+            && is_in_the_trusted_sync_range
             && self
                 .peer_list
                 .is_a_trusted_peer(source_miner_address, data_source_ip.ip())

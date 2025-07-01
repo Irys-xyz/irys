@@ -105,9 +105,23 @@ impl SyncState {
         }
     }
 
+    /// Sets the height at which the node should switch to full validation.
     pub fn set_switch_to_full_validation_at_height(&self, height: Option<usize>) {
         let mut lock = self.switch_to_full_validation_at_height.write().unwrap();
         *lock = height;
+    }
+
+    /// Returns the height at which the node should switch to full validation.
+    pub fn full_validation_switch_height(&self) -> Option<usize> {
+        *self.switch_to_full_validation_at_height.read().unwrap()
+    }
+
+    pub fn is_in_trusted_sync_range(&self, height: usize) -> bool {
+        if let Some(switch_height) = self.full_validation_switch_height() {
+            self.is_trusted_sync() && switch_height >= height
+        } else {
+            false
+        }
     }
 
     /// Highest pre-validated block height. Set by the [`crate::block_pool::BlockPool`]
