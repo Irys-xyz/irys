@@ -1215,6 +1215,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         pledge_tx
     }
 
+    pub async fn post_pledge_commitment_without_gossip(
+        &self,
+        anchor: H256,
+    ) -> CommitmentTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+
+        let stake_tx = self.post_pledge_commitment(anchor).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+
+        stake_tx
+    }
+
     pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let stake_tx = CommitmentTransaction {
             commitment_type: CommitmentType::Stake,
@@ -1231,6 +1244,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         // Submit stake commitment via public API
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, &stake_tx).await;
+
+        stake_tx
+    }
+
+    pub async fn post_stake_commitment_without_gossip(
+        &self,
+        anchor: H256,
+    ) -> CommitmentTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+
+        let stake_tx = self.post_stake_commitment(anchor).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
 
         stake_tx
     }
