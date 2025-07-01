@@ -454,7 +454,9 @@ where
 
         // If the parent block is in the db, process it
         if previous_block_status.is_processed() {
-            info!("Found parent block for block {:?}", current_block_hash);
+            info!("Found parent block for block {:?}, checking if tree has enough capacity", current_block_hash);
+
+            self.block_status_provider.wait_for_block_tree_to_catch_up(block_header.height).await;
 
             if let Err(block_discovery_error) = self
                 .block_discovery

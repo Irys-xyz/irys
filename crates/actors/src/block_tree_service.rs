@@ -1687,6 +1687,35 @@ impl BlockTreeCache {
         }
     }
 
+    pub fn get_earliest_unvalidated_block_height(
+        &self,
+    ) -> Option<u64> {
+        // Get the block with max cumulative difficulty
+        self.get_earliest_not_onchain_in_longest_chain().map(|(_entry, headers, _time)| {
+            headers.iter().min_by(|header, header2| {
+                header.height.cmp(&header2.height)
+            }).map(|header| {
+                header.height
+            })
+        })?
+    }
+
+    pub fn can_process_height(
+        &self,
+        height: u64,
+    ) -> bool {
+        let max_tree_depth = self.consensus_config.block_cache_depth;
+        if height < max_tree_depth {
+            return true;
+        }
+        let earliest_unvalidated_height = self.get_earliest_unvalidated_block_height();
+
+        earliest_unvalidated_height.map(|earliest_height| {
+            let max_height = earliest_height + (max_tree_depth / 2);
+            height <= max_height
+        }).unwrap_or(false)
+    }
+
     /// Gets block with matching solution hash, excluding specified block.
     /// Returns a block meeting these requirements:
     /// - Has matching `solution_hash`
