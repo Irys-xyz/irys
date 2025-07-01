@@ -8,7 +8,7 @@ use {
     irys_database::BlockIndex,
     irys_types::{BlockIndexItem, IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
-    tracing::{warn},
+    tracing::warn,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -129,9 +129,9 @@ impl BlockStatusProvider {
             if attempts % ATTEMPTS_PER_SECOND == 0 {
                 debug!(
                     "Block tree did not catch up to height {} after {} seconds, waiting...",
-                    block_height, attempts / ATTEMPTS_PER_SECOND
+                    block_height,
+                    attempts / ATTEMPTS_PER_SECOND
                 );
-                return;
             }
 
             let can_process_height = {

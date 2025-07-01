@@ -1629,10 +1629,10 @@ impl BlockTreeCache {
         while prev_block.height > 0 && depth_count < self.consensus_config.block_cache_depth {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
-            debug!(
-                "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
-                prev_entry.chain_state, prev_hash, prev_entry.block.height
-            );
+            // debug!(
+            //     "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
+            //     prev_entry.chain_state, prev_hash, prev_entry.block.height
+            // );
             match prev_entry.chain_state {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
                     return Some((
@@ -1687,33 +1687,30 @@ impl BlockTreeCache {
         }
     }
 
-    pub fn get_earliest_unvalidated_block_height(
-        &self,
-    ) -> Option<u64> {
+    pub fn get_earliest_unvalidated_block_height(&self) -> Option<u64> {
         // Get the block with max cumulative difficulty
-        self.get_earliest_not_onchain_in_longest_chain().map(|(_entry, headers, _time)| {
-            headers.iter().min_by(|header, header2| {
-                header.height.cmp(&header2.height)
-            }).map(|header| {
-                header.height
-            })
-        })?
+        self.get_earliest_not_onchain_in_longest_chain()
+            .map(|(_entry, headers, _time)| {
+                headers
+                    .iter()
+                    .min_by(|header, header2| header.height.cmp(&header2.height))
+                    .map(|header| header.height)
+            })?
     }
 
-    pub fn can_process_height(
-        &self,
-        height: u64,
-    ) -> bool {
-        let max_tree_depth = self.consensus_config.block_cache_depth;
+    pub fn can_process_height(&self, height: u64) -> bool {
+        let max_tree_depth = self.consensus_config.block_migration_depth as u64;
         if height < max_tree_depth {
             return true;
         }
         let earliest_unvalidated_height = self.get_earliest_unvalidated_block_height();
 
-        earliest_unvalidated_height.map(|earliest_height| {
-            let max_height = earliest_height + (max_tree_depth / 2);
-            height <= max_height
-        }).unwrap_or(false)
+        earliest_unvalidated_height
+            .map(|earliest_height| {
+                let max_height = earliest_height + (max_tree_depth / 2);
+                height <= max_height
+            })
+            .unwrap_or(false)
     }
 
     /// Gets block with matching solution hash, excluding specified block.
