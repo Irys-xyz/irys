@@ -408,7 +408,24 @@ impl GossipServiceTestFixture {
 
         let (block_tree_sender, mut block_tree_receiver) =
             tokio::sync::mpsc::unbounded_channel::<BlockTreeServiceMessage>();
-        tokio::spawn(async move { while let Some(_msg) = block_tree_receiver.recv().await {} });
+        tokio::spawn(async move {
+            while let Some(message) = block_tree_receiver.recv().await {
+                debug!("Received BlockTreeServiceMessage: {:?}", message);
+                if let BlockTreeServiceMessage::FastTrackStorageFinalized {
+                    block_header: _,
+                    response,
+                } = message
+                {
+                    // Simulate processing the block header
+                    response
+                        .send(Ok(()))
+                        .expect("to send response for FastTrackStorageFinalized");
+                } else {
+                    debug!("Received unsupported BlockTreeServiceMessage");
+                }
+            }
+            debug!("BlockTreeServiceMessage channel closed");
+        });
 
         Self {
             // temp_dir,
