@@ -53,7 +53,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn, Instrument, Span};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
