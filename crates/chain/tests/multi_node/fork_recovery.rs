@@ -526,21 +526,24 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
             vec![peer_a_b1_stake_tx.id, peer_a_b1_pledge_tx.id],
             seconds_to_wait,
         )
-        .await?;
+        .await
+        .expect("node_a txs to still be on node_a");
 
     node_b
         .wait_for_mempool_commitment_txs(
             vec![peer_b_b1_stake_tx.id, peer_b_b1_pledge_tx.id],
             seconds_to_wait,
         )
-        .await?;
+        .await
+        .expect("node_b txs to still be on node_b");
 
     node_c
         .wait_for_mempool_commitment_txs(
             vec![peer_c_c1_stake_tx.id, peer_c_c1_pledge_tx.id],
             seconds_to_wait,
         )
-        .await?;
+        .await
+        .expect("node_c txs to still be on node_c");
 
     // TODO: stretch goal, make original chain B the longest chain again and see if txs come back
 
