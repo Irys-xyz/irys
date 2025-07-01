@@ -608,7 +608,7 @@ impl IrysNode {
             ctx.peer_list.clone(),
             node_mode,
             latest_known_block_height as usize,
-            ctx.config.node_config.genesis_peer_discovery_timeout_millis,
+            &ctx.config,
         )
         .await?;
 

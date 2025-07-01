@@ -6,12 +6,13 @@ use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
 use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
+const BLOCK_BATCH_SIZE: usize = 10;
 
 #[derive(Clone, Debug, Default)]
 pub struct SyncState {
@@ -19,6 +20,7 @@ pub struct SyncState {
     trusted_sync: Arc<AtomicBool>,
     sync_target_height: Arc<AtomicUsize>,
     highest_processed_block: Arc<AtomicUsize>,
+    switch_to_full_validation_at_height: Arc<RwLock<Option<usize>>>,
 }
 
 impl SyncState {
@@ -29,6 +31,7 @@ impl SyncState {
             trusted_sync: Arc::new(AtomicBool::new(is_trusted_sync)),
             sync_target_height: Arc::new(AtomicUsize::new(0)),
             highest_processed_block: Arc::new(AtomicUsize::new(0)),
+            switch_to_full_validation_at_height: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -93,7 +96,18 @@ impl SyncState {
         if height > current_height {
             self.highest_processed_block
                 .store(height, Ordering::Relaxed);
+
+            if let Some(switch_height) = *self.switch_to_full_validation_at_height.read().unwrap() {
+                if self.is_trusted_sync() && height >= switch_height {
+                    self.set_trusted_sync(false)
+                }
+            }
         }
+    }
+
+    pub fn set_switch_to_full_validation_at_height(&self, height: Option<usize>) {
+        let mut lock = self.switch_to_full_validation_at_height.write().unwrap();
+        *lock = height;
     }
 
     /// Highest pre-validated block height. Set by the [`crate::block_pool::BlockPool`]
@@ -167,16 +181,50 @@ pub async fn sync_chain(
     peer_list: impl PeerList,
     node_mode: &NodeMode,
     mut start_sync_from_height: usize,
-    genesis_peer_discovery_timeout_millis: u64,
+    config: &irys_types::Config,
 ) -> Result<(), GossipError> {
+    let genesis_peer_discovery_timeout_millis =
+        config.node_config.genesis_peer_discovery_timeout_millis;
     // If the peer doesn't have any blocks, it should start syncing from 1, as the genesis block
     // should always be present
     if start_sync_from_height == 0 {
         start_sync_from_height = 1;
     }
     let trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
+
     sync_state.set_syncing_from(start_sync_from_height);
     sync_state.set_trusted_sync(trusted_mode);
+
+    if trusted_mode {
+        // We should enable full validation when the index nears the (tip - migration depth)
+        let migration_depth = config.consensus.block_migration_depth as usize;
+        let trusted_peers = peer_list.top_trusted_peer().await?;
+        if let Some((_, peer)) = trusted_peers.first() {
+            let node_info = api_client
+                .node_info(peer.address.api)
+                .await
+                .map_err(|e| GossipError::Network(e.to_string()))?;
+            let index_tip = node_info.block_index_height;
+            if index_tip > migration_depth as u64 {
+                let switch_height = index_tip as usize - migration_depth;
+                sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
+                debug!(
+                    "Sync task: Setting switch to full validation at height {}",
+                    switch_height
+                );
+            } else {
+                warn!(
+                    "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
+                    index_tip, migration_depth
+                );
+            }
+        } else {
+            return Err(GossipError::Network(
+                "No trusted peers available".to_string(),
+            ));
+        }
+    }
+
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
 
     if matches!(node_mode, NodeMode::TrustedPeerSync) {
@@ -217,14 +265,12 @@ pub async fn sync_chain(
 
     debug!("Sync task: Syncing started");
 
-    let limit = 10;
-
     let mut block_queue = VecDeque::new();
     let block_index = get_block_index(
         &peer_list,
         &api_client,
         sync_state.sync_target_height(),
-        limit,
+        BLOCK_BATCH_SIZE,
         5,
         fetch_index_from_the_trusted_peer,
     )
@@ -274,7 +320,7 @@ pub async fn sync_chain(
                     &peer_list,
                     &api_client,
                     sync_state.sync_target_height(),
-                    limit,
+                    BLOCK_BATCH_SIZE,
                     5,
                     fetch_index_from_the_trusted_peer,
                 )
@@ -410,6 +456,7 @@ mod tests {
 
             let mut node_config = NodeConfig::testnet();
             node_config.trusted_peers = vec![fake_peer_address];
+            node_config.genesis_peer_discovery_timeout_millis = 10;
             let config = Config::new(node_config);
 
             let api_client_stub = ApiClientStub::new();
@@ -470,7 +517,7 @@ mod tests {
                 peer_list,
                 &NodeMode::PeerSync,
                 10,
-                10,
+                &config,
             )
             .await
             .expect("to finish catching up");

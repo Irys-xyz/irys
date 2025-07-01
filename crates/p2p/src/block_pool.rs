@@ -22,13 +22,14 @@ use tracing::{debug, error, info};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 1000;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BlockPoolError {
     DatabaseError(String),
     MempoolError(String),
     OtherInternal(String),
     BlockError(String),
     AlreadyProcessed(BlockHash),
+    AlreadyFastTracking(BlockHash),
     TryingToReprocessFinalizedBlock(BlockHash),
     PreviousBlockDoesNotMatch(String),
     VdfFFError(String),
@@ -91,6 +92,10 @@ impl BlockCache {
 
     async fn remove_block(&self, block_hash: &BlockHash) {
         self.inner.write().await.remove_block(block_hash);
+    }
+
+    async fn is_block_in_cache(&self, block_hash: &BlockHash) -> bool {
+        self.inner.read().await.is_block_in_cache(block_hash)
     }
 
     async fn get_block_header_cloned(&self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
@@ -186,6 +191,10 @@ impl BlockCacheInner {
 
         None
     }
+
+    fn is_block_in_cache(&self, block_hash: &BlockHash) -> bool {
+        self.block_hash_to_parent_hash.contains(block_hash)
+    }
 }
 
 impl<P, B, M> BlockPool<P, B, M>
@@ -231,17 +240,26 @@ where
             block_header.block_hash, block_height,
         );
 
-        // Check if the block is already processed or being processed
         if self
-            .is_block_processing_or_processed(&block_header.block_hash, block_header.height)
-            .await
+            .block_status_provider
+            .is_height_in_the_index(block_header.height)
         {
             debug!(
-                "Block {:?} (height {}) is already processed or being processed",
+                "Block pool: Block {:?} (height {}) is already in the index, skipping the fast track",
                 block_header.block_hash, block_header.height,
             );
-            return Ok(());
+            return Err(BlockPoolError::AlreadyProcessed(block_hash));
         }
+
+        if self.blocks_cache.is_block_in_cache(&block_hash).await {
+            debug!(
+                "Block pool: Block {:?} (height {}) is already in the cache, skipping the fast track",
+                block_header.block_hash, block_header.height,
+            );
+            return Err(BlockPoolError::AlreadyFastTracking(block_hash));
+        }
+
+        self.blocks_cache.add_block(block_header.clone()).await;
 
         // First, wait for the previous VDF step to be available
         let first_step_number = block_header.vdf_limiter_info.first_step_number();
@@ -272,7 +290,7 @@ where
 
         if block_height > 0 {
             debug!(
-                "Block pool: Fast tracking block {:?}: Checking if the parent block is in the index",
+                "Block pool: Checking if the parent block for block {:?} is in the index ",
                 block_header.block_hash,
             );
             if !self
@@ -306,6 +324,7 @@ where
             block_hash
         );
         self.sync_state.mark_processed(block_height as usize);
+        self.blocks_cache.remove_block(&block_hash).await;
         Ok(())
     }
 

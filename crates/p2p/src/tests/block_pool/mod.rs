@@ -13,7 +13,7 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
-    NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
+    NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use irys_vdf::VdfStep;
@@ -76,6 +76,10 @@ impl ApiClient for MockApiClient {
         _block_index_query: BlockIndexQuery,
     ) -> eyre::Result<Vec<BlockIndexItem>> {
         Ok(vec![])
+    }
+
+    async fn node_info(&self, _peer: SocketAddr) -> eyre::Result<NodeInfo> {
+        Ok(NodeInfo::default())
     }
 }
 
@@ -591,4 +595,126 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         processing_error,
         BlockPoolError::TryingToReprocessFinalizedBlock(_)
     ));
+}
+
+#[actix_rt::test]
+async fn should_fast_track_block() {
+    let config = create_test_config();
+
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_service_addr: peer_addr,
+        db,
+        execution_payload_provider,
+        mempool_stub,
+        vdf_state_stub,
+        vdf_ff_sender,
+    } = MockedServices::new(&config).await;
+
+    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
+    let sync_state = SyncState::new(false, true);
+    let service = BlockPool::new(
+        db.clone(),
+        peer_addr,
+        block_discovery_stub.clone(),
+        mempool_stub.clone(),
+        sync_state,
+        block_status_provider_mock.clone(),
+        execution_payload_provider.clone(),
+        gossip_broadcast_sender,
+        vdf_state_stub,
+        vdf_ff_sender,
+    );
+
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
+    let parent_block_header = mock_chain[0].clone();
+    let test_header = mock_chain[1].clone();
+
+    // Inserting parent block header to the db, so the current block should go to the
+    //  block producer
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
+
+    debug!(
+        "Previous block hash: {:?}",
+        test_header.previous_block_hash.0.to_base58()
+    );
+
+    service
+        .process_block(test_header.clone(), true)
+        .await
+        .expect("can't process block");
+
+    let blocks_in_discovery = block_discovery_stub.get_blocks();
+    // No blocks should be in discovery service, since we've fast tracked the block
+    assert_eq!(blocks_in_discovery.len(), 0);
+
+    let migrated_blocks = mempool_stub
+        .migrated_blocks
+        .read()
+        .expect("to lock migrated blocks");
+    // The block should be migrated to the mempool
+    assert_eq!(migrated_blocks.len(), 1);
+    assert_eq!(migrated_blocks[0].block_hash, test_header.block_hash);
+}
+
+#[actix_rt::test]
+async fn should_not_fast_track_block_already_in_index() {
+    let config = create_test_config();
+
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_service_addr: peer_addr,
+        db,
+        execution_payload_provider,
+        mempool_stub,
+        vdf_state_stub,
+        vdf_ff_sender,
+    } = MockedServices::new(&config).await;
+
+    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
+    let sync_state = SyncState::new(false, true);
+    let service = BlockPool::new(
+        db.clone(),
+        peer_addr,
+        block_discovery_stub.clone(),
+        mempool_stub.clone(),
+        sync_state,
+        block_status_provider_mock.clone(),
+        execution_payload_provider.clone(),
+        gossip_broadcast_sender,
+        vdf_state_stub,
+        vdf_ff_sender,
+    );
+
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
+    let parent_block_header = mock_chain[0].clone();
+    let test_header = mock_chain[1].clone();
+
+    // Inserting parent block header to the db, so the current block should go to the
+    //  block producer
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&test_header);
+
+    debug!(
+        "Previous block hash: {:?}",
+        test_header.previous_block_hash.0.to_base58()
+    );
+
+    let err = service
+        .process_block(test_header.clone(), true)
+        .await
+        .expect_err("to have an error");
+
+    let blocks_in_discovery = block_discovery_stub.get_blocks();
+    // No blocks should be in discovery service, since we've fast tracked the block
+    assert_eq!(blocks_in_discovery.len(), 0);
+
+    assert_eq!(
+        err,
+        BlockPoolError::AlreadyProcessed(test_header.block_hash)
+    );
 }

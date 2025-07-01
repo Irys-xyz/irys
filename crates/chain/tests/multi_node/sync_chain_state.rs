@@ -1,6 +1,5 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
-use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{
     peer_utilities::{
         block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
@@ -9,8 +8,8 @@ use irys_chain::{
 };
 use irys_database::block_header_by_hash;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, PeerAddress,
-    H256,
+    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, NodeInfo,
+    PeerAddress, H256,
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
