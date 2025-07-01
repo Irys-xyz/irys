@@ -10,6 +10,7 @@ use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveryError;
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
@@ -308,6 +309,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub config: Config,
     pub vdf_state_stub: VdfStateReadonly,
     pub vdf_sender: mpsc::UnboundedSender<VdfStep>,
+    pub block_tree_sender: mpsc::UnboundedSender<BlockTreeServiceMessage>,
 }
 
 #[derive(Debug, Clone)]
@@ -404,6 +406,10 @@ impl GossipServiceTestFixture {
             }
         });
 
+        let (block_tree_sender, mut block_tree_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<BlockTreeServiceMessage>();
+        tokio::spawn(async move { while let Some(_msg) = block_tree_receiver.recv().await {} });
+
         Self {
             // temp_dir,
             gossip_port,
@@ -425,6 +431,7 @@ impl GossipServiceTestFixture {
             config,
             vdf_state_stub,
             vdf_sender,
+            block_tree_sender,
         }
     }
 
@@ -474,6 +481,7 @@ impl GossipServiceTestFixture {
                 execution_payload_provider,
                 self.vdf_state_stub.clone(),
                 self.vdf_sender.clone(),
+                self.block_tree_sender.clone(),
             )
             .expect("failed to run gossip service");
 

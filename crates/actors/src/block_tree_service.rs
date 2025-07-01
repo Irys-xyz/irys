@@ -78,6 +78,10 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
+    FastTrackStorageFinalized {
+        block_header: IrysBlockHeader,
+        response: oneshot::Sender<eyre::Result<()>>,
+    },
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -235,7 +239,54 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await;
             }
+            BlockTreeServiceMessage::FastTrackStorageFinalized {
+                block_header,
+                response,
+            } => {
+                let result = self
+                    .fast_track_storage_finalized_message(block_header)
+                    .await;
+                let _ = response.send(result);
+            }
         }
+        Ok(())
+    }
+
+    /// Fast tracks the storage finalization of a block by retrieving transaction headers. Do
+    /// after the block has been migrated.
+    async fn fast_track_storage_finalized_message(
+        &self,
+        block_header: IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        let submit_txs = self
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
+            .await?;
+        let publish_txs = self
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
+            .await?;
+
+        let mut all_txs = vec![];
+        all_txs.extend(publish_txs);
+        all_txs.extend(submit_txs);
+
+        info!(
+            "Migrating to block_index - hash: {} height: {}",
+            &block_header.block_hash.0.to_base58(),
+            &block_header.height
+        );
+
+        // HACK
+        System::set_current(self.system.clone());
+
+        let chunk_migration = ChunkMigrationService::from_registry();
+        let block_index = BlockIndexService::from_registry();
+        let block_finalized_message = BlockFinalizedMessage {
+            block_header: Arc::new(block_header),
+            all_txs: Arc::new(all_txs),
+        };
+
+        block_index.do_send(block_finalized_message.clone());
+        chunk_migration.do_send(block_finalized_message);
         Ok(())
     }
 

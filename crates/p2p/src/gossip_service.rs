@@ -21,6 +21,7 @@ use crate::{
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{Address, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
@@ -167,6 +168,7 @@ impl P2PService {
         execution_payload_provider: ExecutionPayloadProvider<P>,
         vdf_state: VdfStateReadonly,
         vdf_ff_sender: UnboundedSender<VdfStep>,
+        block_tree_sender: UnboundedSender<BlockTreeServiceMessage>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -185,6 +187,7 @@ impl P2PService {
             self.broadcast_data_sender.clone(),
             vdf_state,
             vdf_ff_sender,
+            block_tree_sender,
         );
 
         let server_data_handler = GossipServerDataHandler {

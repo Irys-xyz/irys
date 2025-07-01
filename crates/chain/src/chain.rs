@@ -1011,6 +1011,7 @@ impl IrysNode {
             execution_payload_provider,
             vdf_state_readonly.clone(),
             service_senders.vdf_fast_forward.clone(),
+            service_senders.block_tree.clone(),
         )?;
 
         // set up the price oracle

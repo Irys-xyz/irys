@@ -2,6 +2,7 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
@@ -17,7 +18,7 @@ use reth::revm::primitives::B256;
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 1000;
@@ -65,6 +66,7 @@ where
     gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
     vdf_state: VdfStateReadonly,
     vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
+    block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +216,7 @@ where
         gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
         vdf_state: VdfStateReadonly,
         vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
+        block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
     ) -> Self {
         Self {
             db,
@@ -227,6 +230,7 @@ where
             gossip_broadcast_sender,
             vdf_state,
             vdf_ff_sender,
+            block_tree_sender,
         }
     }
 
@@ -313,16 +317,66 @@ where
 
         debug!("Block pool: Migrating block {:?}", block_header.block_hash);
         self.mempool
-            .migrate_block(block_header)
+            .migrate_block(block_header.clone())
             .await
             .map_err(|err| {
                 BlockPoolError::MempoolError(format!("Mempool migration error: {:?}", err))
             })?;
 
         debug!(
-            "Block pool: Block {:?} successfully fast tracked",
+            "Block pool: Block {:?} migrated, fast tracking index now",
             block_hash
         );
+
+        let (sender, receiver) = oneshot::channel();
+        self.block_tree_sender
+            .send(BlockTreeServiceMessage::FastTrackStorageFinalized {
+                block_header,
+                response: sender,
+            })
+            .map_err(|send_err| {
+                error!(
+                    "Block pool: Failed to send a fast track request to block tree service: {:?}",
+                    send_err
+                );
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to send a fast track request to block tree service: {:?}",
+                    send_err
+                ))
+            })?;
+
+        debug!(
+            "Block pool: Fast track request sent to block tree service for block {:?}",
+            block_hash
+        );
+        receiver
+            .await
+            .map_err(|recv_err| {
+                error!(
+                    "Block pool: Failed to receive a response from block tree service: {:?}",
+                    recv_err
+                );
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to receive a response from block tree service: {:?}",
+                    recv_err
+                ))
+            })?
+            .map_err(|err| {
+                error!(
+                    "Block pool: Failed to fast track block in storage: {:?}",
+                    err
+                );
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to fast-track block in storage: {:?}",
+                    err
+                ))
+            })?;
+
+        debug!(
+            "Block pool: Block {:?} fast tracked successfully",
+            block_hash
+        );
+
         self.sync_state.mark_processed(block_height as usize);
         self.blocks_cache.remove_block(&block_hash).await;
         Ok(())
