@@ -44,6 +44,9 @@ pub async fn init_state(
     // override the state root, null out the genesis allocation
     chainspec.genesis_header.set_state_root(expected_state_root);
     chainspec.genesis.alloc = BTreeMap::new();
+    // let mut unsealed = chainspec.genesis_header.unseal();
+    // unsealed.state_root = expected_state_root;
+    // chainspec.genesis_header = SealedHeader::seal_slow(unsealed);
 
     cmd.env.chain = Arc::new(chainspec);
 

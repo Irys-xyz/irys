@@ -604,15 +604,17 @@ impl IrysNode {
         let latest_known_block_height = ctx.block_index_guard.read().latest_height();
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
-        irys_p2p::sync_chain(
-            ctx.sync_state.clone(),
-            irys_api_client::IrysApiClient::new(),
-            ctx.peer_list.clone(),
-            node_mode,
-            latest_known_block_height as usize,
-            ctx.config.node_config.genesis_peer_discovery_timeout_millis,
-        )
-        .await?;
+        if matches!(node_mode, NodeMode::PeerSync) {
+            irys_p2p::sync_chain(
+                ctx.sync_state.clone(),
+                irys_api_client::IrysApiClient::new(),
+                ctx.peer_list.clone(),
+                node_mode,
+                latest_known_block_height as usize,
+                ctx.config.node_config.genesis_peer_discovery_timeout_millis,
+            )
+            .await?;
+        }
 
         Ok(ctx)
     }

@@ -35,7 +35,7 @@ impl IrysChainSpecBuilder {
 
     // build the chainspec and the Irys genesis block
     pub fn build(&self) -> (ChainSpec, IrysBlockHeader) {
-        let mut cs = self.reth_builder.clone().build();
+        let cs = self.reth_builder.clone().build();
         let mut genesis = self.genesis.clone();
         // cs.genesis_hash = once_cell::sync::OnceCell::with_value(B256::from_slice(
         //     &hex::decode("26deb95629271c51e1068e09733d9f71f438088ccc0541bfb7c886e0e4cee35a")
