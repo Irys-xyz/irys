@@ -328,25 +328,31 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 #[test_log::test(actix_web::test)]
 async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     initialize_tracing();
-
+    // config variables
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 15;
+
+    // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
+    // signers
     let b_signer = genesis_config.new_random_signer();
     let c_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
 
+    // genesis node
     let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("NODE_A", seconds_to_wait)
         .await;
 
+    // additional configs for peers
     let config_b = node_a.testnet_peer_with_signer(&c_signer);
     let config_c = node_a.testnet_peer_with_signer(&b_signer);
 
+    // start peer nodes
     let node_b = IrysNodeTest::new(config_b)
         .start_and_wait_for_packing("NODE_B", seconds_to_wait)
         .await;
@@ -354,6 +360,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .start_and_wait_for_packing("NODE_C", seconds_to_wait)
         .await;
 
+    // check peer heights match genesis - ie.e that we are all in sync
     let current_height = node_a.get_height().await;
     node_b
         .wait_until_height(current_height, seconds_to_wait)
@@ -413,6 +420,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     node_c.gossip_block(&c_block)?;
     node_a.gossip_block(&a_block)?;
 
+    // confirm all three nodes are at the expected height
     node_a
         .wait_until_height(c_block.height, seconds_to_wait)
         .await?;
