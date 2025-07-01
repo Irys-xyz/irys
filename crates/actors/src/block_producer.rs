@@ -240,10 +240,8 @@ pub trait BlockProdStrategy {
                 //   That way we can eliminate duplicate code for vdf validation.
                 // - subscribing to "block updates" via a channel, thus eliminating extra sleeps.
                 //   ValidationService would also benefit from this
-                ChainState::Validated(BlockState::ValidationScheduled)
-                | ChainState::NotOnchain(BlockState::ValidationScheduled)
-                | ChainState::Validated(BlockState::Unknown)
-                | ChainState::NotOnchain(BlockState::Unknown) => {
+                ChainState::Validated(BlockState::ValidationScheduled | BlockState::Unknown)
+                | ChainState::NotOnchain(BlockState::ValidationScheduled | BlockState::Unknown) => {
                     // Wait for VDF steps to catch up before continuing.
                     let vdf_info = &parent_block.vdf_limiter_info;
                     let first_step_number = vdf_info.first_step_number();
