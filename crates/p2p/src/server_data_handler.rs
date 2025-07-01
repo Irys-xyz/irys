@@ -407,7 +407,7 @@ where
             }
         }
 
-        // TODO: Also check that we're within the block is withing the range
+        // TODO: Also check that we're within the block is within the range
         //   Or better yet, set sync_state.is_trusted_sync to false
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
 
