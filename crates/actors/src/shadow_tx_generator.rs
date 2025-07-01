@@ -1,6 +1,6 @@
 use eyre::Result;
-use irys_reth::system_tx::{
-    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, SystemTransaction, TransactionPacket,
+use irys_reth::shadow_tx::{
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
 };
 use irys_types::{
     Address, CommitmentTransaction, IrysBlockHeader, IrysTransactionCommon as _,
@@ -8,14 +8,14 @@ use irys_types::{
 };
 use reth::revm::primitives::ruint::Uint;
 
-pub struct SystemTxGenerator<'a> {
+pub struct ShadowTxGenerator<'a> {
     pub block_height: &'a u64,
     pub reward_address: &'a Address,
     pub reward_amount: &'a irys_types::U256,
     pub parent_block: &'a IrysBlockHeader,
 }
 
-impl<'a> SystemTxGenerator<'a> {
+impl<'a> ShadowTxGenerator<'a> {
     pub fn new(
         block_height: &'a u64,
         reward_address: &'a Address,
@@ -34,17 +34,17 @@ impl<'a> SystemTxGenerator<'a> {
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [IrysTransactionHeader],
-    ) -> impl std::iter::Iterator<Item = Result<SystemTransaction>> + use<'a> {
-        self.generate_system_tx_header()
-            .chain(self.generate_commitment_system_transactions(commitment_txs))
-            .chain(self.generate_data_storage_system_transactions(submit_txs))
+    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
+        self.generate_shadow_tx_header()
+            .chain(self.generate_commitment_shadow_transactions(commitment_txs))
+            .chain(self.generate_data_storage_shadow_transactions(submit_txs))
     }
 
-    /// Generates the expected header system transactions for a given block
-    pub fn generate_system_tx_header(
+    /// Generates the expected header shadow transactions for a given block
+    pub fn generate_shadow_tx_header(
         &self,
-    ) -> impl std::iter::Iterator<Item = Result<SystemTransaction>> {
-        std::iter::once(Ok(SystemTransaction::new_v1(
+    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> {
+        std::iter::once(Ok(ShadowTransaction::new_v1(
             TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: (*self.reward_amount).into(),
                 target: *self.reward_address,
@@ -52,14 +52,14 @@ impl<'a> SystemTxGenerator<'a> {
         )))
     }
 
-    /// Generates the expected data system transactions for a given block
-    pub fn generate_data_storage_system_transactions(
+    /// Generates the expected data shadow transactions for a given block
+    pub fn generate_data_storage_shadow_transactions(
         &'a self,
         submit_txs: &'a [IrysTransactionHeader],
-    ) -> impl std::iter::Iterator<Item = Result<SystemTransaction>> + use<'a> {
-        // create a storage fee system txs
+    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
+        // create a storage fee shadow txs
         submit_txs.iter().map(move |tx| {
-            Ok(SystemTransaction::new_v1(TransactionPacket::StorageFees(
+            Ok(ShadowTransaction::new_v1(TransactionPacket::StorageFees(
                 BalanceDecrement {
                     amount: Uint::from(tx.total_fee()),
                     target: tx.signer,
@@ -70,10 +70,10 @@ impl<'a> SystemTxGenerator<'a> {
     }
 
     /// Generates the expected commitment transactions for a given block
-    pub fn generate_commitment_system_transactions(
+    pub fn generate_commitment_shadow_transactions(
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
-    ) -> impl std::iter::Iterator<Item = Result<SystemTransaction>> + use<'a> {
+    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
         commitment_txs.iter().map(move |tx| {
             let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
             let total_fee = Uint::from(tx.total_fee());
@@ -83,7 +83,7 @@ impl<'a> SystemTxGenerator<'a> {
                     let amount = total_fee
                         .checked_add(commitment_value)
                         .ok_or_else(|| eyre::eyre!("Overflow when calculating stake amount"))?;
-                    Ok(SystemTransaction::new_v1(TransactionPacket::Stake(
+                    Ok(ShadowTransaction::new_v1(TransactionPacket::Stake(
                         BalanceDecrement {
                             amount,
                             target: tx.signer,
@@ -95,7 +95,7 @@ impl<'a> SystemTxGenerator<'a> {
                     let amount = total_fee
                         .checked_add(commitment_value)
                         .ok_or_else(|| eyre::eyre!("Overflow when calculating pledge amount"))?;
-                    Ok(SystemTransaction::new_v1(TransactionPacket::Pledge(
+                    Ok(ShadowTransaction::new_v1(TransactionPacket::Pledge(
                         BalanceDecrement {
                             amount,
                             target: tx.signer,
@@ -107,7 +107,7 @@ impl<'a> SystemTxGenerator<'a> {
                     let amount = commitment_value
                         .checked_sub(total_fee)
                         .ok_or_else(|| eyre::eyre!("Underflow when calculating unpledge amount"))?;
-                    Ok(SystemTransaction::new_v1(TransactionPacket::Unpledge(
+                    Ok(ShadowTransaction::new_v1(TransactionPacket::Unpledge(
                         BalanceIncrement {
                             amount,
                             target: tx.signer,
@@ -119,7 +119,7 @@ impl<'a> SystemTxGenerator<'a> {
                     let amount = commitment_value
                         .checked_sub(total_fee)
                         .ok_or_else(|| eyre::eyre!("Underflow when calculating unstake amount"))?;
-                    Ok(SystemTransaction::new_v1(TransactionPacket::Unstake(
+                    Ok(ShadowTransaction::new_v1(TransactionPacket::Unstake(
                         BalanceIncrement {
                             amount,
                             target: tx.signer,

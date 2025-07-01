@@ -1,7 +1,7 @@
 //! Validation service module.
 //!
 //! Actor-based service for validating blockchain blocks through multi-stage processing:
-//! VDF verification, recall range validation, proof-of-access, and system transactions.
+//! VDF verification, recall range validation, proof-of-access, and shadow transactions.
 //!
 //! ## Flow
 //! 1. **VDF Validation**: Initial check using thread pool, fast-forward VDF state.
@@ -79,7 +79,7 @@ pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
     pub(crate) block_tree_guard: BlockTreeReadGuard,
     /// Rayon thread pool that executes vdf steps   
     pub(crate) pool: rayon::ThreadPool,
-    /// Execution payload provider for system transaction validation
+    /// Execution payload provider for shadow transaction validation
     pub(crate) execution_payload_provider: T,
 }
 

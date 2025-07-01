@@ -13,8 +13,8 @@ pub mod mining;
 pub mod packing;
 pub mod reth_service;
 pub mod services;
+pub mod shadow_tx_generator;
 pub mod storage_module_service;
-pub mod system_tx_generator;
 pub mod validation_service;
 
 pub use addresses::*;
