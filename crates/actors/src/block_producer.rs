@@ -2,7 +2,7 @@ use crate::{
     block_discovery::{get_data_tx_in_parallel, BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
         ema_snapshot::{EmaBlock, EmaSnapshot},
-        BlockTreeReadGuard,
+        BlockState, BlockTreeReadGuard, ChainState,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
@@ -155,8 +155,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         if let Some(blocks_remaining) = self.blocks_remaining_for_test {
             if blocks_remaining == 0 {
                 info!(
-                    "No more blocks needed for this test, skipping block production for solution_hash={}"
-                    , solution.solution_hash.0.to_base58()
+                    "No more blocks needed for this test, skipping block production for solution_hash={}",
+                    solution.solution_hash.0.to_base58()
                 );
                 return AtomicResponse::new(Box::pin(fut::ready(Ok(None))));
             }
@@ -195,14 +195,45 @@ pub trait BlockProdStrategy {
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         let (prev, ema_snapshot) = {
             let read = self.inner().block_tree_guard.read();
-            let (canonical_blocks, _not_onchain_count) = read.get_canonical_chain();
-            let prev = canonical_blocks
-                .last()
-                .expect("canonical chain must contain at least 1 block");
+            let parent_entry = read.get_latest_canonical_entry();
+            let (parent_block, status) = read
+                .get_block_and_status(&parent_entry.block_hash)
+                .expect("block to be present");
+
+            loop {
+                match status {
+                    ChainState::Onchain => {
+                        // block is valid, included on the chain. Safe to build upon.
+                        break;
+                    }
+                    ChainState::Validated(BlockState::Unknown) => {
+                        // noop, sleep and wait
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    ChainState::Validated(BlockState::ValidationScheduled) => {
+                        // wait for vdf steps to catch up
+                        let vdf_info = &parent_block.vdf_limiter_info;
+                        let first_step_number = vdf_info.first_step_number();
+                        let prev_output_step_number = first_step_number.saturating_sub(1);
+                        self.inner()
+                            .vdf_steps_guard
+                            .wait_for_step(prev_output_step_number)
+                            .await;
+                        continue;
+                    }
+                    ChainState::Validated(BlockState::ValidBlock) => {
+                        break;
+                    }
+                    ChainState::NotOnchain(_block_state) => {
+                        panic!("canonical tip should never be NotOnchain")
+                    }
+                }
+            }
             let ema_snapshot = read
-                .get_ema_snapshot(&prev.block_hash)
+                .get_ema_snapshot(&parent_block.block_hash)
                 .expect("every block must contain an EMA snapshot");
-            (prev.clone(), ema_snapshot)
+
+            (parent_block.clone(), ema_snapshot)
         };
         info!(?prev.block_hash, ?prev.height, "Starting block production, previous block");
 
