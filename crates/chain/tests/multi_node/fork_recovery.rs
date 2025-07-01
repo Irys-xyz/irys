@@ -460,12 +460,20 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .wait_until_height(c_block3.height, seconds_to_wait)
         .await?;
 
-    // confirm block_c is the heighest block on all three nodes
-    let c_a = node_a.get_block_by_height(c_block3.height).await?;
-    let c_b = node_b.get_block_by_height(c_block3.height).await?;
-    let c_c = node_c.get_block_by_height(c_block3.height).await?;
-    assert_eq!(c_a, c_b);
-    assert_eq!(c_a, c_c);
+    // confirm chain has identical and expected height on all three nodes
+    let a_latest_height = node_a.get_height().await;
+    let b_latest_height = node_b.get_height().await;
+    let c_latest_height = node_c.get_height().await;
+    assert_eq!(a_latest_height, c_block3.height);
+    assert_eq!(a_latest_height, b_latest_height);
+    assert_eq!(a_latest_height, c_latest_height);
+
+    // confirm blocks at this height match c3
+    let a3 = node_a.get_block_by_height(c_block3.height).await?;
+    let b3 = node_b.get_block_by_height(c_block3.height).await?;
+    let c3 = node_c.get_block_by_height(c_block3.height).await?;
+    assert_eq!(a3, b3);
+    assert_eq!(a3, c3);
 
     // gracefully shutdown nodes
     tokio::join!(node_a.stop(), node_b.stop(), node_c.stop(),);
