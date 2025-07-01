@@ -195,36 +195,6 @@ pub async fn sync_chain(
     sync_state.set_syncing_from(start_sync_from_height);
     sync_state.set_trusted_sync(trusted_mode);
 
-    if trusted_mode {
-        // We should enable full validation when the index nears the (tip - migration depth)
-        let migration_depth = config.consensus.block_migration_depth as usize;
-        let trusted_peers = peer_list.top_trusted_peer().await?;
-        if let Some((_, peer)) = trusted_peers.first() {
-            let node_info = api_client
-                .node_info(peer.address.api)
-                .await
-                .map_err(|e| GossipError::Network(e.to_string()))?;
-            let index_tip = node_info.block_index_height;
-            if index_tip > migration_depth as u64 {
-                let switch_height = index_tip as usize - migration_depth;
-                sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
-                debug!(
-                    "Sync task: Setting switch to full validation at height {}",
-                    switch_height
-                );
-            } else {
-                warn!(
-                    "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
-                    index_tip, migration_depth
-                );
-            }
-        } else {
-            return Err(GossipError::Network(
-                "No trusted peers available".to_string(),
-            ));
-        }
-    }
-
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
 
     if matches!(node_mode, NodeMode::TrustedPeerSync) {
@@ -264,6 +234,36 @@ pub async fn sync_chain(
     }
 
     debug!("Sync task: Syncing started");
+
+    if trusted_mode {
+        // We should enable full validation when the index nears the (tip - migration depth)
+        let migration_depth = config.consensus.block_migration_depth as usize;
+        let trusted_peers = peer_list.top_trusted_peer().await?;
+        if let Some((_, peer)) = trusted_peers.first() {
+            let node_info = api_client
+                .node_info(peer.address.api)
+                .await
+                .map_err(|e| GossipError::Network(e.to_string()))?;
+            let index_tip = node_info.block_index_height;
+            if index_tip > migration_depth as u64 {
+                let switch_height = index_tip as usize - migration_depth;
+                sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
+                debug!(
+                    "Sync task: Setting switch to full validation at height {}",
+                    switch_height
+                );
+            } else {
+                warn!(
+                    "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
+                    index_tip, migration_depth
+                );
+            }
+        } else {
+            return Err(GossipError::Network(
+                "No trusted peers available".to_string(),
+            ));
+        }
+    }
 
     let mut block_queue = VecDeque::new();
     let block_index = get_block_index(

@@ -389,7 +389,7 @@ where
     ) -> Result<(), BlockPoolError> {
         if skip_validation_for_fast_track {
             debug!(
-                "Block pool: The block block {:?} (height {}) is marked for fast track, skipping validation",
+                "Block pool: The block {:?} (height {}) is marked for fast track, skipping validation",
                 block_header.block_hash, block_header.height,
             );
             return self.fast_track_block(block_header).await;
