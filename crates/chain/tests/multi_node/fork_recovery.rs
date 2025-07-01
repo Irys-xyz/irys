@@ -405,6 +405,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // Node C mines on top of B's chain
     let (c_block, _) = node_c.mine_block_without_gossip().await?;
+    assert_eq!(c_block.height, 3);
 
     // Reconnect all nodes
     a_ctx
@@ -432,6 +433,13 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     node_c
         .wait_until_height(c_block.height, seconds_to_wait)
         .await?;
+
+    // confirm block_c is the heighest block on all three nodes
+    let c_a = node_a.get_block_by_height(c_block.height).await?;
+    let c_b = node_b.get_block_by_height(c_block.height).await?;
+    let c_c = node_c.get_block_by_height(c_block.height).await?;
+    assert_eq!(c_a, c_b);
+    assert_eq!(c_a, c_c);
 
     // gracefully shutdown nodes
     tokio::join!(node_a.stop(), node_b.stop(), node_c.stop(),);
