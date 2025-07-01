@@ -377,18 +377,32 @@ where
             block_hash
         );
 
-        if let Some(switch_to_full_validation_at_height) = self.sync_state.full_validation_switch_height() {
+        if let Some(switch_to_full_validation_at_height) =
+            self.sync_state.full_validation_switch_height()
+        {
             // mark_processed called on the current block height will set trust sync to false
-            let switch_at_the_next_block = block_height as usize == switch_to_full_validation_at_height;
+            let switch_at_the_next_block =
+                block_height as usize == switch_to_full_validation_at_height;
             if switch_at_the_next_block {
                 let (tx, rx) = oneshot::channel();
-                self.block_tree_sender.send(BlockTreeServiceMessage::ReloadCacheFromDb { response: tx }).map_err(|err| {
-                    error!("Failed to send ReloadCacheFromDb message: {:?}", err);
-                    BlockPoolError::OtherInternal(format!("Failed to send ReloadCacheFromDb message: {:?}", err))
-                })?;
+                self.block_tree_sender
+                    .send(BlockTreeServiceMessage::ReloadCacheFromDb { response: tx })
+                    .map_err(|err| {
+                        error!("Failed to send ReloadCacheFromDb message: {:?}", err);
+                        BlockPoolError::OtherInternal(format!(
+                            "Failed to send ReloadCacheFromDb message: {:?}",
+                            err
+                        ))
+                    })?;
                 rx.await.map_err(|err| {
-                    error!("Failed to receive response for ReloadCacheFromDb: {:?}", err);
-                    BlockPoolError::OtherInternal(format!("Failed to receive response for ReloadCacheFromDb: {:?}", err))
+                    error!(
+                        "Failed to receive response for ReloadCacheFromDb: {:?}",
+                        err
+                    );
+                    BlockPoolError::OtherInternal(format!(
+                        "Failed to receive response for ReloadCacheFromDb: {:?}",
+                        err
+                    ))
                 })?;
             }
         }
@@ -465,6 +479,7 @@ where
             // Request the execution payload for the block if it is not already stored locally
             self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash);
 
+            debug!("Block pool: Marking block {:?} as processed", current_block_hash);
             self.sync_state
                 .mark_processed(current_block_height as usize);
             self.blocks_cache

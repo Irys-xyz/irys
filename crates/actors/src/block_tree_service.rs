@@ -251,9 +251,7 @@ impl BlockTreeServiceInner {
                     .await;
                 let _ = response.send(result);
             }
-            BlockTreeServiceMessage::ReloadCacheFromDb {
-                response,
-            } => {
+            BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
                 self.reload_cache_from_db();
                 let _ = response.send(());
             }
@@ -263,14 +261,14 @@ impl BlockTreeServiceInner {
 
     fn reload_cache_from_db(&self) {
         debug!("Reloading block tree cache from database");
-        let new_index = BlockTreeCache::restore_from_db(
+        let new_block_tree_cache = BlockTreeCache::restore_from_db(
             self.block_index_guard.clone(),
             self.commitment_state_guard.clone(),
             self.reth_service_actor.clone(),
             self.db.clone(),
             self.consensus_config.clone(),
         );
-        *self.cache.write().unwrap() = new_index;
+        *self.cache.write().unwrap() = new_block_tree_cache;
     }
 
     /// Fast tracks the storage finalization of a block by retrieving transaction headers. Do
