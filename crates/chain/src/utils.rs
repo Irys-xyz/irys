@@ -30,11 +30,6 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
     if is_genesis {
         config.mode = NodeMode::Genesis;
     }
-    // This line made little sense to me - this would set the mode to whatever is in the config
-    // already before adding a new mode.
-    // else {
-    //     config.mode = NodeMode::PeerSync;
-    // };
 
     Ok(config)
 }
