@@ -7,10 +7,7 @@ use irys_chain::{
     IrysNodeCtx,
 };
 use irys_database::block_header_by_hash;
-use irys_types::{
-    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, NodeInfo,
-    PeerAddress, H256,
-};
+use irys_types::{irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, NodeInfo, NodeMode, PeerAddress, H256};
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
@@ -220,7 +217,8 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await;
     ctx_peer1_node.start_public_api().await;
 
-    let ctx_peer2_node = ctx_genesis_node.testnet_peer();
+    let mut ctx_peer2_node = ctx_genesis_node.testnet_peer();
+    ctx_peer2_node.mode = NodeMode::TrustedPeerSync;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
         .await;
