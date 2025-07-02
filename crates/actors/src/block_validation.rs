@@ -3,12 +3,12 @@ use std::{sync::Arc, time::Duration};
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_index_service::BlockIndexReadGuard,
-    ema_service::{EmaServiceMessage, PriceStatus},
+    block_tree_service::ema_snapshot::EmaSnapshot,
     epoch_service::PartitionAssignmentsReadGuard,
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
-    system_tx_generator::SystemTxGenerator,
+    shadow_tx_generator::ShadowTxGenerator,
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
@@ -19,7 +19,7 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
-use irys_reth::system_tx::SystemTransaction;
+use irys_reth::shadow_tx::ShadowTransaction;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
@@ -53,7 +53,7 @@ pub async fn prevalidate_block(
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
-    ema_service_sender: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+    parent_ema_snapshot: &EmaSnapshot,
 ) -> eyre::Result<()> {
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
@@ -113,36 +113,29 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    let vdf_checkpoint_valid = async {
-        last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "last_step_checkpoints_is_valid",
-        );
-        Result::<_, eyre::Report>::Ok(())
-    };
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+
     // Check that the oracle price does not exceed the EMA pricing parameters
-    let oracle_price_valid = async {
-        check_valid_oracle_price(&block, &ema_service_sender).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "check_valid_oracle_price",
-        );
-        Result::<_, eyre::Report>::Ok(())
-    };
+    let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
+        block.oracle_irys_price,
+        previous_block.oracle_irys_price,
+        config.consensus.token_price_safe_range,
+    );
+    ensure!(oracle_price_valid, "Oracle price must be valid");
+
     // Check that the EMA has been correctly calculated
-    let ema_valid = async {
-        check_valid_ema_calculation(&block, &ema_service_sender).await?;
-        debug!(
-            block_hash = ?block.block_hash.0.to_base58(),
-            ?block.height,
-            "check_valid_ema_calculation",
-        );
-        Result::<_, eyre::Report>::Ok(())
+    let ema_valid = {
+        let res = parent_ema_snapshot
+            .calculate_ema_for_new_block(
+                &previous_block,
+                block.oracle_irys_price,
+                config.consensus.token_price_safe_range,
+                config.consensus.ema.price_adjustment_interval,
+            )
+            .ema;
+        res == block.ema_irys_price
     };
-    futures::try_join!(vdf_checkpoint_valid, oracle_price_valid, ema_valid)?;
+    ensure!(ema_valid, "EMA must be valid");
 
     // Check valid curve price
     let reward = reward_curve.reward_between(
@@ -163,40 +156,6 @@ pub async fn prevalidate_block(
     // we just accept any valid signature.
     ensure!(block.is_signature_valid(), "block signature is not valid");
 
-    Ok(())
-}
-
-async fn check_valid_oracle_price(
-    block: &IrysBlockHeader,
-    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
-) -> eyre::Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_service_sender.send(EmaServiceMessage::ValidateOraclePrice {
-        block_height: block.height,
-        oracle_price: block.oracle_irys_price,
-        response: tx,
-    })?;
-    let response = rx.await??;
-    ensure!(
-        response == PriceStatus::Valid,
-        "Oracle price exceeds the defined bounds"
-    );
-    Ok(())
-}
-
-async fn check_valid_ema_calculation(
-    block: &IrysBlockHeader,
-    ema_service_sender: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
-) -> eyre::Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ema_service_sender.send(EmaServiceMessage::ValidateEmaPrice {
-        block_height: block.height,
-        ema_price: block.ema_irys_price,
-        oracle_price: block.oracle_irys_price,
-        response: tx,
-    })?;
-    let response = rx.await??;
-    ensure!(response == PriceStatus::Valid, "EMA price is invalid");
     Ok(())
 }
 
@@ -494,9 +453,9 @@ pub fn poa_is_valid(
     Ok(())
 }
 
-/// Validates that the system transactions in the EVM block match the expected system transactions
+/// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data.
-pub async fn system_transactions_are_valid(
+pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
@@ -555,56 +514,56 @@ pub async fn system_transactions_are_valid(
     }
     let evm_block: Block = payload.try_into_block()?;
 
-    // 2. Extract system transactions from the beginning of the block
-    let mut expect_system_txs = true;
-    let actual_system_txs = evm_block
+    // 2. Extract shadow transactions from the beginning of the block
+    let mut expect_shadow_txs = true;
+    let actual_shadow_txs = evm_block
         .body
         .transactions
         .into_iter()
         .map(|tx| {
-            if expect_system_txs {
-                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+            if expect_shadow_txs {
+                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
                 let tx_signer = tx.into_signed().recover_signer()?;
-                let Ok(system_tx) = system_tx else {
-                    // after reaching first non-system tx, we scan the rest of the
-                    // txs to check if we don't have any stray system txs in there
-                    expect_system_txs = false;
+                let Ok(shadow_tx) = shadow_tx else {
+                    // after reaching first non-shadow tx, we scan the rest of the
+                    // txs to check if we don't have any stray shadow txs in there
+                    expect_shadow_txs = false;
                     return Ok(None);
                 };
 
                 ensure!(
                     block.miner_address == tx_signer,
-                    "System tx signer is not the miner"
+                    "Shadow tx signer is not the miner"
                 );
-                Ok(Some(system_tx))
+                Ok(Some(shadow_tx))
             } else {
-                // ensure that no other system txs are present in the block
-                let system_tx = SystemTransaction::decode(&mut tx.input().as_ref());
+                // ensure that no other shadow txs are present in the block
+                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
                 ensure!(
-                    system_tx.is_err(),
-                    "system tx injected in the middle of the block"
+                    shadow_tx.is_err(),
+                    "shadow tx injected in the middle of the block"
                 );
                 Ok(None)
             }
         })
         .filter_map(std::result::Result::transpose);
 
-    // 3. Generate expected system transactions
+    // 3. Generate expected shadow transactions
     let expected_txs =
-        generate_expected_system_transactions_from_db(config, service_senders, block, db).await?;
+        generate_expected_shadow_transactions_from_db(config, service_senders, block, db).await?;
 
     // 4. Validate they match
-    validate_system_transactions_match(actual_system_txs, expected_txs.into_iter())
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter())
 }
 
-/// Generates expected system transactions by looking up required data from the mempool or database
+/// Generates expected shadow transactions by looking up required data from the mempool or database
 #[tracing::instrument(skip_all, err)]
-async fn generate_expected_system_transactions_from_db<'a>(
+async fn generate_expected_shadow_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<SystemTransaction>> {
+) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
     let prev_block = {
         let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
@@ -629,16 +588,16 @@ async fn generate_expected_system_transactions_from_db<'a>(
     // Lookup data txs
     let data_txs = extract_data_txs(service_senders, block, db).await?;
 
-    let system_txs = SystemTxGenerator::new(
+    let shadow_txs = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
         &prev_block,
     );
-    let system_txs = system_txs
+    let shadow_txs = shadow_txs
         .generate_all(&commitment_txs, &data_txs)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(system_txs)
+    Ok(shadow_txs)
 }
 
 async fn extract_commitment_txs(
@@ -649,7 +608,7 @@ async fn extract_commitment_txs(
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
     let commitment_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't generate system txs for commitment txs
+        // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
         vec![]
     } else {
         match &block.system_ledgers[..] {
@@ -698,24 +657,24 @@ async fn extract_data_txs(
     Ok(txs)
 }
 
-/// Validates  the actual system transactions match the expected ones
+/// Validates  the actual shadow transactions match the expected ones
 #[tracing::instrument(skip_all, err)]
-fn validate_system_transactions_match(
-    actual: impl Iterator<Item = eyre::Result<SystemTransaction>>,
-    expected: impl Iterator<Item = SystemTransaction>,
+fn validate_shadow_transactions_match(
+    actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
+    expected: impl Iterator<Item = ShadowTransaction>,
 ) -> eyre::Result<()> {
-    // Validate each expected system transaction
+    // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
-            // If either of the system txs is not present, it means it was not generated as `expected`
+            // If either of the shadow txs is not present, it means it was not generated as `expected`
             // or it was not included in the block. either way - an error
-            tracing::warn!(?data, "system tx len mismatch");
-            eyre::bail!("actual and expected system txs lens differ");
+            tracing::warn!(?data, "shadow tx len mismatch");
+            eyre::bail!("actual and expected shadow txs lens differ");
         };
         let actual = actual?;
         ensure!(
             actual == expected,
-            "System transaction mismatch at idx {}. expected {:?}, got {:?}",
+            "Shadow transaction mismatch at idx {}. expected {:?}, got {:?}",
             idx,
             expected,
             actual

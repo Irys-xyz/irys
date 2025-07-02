@@ -373,7 +373,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// get block height in block index
-    pub async fn wait_until_height_on_chain(
+    pub async fn wait_until_block_index_height(
         &self,
         target_height: u64,
         max_seconds: usize,
@@ -455,6 +455,44 @@ impl IrysNodeTest<IrysNodeCtx> {
                     "reached height {} after {} retries",
                     target_height, &retries
                 );
+                return Ok(latest_block.block_hash);
+            }
+
+            if retries >= max_retries {
+                return Err(eyre::eyre!(
+                    "Failed to reach target height {} after {} retries",
+                    target_height,
+                    retries
+                ));
+            }
+
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+    }
+
+    pub async fn wait_until_height_confirmed(
+        &self,
+        target_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<H256> {
+        let mut retries = 0;
+        let max_retries = max_seconds; // 1 second per retry
+
+        loop {
+            let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+                .await
+                .unwrap();
+            let latest_block = canonical_chain.0.last().unwrap();
+
+            let latest_height = latest_block.height;
+            let not_onchain_count = canonical_chain.1 as u64;
+            if (latest_height - not_onchain_count) >= target_height {
+                info!(
+                    "reached height {} after {} retries",
+                    target_height, &retries
+                );
+
                 return Ok(latest_block.block_hash);
             }
 
@@ -746,6 +784,32 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
     }
 
+    // wait for block to be available via block tree guard
+    pub async fn wait_for_block(
+        &self,
+        hash: &H256,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<IrysBlockHeader> {
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+        let mut retries = 0;
+
+        for _ in 0..max_retries {
+            if let Ok(block) = self.get_block_by_hash(hash) {
+                info!("block found in block tree after {} retries", &retries);
+                return Ok(block);
+            }
+
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+            retries += 1;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate block in block tree after {} retries",
+            retries
+        ))
+    }
+
     /// wait for tx to appear in the mempool or be found in the database
     pub async fn wait_for_mempool(
         &self,
@@ -832,7 +896,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block
     // if None is provided, it will use the latest state.
-    pub async fn get_best_mempool_tx(&self, parent_evm_block_hash: Option<BlockId>) -> MempoolTxs {
+    pub async fn get_best_mempool_tx(
+        &self,
+        parent_evm_block_hash: Option<BlockId>,
+    ) -> eyre::Result<MempoolTxs> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.node_ctx
             .service_senders
@@ -1038,6 +1105,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    /// get block from block tree guard
     pub fn get_block_by_hash(&self, hash: &H256) -> eyre::Result<IrysBlockHeader> {
         self.node_ctx
             .block_tree_guard

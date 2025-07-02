@@ -10,7 +10,7 @@ use actix_web::{
 };
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
-    ema_service::EmaServiceMessage, mempool_service::MempoolServiceMessage,
+    mempool_service::MempoolServiceMessage,
 };
 use irys_p2p::{PeerList as _, PeerListServiceFacade, SyncState};
 use irys_reth_node_bridge::node::RethNodeProvider;
@@ -31,7 +31,6 @@ use tracing::{debug, info};
 pub struct ApiState {
     pub mempool_service: UnboundedSender<MempoolServiceMessage>,
     pub chunk_provider: Arc<ChunkProvider>,
-    pub ema_service: UnboundedSender<EmaServiceMessage>,
     pub peer_list: PeerListServiceFacade,
     pub db: DatabaseProvider,
     pub config: Config,

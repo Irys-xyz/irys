@@ -8,12 +8,11 @@ use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysToke
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
-use crate::{
-    ema_service::{EmaServiceMessage, NewBlockEmaResponse, PriceStatus},
-    services::{ServiceReceivers, ServiceSenders},
-};
+use crate::services::{ServiceReceivers, ServiceSenders};
 
-use super::{BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent};
+use super::{
+    ema_snapshot::EmaSnapshot, BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent,
+};
 
 pub fn build_genesis_tree_with_n_blocks(
     max_block_height: u64,
@@ -54,6 +53,16 @@ pub fn deterministic_price(height: u64) -> IrysTokenPrice {
     IrysTokenPrice::new(amount)
 }
 
+pub fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
+    let config = irys_types::ConsensusConfig::testnet();
+    let genesis_header = IrysBlockHeader {
+        oracle_irys_price: config.genesis_price,
+        ema_irys_price: config.genesis_price,
+        ..Default::default()
+    };
+    EmaSnapshot::genesis(&genesis_header)
+}
+
 pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
     let mut block_hash = if blocks[0].0.block_hash == H256::default() {
         H256::random()
@@ -82,6 +91,7 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
                 block.block_hash,
                 block,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 *state,
             )
             .unwrap();
@@ -109,59 +119,6 @@ impl TestCtx {
     pub fn setup(max_block_height: u64, config: Config) -> (Self, ServiceReceivers) {
         let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(max_block_height);
         Self::setup_with_tree(block_tree_guard, prices, config)
-    }
-
-    pub async fn get_prices_for_new_block(
-        &self,
-        height_of_new_block: u64,
-        new_oracle_price: IrysTokenPrice,
-    ) -> eyre::Result<NewBlockEmaResponse> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
-            .ema
-            .send(EmaServiceMessage::GetPriceDataForNewBlock {
-                height_of_new_block,
-                response: tx,
-                oracle_price: new_oracle_price,
-            })
-            .unwrap();
-        rx.await.unwrap()
-    }
-
-    pub async fn validate_ema_price(
-        &self,
-        block_height: u64,
-        ema_price: IrysTokenPrice,
-        oracle_price: IrysTokenPrice,
-    ) -> eyre::Result<PriceStatus> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
-            .ema
-            .send(EmaServiceMessage::ValidateEmaPrice {
-                response: tx,
-                block_height,
-                ema_price,
-                oracle_price,
-            })
-            .unwrap();
-        rx.await.unwrap()
-    }
-
-    pub async fn validate_oracle_price(
-        &self,
-        block_height: u64,
-        oracle_price: IrysTokenPrice,
-    ) -> eyre::Result<PriceStatus> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service_senders
-            .ema
-            .send(EmaServiceMessage::ValidateOraclePrice {
-                response: tx,
-                block_height,
-                oracle_price,
-            })
-            .unwrap();
-        rx.await.unwrap()
     }
 
     pub fn setup_with_tree(
@@ -295,6 +252,7 @@ pub fn create_and_apply_fork(
                 header.block_hash,
                 &header,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_ema_snapshot(),
                 chain_state,
             )
             .unwrap();
