@@ -424,27 +424,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .network
         .connect_peer(b_info.peer_id, b_info.peering_tcp_addr);
 
-    tracing::warn!("about to post stakes");
-
-    // node_a generates txs in isolation after block 1
-    let peer_a_b1_stake_tx = node_a
-        .post_stake_commitment_without_gossip(genesis_block_hash)
-        .await;
-    let peer_a_b1_pledge_tx = node_a
-        .post_pledge_commitment_without_gossip(genesis_block_hash)
-        .await;
-
-    tracing::warn!("posted stakes");
-
-    // confirm node_a has txs in mempool
-    node_a
-        .wait_for_mempool_commitment_txs(
-            vec![peer_a_b1_stake_tx.id, peer_a_b1_pledge_tx.id],
-            seconds_to_wait,
-        )
-        .await?;
-
-    // node_b generates txs in isolation after block 0
+    // node_b generates txs in isolation for inclusion in block 1
     let peer_b_b1_stake_tx = node_b
         .post_stake_commitment_without_gossip(genesis_block_hash)
         .await;
@@ -452,7 +432,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .post_pledge_commitment_without_gossip(genesis_block_hash)
         .await;
 
-    // node_c generates txs in isolation after block 0
+    // node_c generates txs in isolation for inclusion block 1
     let peer_c_c1_stake_tx = node_c.post_stake_commitment(genesis_block_hash).await;
     let peer_c_c1_pledge_tx = node_c.post_pledge_commitment(genesis_block_hash).await;
 
