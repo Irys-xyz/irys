@@ -5,6 +5,7 @@ use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
 use irys_actors::block_tree_service::ChainState;
 use irys_actors::mempool_service::TxIngressError;
+use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
@@ -20,8 +21,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, read_block_from_state, AddTxError,
-    BlockValidationOutcome, IrysNodeTest,
+    mine_block, mine_block_and_wait_for_validation, read_block_from_state, solution_context,
+    AddTxError, BlockValidationOutcome, IrysNodeTest,
 };
 
 #[test_log::test(tokio::test)]
@@ -902,6 +903,99 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     }
     genesis_node.stop().await;
     peer_node.stop().await;
+
+    Ok(())
+}
+
+// This test produces a block with an invalid PoA chunk.
+// A new block will not be built on the invalid block.
+#[test_log::test(actix_web::test)]
+async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        fn create_poa_data(
+            &self,
+            solution: &irys_types::block_production::SolutionContext,
+            ledger_id: Option<u32>,
+        ) -> eyre::Result<(irys_types::PoaData, H256)> {
+            // Create an invalid PoA chunk that doesn't match the actual solution
+            let invalid_chunk = vec![0xFF; 256 * 1024]; // Fill with invalid data
+            let poa_chunk = irys_types::Base64(invalid_chunk);
+            // hash is valid so that prevalidation succeeds
+            let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
+
+            let poa = irys_types::PoaData {
+                tx_path: solution.tx_path.clone().map(irys_types::Base64),
+                data_path: solution.data_path.clone().map(irys_types::Base64),
+                chunk: Some(poa_chunk),
+                recall_chunk_index: solution.recall_chunk_index,
+                ledger_id,
+                partition_chunk_offset: solution.chunk_offset,
+                partition_hash: solution.partition_hash,
+            };
+            Ok((poa, poa_chunk_hash))
+        }
+    }
+
+    // Configure test network
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+
+    // Create peer signer and fund it
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    // Start genesis node (node 1)
+    let node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    node.start_public_api().await;
+
+    // Create evil block production strategy
+    let evil_strategy = EvilBlockProdStrategy {
+        prod: ProductionStrategy {
+            inner: node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    // Produce block with invalid PoA
+    let (evil_block, _eth_payload) = evil_strategy
+        .fully_produce_new_block(solution_context(&node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Mine a valid block
+    // note: cannot use `.mine_block()` because there will be height mismatch
+    let (_new_block, _reth_block) = ProductionStrategy {
+        inner: node.node_ctx.block_producer_inner.clone(),
+    }
+    .fully_produce_new_block(solution_context(&node.node_ctx).await?)
+    .await?
+    .unwrap();
+    let new_height = node.get_height().await;
+    assert_eq!(
+        new_height, evil_block.height,
+        "we have created a fork because we don't want to build on the evil block"
+    );
+
+    // Get the new block and verify its parent is not the evil block
+    let new_block = node.get_block_by_height(new_height).await?;
+    assert_ne!(
+        new_block.previous_block_hash, evil_block.block_hash,
+        "expect the new block parent to NOT be the evil parent block"
+    );
+
+    // Cleanup
+    node.stop().await;
 
     Ok(())
 }
