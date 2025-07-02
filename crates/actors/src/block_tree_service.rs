@@ -123,6 +123,13 @@ pub struct BlockMigratedEvent {
     pub block: Arc<IrysBlockHeader>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CanonicalChainEvent {
+    pub latest_block: BlockTreeEntry,
+    pub blocks_awaiting_validation: usize,
+    pub timestamp: SystemTime,
+}
+
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     pub fn spawn_service(
@@ -472,6 +479,14 @@ impl BlockTreeServiceInner {
             );
         }
 
+        // Release the write lock before broadcasting
+        drop(cache);
+
+        // Broadcast canonical chain update if block was successfully added
+        if add_result.is_ok() {
+            self.broadcast_canonical_chain_update();
+        }
+
         Ok(())
     }
 
@@ -629,6 +644,9 @@ impl BlockTreeServiceInner {
                 // Handle block finalization (move chunks to disk and add to block_index)
                 self.try_notify_services_of_block_finalization(&arc_block)
                     .await;
+
+                // Broadcast canonical chain update after validation completes
+                self.broadcast_canonical_chain_update();
             }
         }
     }
@@ -673,6 +691,23 @@ impl BlockTreeServiceInner {
         }
 
         Ok(received)
+    }
+
+    /// Broadcasts an update about the current canonical chain state
+    fn broadcast_canonical_chain_update(&self) {
+        let cache = self.cache.read().unwrap();
+        let latest_entry = cache.get_latest_canonical_entry();
+        let blocks_awaiting_validation =
+            cache.get_num_blocks_awaiting_validation_on_canonical_chain();
+        let event = CanonicalChainEvent {
+            latest_block: latest_entry.clone(),
+            blocks_awaiting_validation,
+            timestamp: SystemTime::now(),
+        };
+        drop(cache);
+        if let Err(e) = self.service_senders.canonical_chain_events.send(event) {
+            debug!("No canonical chain subscribers: {:?}", e);
+        }
     }
 }
 

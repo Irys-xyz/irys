@@ -1,5 +1,5 @@
 use crate::{
-    block_tree_service::{BlockMigratedEvent, BlockTreeServiceMessage, ReorgEvent},
+    block_tree_service::{BlockMigratedEvent, BlockTreeServiceMessage, CanonicalChainEvent, ReorgEvent},
     cache_service::CacheServiceAction,
     mempool_service::MempoolServiceMessage,
     validation_service::ValidationServiceMessage,
@@ -42,6 +42,10 @@ impl ServiceSenders {
     pub fn subscribe_block_migrated(&self) -> broadcast::Receiver<BlockMigratedEvent> {
         self.0.subscribe_block_migrated()
     }
+
+    pub fn subscribe_canonical_chain(&self) -> broadcast::Receiver<CanonicalChainEvent> {
+        self.0.canonical_chain_events.subscribe()
+    }
 }
 
 #[derive(Debug)]
@@ -57,6 +61,7 @@ pub struct ServiceReceivers {
     pub epoch_service: UnboundedReceiver<EpochServiceMessage>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
+    pub canonical_chain_events: broadcast::Receiver<CanonicalChainEvent>,
 }
 
 #[derive(Debug)]
@@ -72,6 +77,7 @@ pub struct ServiceSendersInner {
     pub epoch_service: UnboundedSender<EpochServiceMessage>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
+    pub canonical_chain_events: broadcast::Sender<CanonicalChainEvent>,
 }
 
 impl ServiceSendersInner {
@@ -96,6 +102,8 @@ impl ServiceSendersInner {
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
         let (block_migrated_sender, block_migrated_receiver) =
             broadcast::channel::<BlockMigratedEvent>(100);
+        let (canonical_chain_sender, canonical_chain_receiver) =
+            broadcast::channel::<CanonicalChainEvent>(100);
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -109,6 +117,7 @@ impl ServiceSendersInner {
             epoch_service: epoch_sender,
             reorg_events: reorg_sender,
             block_migrated_events: block_migrated_sender,
+            canonical_chain_events: canonical_chain_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -122,6 +131,7 @@ impl ServiceSendersInner {
             epoch_service: epoch_receiver,
             reorg_events: reorg_receiver,
             block_migrated_events: block_migrated_receiver,
+            canonical_chain_events: canonical_chain_receiver,
         };
         (senders, receivers)
     }
