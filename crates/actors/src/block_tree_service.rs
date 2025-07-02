@@ -1167,6 +1167,15 @@ impl BlockTreeCache {
             block.block_hash, block.height
         );
 
+        // Check if block is already part of the canonical chain
+        if matches!(
+            self.blocks.get(&hash).map(|b| &b.chain_state),
+            Some(ChainState::Onchain)
+        ) {
+            debug!(?hash, "already part of the main chain state");
+            return Ok(());
+        }
+
         self.add_common(
             hash,
             block,
@@ -1982,7 +1991,7 @@ mod tests {
             .tx_ids
             .push(H256::random());
         assert_matches!(
-            cache.add_peer_block(&b1_test, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b1_test, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_eq!(
@@ -2010,7 +2019,7 @@ mod tests {
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
         assert_matches!(
-            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_eq!(
@@ -2029,7 +2038,7 @@ mod tests {
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
         assert_matches!(
-            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_eq!(
@@ -2064,13 +2073,13 @@ mod tests {
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
         assert_matches!(
-            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
         assert_matches!(
-            cache.add_peer_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
 
@@ -2205,11 +2214,11 @@ mod tests {
         // has a lower cdiff.
         let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
         assert_matches!(
-            cache.add_peer_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_matches!(
-            cache.add_peer_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
@@ -2219,7 +2228,7 @@ mod tests {
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(&b2_2, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b2_2, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_eq!(
@@ -2239,7 +2248,7 @@ mod tests {
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(&b2_3, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b2_3, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_eq!(
@@ -2256,11 +2265,12 @@ mod tests {
 
         // Now b2_2->b2->b1 are validated.
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b2_2.block_hash,
                 &b2_2,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );
@@ -2286,15 +2296,16 @@ mod tests {
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(&b3, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b3, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b3.block_hash,
                 &b3,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );
@@ -2322,7 +2333,7 @@ mod tests {
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(&b4, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b4, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_eq!(
@@ -2459,7 +2470,7 @@ mod tests {
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_peer_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         let b13 = extend_chain(random_block(U256::one()), &b11);
@@ -2480,11 +2491,12 @@ mod tests {
         println!("tip: {} before mark_tip()", cache.tip);
 
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b13.block_hash,
                 &b13,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );
@@ -2530,7 +2542,7 @@ mod tests {
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
         assert_matches!(
-            cache.add_peer_block(&b14, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b14, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_eq!(
@@ -2615,7 +2627,7 @@ mod tests {
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(
-            cache.add_peer_block(&b15, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b15, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_matches!(
@@ -2630,11 +2642,12 @@ mod tests {
 
         // Validate b14
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b14.block_hash,
                 &b14,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );
@@ -2656,7 +2669,7 @@ mod tests {
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
         assert_matches!(
-            cache.add_peer_block(&b16, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b16, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         assert_matches!(
@@ -2711,7 +2724,7 @@ mod tests {
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_peer_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
+            cache.add_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
             Ok(())
         );
         let _b13 = extend_chain(random_block(U256::one()), &b11);
@@ -2723,11 +2736,12 @@ mod tests {
 
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b12.block_hash,
                 &b12,
-                ChainState::Validated(BlockState::ValidationScheduled),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidationScheduled)
             ),
             Ok(())
         );
@@ -2751,11 +2765,12 @@ mod tests {
 
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b12.block_hash,
                 &b12,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );
@@ -2768,20 +2783,22 @@ mod tests {
         let b13b = extend_chain(random_block(U256::from(2)), &b12);
 
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b13a.block_hash,
                 &b13a,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b13b.block_hash,
                 &b13b,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );
@@ -2794,11 +2811,12 @@ mod tests {
         // extend the fork to make it canonical
         let b14b = extend_chain(random_block(U256::from(3)), &b13b);
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b14b.block_hash,
                 &b14b,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache,
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock)
             ),
             Ok(())
         );

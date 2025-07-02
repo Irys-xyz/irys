@@ -1,13 +1,13 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, reth_ethereum_primitives, sha, BlockProdStrategy, BlockProducerInner,
+    async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, Base64, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
-    NodeConfig, PoaData, H256,
+    storage_pricing::Amount, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
+    NodeConfig,
 };
 use reth::payload::EthBuiltPayload;
 

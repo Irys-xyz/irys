@@ -1005,14 +1005,13 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .read()
         .get_latest_canonical_entry()
         .block_hash;
-    let new_block_state = node
+    let new_block_state = *node
         .node_ctx
         .block_tree_guard
         .read()
         .get_block_and_status(&new_block.block_hash)
         .unwrap()
-        .1
-        .clone();
+        .1;
     assert_eq!(latest_block_hash, new_block.block_hash);
     assert_eq!(new_block_state, ChainState::Onchain);
 

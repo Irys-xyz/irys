@@ -1,5 +1,7 @@
 use crate::{
-    block_tree_service::{BlockMigratedEvent, BlockTreeServiceMessage, CanonicalChainEvent, ReorgEvent},
+    block_tree_service::{
+        BlockMigratedEvent, BlockTreeServiceMessage, CanonicalChainEvent, ReorgEvent,
+    },
     cache_service::CacheServiceAction,
     mempool_service::MempoolServiceMessage,
     validation_service::ValidationServiceMessage,
