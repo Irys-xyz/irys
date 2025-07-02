@@ -7,7 +7,8 @@ use crate::utils::IrysNodeTest;
 #[should_panic]
 /// This test is expected to panic
 /// create_new_genesis_block() calls get_genesis_commitments()
-/// This creates some initial commitments in the genesis block, which are duplicated in this test and cause the panic
+/// This creates some initial commitments in the genesis block,
+/// which are duplicated in this test and cause the panic
 async fn commitment_directly_after_genesis_errors() -> () {
     initialize_tracing();
     // config variables
