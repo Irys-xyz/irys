@@ -40,7 +40,7 @@ use irys_p2p::{
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
-use irys_reth_node_bridge::irys_reth::payload::SystemTxStore;
+use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::RethNode;
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::signal::{
@@ -108,7 +108,7 @@ pub struct IrysNodeCtx {
     stop_guard: StopGuard,
     pub peer_list: PeerListServiceFacade,
     pub sync_state: SyncState,
-    pub system_tx_store: SystemTxStore,
+    pub shadow_tx_store: ShadowTxStore,
 }
 
 impl IrysNodeCtx {
@@ -218,7 +218,7 @@ async fn start_reth_node(
     sender: oneshot::Sender<RethNode>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
-    system_tx_store: SystemTxStore,
+    shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<()> {
     let random_ports = config.node_config.reth.use_random_ports;
     let (node_handle, _reth_node_adapter) = match irys_reth_node_bridge::node::run_node(
@@ -228,7 +228,7 @@ async fn start_reth_node(
         irys_provider.clone(),
         latest_block,
         random_ports,
-        system_tx_store.clone(),
+        shadow_tx_store.clone(),
     )
     .in_current_span()
     .await
@@ -244,7 +244,7 @@ async fn start_reth_node(
                 irys_provider.clone(),
                 latest_block,
                 random_ports,
-                system_tx_store,
+                shadow_tx_store,
             )
             .await
             .expect("expected reth node to have started")
@@ -537,8 +537,8 @@ impl IrysNode {
         let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel(1);
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
-        let (system_tx_store, _system_tx_notification_stream) =
-            SystemTxStore::new_with_notifications();
+        let (shadow_tx_store, _shadow_tx_notification_stream) =
+            ShadowTxStore::new_with_notifications();
 
         let irys_provider = irys_storage::reth_provider::create_provider();
 
@@ -561,7 +561,7 @@ impl IrysNode {
             irys_db,
             block_index,
             self.gossip_listener,
-            system_tx_store.clone(),
+            shadow_tx_store.clone(),
         )?;
 
         // await the latest height to be reported
@@ -572,7 +572,7 @@ impl IrysNode {
             self.config.clone(),
             reth_shutdown_receiver,
             main_actor_thread_shutdown_tx,
-            system_tx_store,
+            shadow_tx_store,
             reth_handle_sender,
             actor_main_thread_handle,
             irys_provider.clone(),
@@ -630,7 +630,7 @@ impl IrysNode {
         irys_db: DatabaseProvider,
         block_index: BlockIndex,
         gossip_listener: TcpListener,
-        system_tx_store: SystemTxStore,
+        shadow_tx_store: ShadowTxStore,
     ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
         let span = Span::current();
         let actor_main_thread_handle = std::thread::Builder::new()
@@ -663,7 +663,7 @@ impl IrysNode {
                                 http_listener,
                                 irys_db,
                                 gossip_listener,
-                                system_tx_store,
+                                shadow_tx_store,
                             )
                             .instrument(Span::current())
                             .await
@@ -723,7 +723,7 @@ impl IrysNode {
         config: Config,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<()>,
-        system_tx_store: SystemTxStore,
+        shadow_tx_store: ShadowTxStore,
         reth_handle_sender: oneshot::Sender<RethNode>,
         actor_main_thread_handle: JoinHandle<RethNodeProvider>,
         irys_provider: IrysRethProvider,
@@ -749,7 +749,7 @@ impl IrysNode {
                         reth_handle_sender,
                         irys_provider.clone(),
                         latest_block_height,
-                        system_tx_store,
+                        shadow_tx_store,
                     );
                     let fut = run_until_ctrl_c_or_channel_message(
                         start_reth_node.instrument(span2),
@@ -800,7 +800,7 @@ impl IrysNode {
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
         gossip_listener: TcpListener,
-        system_tx_store: SystemTxStore,
+        shadow_tx_store: ShadowTxStore,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -812,7 +812,7 @@ impl IrysNode {
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
         let reth_node_adapter =
-            IrysRethNodeAdapter::new(reth_node.clone().into(), system_tx_store.clone()).await?;
+            IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
         // start service senders/receivers
         let (service_senders, receivers) = ServiceSenders::new();
@@ -1095,7 +1095,7 @@ impl IrysNode {
             stop_guard: StopGuard::new(),
             peer_list: peer_list_service.clone(),
             sync_state: sync_state.clone(),
-            system_tx_store,
+            shadow_tx_store,
             reth_node_adapter,
             commitment_state_guard,
             block_producer_inner,

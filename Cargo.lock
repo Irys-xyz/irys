@@ -4776,6 +4776,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.19",
@@ -5180,7 +5181,6 @@ name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
  "tempfile",
- "tokio",
  "tracing",
  "tracing-subscriber 0.3.19",
 ]

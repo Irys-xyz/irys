@@ -1287,6 +1287,14 @@ impl BlockTreeCache {
         self.longest_chain_cache.clone()
     }
 
+    #[must_use]
+    pub fn get_latest_canonical_entry(&self) -> &BlockTreeEntry {
+        self.longest_chain_cache
+            .0
+            .last()
+            .expect("canonical chain must always have an entry in it")
+    }
+
     fn update_longest_chain_cache(&mut self) {
         let pairs = {
             self.longest_chain_cache.0.clear();
