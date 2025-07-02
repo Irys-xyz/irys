@@ -1,5 +1,6 @@
 use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
+use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
 use reth::network::Peers as _;
@@ -485,56 +486,73 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     //
 
     // confirm all three nodes are at the expected height
-    node_a
-        .wait_until_height(c_block4.height, seconds_to_wait)
-        .await?;
-    node_b
-        .wait_until_height(c_block4.height, seconds_to_wait)
-        .await?;
-    node_c
-        .wait_until_height(c_block4.height, seconds_to_wait)
-        .await?;
+    {
+        node_a
+            .wait_until_height(c_block4.height, seconds_to_wait)
+            .await?;
+        node_b
+            .wait_until_height(c_block4.height, seconds_to_wait)
+            .await?;
+        node_c
+            .wait_until_height(c_block4.height, seconds_to_wait)
+            .await?;
 
-    // confirm chain has identical and expected height on all three nodes
-    let a_latest_height = node_a.get_height().await;
-    let b_latest_height = node_b.get_height().await;
-    let c_latest_height = node_c.get_height().await;
-    assert_eq!(a_latest_height, c_block4.height);
-    assert_eq!(a_latest_height, b_latest_height);
-    assert_eq!(a_latest_height, c_latest_height);
+        // confirm chain has identical and expected height on all three nodes
+        let a_latest_height = node_a.get_height().await;
+        let b_latest_height = node_b.get_height().await;
+        let c_latest_height = node_c.get_height().await;
+        assert_eq!(a_latest_height, c_block4.height);
+        assert_eq!(a_latest_height, b_latest_height);
+        assert_eq!(a_latest_height, c_latest_height);
 
-    // confirm blocks at this height match c4
-    let a3 = node_a.get_block_by_height(c_block4.height).await?;
-    let b3 = node_b.get_block_by_height(c_block4.height).await?;
-    let c3 = node_c.get_block_by_height(c_block4.height).await?;
-    assert_eq!(a3, b3);
-    assert_eq!(a3, c3);
+        // confirm blocks at this height match c4
+        let a3 = node_a.get_block_by_height(c_block4.height).await?;
+        let b3 = node_b.get_block_by_height(c_block4.height).await?;
+        let c3 = node_c.get_block_by_height(c_block4.height).await?;
+        assert_eq!(a3, b3);
+        assert_eq!(a3, c3);
+    }
 
-    // confirm mempool txs in nodes have remained in the mempool
-    // TODO: check for: these will not have been gossiped, and so only the canonical chain txs will have been synced
-    node_a
-        .wait_for_mempool_commitment_txs(
-            vec![peer_a_b1_stake_tx.id, peer_a_b1_pledge_tx.id],
-            seconds_to_wait,
-        )
-        .await
-        .expect("node_a txs to still be on node_a");
+    // confirm mempool txs in nodes have remained in the mempool and,
+    // confirm that all txs have made it to all peers, regardless of canon status
+    {
+        let mut peer_b_commitment_txs = vec![peer_b_b1_stake_tx.id, peer_b_b1_pledge_tx.id];
+        peer_b_commitment_txs.sort();
+        let mut peer_c_commitment_txs = vec![peer_c_c1_stake_tx.id, peer_c_c1_pledge_tx.id];
+        peer_c_commitment_txs.sort();
+        let mut all_commitment_txs = peer_b_commitment_txs.clone();
+        all_commitment_txs.extend(peer_c_commitment_txs);
+        all_commitment_txs.sort();
 
-    node_b
-        .wait_for_mempool_commitment_txs(
-            vec![peer_b_b1_stake_tx.id, peer_b_b1_pledge_tx.id],
-            seconds_to_wait,
-        )
-        .await
-        .expect("node_b txs to still be on node_b");
+        // check txs are in mempools
+        node_b
+            .wait_for_mempool_commitment_txs(all_commitment_txs.clone(), seconds_to_wait)
+            .await
+            .expect("node_b and node_c txs to still be on node_b");
+        node_c
+            .wait_for_mempool_commitment_txs(all_commitment_txs.clone(), seconds_to_wait)
+            .await
+            .expect("node_c and node_c txs to still be on node_c");
 
-    node_c
-        .wait_for_mempool_commitment_txs(
-            vec![peer_c_c1_stake_tx.id, peer_c_c1_pledge_tx.id],
-            seconds_to_wait,
-        )
-        .await
-        .expect("node_c txs to still be on node_c");
+        // sort tx order
+        async fn sorted_commitments_at(
+            node: &IrysNodeTest<IrysNodeCtx>,
+            height: u64,
+        ) -> eyre::Result<Vec<H256>> {
+            let mut txs = node
+                .get_block_by_height(height)
+                .await?
+                .get_commitment_ledger_tx_ids();
+            txs.sort();
+            Ok(txs)
+        }
+
+        // check which txs made it into specific blocks
+        assert_eq!(sorted_commitments_at(&node_a, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_a, 2).await?, all_commitment_txs); // this is suprising
+        assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_a, 4).await?, vec![]);
+    }
 
     // TODO: stretch goal, make original chain B the longest chain again and see if txs come back
 
