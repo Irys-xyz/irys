@@ -9,7 +9,7 @@ use crate::{
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
-use eyre::{ensure, eyre, Context as _};
+use eyre::{eyre, Context as _};
 use futures::future::Either;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, CommitmentSnapshot,
@@ -410,7 +410,6 @@ impl BlockTreeServiceInner {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
     ) -> eyre::Result<()> {
-        let miner_address = self.miner_address;
         let block_hash = &block.block_hash;
 
         let mut cache = self.cache.write().expect("cache lock poisoned");
@@ -448,17 +447,8 @@ impl BlockTreeServiceInner {
             &self.consensus_config,
         )?;
 
-        // Add block based on origin (local vs peer)
-        let add_result = if block.miner_address == miner_address {
-            cache.add_local_block(
-                &block,
-                ChainState::Validated(BlockState::Unknown),
-                commitment_snapshot,
-                ema_snapshot,
-            )
-        } else {
-            cache.add_peer_block(&block, commitment_snapshot, ema_snapshot)
-        };
+        // Add block to the tree (all blocks start as NotOnchain and go through validation)
+        let add_result = cache.add_block(&block, commitment_snapshot, ema_snapshot);
 
         if add_result.is_ok() {
             // Schedule validation and mark as scheduled
@@ -1039,12 +1029,15 @@ impl BlockTreeCache {
             prev_commitment_snapshot = arc_commitment_snapshot.clone();
             prev_ema_snapshot = arc_ema_snapshot.clone();
             prev_block = block.clone();
+
+            // Use add_common directly for restored blocks since they're already validated
             block_tree_cache
-                .add_local_block(
+                .add_common(
+                    block.block_hash,
                     &block,
-                    ChainState::Validated(BlockState::ValidBlock),
                     arc_commitment_snapshot,
                     arc_ema_snapshot,
+                    ChainState::Validated(BlockState::ValidBlock),
                 )
                 .unwrap();
         }
@@ -1122,16 +1115,13 @@ impl BlockTreeCache {
         Ok(())
     }
 
-    /// Adds a block received from a peer to the block tree.
+    /// Adds a block to the block tree.
     ///
-    /// Peer blocks undergo strict validation before acceptance:
+    /// All blocks undergo strict validation before acceptance:
     /// 1. **Full validation sequence** - Full validation rules must be run and pass
     /// 2. **Confirmation required** - Block must be confirmed by another block building on it
     /// 3. **Block Index Migration** - Only then is the block added to the block_index
-    ///
-    /// This differs from locally produced blocks, which can be added with more
-    /// flexible validation states to facilitate chain progress for local mining and initialization.
-    pub fn add_peer_block(
+    pub fn add_block(
         &mut self,
         block: &IrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
@@ -1144,14 +1134,6 @@ impl BlockTreeCache {
             block.block_hash, block.height
         );
 
-        if matches!(
-            self.blocks.get(&hash).map(|b| b.chain_state),
-            Some(ChainState::Onchain)
-        ) {
-            debug!(?hash, "already part of the main chian state");
-            return Ok(());
-        }
-
         self.add_common(
             hash,
             block,
@@ -1159,48 +1141,6 @@ impl BlockTreeCache {
             ema_snapshot,
             ChainState::NotOnchain(BlockState::Unknown),
         )
-    }
-
-    /// Adds a locally cached or produced block to the block tree.
-    ///
-    /// Local blocks have more flexible validation requirements than peer blocks:
-    /// - **Peer blocks**: Must reach `BlockState::ValidBlock` before joining the canonical chain
-    /// - **Local blocks**: Can be added as `ChainState::Validated` with any `BlockState` override
-    ///
-    /// This flexibility allows the local node to:
-    /// - Continue building the chain while full validation runs in parallel
-    /// - Skip full validation for locally produced blocks entirely
-    ///
-    /// # Parameters
-    /// - Block must be locally produced (not received from peers)
-    /// - Can specify any `ChainState` and `BlockState` regardless of actual validation status
-    /// - Commitment snapshot reference for the block
-    pub fn add_local_block(
-        &mut self,
-        block: &IrysBlockHeader,
-        chain_state: ChainState,
-        commitment_snapshot: Arc<CommitmentSnapshot>,
-        ema_snapshot: Arc<EmaSnapshot>,
-    ) -> eyre::Result<()> {
-        let hash = block.block_hash;
-        let prev_hash = block.previous_block_hash;
-
-        debug!(
-            "adding validated block - hash: {} height: {}",
-            block.block_hash.0.to_base58(),
-            block.height,
-        );
-
-        // Verify parent is validated
-        ensure!(
-            !matches!(
-                self.blocks.get(&prev_hash).map(|b| b.chain_state),
-                Some(ChainState::NotOnchain(_))
-            ),
-            "Previous block not validated"
-        );
-
-        self.add_common(hash, block, commitment_snapshot, ema_snapshot, chain_state)
     }
 
     /// Helper function to delete a single block without recursion
@@ -1293,6 +1233,10 @@ impl BlockTreeCache {
             .0
             .last()
             .expect("canonical chain must always have an entry in it")
+    }
+
+    pub fn get_num_blocks_awaiting_validation_on_canonical_chain(&self) -> usize {
+        self.longest_chain_cache.1
     }
 
     fn update_longest_chain_cache(&mut self) {
