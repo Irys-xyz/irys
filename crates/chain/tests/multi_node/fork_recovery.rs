@@ -342,7 +342,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
-    let num_blocks_in_epoch = 2;
+    let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
     let genesis_block_hash = H256::zero();
 
