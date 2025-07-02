@@ -1,4 +1,4 @@
-use crate::block_discovery::get_data_tx_in_parallel;
+use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::mempool_service::ChunkIngressError;
 use crate::services::ServiceSenders;
@@ -6,6 +6,7 @@ use crate::CommitmentStateReadGuard;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use futures::future::BoxFuture;
+use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
 use irys_primitives::CommitmentType;
@@ -394,9 +395,17 @@ impl Inner {
             }
 
             // Loop though all the pending tx to see which haven't been promoted
-            let tx_headers = get_data_tx_in_parallel(
+            let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
+            // TODO: improve this
+            let tx_headers = get_data_tx_in_parallel_inner(
                 publish_txids,
-                &self.service_senders.mempool,
+                |_tx_ids| {
+                    {
+                        let txs = txs.clone(); // whyyyy
+                        async move { Ok(txs) }
+                    }
+                    .boxed()
+                },
                 &self.irys_db,
             )
             .await
