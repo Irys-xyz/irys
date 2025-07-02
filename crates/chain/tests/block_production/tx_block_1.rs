@@ -46,5 +46,4 @@ async fn commitment_directly_after_genesis_errors() -> () {
     node_a.stop().await;
 
     // return () as we expect a panic
-    ()
 }
