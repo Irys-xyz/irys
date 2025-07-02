@@ -289,7 +289,6 @@ pub trait BlockProdStrategy {
             });
         }
 
-        // Log that we're starting block production
         info!(
             ?parent_block_hash,
             ?parent_height,

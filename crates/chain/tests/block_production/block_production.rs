@@ -974,25 +974,47 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .unwrap();
 
     // Mine a valid block
-    // note: cannot use `.mine_block()` because there will be height mismatch
-    let (_new_block, _reth_block) = ProductionStrategy {
+    // note: cannot use `.mine_block()` because there will be height mismatch when it awaits for the new height
+    let mut sub = node.node_ctx.service_senders.subscribe_canonical_chain();
+    let (new_block, _reth_block) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
     .fully_produce_new_block(solution_context(&node.node_ctx).await?)
     .await?
     .unwrap();
-    let new_height = node.get_height().await;
-    assert_eq!(
-        new_height, evil_block.height,
-        "we have created a fork because we don't want to build on the evil block"
-    );
 
     // Get the new block and verify its parent is not the evil block
-    let new_block = node.get_block_by_height(new_height).await?;
     assert_ne!(
         new_block.previous_block_hash, evil_block.block_hash,
         "expect the new block parent to NOT be the evil parent block"
     );
+    assert_eq!(
+        new_block.height, evil_block.height,
+        "we have created a fork because we don't want to build on the evil block"
+    );
+    loop {
+        let res = sub.recv().await.unwrap();
+        if res.latest_block.block_hash == new_block.block_hash {
+            break;
+        }
+    }
+
+    let latest_block_hash = node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_latest_canonical_entry()
+        .block_hash;
+    let new_block_state = node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_block_and_status(&new_block.block_hash)
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(latest_block_hash, new_block.block_hash);
+    assert_eq!(new_block_state, ChainState::Onchain);
 
     // Cleanup
     node.stop().await;
