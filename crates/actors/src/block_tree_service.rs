@@ -127,7 +127,6 @@ pub struct BlockMigratedEvent {
 pub struct CanonicalChainEvent {
     pub latest_block: BlockTreeEntry,
     pub blocks_awaiting_validation: usize,
-    pub timestamp: SystemTime,
 }
 
 impl BlockTreeService {
@@ -702,7 +701,6 @@ impl BlockTreeServiceInner {
         let event = CanonicalChainEvent {
             latest_block: latest_entry.clone(),
             blocks_awaiting_validation,
-            timestamp: SystemTime::now(),
         };
         drop(cache);
         if let Err(e) = self.service_senders.canonical_chain_events.send(event) {

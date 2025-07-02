@@ -2,7 +2,7 @@ use crate::{
     block_discovery::{get_data_tx_in_parallel, BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
         ema_snapshot::{EmaBlock, EmaSnapshot},
-        BlockState, BlockTreeReadGuard, ChainState,
+        BlockTreeReadGuard,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
@@ -215,55 +215,98 @@ pub trait BlockProdStrategy {
         Ok((poa, poa_chunk_hash))
     }
 
-    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        loop {
-            // hold guard briefly to get latest canonical chain state
-            let (parent_block, status, ema_snapshot) = {
-                let read = self.inner().block_tree_guard.read();
-                let parent_entry = read.get_latest_canonical_entry();
-                let (parent_block, status) = read
-                    .get_block_and_status(&parent_entry.block_hash)
-                    .ok_or_else(|| eyre!("Parent block not found in block tree"))?;
-                let ema_snapshot = read
-                    .get_ema_snapshot(&parent_block.block_hash)
-                    .ok_or_else(|| eyre!("EMA snapshot not found for parent block"))?;
+    /// Fetches a block header from mempool or database
+    async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
+        // Try mempool first
+        let (tx, rx) = oneshot::channel();
+        self.inner()
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
 
-                (parent_block.clone(), *status, ema_snapshot)
-            };
-
-            // Closure to fetch full block header from mempool or database
-            let fetch_block_header = async move |block_hash: H256| {
-                let (tx_prev, rx_prev) = oneshot::channel();
-                self.inner().service_senders.mempool.send(
-                    MempoolServiceMessage::GetBlockHeader(block_hash, false, tx_prev),
-                )?;
-                let header = match rx_prev.await? {
-                    Some(header) => header,
-                    None => self
-                        .inner()
-                        .db
-                        .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-                        .ok_or_else(|| eyre!("No block header found for hash {}", block_hash,))?,
-                };
-                Ok::<_, eyre::Error>(header)
-            };
-
-            match status {
-                ChainState::Onchain
-                | ChainState::Validated(BlockState::ValidBlock)
-                | ChainState::NotOnchain(BlockState::ValidBlock) => {
-                    // Block is ready to use as parent
-                    info!(?parent_block.block_hash, ?parent_block.height, "Starting block production, previous block");
-
-                    let header = fetch_block_header(parent_block.block_hash).await?;
-                    return Ok((header, ema_snapshot));
-                }
-                _ => {
-                    // Block is not yet marked as ValidBlock, wait briefly
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+        match rx.await? {
+            Some(header) => Ok(header),
+            None => {
+                // Fall back to database
+                self.inner()
+                    .db
+                    .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+                    .ok_or_else(|| eyre!("No block header found for hash {}", block_hash))
             }
         }
+    }
+
+    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        // todo: compute this from the vdf difficulty
+        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+        // Subscribe to canonical chain events
+        let mut canonical_chain_rx = self.inner().service_senders.subscribe_canonical_chain();
+
+        // Get latest canonical chain state
+        let (mut parent_block_hash, mut parent_height, blocks_awaiting_validation) = {
+            let read = self.inner().block_tree_guard.read();
+            let parent_entry = read.get_latest_canonical_entry();
+            let blocks_awaiting = read.get_num_blocks_awaiting_validation_on_canonical_chain();
+
+            (
+                parent_entry.block_hash,
+                parent_entry.height,
+                blocks_awaiting,
+            )
+        };
+
+        // Wait for validation to complete if there are blocks awaiting validation
+        if blocks_awaiting_validation > 0 {
+            debug!(
+                "Waiting for {} blocks to be validated before producing new block",
+                blocks_awaiting_validation
+            );
+
+            // Wait with timeout for all blocks to be validated
+            let _ = tokio::time::timeout(MAX_WAIT_TIME, async {
+                loop {
+                    let event = canonical_chain_rx
+                        .recv()
+                        .await
+                        .expect("channel must never be closed");
+                    debug!(
+                        "Canonical chain update: {} blocks awaiting validation",
+                        event.blocks_awaiting_validation
+                    );
+                    parent_block_hash = event.latest_block.block_hash;
+                    parent_height = event.latest_block.height;
+                    if event.blocks_awaiting_validation == 0 {
+                        break;
+                    }
+                }
+            })
+            .await
+            .inspect_err(|_err| {
+                warn!(
+                    "Timeout waiting for blocks to be validated after {:?}, proceeding anyway",
+                    MAX_WAIT_TIME
+                );
+            });
+        }
+
+        // Log that we're starting block production
+        info!(
+            ?parent_block_hash,
+            ?parent_height,
+            blocks_awaiting_validation,
+            "Starting block production, previous block"
+        );
+
+        // Fetch full block header from mempool or database
+        let header = self.fetch_block_header(parent_block_hash).await?;
+
+        let ema_snapshot = {
+            let read = self.inner().block_tree_guard.read();
+            read.get_ema_snapshot(&header.block_hash)
+                .expect("ema snapshot must be present")
+        };
+
+        Ok((header, ema_snapshot))
     }
 
     async fn fully_produce_new_block(
