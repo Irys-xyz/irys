@@ -1066,7 +1066,6 @@ impl BlockTreeCache {
             // Use add_common directly for restored blocks since they're already validated
             block_tree_cache
                 .add_common(
-                    block.block_hash,
                     &block,
                     arc_commitment_snapshot,
                     arc_ema_snapshot,
@@ -1095,12 +1094,12 @@ impl BlockTreeCache {
 
     pub fn add_common(
         &mut self,
-        hash: BlockHash,
         block: &IrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
         chain_state: ChainState,
     ) -> eyre::Result<()> {
+        let hash = block.block_hash;
         let prev_hash = block.previous_block_hash;
 
         // Get parent
@@ -1177,7 +1176,6 @@ impl BlockTreeCache {
         }
 
         self.add_common(
-            hash,
             block,
             commitment_snapshot,
             ema_snapshot,
@@ -2266,7 +2264,6 @@ mod tests {
         // Now b2_2->b2->b1 are validated.
         assert_matches!(
             cache.add_common(
-                b2_2.block_hash,
                 &b2_2,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2301,7 +2298,6 @@ mod tests {
         );
         assert_matches!(
             cache.add_common(
-                b3.block_hash,
                 &b3,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2492,7 +2488,6 @@ mod tests {
 
         assert_matches!(
             cache.add_common(
-                b13.block_hash,
                 &b13,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2643,7 +2638,6 @@ mod tests {
         // Validate b14
         assert_matches!(
             cache.add_common(
-                b14.block_hash,
                 &b14,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2737,7 +2731,6 @@ mod tests {
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
             cache.add_common(
-                b12.block_hash,
                 &b12,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2766,7 +2759,6 @@ mod tests {
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_common(
-                b12.block_hash,
                 &b12,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2784,7 +2776,6 @@ mod tests {
 
         assert_matches!(
             cache.add_common(
-                b13a.block_hash,
                 &b13a,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2794,7 +2785,6 @@ mod tests {
         );
         assert_matches!(
             cache.add_common(
-                b13b.block_hash,
                 &b13b,
                 comm_cache.clone(),
                 dummy_ema_snapshot(),
@@ -2812,7 +2802,6 @@ mod tests {
         let b14b = extend_chain(random_block(U256::from(3)), &b13b);
         assert_matches!(
             cache.add_common(
-                b14b.block_hash,
                 &b14b,
                 comm_cache,
                 dummy_ema_snapshot(),
