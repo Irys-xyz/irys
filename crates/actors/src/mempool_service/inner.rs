@@ -1,10 +1,13 @@
+use crate::block_discovery::get_data_tx_in_parallel;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::mempool_service::ChunkIngressError;
 use crate::services::ServiceSenders;
 use crate::CommitmentStateReadGuard;
 use base58::ToBase58 as _;
+use eyre::eyre;
 use futures::future::BoxFuture;
-use irys_database::SystemLedger;
+use irys_database::tables::IngressProofs;
+use irys_database::{cached_data_root_by_data_root, SystemLedger};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
@@ -14,11 +17,12 @@ use irys_types::{
 };
 use irys_types::{
     Address, Base64, CommitmentTransaction, DataRoot, IrysTransactionHeader, MempoolConfig,
-    TxChunkOffset, UnpackedChunk,
+    TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::TaskExecutor;
+use reth_db::cursor::*;
 use reth_db::{Database as _, DatabaseError};
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -87,7 +91,7 @@ pub enum MempoolServiceMessage {
     /// Return filtered list of candidate txns
     /// Filtering based on funding status etc based on the provided EVM block ID
     /// If `None` is provided, the latest canonical block is used
-    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<MempoolTxs>),
+    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<eyre::Result<MempoolTxs>>),
     /// Retrieves a list of CommitmentTransactions based on the provided tx ids
     GetCommitmentTxs {
         commitment_tx_ids: Vec<IrysTransactionId>,
@@ -193,7 +197,7 @@ impl Inner {
     async fn handle_get_best_mempool_txs(
         &self,
         parent_evm_block_id: Option<BlockId>,
-    ) -> MempoolTxs {
+    ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
@@ -337,11 +341,100 @@ impl Inner {
             }
         }
 
+        let publish_txs_and_proofs = self
+            .get_publish_txs_and_proofs(submit_tx.iter().map(|tx| tx.id).collect())
+            .await?;
+
         // Return selected transactions grouped by type
-        MempoolTxs {
+        Ok(MempoolTxs {
             commitment_tx,
             submit_tx,
+            publish_tx: publish_txs_and_proofs,
+        })
+    }
+
+    pub async fn get_publish_txs_and_proofs(
+        &self,
+        submit_txs: HashSet<IrysTransactionId>, // filter out any promotions also in this submit_txs list
+                                                // this is to enforce that a tx cannot be promoted in the same block that it's submitted
+    ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+        let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
+        let mut proofs: Vec<TxIngressProof> = Vec::new();
+
+        {
+            let read_tx = self
+                .irys_db
+                .tx()
+                .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
+
+            let mut read_cursor = read_tx
+                .new_cursor::<IngressProofs>()
+                .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
+
+            let walker = read_cursor
+                .walk(None)
+                .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
+
+            let ingress_proofs = walker
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
+
+            let mut publish_txids: Vec<H256> = Vec::new();
+            // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
+            for data_root in ingress_proofs.keys() {
+                let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
+                if let Some(cached_data_root) = cached_data_root {
+                    let filtered_publish = cached_data_root
+                        .txid_set
+                        .iter()
+                        .filter(|tx_id| !submit_txs.contains(tx_id));
+                    debug!(tx_ids = ?filtered_publish, "publishing");
+                    publish_txids.extend(filtered_publish)
+                }
+            }
+
+            // Loop though all the pending tx to see which haven't been promoted
+            let tx_headers = get_data_tx_in_parallel(
+                publish_txids,
+                &self.service_senders.mempool,
+                &self.irys_db,
+            )
+            .await
+            .unwrap_or(vec![]);
+
+            for tx_header in &tx_headers {
+                // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
+                if tx_header.ingress_proofs.is_none() {
+                    // Get the proof
+                    match ingress_proofs.get(&tx_header.data_root) {
+                        Some(proof) => {
+                            let mut tx_header = tx_header.clone();
+                            let proof = TxIngressProof {
+                                proof: proof.proof,
+                                signature: proof.signature,
+                            };
+                            proofs.push(proof.clone());
+                            tx_header.ingress_proofs = Some(proof);
+                            publish_txs.push(tx_header);
+                        }
+                        None => {
+                            error!(
+                                "No ingress proof found for data_root: {}",
+                                tx_header.data_root
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
         }
+
+        let txs = &publish_txs
+            .iter()
+            .map(|h| h.id.0.to_base58())
+            .collect::<Vec<_>>();
+        debug!(?txs, "Publish transactions");
+        Ok((publish_txs, proofs))
     }
 
     /// return block header from mempool, if found
@@ -665,4 +758,5 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<IrysTransactionHeader>,
+    pub publish_tx: (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
 }
