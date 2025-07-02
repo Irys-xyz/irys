@@ -779,7 +779,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
     }
 
-    // wait for block to be available via block tree guard
+    /// wait for specific block to be available via block tree guard
+    ///   i.e. in the case of a fork, check a specific block has been gossiped between peers,
+    ///        even though it may not become part of the canonical chain.
     pub async fn wait_for_block(
         &self,
         hash: &H256,
