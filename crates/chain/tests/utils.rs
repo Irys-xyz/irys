@@ -45,7 +45,7 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
-use reth::network::{PeerInfo, Peers};
+use reth::network::{PeerInfo, Peers as _};
 use reth::payload::EthBuiltPayload;
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
 use sha2::{Digest as _, Sha256};

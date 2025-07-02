@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
-use reth::network::Peers;
+use reth::network::Peers as _;
 use tracing::debug;
 
 #[actix_web::test]
@@ -413,8 +413,8 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let c_ctx = node_c.node_ctx.reth_node_adapter.clone();
 
     // Connect B <-> C directly
-    let b_info = node_b.node_ctx.config.node_config.reth_peer_info.clone();
-    let c_info = node_c.node_ctx.config.node_config.reth_peer_info.clone();
+    let b_info = node_b.node_ctx.config.node_config.reth_peer_info;
+    let c_info = node_c.node_ctx.config.node_config.reth_peer_info;
     b_ctx
         .inner
         .network
