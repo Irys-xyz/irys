@@ -344,7 +344,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
-    let genesis_block_hash = H256::zero();
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
@@ -433,7 +432,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let peer_b_b2_pledge_tx = node_b
         .post_pledge_commitment_without_gossip(peer_b_b2_stake_tx.id)
         .await;
-    let peer_b_b2_txs = vec![peer_b_b2_stake_tx.clone(), peer_b_b2_pledge_tx.clone()];
 
     // node_c generates txs in isolation for inclusion block 2
     let peer_c_b2_stake_tx = node_c
@@ -442,7 +440,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let peer_c_b2_pledge_tx = node_c
         .post_pledge_commitment_without_gossip(peer_c_b2_stake_tx.id)
         .await;
-    let peer_c_b2_txs = vec![peer_c_b2_stake_tx.clone(), peer_c_b2_pledge_tx.clone()];
 
     //
     // Stage 5: MINE FORK A and B TO HEIGHT 2 and 3
