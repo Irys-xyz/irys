@@ -97,7 +97,7 @@ async fn external_api() -> eyre::Result<()> {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
         match oneshot_rx.await {
-            Ok(mempool_tx) if !mempool_tx.submit_tx.is_empty() => {
+            Ok(Ok(mempool_tx)) if !mempool_tx.submit_tx.is_empty() => {
                 break mempool_tx.submit_tx[0].clone();
             }
             _ => {

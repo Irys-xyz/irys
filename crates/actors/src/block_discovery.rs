@@ -8,6 +8,7 @@ use crate::{
 };
 use actix::prelude::*;
 use async_trait::async_trait;
+use futures::{future::BoxFuture, FutureExt as _};
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
     CommitmentSnapshotStatus, SystemLedger,
@@ -702,15 +703,41 @@ pub async fn get_data_tx_in_parallel(
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<IrysTransactionHeader>> {
+    get_data_tx_in_parallel_inner(
+        data_tx_ids,
+        |tx_ids| {
+            let sender = mempool_sender.clone();
+            async move {
+                let (tx, rx) = oneshot::channel();
+                sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx))?;
+                Ok(rx.await?)
+            }
+            .boxed()
+        },
+        db,
+    )
+    .await
+}
+
+/// Get all data transactions from the mempool and database
+/// with a custom get_data_txs function (this is used by the mempool)
+pub async fn get_data_tx_in_parallel_inner<F>(
+    data_tx_ids: Vec<IrysTransactionId>,
+    get_data_txs: F,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<IrysTransactionHeader>>
+where
+    F: Fn(
+        Vec<IrysTransactionId>,
+    ) -> BoxFuture<'static, eyre::Result<Vec<Option<IrysTransactionHeader>>>>,
+{
     let tx_ids_clone = data_tx_ids.clone();
 
     // Set up a function to query the mempool for data transactions
     let mempool_future = {
         let tx_ids = tx_ids_clone.clone();
         async move {
-            let (tx, rx) = oneshot::channel();
-            mempool_sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx))?;
-            let x = rx
+            let x = get_data_txs(tx_ids)
                 .await
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
                 .into_iter()
