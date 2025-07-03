@@ -54,14 +54,14 @@ impl<'a> BlockValidationTracker<'a> {
         // Get initial blockchain state
         let tree = inner.block_tree_guard.read();
         let (target_block_hash, max_difficulty) = tree.get_max_cumulative_difficulty_block();
-        let target_block_height = tree.get_block(&target_block_hash)
+        let target_block_height = tree
+            .get_block(&target_block_hash)
             .map(|b| b.height)
             .unwrap_or(0);
         let (blocks_awaiting_validation, fallback_block_hash) =
             tree.get_validation_chain_status(&target_block_hash);
-        let fallback_block_height_opt = fallback_block_hash.and_then(|hash| {
-            tree.get_block(&hash).map(|b| (hash, b.height))
-        });
+        let fallback_block_height_opt =
+            fallback_block_hash.and_then(|hash| tree.get_block(&hash).map(|b| (hash, b.height)));
         drop(tree);
 
         Self {
@@ -86,7 +86,10 @@ impl<'a> BlockValidationTracker<'a> {
         loop {
             // Handle terminal states first
             let (target_hash, target_height, current_awaiting) = match self.state {
-                ValidationState::Validated { block_hash, block_height } => {
+                ValidationState::Validated {
+                    block_hash,
+                    block_height,
+                } => {
                     let elapsed = start_time.elapsed();
                     info!(
                         block_hash = %block_hash,
@@ -120,7 +123,7 @@ impl<'a> BlockValidationTracker<'a> {
                     let target_height = target.height;
                     let current_awaiting = awaiting_validation;
                     if self.timer.is_expired() {
-                        let fallback_block = fallback.clone();
+                        let fallback_block = fallback;
                         let abandoned_target = target_hash;
                         let abandoned_target_height = target_height;
 
@@ -240,13 +243,10 @@ impl<'a> BlockValidationTracker<'a> {
         let tree = self.inner.block_tree_guard.read();
 
         let (max_hash, max_diff) = tree.get_max_cumulative_difficulty_block();
-        let max_height = tree.get_block(&max_hash)
-            .map(|b| b.height)
-            .unwrap_or(0);
+        let max_height = tree.get_block(&max_hash).map(|b| b.height).unwrap_or(0);
         let (awaiting, fallback_hash) = tree.get_validation_chain_status(&max_hash);
-        let fallback = fallback_hash.and_then(|hash| {
-            tree.get_block(&hash).map(|b| (hash, b.height))
-        });
+        let fallback =
+            fallback_hash.and_then(|hash| tree.get_block(&hash).map(|b| (hash, b.height)));
         let can_build = tree.can_be_built_upon(&max_hash);
 
         Ok(BlockchainSnapshot {
@@ -276,10 +276,7 @@ pub(super) enum ValidationState {
     },
 
     /// Target block is fully validated and ready to use
-    Validated { 
-        block_hash: H256,
-        block_height: u64,
-    },
+    Validated { block_hash: H256, block_height: u64 },
 
     /// Timed out waiting for validation
     TimedOut {

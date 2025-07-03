@@ -174,7 +174,7 @@ impl IrysNodeCtx {
     pub async fn vdf_state(&self, running: bool) -> eyre::Result<()> {
         Ok(self.service_senders.vdf_mining.send(running).await?)
     }
-    
+
     /// Sets whether the validation service should process incoming validation messages
     pub fn set_validation_enabled(&self, enabled: bool) {
         self.validation_enabled.store(enabled, Ordering::Relaxed);

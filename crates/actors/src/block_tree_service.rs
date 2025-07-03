@@ -2994,7 +2994,7 @@ mod tests {
 
         // Add blocks with specified states
         let mut prev_block = genesis;
-        for (state, diff) in states.into_iter() {
+        for (state, diff) in states {
             let mut block = extend_chain(random_block(diff), &prev_block);
             block.cumulative_diff = prev_block.cumulative_diff + diff;
 
