@@ -485,7 +485,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // Stage 7: FINAL STATE CHECKS
     //
 
-    // confirm all three nodes are at the expected height
+    // confirm all three nodes are at the same and expected height "4"
     {
         node_a
             .wait_until_height(c_block4.height, seconds_to_wait)
@@ -515,6 +515,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // confirm mempool txs in nodes have remained in the mempool and,
     // confirm that all txs have made it to all peers, regardless of canon status
+    // Canonical blocks by mining peer: A1, B2, B3, C4
     {
         let mut peer_b_commitment_txs = vec![peer_b_b1_stake_tx.id, peer_b_b1_pledge_tx.id];
         peer_b_commitment_txs.sort();
