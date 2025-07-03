@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
-use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
+use irys_types::{DataLedger, IrysTransaction, NodeConfig, PeerAddress, RethPeerInfo, H256};
 use tracing::debug;
 
 #[actix_web::test]
@@ -411,8 +411,12 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         .await;
 
     // node_c generates txs in isolation for inclusion block 1
-    let peer_c_c1_stake_tx = node_c.post_stake_commitment(genesis_block_hash).await;
-    let peer_c_c1_pledge_tx = node_c.post_pledge_commitment(genesis_block_hash).await;
+    let peer_c_c1_stake_tx = node_c
+        .post_stake_commitment_without_gossip(genesis_block_hash)
+        .await;
+    let peer_c_c1_pledge_tx = node_c
+        .post_pledge_commitment_without_gossip(genesis_block_hash)
+        .await;
 
     //
     // Stage 4: MINE FORK A and B TO HEIGHT 2 and 3
@@ -423,12 +427,41 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
 
-    // Gossip B's blocks to C only
-    node_b.gossip_block(&b_block2)?;
-    node_b.gossip_block(&b_block3)?;
+    let peer_c = PeerAddress {
+        gossip: format!(
+            "{}:{}",
+            &node_c.node_ctx.config.node_config.gossip.bind_ip,
+            &node_c.node_ctx.config.node_config.gossip.bind_port
+        )
+        .parse()
+        .expect("valid socket address"),
+        api: format!(
+            "{}:{}",
+            &node_c.node_ctx.config.node_config.http.bind_ip,
+            &node_c.node_ctx.config.node_config.http.bind_port
+        )
+        .parse()
+        .expect("valid socket address"),
+        execution: RethPeerInfo::default(),
+    };
 
-    node_c.wait_for_block(&b_block2.block_hash, 10).await?;
-    node_c.wait_for_block(&b_block3.block_hash, 10).await?;
+    // NODE B -> Node C
+    // post commitment txs and then the blocks to node c
+    // this will cause a reorg on node c to match the chain on node b
+    {
+        node_c.post_commitment_tx(&peer_b_b1_stake_tx).await;
+        node_c.post_commitment_tx(&peer_b_b1_pledge_tx).await;
+        node_b.post_block_to_peer(&peer_c, &b_block2).await?;
+        tracing::error!("posted block 2: {:?}", b_block2.block_hash);
+        node_b.post_block_to_peer(&peer_c, &b_block3).await?;
+        tracing::error!("posted block 3: {:?}", b_block3.block_hash);
+
+        node_c.wait_for_block(&b_block2.block_hash, 10).await?;
+        node_c.wait_for_block(&b_block3.block_hash, 10).await?;
+        //these next two will fail (as expected)
+        //node_a.wait_for_block(&b_block2.block_hash, 1).await?;
+        //node_a.wait_for_block(&b_block3.block_hash, 1).await?;
+    }
 
     //
     // Stage 5: MINE FORK C TO HEIGHT 4
