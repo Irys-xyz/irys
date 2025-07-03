@@ -285,9 +285,7 @@ pub trait BlockProdStrategy {
 
             let mut block_state_rx = self.inner().service_senders.subscribe_block_state_updates();
 
-            tracker
-                .wait_for_validation(MAX_WAIT_TIME, &mut block_state_rx)
-                .await?
+            tracker.wait_for_validation(&mut block_state_rx).await?
         } else {
             info!(
                 target_block = %target_block_hash,

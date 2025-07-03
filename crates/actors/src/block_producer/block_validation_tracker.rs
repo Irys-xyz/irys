@@ -12,7 +12,7 @@
 //!
 //! # Algorithm
 //! 1. Identify block with maximum cumulative difficulty
-//! 2. Check if fully validated (including all ancestors)
+//! 2. Check if fully validated
 //! 3. If not validated:
 //!    - Monitor block state updates
 //!    - Track if a new max-difficulty block appears
@@ -70,25 +70,9 @@ impl<'a> BlockValidationTracker<'a> {
     /// Returns the final block hash to use (either the target or fallback)
     pub async fn wait_for_validation(
         &mut self,
-        _max_wait_time: Duration,
         block_state_rx: &mut Receiver<BlockStateUpdated>,
     ) -> eyre::Result<H256> {
         let start_time = Instant::now();
-
-        // Log initial state
-        if let ValidationState::Tracking {
-            target,
-            awaiting_validation,
-            fallback,
-        } = &self.state
-        {
-            debug!(
-                target_block = %target.hash,
-                blocks_awaiting = awaiting_validation,
-                fallback_block = ?fallback,
-                "Starting validation wait"
-            );
-        }
 
         loop {
             // Handle terminal states first
@@ -151,44 +135,21 @@ impl<'a> BlockValidationTracker<'a> {
                 }
             };
 
-            // Check if current target is already validated
-            if self.is_fully_validated(&target_hash)? {
-                self.state = ValidationState::Validated {
-                    block_hash: target_hash,
-                };
-
-                let elapsed = start_time.elapsed();
-                info!(
-                    block_hash = %target_hash,
-                    elapsed_ms = elapsed.as_millis(),
-                    "Target block validated successfully"
-                );
-                return Ok(target_hash);
-            }
-
-            // Wait for next event or timeout
-            let event = tokio::select! {
-                event = block_state_rx.recv() => {
-                    Some(event.expect("channel must not close"))
-                }
-                _ = self.timer.sleep_until_deadline() => {
-                    trace!("Deadline sleep completed");
-                    None
-                }
-            };
-
-            // Process event if we got one
-            let Some(event) = event else {
-                continue;
-            };
-
-            trace!(
-                block_hash = %event.block_hash,
-                "Processing block state event"
-            );
-
             // Get current blockchain state
             let snapshot = self.capture_blockchain_snapshot()?;
+            // Check if we can build on the block
+            if snapshot.can_build_upon {
+                self.state = ValidationState::Validated {
+                    block_hash: snapshot.max_block.hash,
+                };
+                continue;
+            }
+            // update our local state copy to keep track of this snapshot
+            self.state = ValidationState::Tracking {
+                target: snapshot.max_block,
+                awaiting_validation: snapshot.awaiting_validation,
+                fallback: snapshot.fallback_block,
+            };
 
             // Check if max difficulty block changed
             if snapshot.max_block.hash != target_hash {
@@ -222,6 +183,8 @@ impl<'a> BlockValidationTracker<'a> {
             // Check validation progress
             let blocks_validated = snapshot.awaiting_validation.abs_diff(current_awaiting);
             if blocks_validated == 0 {
+                // we have made no progress of validating the blocks we actually care about.
+                // Start the loop again.
                 continue;
             }
 
@@ -232,36 +195,20 @@ impl<'a> BlockValidationTracker<'a> {
                 "Validation progress detected"
             );
 
-            match &mut self.state {
-                ValidationState::Tracking {
-                    awaiting_validation,
-                    fallback,
-                    ..
-                } => {
-                    *awaiting_validation = snapshot.awaiting_validation;
-                    *fallback = snapshot.fallback_block;
-                }
-                _ => unreachable!(),
-            }
-
             // Reset timer on progress
             self.timer.reset();
             trace!("Timer reset due to validation progress");
 
-            // Check if fully validated now
-            if snapshot.can_build_upon {
-                self.state = ValidationState::Validated {
-                    block_hash: target_hash,
-                };
-
-                let elapsed = start_time.elapsed();
-                info!(
-                    block_hash = %target_hash,
-                    elapsed_ms = elapsed.as_millis(),
-                    "All blocks validated successfully"
-                );
-                return Ok(target_hash);
-            }
+            // Wait for next event or timeout; restart the loop
+            let _event = tokio::select! {
+                event = block_state_rx.recv() => {
+                    Some(event.expect("channel must not close"))
+                }
+                _ = self.timer.sleep_until_deadline() => {
+                    trace!("Deadline sleep completed");
+                    None
+                }
+            };
         }
     }
 
@@ -282,12 +229,6 @@ impl<'a> BlockValidationTracker<'a> {
             fallback_block: fallback,
             can_build_upon: can_build,
         })
-    }
-
-    /// Check if a block is fully validated (all ancestors validated)
-    fn is_fully_validated(&self, block_hash: &H256) -> eyre::Result<bool> {
-        let tree = self.inner.block_tree_guard.read();
-        Ok(tree.can_be_built_upon(block_hash))
     }
 }
 
