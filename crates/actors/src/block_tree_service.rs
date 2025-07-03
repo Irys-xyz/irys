@@ -297,38 +297,40 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    fn notify_services_of_block_confirmation(
+    async fn notify_services_of_block_confirmation(
         &self,
         tip_hash: BlockHash,
         confirmed_block: &Arc<IrysBlockHeader>,
-    ) {
+    ) -> eyre::Result<()> {
         debug!(
             "JESSEDEBUG confirming irys block evm_block_hash: {} ({})",
             &confirmed_block.evm_block_hash, &confirmed_block.height
         );
-        if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
-            head_hash: BlockHashType::Irys(tip_hash),
-            confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
-            finalized_hash: None,
-        }) {
-            panic!(
-                "Unable to send confirmation FCU message to reth for {}: {}",
-                &tip_hash, &e
-            )
-        }
+        let _ = self
+            .reth_service_actor
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Irys(tip_hash),
+                confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
+                finalized_hash: None,
+            })
+            .await??;
         self.service_senders
             .mempool
             .send(MempoolServiceMessage::BlockConfirmed(
                 confirmed_block.clone(),
             ))
             .expect("mempool service has unexpectedly become unreachable");
+        Ok(())
     }
 
     /// Checks if a block that is `block_migration_depth` blocks behind `arc_block`
     /// should be finalized. If eligible, sends finalization message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    async fn try_notify_services_of_block_finalization(&self, arc_block: &Arc<IrysBlockHeader>) {
+    async fn try_notify_services_of_block_finalization(
+        &self,
+        arc_block: &Arc<IrysBlockHeader>,
+    ) -> eyre::Result<()> {
         let finalized_hash;
         {
             let binding = self.cache.clone();
@@ -337,12 +339,12 @@ impl BlockTreeServiceInner {
 
             // Skip if block isn't deep enough for finalization
             if arc_block.height <= migration_depth as u64 {
-                return;
+                return Ok(());
             }
 
             let (longest_chain, _) = cache.get_canonical_chain();
             if longest_chain.len() <= migration_depth {
-                return;
+                return Ok(());
             }
 
             // Find block to finalize
@@ -354,11 +356,11 @@ impl BlockTreeServiceInner {
                     "Validated block not in longest chain, block {} height: {}, skipping finalization",
                     arc_block.block_hash, arc_block.height
                 );
-                return;
+                return Ok(());
             };
 
             if current_index < migration_depth {
-                return; // Block already finalized
+                return Ok(()); // Block already finalized
             }
 
             let finalize_index = current_index - migration_depth;
@@ -371,7 +373,7 @@ impl BlockTreeServiceInner {
             if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
                 let finalized = bi.get_item(finalized_height).unwrap();
                 if finalized.block_hash == finalized_hash {
-                    return;
+                    return Ok(());
                 }
                 panic!("Block tree and index out of sync");
             }
@@ -398,18 +400,18 @@ impl BlockTreeServiceInner {
 
             debug!(?finalized_hash, ?finalized_height, "migrating irys block");
             // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
-            if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(cache.tip),
-                confirmed_hash: None,
-                finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
-            }) {
-                panic!("Unable to send finalization message to reth: {}", &e)
-            }
+            let _res = self
+                .reth_service_actor
+                .send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(cache.tip),
+                    confirmed_hash: None,
+                    finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+                })
+                .await??;
         }
 
-        if let Err(e) = self.send_storage_finalized_message(finalized_hash).await {
-            error!("Unable to send block finalized message: {:?}", e);
-        }
+        self.send_storage_finalized_message(finalized_hash).await?;
+        Ok(())
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -513,45 +515,37 @@ impl BlockTreeServiceInner {
         &mut self,
         block_hash: H256,
         validation_result: ValidationResult,
-    ) {
+    ) -> eyre::Result<()> {
         debug!(
             "\u{001b}[32mOn validation complete : result {} {:?}\u{001b}[0m",
             block_hash, validation_result
         );
         let arc_block;
+        let height;
+        let state;
+        let discarded;
         match validation_result {
             ValidationResult::Invalid => {
                 error!(block_hash = %block_hash.0.to_base58(),"invalid block");
                 let mut cache = self.cache.write().unwrap();
 
-                // Get block info before removal for the event
-                if let Some(block_entry) = cache.get_block(&block_hash) {
-                    let _block_tree_entry = make_block_tree_entry(block_entry);
-                    let height = block_entry.height;
-                    let state = cache
-                        .get_block_and_status(&block_hash)
-                        .map(|(_, state)| *state)
-                        .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+                let Some(block_entry) = cache.get_block(&block_hash) else {
+                    // block not in the tree
+                    return Ok(());
+                };
+                // Get block state info before removal for the event
+                height = block_entry.height;
+                state = cache
+                    .get_block_and_status(&block_hash)
+                    .map(|(_, state)| *state)
+                    .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-                    // Remove the block
-                    let _ = cache
-                        .remove_block(&block_hash)
-                        .inspect_err(|err| tracing::error!(?err));
+                // Remove the block
+                let _ = cache
+                    .remove_block(&block_hash)
+                    .inspect_err(|err| tracing::error!(?err));
 
-                    // Emit event after removal
-                    drop(cache);
-                    let event = BlockStateUpdated {
-                        block_hash,
-                        height,
-                        state,
-                        discarded: true,
-                    };
-                    let _ = self.service_senders.block_state_events.send(event);
-                } else {
-                    let _ = cache
-                        .remove_block(&block_hash)
-                        .inspect_err(|err| tracing::error!(?err));
-                }
+                discarded = true;
             }
             ValidationResult::Valid => {
                 {
@@ -566,29 +560,19 @@ impl BlockTreeServiceInner {
 
                     // Get block info before marking as valid
                     let block_entry = cache.get_block(&block_hash).unwrap();
-                    let height = block_entry.height;
-
-                    // Mark block as validated in cache, this will update the canonical chain
-                    if let Err(err) = cache.mark_block_as_valid(&block_hash) {
-                        error!("{}", err);
-                        return;
-                    }
-
+                    height = block_entry.height;
+                    discarded = false;
                     // Get the updated state after marking as valid
-                    let state = cache
+                    state = cache
                         .get_block_and_status(&block_hash)
                         .map(|(_, state)| *state)
                         .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-                    let _ = self
-                        .service_senders
-                        .block_state_events
-                        .send(BlockStateUpdated {
-                            block_hash,
-                            height,
-                            state,
-                            discarded: false,
-                        });
+                    // Mark block as validated in cache, this will update the canonical chain
+                    if let Err(err) = cache.mark_block_as_valid(&block_hash) {
+                        error!("{}", err);
+                        return Ok(());
+                    }
 
                     // let (longest_chain, not_on_chain_count) = cache.get_canonical_chain();
                     let Some((_block_entry, fork_blocks, _)) =
@@ -608,7 +592,7 @@ impl BlockTreeServiceInner {
                                 old_tip_block.height
                             );
                         }
-                        return;
+                        return Ok(());
                     };
 
                     // if the old tip isn't in the fork_blocks, it's a reorg
@@ -688,14 +672,24 @@ impl BlockTreeServiceInner {
                             );
                         }
 
-                        self.notify_services_of_block_confirmation(block_hash, &arc_block);
+                        self.notify_services_of_block_confirmation(block_hash, &arc_block)
+                            .await?;
                     }
                 }
                 // Handle block finalization (move chunks to disk and add to block_index)
                 self.try_notify_services_of_block_finalization(&arc_block)
-                    .await;
+                    .await?;
             }
         }
+
+        let event = BlockStateUpdated {
+            block_hash,
+            height,
+            state,
+            discarded,
+        };
+        let _ = self.service_senders.block_state_events.send(event);
+        Ok(())
     }
 
     /// Fetches full transaction headers from mempool using the txids from a ledger in a block

@@ -957,16 +957,18 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     // Configure test network
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut node = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
 
     // Create peer signer and fund it
-    let peer_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+    let peer_signer = node.new_random_signer();
+    node.fund_genesis_accounts(vec![&peer_signer]);
 
     // Start genesis node (node 1)
-    let node = IrysNodeTest::new_genesis(genesis_config.clone())
+    let node = IrysNodeTest::new_genesis(node.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
+    // disable validation for this test
+    node.node_ctx.set_validation_enabled(false);
     node.start_public_api().await;
 
     // Create evil block production strategy
@@ -988,6 +990,9 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .node_ctx
         .service_senders
         .subscribe_block_state_updates();
+
+    // turn back on the validation for this test
+    node.node_ctx.set_validation_enabled(true);
     let (new_block, _reth_block) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
@@ -1038,7 +1043,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_optimistic_mining_strategy() -> eyre::Result<()> {
+async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     // Define the OptimisticBlockMiningStrategy that mines blocks without waiting for validation
     struct OptimisticBlockMiningStrategy {
         pub prod: ProductionStrategy,
@@ -1073,6 +1078,9 @@ async fn heavy_test_optimistic_mining_strategy() -> eyre::Result<()> {
     // Configure test network
     let config = NodeConfig::testnet();
     let node = IrysNodeTest::new_genesis(config).start().await;
+
+    // disable validation for this test
+    node.node_ctx.set_validation_enabled(false);
 
     // Create optimistic block production strategy
     let optimistic_strategy = OptimisticBlockMiningStrategy {
@@ -1116,6 +1124,9 @@ async fn heavy_test_optimistic_mining_strategy() -> eyre::Result<()> {
             idx + 1
         );
     }
+
+    // enable back validation
+    node.node_ctx.set_validation_enabled(true);
 
     // Now mine a new block using the normal mining method
     // This should wait for validation and build on the last optimistic block
