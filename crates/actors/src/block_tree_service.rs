@@ -80,7 +80,7 @@ pub enum BlockTreeServiceMessage {
     },
     FastTrackStorageFinalized {
         block_header: IrysBlockHeader,
-        response: oneshot::Sender<eyre::Result<()>>,
+        response: oneshot::Sender<eyre::Result<bool>>,
     },
     ReloadCacheFromDb {
         response: oneshot::Sender<()>,
@@ -276,7 +276,7 @@ impl BlockTreeServiceInner {
     async fn fast_track_storage_finalized_message(
         &self,
         block_header: IrysBlockHeader,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<bool> {
         let submit_txs = self
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
             .await?;
@@ -306,7 +306,7 @@ impl BlockTreeServiceInner {
 
         block_index.do_send(block_finalized_message.clone());
         chunk_migration.do_send(block_finalized_message);
-        Ok(())
+        Ok(true)
     }
 
     async fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {

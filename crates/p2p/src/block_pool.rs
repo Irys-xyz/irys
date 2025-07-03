@@ -2,7 +2,9 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::{ExecutionPayloadProvider, ExecutionPayloadProviderError};
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
+use actix::SystemService as _;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
@@ -296,7 +298,10 @@ where
             .map(|_| ())
     }
 
-    async fn finalize_block_storage(&self, header: &IrysBlockHeader) -> Result<(), BlockPoolError> {
+    async fn finalize_block_storage(
+        &self,
+        header: &IrysBlockHeader,
+    ) -> Result<bool, BlockPoolError> {
         let hash = header.block_hash;
         let (sender, receiver) = oneshot::channel();
         self.block_tree_sender
@@ -447,8 +452,25 @@ where
         self.wait_for_parent_to_appear_in_index(&block_header)
             .await?;
         self.migrate_block(&block_header).await?;
-        self.finalize_block_storage(&block_header).await?;
+        let need_to_update_forkchoice = self.finalize_block_storage(&block_header).await?;
+
+        // Validate the payload and submit it to the Reth service
         self.validate_and_submit_reth_payload(&block_header).await?;
+        if need_to_update_forkchoice {
+            let reth_service = RethServiceActor::from_registry();
+            reth_service
+                .try_send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(block_header.block_hash),
+                    confirmed_hash: None,
+                    finalized_hash: None,
+                })
+                .map_err(|err| {
+                    BlockPoolError::OtherInternal(format!(
+                        "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
+                        err
+                    ))
+                })?;
+        }
 
         // After the block is inserted into the index, we can fast forward the VDF steps to
         // unblock next blocks processing
