@@ -474,14 +474,15 @@ impl BlockTreeServiceInner {
                 error!("Unable to mark block as ValidationScheduled");
             }
 
-            self.service_senders
+            let _ = self
+                .service_senders
                 .block_state_events
                 .send(BlockStateUpdated {
                     block_hash: block.block_hash,
                     height: block.height,
                     state: new_state,
                     discarded: false,
-                })?;
+                });
 
             debug!(
                 "scheduling block for validation: {} height: {}",
@@ -545,9 +546,7 @@ impl BlockTreeServiceInner {
                         state,
                         discarded: true,
                     };
-                    if let Err(e) = self.service_senders.block_state_events.send(event) {
-                        debug!("No canonical chain subscribers: {:?}", e);
-                    }
+                    let _ = self.service_senders.block_state_events.send(event);
                 } else {
                     let _ = cache
                         .remove_block(&block_hash)
@@ -581,18 +580,15 @@ impl BlockTreeServiceInner {
                         .map(|(_, state)| *state)
                         .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-                    if let Err(e) =
-                        self.service_senders
-                            .block_state_events
-                            .send(BlockStateUpdated {
-                                block_hash,
-                                height,
-                                state,
-                                discarded: false,
-                            })
-                    {
-                        debug!("No canonical chain subscribers: {:?}", e);
-                    }
+                    let _ = self
+                        .service_senders
+                        .block_state_events
+                        .send(BlockStateUpdated {
+                            block_hash,
+                            height,
+                            state,
+                            discarded: false,
+                        });
 
                     // let (longest_chain, not_on_chain_count) = cache.get_canonical_chain();
                     let Some((_block_entry, fork_blocks, _)) =
@@ -1301,18 +1297,6 @@ impl BlockTreeCache {
 
     pub fn get_max_cumulative_difficulty(&self) -> U256 {
         self.max_cumulative_difficulty.0
-    }
-
-    #[must_use]
-    pub fn get_latest_canonical_entry(&self) -> &BlockTreeEntry {
-        self.longest_chain_cache
-            .0
-            .last()
-            .expect("canonical chain must always have an entry in it")
-    }
-
-    pub fn get_num_blocks_awaiting_validation_on_canonical_chain(&self) -> usize {
-        self.longest_chain_cache.1
     }
 
     fn update_longest_chain_cache(&mut self) {

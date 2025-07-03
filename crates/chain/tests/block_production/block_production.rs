@@ -3,7 +3,7 @@ use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
-use irys_actors::block_tree_service::ChainState;
+use irys_actors::block_tree_service::{BlockState, ChainState};
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -1004,8 +1004,12 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         "we have created a fork because we don't want to build on the evil block"
     );
     loop {
+        // wait for the block to be validated
         let res = sub.recv().await.unwrap();
-        if res.block_hash == new_block.block_hash {
+        if res.block_hash == new_block.block_hash
+            // if we get anything other than Unknown, proceed processing
+            && res.state != ChainState::NotOnchain(BlockState::Unknown)
+        {
             break;
         }
     }
@@ -1014,8 +1018,8 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .node_ctx
         .block_tree_guard
         .read()
-        .get_latest_canonical_entry()
-        .block_hash;
+        .get_max_cumulative_difficulty_block()
+        .0;
     let new_block_state = *node
         .node_ctx
         .block_tree_guard
