@@ -519,7 +519,12 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // Node C mines on top of B's chain and does not gossip it back to B
     let (c_block4, _) = node_c.mine_block_without_gossip().await?;
-    node_c.wait_until_height(4, seconds_to_wait).await?;
+    if let Err(does_not_reach_height) = node_c.wait_until_height(4, seconds_to_wait).await {
+        tracing::error!(
+            "Node C Failed to reach block height 4: {:?}",
+            does_not_reach_height
+        );
+    }
     assert_eq!(c_block4.height, 4); // block c4
 
     //
