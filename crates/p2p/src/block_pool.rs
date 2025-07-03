@@ -344,6 +344,7 @@ where
     async fn validate_and_submit_reth_payload(
         &self,
         block_header: &IrysBlockHeader,
+        reth_service: Option<Addr<RethServiceActor>>,
     ) -> Result<(), BlockPoolError> {
         debug!(
             "Block pool: Validating and submitting execution payload for block {:?}",
@@ -371,6 +372,33 @@ where
             "Block pool: Execution payload for block {:?} validated and submitted",
             block_header.block_hash
         );
+
+        if let Some(reth_service) = reth_service {
+            debug!(
+                "Sending ForkChoiceUpdateMessage to Reth service for block {:?}",
+                block_header.block_hash
+            );
+            reth_service
+                .send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(block_header.block_hash),
+                    confirmed_hash: None,
+                    finalized_hash: None,
+                })
+                .await
+                .map_err(|err| {
+                    BlockPoolError::OtherInternal(format!(
+                        "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
+                        err
+                    ))
+                })?
+                .map_err(|err| {
+                    BlockPoolError::ForckchoiceFailed(format!(
+                        "Failed to update fork choice in Reth service: {:?}",
+                        err
+                    ))
+                })?;
+        }
+
         Ok(())
     }
 
@@ -404,6 +432,7 @@ where
     async fn fast_track_block(&self, block_header: IrysBlockHeader) -> Result<(), BlockPoolError> {
         let block_height = block_header.height;
         let block_hash = block_header.block_hash;
+        let previous_block_hash = block_header.previous_block_hash;
         let evm_block_hash = block_header.evm_block_hash;
         let execution_payload_provider = self.execution_payload_provider.clone();
         debug!(
@@ -456,32 +485,7 @@ where
         let reth_service = self.finalize_block_storage(&block_header).await?;
 
         // Validate the payload and submit it to the Reth service
-        self.validate_and_submit_reth_payload(&block_header).await?;
-        if let Some(reth_service) = reth_service {
-            debug!(
-                "Sending ForkChoiceUpdateMessage to Reth service for block {:?}",
-                block_header.block_hash
-            );
-            reth_service
-                .send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(block_header.block_hash),
-                    confirmed_hash: None,
-                    finalized_hash: None,
-                })
-                .await
-                .map_err(|err| {
-                    BlockPoolError::OtherInternal(format!(
-                        "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
-                        err
-                    ))
-                })?
-                .map_err(|err| {
-                    BlockPoolError::ForckchoiceFailed(format!(
-                        "Failed to update fork choice in Reth service: {:?}",
-                        err
-                    ))
-                })?;
-        }
+        self.validate_and_submit_reth_payload(&block_header, reth_service).await?;
 
         // After the block is inserted into the index, we can fast forward the VDF steps to
         // unblock next blocks processing
