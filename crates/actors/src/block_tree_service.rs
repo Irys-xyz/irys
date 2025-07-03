@@ -351,9 +351,9 @@ impl BlockTreeServiceInner {
                 .position(|x| x.block_hash == arc_block.block_hash)
             else {
                 info!(
-                "Validated block not in longest chain, block {} height: {}, skipping finalization",
-                arc_block.block_hash, arc_block.height
-            );
+                    "Validated block not in longest chain, block {} height: {}, skipping finalization",
+                    arc_block.block_hash, arc_block.height
+                );
                 return;
             };
 
@@ -596,11 +596,9 @@ impl BlockTreeServiceInner {
                     else {
                         if block_hash == old_tip {
                             debug!(
-                            "\u{001b}[32mSame Tip Marked current tip {} cdiff: {} height: {}\u{001b}[0m",
-                            block_hash,
-                            old_tip_block.cumulative_diff,
-                            old_tip_block.height
-                         );
+                                "\u{001b}[32mSame Tip Marked current tip {} cdiff: {} height: {}\u{001b}[0m",
+                                block_hash, old_tip_block.cumulative_diff, old_tip_block.height
+                            );
                         } else {
                             debug!(
                                 "\u{001b}[32mNo new tip found {}, current tip {} cdiff: {} height: {}\u{001b}[0m",
@@ -683,7 +681,10 @@ impl BlockTreeServiceInner {
                         } else {
                             debug!(
                                 "\u{001b}[32mExtending longest chain to height {} with {} parent: {} height: {}\u{001b}[0m",
-                                arc_block.height, arc_block.block_hash, old_tip_block.block_hash, old_tip_block.height
+                                arc_block.height,
+                                arc_block.block_hash,
+                                old_tip_block.block_hash,
+                                old_tip_block.height
                             );
                         }
 
@@ -1207,7 +1208,7 @@ impl BlockTreeCache {
         }
 
         let state = ChainState::NotOnchain(BlockState::Unknown);
-        self.add_common(block, commitment_snapshot, ema_snapshot, state.clone())?;
+        self.add_common(block, commitment_snapshot, ema_snapshot, state)?;
         Ok(state)
     }
 
@@ -2013,6 +2014,7 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use eyre::ensure;
+    use rstest::rstest;
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
         let config = irys_types::ConsensusConfig::testnet();
@@ -2975,5 +2977,111 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    // Helper function to build a chain with specific validation states
+    fn build_chain_with_states(
+        states: Vec<(ChainState, U256)>,
+    ) -> (BlockTreeCache, Vec<IrysBlockHeader>) {
+        let comm_cache = Arc::new(CommitmentSnapshot::default());
+        let mut blocks = Vec::new();
+
+        // Create genesis block
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTreeCache::new(&genesis, ConsensusConfig::testnet());
+        blocks.push(genesis.clone());
+
+        // Add blocks with specified states
+        let mut prev_block = genesis;
+        for (state, diff) in states.into_iter() {
+            let mut block = extend_chain(random_block(diff), &prev_block);
+            block.cumulative_diff = prev_block.cumulative_diff + diff;
+
+            // Add block with specified state
+            cache
+                .add_common(&block, comm_cache.clone(), dummy_ema_snapshot(), state)
+                .unwrap();
+
+            blocks.push(block.clone());
+            prev_block = block;
+        }
+
+        (cache, blocks)
+    }
+
+    #[rstest]
+    #[case::from_first_block(0, 0, 0)]
+    #[case::from_second_block(1, 0, 1)]
+    #[case::from_third_block(2, 0, 2)]
+    #[case::from_fourth_block(3, 1, 2)]
+    #[case::from_fifth_block(4, 2, 2)]
+    fn test_get_validation_chain_status_chain_scenario(
+        #[case] from_block_index: usize,
+        #[case] expected_blocks_awaiting: usize,
+        #[case] expected_last_validated_index: usize,
+    ) {
+        // Create chain: [idx 0 genesis(onchain), idx 1 validated, idx 2 validated, idx 3 scheduled, idx 4 scheduled]
+        let states = vec![
+            // genesis gets prepended here
+            (ChainState::Onchain, U256::from(1)),
+            (ChainState::Validated(BlockState::ValidBlock), U256::from(1)),
+            (
+                ChainState::NotOnchain(BlockState::ValidationScheduled),
+                U256::from(1),
+            ),
+            (
+                ChainState::NotOnchain(BlockState::ValidationScheduled),
+                U256::from(1),
+            ),
+        ];
+
+        let (cache, blocks) = build_chain_with_states(states);
+
+        // Test from different positions in the chain
+        let test_block_hash = blocks[from_block_index].block_hash;
+        let (blocks_awaiting, last_validated) = cache.get_validation_chain_status(&test_block_hash);
+
+        assert_eq!(blocks_awaiting, expected_blocks_awaiting);
+        assert_eq!(
+            last_validated,
+            Some(blocks[expected_last_validated_index].block_hash)
+        );
+    }
+
+    #[test]
+    fn test_get_validation_chain_status_nonexistent_block() {
+        let genesis = random_block(U256::from(0));
+        let cache = BlockTreeCache::new(&genesis, ConsensusConfig::testnet());
+
+        let nonexistent_hash = H256::random();
+        let (blocks_awaiting, last_validated) =
+            cache.get_validation_chain_status(&nonexistent_hash);
+
+        // Should return 0 blocks awaiting and no last validated for non-existent block
+        assert_eq!(blocks_awaiting, 0);
+        assert_eq!(last_validated, None);
+    }
+
+    #[test]
+    fn test_get_validation_chain_status_all_awaiting() {
+        // Create chain where all blocks after genesis are awaiting validation
+        let states = vec![
+            (ChainState::NotOnchain(BlockState::Unknown), U256::from(1)),
+            (
+                ChainState::NotOnchain(BlockState::ValidationScheduled),
+                U256::from(1),
+            ),
+            (ChainState::NotOnchain(BlockState::Unknown), U256::from(1)),
+        ];
+
+        let (cache, blocks) = build_chain_with_states(states);
+
+        let test_block_hash = blocks[3].block_hash;
+        let (blocks_awaiting, last_validated) = cache.get_validation_chain_status(&test_block_hash);
+
+        // All 3 blocks should be awaiting
+        assert_eq!(blocks_awaiting, 3);
+        // Last validated should be genesis
+        assert_eq!(last_validated, Some(blocks[0].block_hash));
     }
 }

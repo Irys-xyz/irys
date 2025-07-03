@@ -104,10 +104,10 @@ impl<'a> BlockValidationTracker<'a> {
                     awaiting_validation,
                     fallback,
                 } => {
-                    let target_hash = target.hash.clone();
+                    let target_hash = target.hash;
                     let awaiting_validation = awaiting_validation;
                     if self.timer.is_expired() {
-                        let fallback_block = fallback.clone();
+                        let fallback_block = fallback;
                         let abandoned_target = target_hash;
 
                         *state = ValidationState::TimedOut {
