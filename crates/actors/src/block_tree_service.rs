@@ -241,7 +241,7 @@ impl BlockTreeServiceInner {
                 validation_result,
             } => {
                 self.on_block_validation_finished(block_hash, validation_result)
-                    .await;
+                    .await?;
             }
         }
         Ok(())
@@ -332,6 +332,7 @@ impl BlockTreeServiceInner {
         arc_block: &Arc<IrysBlockHeader>,
     ) -> eyre::Result<()> {
         let finalized_hash;
+        let cache_tip;
         {
             let binding = self.cache.clone();
             let cache = binding.write().unwrap();
@@ -399,16 +400,17 @@ impl BlockTreeServiceInner {
             }
 
             debug!(?finalized_hash, ?finalized_height, "migrating irys block");
-            // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
-            let _res = self
-                .reth_service_actor
-                .send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(cache.tip),
-                    confirmed_hash: None,
-                    finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
-                })
-                .await??;
+            cache_tip = cache.tip
         }
+        // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
+        let _res = self
+            .reth_service_actor
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Irys(cache_tip),
+                confirmed_hash: None,
+                finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+            })
+            .await??;
 
         self.send_storage_finalized_message(finalized_hash).await?;
         Ok(())
@@ -548,6 +550,7 @@ impl BlockTreeServiceInner {
                 discarded = true;
             }
             ValidationResult::Valid => {
+                let mut block_confirmed_event = false;
                 {
                     let binding = self.cache.clone();
                     let mut cache = binding.write().unwrap();
@@ -671,11 +674,15 @@ impl BlockTreeServiceInner {
                                 old_tip_block.height
                             );
                         }
-
-                        self.notify_services_of_block_confirmation(block_hash, &arc_block)
-                            .await?;
+                        block_confirmed_event = true;
                     }
                 }
+
+                if block_confirmed_event {
+                    self.notify_services_of_block_confirmation(block_hash, &arc_block)
+                        .await?;
+                }
+
                 // Handle block finalization (move chunks to disk and add to block_index)
                 self.try_notify_services_of_block_finalization(&arc_block)
                     .await?;

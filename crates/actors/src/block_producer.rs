@@ -6,7 +6,7 @@ use crate::{
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
-    reth_service::RethServiceActor,
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
     EpochServiceMessage,
@@ -546,6 +546,15 @@ pub trait BlockProdStrategy {
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
+        let _res = self
+            .inner()
+            .reth_service
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Evm(irys_block.evm_block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            })
+            .await??;
 
         let block = Arc::new(irys_block);
         match self

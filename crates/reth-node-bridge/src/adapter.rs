@@ -8,7 +8,9 @@ use crate::node::{eth_payload_attributes, RethNode};
 use crate::node::{RethNodeAdapter, RethNodeAddOns};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
-use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes};
+use alloy_rpc_types_engine::{
+    ForkchoiceState, PayloadAttributes, PayloadStatus, PayloadStatusEnum,
+};
 use irys_reth::{
     payload::{DeterministicShadowTxKey, ShadowTxStore},
     IrysEthereumNode,
@@ -170,13 +172,15 @@ impl IrysRethNodeAdapter {
     // we can set safe or finalized to ZERO to skip updating them, but head is mandatory.
     // safe (confirmed) we update in the block confirmed handler
     // finalized we update in the block finalized handler
+    #[tracing::instrument(err)]
     pub async fn update_forkchoice_full(
         &self,
         head_block_hash: B256,
         confirmed_block_hash: Option<B256>,
         finalized_block_hash: Option<B256>,
     ) -> eyre::Result<()> {
-        self.reth_node
+        let res = self
+            .reth_node
             .inner
             .add_ons_handle
             .beacon_engine_handle
@@ -190,6 +194,11 @@ impl IrysRethNodeAdapter {
                 EngineApiMessageVersion::default(),
             )
             .await?;
+
+        eyre::ensure!(
+            res.payload_status.status == PayloadStatusEnum::Valid,
+            "Reth has gone out of sync"
+        );
 
         Ok(())
     }
