@@ -531,6 +531,12 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // Stage 7: FINAL SYNC / RE-ORGs
     //
     {
+        // Enable gossip
+        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
+        //       broadcasts can be replaced with something more appropriate and correctly named
+        node_a.node_ctx.sync_state.set_is_syncing(false);
+        node_b.node_ctx.sync_state.set_is_syncing(false);
+        node_c.node_ctx.sync_state.set_is_syncing(false);
         // Gossip all blocks so everyone syncs
         node_b.gossip_block(&b_block2)?;
         node_b.gossip_block(&b_block3)?;
