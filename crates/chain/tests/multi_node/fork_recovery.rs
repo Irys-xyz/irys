@@ -403,7 +403,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     assert_eq!(
         a_block1.system_ledgers.len(),
         0,
-        "No txs should exist to be included in this block!"
+        "No txs should exist to be included in this block"
     );
 
     //
@@ -496,9 +496,21 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;
         node_c.wait_for_block(&b_block3.block_hash, 10).await?;
-        //these next two will fail (as expected)
-        //node_a.wait_for_block(&b_block2.block_hash, 1).await?;
-        //node_a.wait_for_block(&b_block3.block_hash, 1).await?;
+        // check node A has not recieved blocks from B
+        assert!(
+            node_a
+                .wait_for_block(&b_block2.block_hash, 1)
+                .await
+                .is_err(),
+            "Node A should not yet have recieved block 2 from Node B"
+        );
+        assert!(
+            node_a
+                .wait_for_block(&b_block3.block_hash, 1)
+                .await
+                .is_err(),
+            "Node A should not yet have recieved block 3 from Node B"
+        );
     }
 
     //
