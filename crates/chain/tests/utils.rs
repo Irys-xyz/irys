@@ -39,9 +39,9 @@ use irys_types::{
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List, H256,
 };
 use irys_types::{
-    Base64, CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, IrysTransaction,
-    IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk,
-    PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    Base64, CommitmentTransaction, Config, DatabaseProvider, GossipRequest, IrysBlockHeader,
+    IrysTransaction, IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig,
+    NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -1119,6 +1119,38 @@ impl IrysNodeTest<IrysNodeCtx> {
             node_ctx: (),
             cfg,
             temp_dir: self.temp_dir,
+        }
+    }
+
+    /// useful in tests when creating forks and
+    /// needing to send specific blocks between specific peers
+    pub async fn post_block_to_peer(
+        &self,
+        peer: &PeerAddress,
+        block_header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        let client = awc::Client::default();
+        let url = format!("http://{}/v1/block", peer.api);
+
+        let mut response = client
+            .post(url)
+            .send_json(&block_header)
+            .await
+            .map_err(|e| eyre::eyre!("client post failed: {}", e))?;
+
+        if response.status() != StatusCode::OK {
+            let body_bytes = response
+                .body()
+                .await
+                .map_err(|e| eyre::eyre!("Failed to read response body: {}", e))?;
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            Err(eyre::eyre!(
+                "Response status: {} - {}",
+                response.status(),
+                body_str
+            ))
+        } else {
+            Ok(())
         }
     }
 
