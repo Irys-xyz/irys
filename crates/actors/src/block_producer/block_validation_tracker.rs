@@ -170,7 +170,7 @@ impl<'a> BlockValidationTracker<'a> {
             };
 
             trace!(
-                block_hash = %event.block.block_hash,
+                block_hash = %event.block_hash,
                 discarded = event.discarded,
                 "Received block state event"
             );

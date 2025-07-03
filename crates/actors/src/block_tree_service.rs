@@ -125,7 +125,8 @@ pub struct BlockMigratedEvent {
 
 #[derive(Debug, Clone)]
 pub struct BlockStateUpdated {
-    pub block: BlockTreeEntry,
+    pub block_hash: BlockHash,
+    pub height: u64,
     pub state: ChainState,
     pub discarded: bool,
 }
@@ -457,7 +458,7 @@ impl BlockTreeServiceInner {
         // Add block to the tree (all blocks start as NotOnchain and go through validation)
         let add_result = cache.add_block(&block, commitment_snapshot, ema_snapshot);
 
-        if add_result.is_ok() {
+        if let Ok(new_state) = add_result {
             // Schedule validation and mark as scheduled
             self.service_senders
                 .validation_service
@@ -473,18 +474,19 @@ impl BlockTreeServiceInner {
                 error!("Unable to mark block as ValidationScheduled");
             }
 
+            self.service_senders
+                .block_state_events
+                .send(BlockStateUpdated {
+                    block_hash: block.block_hash,
+                    height: block.height,
+                    state: new_state,
+                    discarded: false,
+                })?;
+
             debug!(
                 "scheduling block for validation: {} height: {}",
                 block_hash, block.height
             );
-        }
-
-        // Release the write lock before broadcasting
-        drop(cache);
-
-        // Broadcast canonical chain update if block was successfully added
-        if add_result.is_ok() {
-            self.broadcast_canonical_chain_update();
         }
 
         Ok(())
@@ -523,7 +525,8 @@ impl BlockTreeServiceInner {
 
                 // Get block info before removal for the event
                 if let Some(block_entry) = cache.get_block(&block_hash) {
-                    let block_tree_entry = make_block_tree_entry(block_entry);
+                    let _block_tree_entry = make_block_tree_entry(block_entry);
+                    let height = block_entry.height;
                     let state = cache
                         .get_block_and_status(&block_hash)
                         .map(|(_, state)| *state)
@@ -537,7 +540,8 @@ impl BlockTreeServiceInner {
                     // Emit event after removal
                     drop(cache);
                     let event = BlockStateUpdated {
-                        block: block_tree_entry,
+                        block_hash,
+                        height,
                         state,
                         discarded: true,
                     };
@@ -561,10 +565,33 @@ impl BlockTreeServiceInner {
                     let old_tip = cache.tip;
                     let old_tip_block = cache.get_block(&old_tip).unwrap().clone();
 
+                    // Get block info before marking as valid
+                    let block_entry = cache.get_block(&block_hash).unwrap();
+                    let height = block_entry.height;
+
                     // Mark block as validated in cache, this will update the canonical chain
                     if let Err(err) = cache.mark_block_as_valid(&block_hash) {
                         error!("{}", err);
                         return;
+                    }
+
+                    // Get the updated state after marking as valid
+                    let state = cache
+                        .get_block_and_status(&block_hash)
+                        .map(|(_, state)| *state)
+                        .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+
+                    if let Err(e) =
+                        self.service_senders
+                            .block_state_events
+                            .send(BlockStateUpdated {
+                                block_hash,
+                                height,
+                                state,
+                                discarded: false,
+                            })
+                    {
+                        debug!("No canonical chain subscribers: {:?}", e);
                     }
 
                     // let (longest_chain, not_on_chain_count) = cache.get_canonical_chain();
@@ -670,9 +697,6 @@ impl BlockTreeServiceInner {
                 // Handle block finalization (move chunks to disk and add to block_index)
                 self.try_notify_services_of_block_finalization(&arc_block)
                     .await;
-
-                // Broadcast canonical chain update after validation completes
-                self.broadcast_canonical_chain_update();
             }
         }
     }
@@ -717,28 +741,6 @@ impl BlockTreeServiceInner {
         }
 
         Ok(received)
-    }
-
-    /// Broadcasts an update about the current canonical chain state
-    fn broadcast_canonical_chain_update(&self) {
-        let cache = self.cache.read().unwrap();
-        let latest_entry = cache.get_latest_canonical_entry();
-
-        // Get the block's current state
-        let block_state = cache
-            .get_block_and_status(&latest_entry.block_hash)
-            .map(|(_, state)| *state)
-            .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
-
-        let event = BlockStateUpdated {
-            block: latest_entry.clone(),
-            state: block_state,
-            discarded: false,
-        };
-        drop(cache);
-        if let Err(e) = self.service_senders.block_state_events.send(event) {
-            debug!("No canonical chain subscribers: {:?}", e);
-        }
     }
 }
 
@@ -1191,7 +1193,7 @@ impl BlockTreeCache {
         block: &IrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<ChainState> {
         let hash = block.block_hash;
 
         debug!(
@@ -1205,15 +1207,12 @@ impl BlockTreeCache {
             Some(ChainState::Onchain)
         ) {
             debug!(?hash, "already part of the main chain state");
-            return Ok(());
+            return Ok(ChainState::Onchain);
         }
 
-        self.add_common(
-            block,
-            commitment_snapshot,
-            ema_snapshot,
-            ChainState::NotOnchain(BlockState::Unknown),
-        )
+        let state = ChainState::NotOnchain(BlockState::Unknown);
+        self.add_common(block, commitment_snapshot, ema_snapshot, state.clone())?;
+        Ok(state)
     }
 
     /// Helper function to delete a single block without recursion
@@ -2076,7 +2075,7 @@ mod tests {
             None
         );
 
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
         // Adding `b1` again shouldn't change the state because it is confirmed
         // onchain
@@ -2086,7 +2085,7 @@ mod tests {
             .push(H256::random());
         assert_matches!(
             cache.add_block(&b1_test, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
@@ -2103,18 +2102,18 @@ mod tests {
                 .len(),
             0
         );
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
         // Same as above, `get_deepest_unvalidated_in_longest_chain` should not
         // modify state
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache
@@ -2126,14 +2125,14 @@ mod tests {
             b2.block_hash
         );
 
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
@@ -2157,9 +2156,9 @@ mod tests {
         );
 
         // Remove b2_1
-        assert_matches!(cache.remove_block(&b2.block_hash), Ok(()));
+        assert_matches!(cache.remove_block(&b2.block_hash), Ok(_));
         assert_eq!(cache.get_block(&b2.block_hash), None);
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
         // Remove b2_1 again
         assert_matches!(cache.remove_block(&b2.block_hash), Err(_));
@@ -2168,13 +2167,13 @@ mod tests {
         // on b1 but share the same solution_hash
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
         assert_matches!(
             cache.add_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
 
         println!(
@@ -2233,16 +2232,16 @@ mod tests {
             result.block_hash == b1.block_hash || result.block_hash == b1_2.block_hash,
             "Expected either b1 or b1_2 to be returned"
         );
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
         // Even though b2 is marked as a tip, it is still lower difficulty than b1_2 so will
         // not be included in the longest chain
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         assert_eq!(Some(&b1_2), cache.get_block(&b1_2.block_hash));
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(_));
 
         // Remove b1_2, causing b2 to now be the tip of the heaviest chain
-        assert_matches!(cache.remove_block(&b1_2.block_hash), Ok(()));
+        assert_matches!(cache.remove_block(&b1_2.block_hash), Ok(_));
         assert_eq!(cache.get_block(&b1_2.block_hash), None);
         assert_eq!(
             cache
@@ -2256,10 +2255,10 @@ mod tests {
                 .block_hash,
             b1.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(_));
 
         // Prune to a depth of 1 behind the tip
-        assert_matches!(cache.prune(1), Ok(()));
+        assert_matches!(cache.prune(1), Ok(_));
         assert_eq!(Some(&b1), cache.get_block(&b1.block_hash));
         assert_eq!(
             cache
@@ -2273,10 +2272,10 @@ mod tests {
                 .block_hash,
             b1.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(_));
 
         // Prune at the tip, removing all ancestors (verify b1 is pruned)
-        assert_matches!(cache.prune(0), Ok(()));
+        assert_matches!(cache.prune(0), Ok(_));
         assert_eq!(None, cache.get_block(&b1.block_hash));
         assert_eq!(
             None,
@@ -2287,10 +2286,10 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2], 0, &cache), Ok(_));
 
         // Again, this time to make sure b1_2 is really gone
-        assert_matches!(cache.prune(0), Ok(()));
+        assert_matches!(cache.prune(0), Ok(_));
         assert_eq!(None, cache.get_block(&b1_2.block_hash));
         assert_eq!(
             None,
@@ -2301,7 +2300,7 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2], 0, &cache), Ok(_));
 
         // <Reset the cache>
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
@@ -2309,11 +2308,11 @@ mod tests {
         let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
         assert_matches!(
             cache.add_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
@@ -2323,7 +2322,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b2_2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache
@@ -2343,7 +2342,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b2_3, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache
@@ -2355,7 +2354,7 @@ mod tests {
             b2_2.block_hash
         );
         assert_matches!(cache.mark_tip(&b2_3.block_hash), Err(_));
-        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(_));
 
         // Now b2_2->b2->b1 are validated.
         assert_matches!(
@@ -2380,7 +2379,7 @@ mod tests {
                 .block_hash,
             b2_3.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2, &b2_2], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2, &b2_2], 1, &cache), Ok(_));
 
         // Now the b3->b2->b1 fork is heaviest
         let b3 = extend_chain(random_block(U256::from(4)), &b2);
@@ -2390,7 +2389,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b3, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(
             cache.add_common(
@@ -2403,7 +2402,7 @@ mod tests {
         );
         assert_matches!(cache.mark_tip(&b3.block_hash), Ok(_));
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
-        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 0, &cache), Ok(_));
 
         // b3->b2->b1 fork is still heaviest
         assert_matches!(cache.mark_tip(&b2_2.block_hash), Ok(_));
@@ -2416,7 +2415,7 @@ mod tests {
                 .block_hash,
             b3.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(_));
 
         // add not validated b4, b3->b2->b1 fork is still heaviest
         let b4 = extend_chain(random_block(U256::from(5)), &b3);
@@ -2426,7 +2425,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b4, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache
@@ -2437,10 +2436,10 @@ mod tests {
                 .block_hash,
             b4.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(_));
 
         // Prune to a depth of 1 past the tip and verify b1 and the b1_2 branch are pruned
-        assert_matches!(cache.prune(1), Ok(()));
+        assert_matches!(cache.prune(1), Ok(_));
         assert_eq!(None, cache.get_block(&b1.block_hash));
         assert_eq!(
             None,
@@ -2451,11 +2450,11 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2, &b3], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2, &b3], 1, &cache), Ok(_));
 
         // Mark a new tip for the longest chain, validating b2_3, and pruning again
         assert_matches!(cache.mark_tip(&b2_3.block_hash), Ok(_));
-        assert_matches!(cache.prune(1), Ok(()));
+        assert_matches!(cache.prune(1), Ok(_));
         assert_eq!(None, cache.get_block(&b2.block_hash));
         assert_eq!(
             None,
@@ -2466,10 +2465,10 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(_));
 
         // Also make sure b3 (the old tip) got pruned
-        assert_matches!(cache.prune(1), Ok(()));
+        assert_matches!(cache.prune(1), Ok(_));
         assert_eq!(None, cache.get_block(&b3.block_hash));
         assert_eq!(
             None,
@@ -2480,10 +2479,10 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(_));
 
         // and that the not yet validated b4 was also pruned
-        assert_matches!(cache.prune(1), Ok(()));
+        assert_matches!(cache.prune(1), Ok(_));
         assert_eq!(None, cache.get_block(&b4.block_hash));
         assert_eq!(
             None,
@@ -2494,10 +2493,10 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(_));
 
         // Now make sure b2_2 and b2_3 are still in the cache/state
-        assert_matches!(cache.prune(1), Ok(()));
+        assert_matches!(cache.prune(1), Ok(_));
         assert_eq!(Some(&b2_2), cache.get_block(&b2_2.block_hash));
         assert_eq!(
             cache
@@ -2511,9 +2510,9 @@ mod tests {
                 .block_hash,
             b2_2.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(_));
 
-        assert_matches!(cache.prune(1), Ok(()));
+        assert_matches!(cache.prune(1), Ok(_));
         assert_eq!(Some(&b2_3), cache.get_block(&b2_3.block_hash));
         assert_eq!(
             cache
@@ -2527,7 +2526,7 @@ mod tests {
                 .block_hash,
             b2_3.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(_));
 
         // Verify previously pruned b3 can be safely removed again, with longest chain cache staying stable
         assert_matches!(cache.remove_block(&b3.block_hash), Err(e) if e.to_string() == "Block not found");
@@ -2541,7 +2540,7 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(_));
 
         // Same safety check for b4 - removing already pruned block shouldn't affect chain state
         assert_matches!(cache.remove_block(&b4.block_hash), Err(e) if e.to_string() == "Block not found");
@@ -2555,7 +2554,7 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(_));
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
@@ -2563,7 +2562,7 @@ mod tests {
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
@@ -2628,13 +2627,13 @@ mod tests {
         //   This would ensure tip always follows the longest chain. TBH the current behavior
         //   is likely aligned with the local miners economic interest and why things
         //   like "uncle" blocks exist on other chains.
-        assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(_));
 
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
         assert_matches!(
             cache.add_block(&b14, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache
@@ -2648,7 +2647,7 @@ mod tests {
         // by adding b14 we've now made the b13->b11 chain heavier and because
         // b13 is already validated it is included in the longest chain
         // b14 isn't validated so it doesn't count towards the not_onchain_count
-        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(_));
 
         // Try to mutate the state of the cache with some random validations
         assert_matches!(
@@ -2672,7 +2671,7 @@ mod tests {
             (&b14, &ChainState::NotOnchain(BlockState::Unknown))
         );
         // Verify none of this affected the longest chain cache
-        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(_));
 
         // Move b14 though the vdf validation states
         assert_matches!(
@@ -2695,10 +2694,10 @@ mod tests {
             Ok(())
         );
         // Verify none of this affected the longest chain cache
-        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(_));
 
         // now mark b14 as vdf validated
-        assert_matches!(cache.mark_block_as_valid(&b14.block_hash), Ok(()));
+        assert_matches!(cache.mark_block_as_valid(&b14.block_hash), Ok(_));
         assert_eq!(
             cache.get_block_and_status(&b14.block_hash).unwrap(),
             (&b14, &ChainState::NotOnchain(BlockState::ValidBlock))
@@ -2713,13 +2712,13 @@ mod tests {
         );
         // Now that b14 is vdf validated it can be considered a NotOnchain
         // part of the longest chain
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
 
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(
             cache.add_block(&b15, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(
             check_earliest_not_onchain(
@@ -2729,7 +2728,7 @@ mod tests {
             ),
             Ok(())
         );
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
 
         // Validate b14
         assert_matches!(
@@ -2754,13 +2753,13 @@ mod tests {
             (&b14, &ChainState::Validated(BlockState::ValidBlock))
         );
         // b14 is validated, but wont be onchain until is tip_height or lower
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
 
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
         assert_matches!(
             cache.add_block(&b16, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
@@ -2775,10 +2774,10 @@ mod tests {
             Ok(())
         );
         // Verify the longest chain state isn't changed by b16 pending Vdf validation
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
 
         // Mark b16 as vdf validated eve though b15 is not
-        assert_matches!(cache.mark_block_as_valid(&b16.block_hash), Ok(()));
+        assert_matches!(cache.mark_block_as_valid(&b16.block_hash), Ok(_));
         assert_matches!(
             check_earliest_not_onchain(
                 &b15.block_hash,
@@ -2791,7 +2790,7 @@ mod tests {
             cache.get_block_and_status(&b16.block_hash).unwrap(),
             (&b16, &ChainState::NotOnchain(BlockState::ValidBlock))
         );
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
 
         // Make b14 the tip (making it OnChain)
         assert_matches!(cache.mark_tip(&b14.block_hash), Ok(_));
@@ -2807,7 +2806,7 @@ mod tests {
             ),
             Ok(())
         );
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 0, &cache), Ok(_));
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
@@ -2815,14 +2814,14 @@ mod tests {
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(())
+            Ok(_)
         );
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
         // Verify the longest chain state isn't changed by b16 pending Vdf validation
-        assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(_));
 
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
@@ -2834,7 +2833,7 @@ mod tests {
             ),
             Ok(())
         );
-        assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(_));
 
         // When a locally produced block is added as validated "onchain" but it
         // hasn't yet been validated by the validation_service
@@ -2864,7 +2863,7 @@ mod tests {
         );
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
-        assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(_));
 
         // Create a fork at b12
         let b13a = extend_chain(random_block(U256::from(2)), &b12);
@@ -2889,10 +2888,10 @@ mod tests {
             Ok(())
         );
 
-        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 1, &cache), Ok(_));
 
         assert_matches!(cache.mark_tip(&b13a.block_hash), Ok(_));
-        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 0, &cache), Ok(_));
 
         // extend the fork to make it canonical
         let b14b = extend_chain(random_block(U256::from(3)), &b13b);
