@@ -537,7 +537,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
             does_not_reach_height
         );
     }
-    assert_eq!(c_block4.height, 4); // block c4
+    assert_eq!(c_block4.height, 4, "Node C Failed to reach block height 4"); // block c4
 
     //
     // Stage 7: FINAL SYNC / RE-ORGs
@@ -596,7 +596,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         let mut peer_c_commitment_txs = vec![peer_c_b2_stake_tx.id, peer_c_b2_pledge_tx.id];
         peer_c_commitment_txs.sort();
         let mut all_commitment_txs = peer_b_commitment_txs.clone();
-        all_commitment_txs.extend(peer_c_commitment_txs);
+        all_commitment_txs.extend(&peer_c_commitment_txs);
         all_commitment_txs.sort();
 
         // check txs are in mempools
@@ -626,19 +626,37 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
         // check correct txs made it into specific canon blocks, that are now synced across every node
         assert_eq!(sorted_commitments_at(&node_a, 1).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_a, 2).await?, all_commitment_txs); // this is suprising as I expected only the two txs included in Peer B B2
+        assert_eq!(
+            sorted_commitments_at(&node_a, 2).await?,
+            peer_b_commitment_txs
+        ); // expect only the two txs included in Peer B B2
         assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_a, 4).await?, vec![]);
+        assert_eq!(
+            sorted_commitments_at(&node_a, 4).await?,
+            peer_c_commitment_txs
+        );
 
         assert_eq!(sorted_commitments_at(&node_b, 1).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_b, 2).await?, all_commitment_txs); // this is suprising
+        assert_eq!(
+            sorted_commitments_at(&node_b, 2).await?,
+            peer_b_commitment_txs
+        ); // this is suprising
         assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_b, 4).await?, vec![]);
+        assert_eq!(
+            sorted_commitments_at(&node_b, 4).await?,
+            peer_c_commitment_txs
+        );
 
         assert_eq!(sorted_commitments_at(&node_c, 1).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_c, 2).await?, all_commitment_txs); // this is suprising
+        assert_eq!(
+            sorted_commitments_at(&node_c, 2).await?,
+            peer_b_commitment_txs
+        ); // this is suprising
         assert_eq!(sorted_commitments_at(&node_c, 3).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_c, 4).await?, vec![]);
+        assert_eq!(
+            sorted_commitments_at(&node_c, 4).await?,
+            peer_c_commitment_txs
+        );
     }
 
     // TODO: stretch goal, make original chain B the longest chain again and see if txs come back
