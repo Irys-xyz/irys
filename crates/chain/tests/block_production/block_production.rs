@@ -3,7 +3,7 @@ use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
-use irys_actors::block_tree_service::{BlockState, ChainState};
+use irys_actors::block_tree_service::{ema_snapshot::EmaSnapshot, BlockState, ChainState};
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -12,10 +12,11 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
-use irys_types::{irys::IrysSigner, NodeConfig};
+use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
 use reth::providers::{AccountReader as _, ReceiptProvider as _, TransactionsProvider as _};
 use reth::{providers::BlockReader as _, rpc::types::TransactionRequest};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
@@ -1029,6 +1030,129 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .1;
     assert_eq!(latest_block_hash, new_block.block_hash);
     assert_eq!(new_block_state, ChainState::Onchain);
+
+    // Cleanup
+    node.stop().await;
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn heavy_test_optimistic_mining_strategy() -> eyre::Result<()> {
+    // Define the OptimisticBlockMiningStrategy that mines blocks without waiting for validation
+    struct OptimisticBlockMiningStrategy {
+        pub prod: ProductionStrategy,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl BlockProdStrategy for OptimisticBlockMiningStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        // Override parent_irys_block to immediately select the highest cumulative difficulty block
+        // without waiting for validation, enabling optimistic mining
+        async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+            // Get the block with highest cumulative difficulty immediately
+            let (parent_block_hash, _) = self
+                .inner()
+                .block_tree_guard
+                .read()
+                .get_max_cumulative_difficulty_block();
+
+            // Fetch the parent block header
+            let header = self.fetch_block_header(parent_block_hash).await?;
+
+            // Get the EMA snapshot
+            let ema_snapshot = self.get_block_ema_snapshot(&header.block_hash)?;
+
+            Ok((header, ema_snapshot))
+        }
+    }
+
+    // Configure test network
+    let config = NodeConfig::testnet();
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    // Create optimistic block production strategy
+    let optimistic_strategy = OptimisticBlockMiningStrategy {
+        prod: ProductionStrategy {
+            inner: node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    // Mine 5 blocks using the optimistic strategy
+    let mut optimistic_blocks: Vec<Arc<IrysBlockHeader>> = Vec::new();
+    for i in 1..=5 {
+        info!("Mining optimistic block {}", i);
+
+        // Generate a solution and produce block with optimistic strategy
+        let solution = solution_context(&node.node_ctx).await?;
+        let (block, _eth_payload) = optimistic_strategy
+            .fully_produce_new_block(solution)
+            .await?
+            .unwrap();
+
+        // Verify this block builds on the previous one (or genesis for first block)
+        if i > 1 {
+            assert_eq!(
+                block.previous_block_hash,
+                optimistic_blocks[i - 2].block_hash,
+                "Optimistic block {} should build on previous optimistic block",
+                i
+            );
+        }
+
+        optimistic_blocks.push(block.clone());
+    }
+
+    // Verify all optimistic blocks were mined at correct heights
+    for (idx, block) in optimistic_blocks.iter().enumerate() {
+        assert_eq!(
+            block.height,
+            (idx + 1) as u64,
+            "Optimistic block {} should be at height {}",
+            idx + 1,
+            idx + 1
+        );
+    }
+
+    // Now mine a new block using the normal mining method
+    // This should wait for validation and build on the last optimistic block
+    info!("Mining normal block after optimistic chain");
+    let (normal_block, _) = mine_block(&node.node_ctx).await?.unwrap();
+
+    // Wait for the normal block to be fully processed
+    node.wait_until_height(normal_block.height, 10).await?;
+
+    // Assert that the normal block extends the last optimistic block
+    assert_eq!(
+        normal_block.previous_block_hash,
+        optimistic_blocks.last().unwrap().block_hash,
+        "Normal block should extend the last optimistic block"
+    );
+    assert_eq!(normal_block.height, 6, "Normal block should be at height 6");
+
+    // Also verify that the parent is validated
+    let parent_block_state = {
+        let tree = node.node_ctx.block_tree_guard.read();
+        *tree
+            .get_block_and_status(&optimistic_blocks.last().unwrap().block_hash)
+            .unwrap()
+            .1
+    };
+
+    // Check if the parent block is validated (either Onchain or Validated with ValidBlock)
+    let is_parent_validated = matches!(
+        parent_block_state,
+        ChainState::Onchain | ChainState::Validated(BlockState::ValidBlock)
+    );
+
+    assert!(
+        is_parent_validated,
+        "Parent block should be marked as validated in the block tree, but was {:?}",
+        parent_block_state
+    );
 
     // Cleanup
     node.stop().await;
