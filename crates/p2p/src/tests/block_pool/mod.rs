@@ -203,7 +203,7 @@ impl MockedServices {
                 {
                     // Simulate processing the block header
                     response
-                        .send(Ok(false))
+                        .send(Ok(None))
                         .expect("to send response for FastTrackStorageFinalized");
                 } else {
                     debug!("Received unsupported BlockTreeServiceMessage");

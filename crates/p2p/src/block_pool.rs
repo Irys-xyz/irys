@@ -2,7 +2,7 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::{ExecutionPayloadProvider, ExecutionPayloadProviderError};
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
-use actix::SystemService as _;
+use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
@@ -301,7 +301,7 @@ where
     async fn finalize_block_storage(
         &self,
         header: &IrysBlockHeader,
-    ) -> Result<bool, BlockPoolError> {
+    ) -> Result<Option<Addr<RethServiceActor>>, BlockPoolError> {
         let hash = header.block_hash;
         let (sender, receiver) = oneshot::channel();
         self.block_tree_sender
@@ -452,12 +452,15 @@ where
         self.wait_for_parent_to_appear_in_index(&block_header)
             .await?;
         self.migrate_block(&block_header).await?;
-        let need_to_update_forkchoice = self.finalize_block_storage(&block_header).await?;
+        let reth_service = self.finalize_block_storage(&block_header).await?;
 
         // Validate the payload and submit it to the Reth service
         self.validate_and_submit_reth_payload(&block_header).await?;
-        if need_to_update_forkchoice {
-            let reth_service = RethServiceActor::from_registry();
+        if let Some(reth_service) = reth_service {
+            debug!(
+                "Sending ForkChoiceUpdateMessage to Reth service for block {:?}",
+                block_header.block_hash
+            );
             reth_service
                 .try_send(ForkChoiceUpdateMessage {
                     head_hash: BlockHashType::Irys(block_header.block_hash),
