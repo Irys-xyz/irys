@@ -400,30 +400,8 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     node_c.wait_for_block(&a_block1.block_hash, 10).await?;
 
     //
-    // Stage 3: ISOLATE NODES (reth)
+    // Stage 3: GENERATE ISOLATED txs
     //
-
-    // disconnect peers so reth cannot gossip to each other
-    let _a_peers = node_a.disconnect_all_peers().await?;
-    let _b_peers = node_b.disconnect_all_peers().await?;
-    let _c_peers = node_c.disconnect_all_peers().await?;
-
-    // prepare for direct connects
-    let a_ctx = node_a.node_ctx.reth_node_adapter.clone();
-    let b_ctx = node_b.node_ctx.reth_node_adapter.clone();
-    let c_ctx = node_c.node_ctx.reth_node_adapter.clone();
-
-    // Connect B <-> C directly
-    let b_info = node_b.node_ctx.config.node_config.reth_peer_info;
-    let c_info = node_c.node_ctx.config.node_config.reth_peer_info;
-    b_ctx
-        .inner
-        .network
-        .connect_peer(c_info.peer_id, c_info.peering_tcp_addr);
-    c_ctx
-        .inner
-        .network
-        .connect_peer(b_info.peer_id, b_info.peering_tcp_addr);
 
     // node_b generates txs in isolation for inclusion in block 1
     let peer_b_b1_stake_tx = node_b
@@ -460,16 +438,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // Node C mines on top of B's chain and does not gossip it back to B
     let (c_block4, _) = node_c.mine_block_without_gossip().await?;
     assert_eq!(c_block4.height, 4); // block c4
-
-    // Reconnect all nodes
-    a_ctx
-        .inner
-        .network
-        .connect_peer(b_info.peer_id, b_info.peering_tcp_addr);
-    a_ctx
-        .inner
-        .network
-        .connect_peer(c_info.peer_id, c_info.peering_tcp_addr);
 
     //
     // Stage 6: FINAL SYNC / RE-ORGs
