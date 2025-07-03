@@ -458,7 +458,7 @@ impl BlockTreeServiceInner {
         // Add block to the tree (all blocks start as NotOnchain and go through validation)
         let add_result = cache.add_block(&block, commitment_snapshot, ema_snapshot);
 
-        if let Ok(new_state) = add_result {
+        if let Ok((new_state, head_changed)) = add_result {
             // Schedule validation and mark as scheduled
             self.service_senders
                 .validation_service
@@ -483,6 +483,24 @@ impl BlockTreeServiceInner {
                     state: new_state,
                     discarded: false,
                 });
+
+            // If this block has the highest cumulative difficulty, inform Reth
+            if head_changed {
+                debug!(
+                    "New head of chain detected: {} height: {}",
+                    block_hash, block.height
+                );
+                if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(*block_hash),
+                    confirmed_hash: None,
+                    finalized_hash: None,
+                }) {
+                    error!(
+                        "Unable to send head update message to reth for {}: {}",
+                        &block_hash, &e
+                    );
+                }
+            }
 
             debug!(
                 "scheduling block for validation: {} height: {}",
@@ -1096,7 +1114,8 @@ impl BlockTreeCache {
             prev_block = block.clone();
 
             // Use add_common directly for restored blocks since they're already validated
-            block_tree_cache
+            // We ignore the head_changed flag here since we'll set the tip at the end
+            let _ = block_tree_cache
                 .add_common(
                     &block,
                     arc_commitment_snapshot,
@@ -1130,7 +1149,7 @@ impl BlockTreeCache {
         commitment_snapshot: Arc<CommitmentSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
         chain_state: ChainState,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<bool> {
         let hash = block.block_hash;
         let prev_hash = block.previous_block_hash;
 
@@ -1155,13 +1174,17 @@ impl BlockTreeCache {
             "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}",
             self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash
         );
-        if block.cumulative_diff > self.max_cumulative_difficulty.0 {
+        
+        let head_changed = if block.cumulative_diff > self.max_cumulative_difficulty.0 {
             debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
                 block.cumulative_diff, hash, block.height
             );
             self.max_cumulative_difficulty = (block.cumulative_diff, hash);
-        }
+            true
+        } else {
+            false
+        };
 
         self.blocks.insert(
             hash,
@@ -1176,7 +1199,7 @@ impl BlockTreeCache {
         );
 
         self.update_longest_chain_cache();
-        Ok(())
+        Ok(head_changed)
     }
 
     /// Adds a block to the block tree.
@@ -1190,7 +1213,7 @@ impl BlockTreeCache {
         block: &IrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
-    ) -> eyre::Result<ChainState> {
+    ) -> eyre::Result<(ChainState, bool)> {
         let hash = block.block_hash;
 
         debug!(
@@ -1204,12 +1227,12 @@ impl BlockTreeCache {
             Some(ChainState::Onchain)
         ) {
             debug!(?hash, "already part of the main chain state");
-            return Ok(ChainState::Onchain);
+            return Ok((ChainState::Onchain, false));
         }
 
         let state = ChainState::NotOnchain(BlockState::Unknown);
-        self.add_common(block, commitment_snapshot, ema_snapshot, state)?;
-        Ok(state)
+        let head_changed = self.add_common(block, commitment_snapshot, ema_snapshot, state)?;
+        Ok((state, head_changed))
     }
 
     /// Helper function to delete a single block without recursion
@@ -2071,7 +2094,7 @@ mod tests {
             .push(H256::random());
         assert_matches!(
             cache.add_block(&b1_test, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
@@ -2099,7 +2122,7 @@ mod tests {
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_eq!(
             cache
@@ -2118,7 +2141,7 @@ mod tests {
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
@@ -2153,13 +2176,13 @@ mod tests {
         // on b1 but share the same solution_hash
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
         assert_matches!(
             cache.add_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
 
         println!(
@@ -2294,11 +2317,11 @@ mod tests {
         let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
         assert_matches!(
             cache.add_block(&b1_2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_matches!(
             cache.add_block(&b2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         let b2_2 = extend_chain(random_block(U256::one()), &b2);
@@ -2308,7 +2331,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b2_2, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_eq!(
             cache
@@ -2328,7 +2351,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b2_3, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_eq!(
             cache
@@ -2350,7 +2373,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache.get_block_and_status(&b2_2.block_hash).unwrap(),
@@ -2375,7 +2398,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b3, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_matches!(
             cache.add_common(
@@ -2384,7 +2407,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(cache.mark_tip(&b3.block_hash), Ok(_));
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
@@ -2411,7 +2434,7 @@ mod tests {
         );
         assert_matches!(
             cache.add_block(&b4, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_eq!(
             cache
@@ -2548,7 +2571,7 @@ mod tests {
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         let b13 = extend_chain(random_block(U256::one()), &b11);
 
@@ -2574,7 +2597,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
 
@@ -2619,7 +2642,7 @@ mod tests {
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
         assert_matches!(
             cache.add_block(&b14, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_eq!(
             cache
@@ -2638,13 +2661,13 @@ mod tests {
         // Try to mutate the state of the cache with some random validations
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&BlockHash::random()),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(cache.mark_block_as_valid(&BlockHash::random()), Err(_));
         // Attempt to mark the already onchain b13 to prior vdf states
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b13.block_hash),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(cache.mark_block_as_valid(&b13.block_hash), Err(_));
         // Verify its state wasn't changed
@@ -2662,7 +2685,7 @@ mod tests {
         // Move b14 though the vdf validation states
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b14.block_hash),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache.get_block_and_status(&b14.block_hash).unwrap(),
@@ -2677,7 +2700,7 @@ mod tests {
                 &ChainState::NotOnchain(BlockState::ValidationScheduled),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
         // Verify none of this affected the longest chain cache
         assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(_));
@@ -2694,7 +2717,7 @@ mod tests {
                 &ChainState::NotOnchain(BlockState::ValidBlock),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
         // Now that b14 is vdf validated it can be considered a NotOnchain
         // part of the longest chain
@@ -2704,7 +2727,7 @@ mod tests {
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(
             cache.add_block(&b15, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_matches!(
             check_earliest_not_onchain(
@@ -2712,7 +2735,7 @@ mod tests {
                 &ChainState::NotOnchain(BlockState::ValidBlock),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
 
@@ -2724,7 +2747,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(
             check_earliest_not_onchain(
@@ -2732,7 +2755,7 @@ mod tests {
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache.get_block_and_status(&b14.block_hash).unwrap(),
@@ -2745,11 +2768,11 @@ mod tests {
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
         assert_matches!(
             cache.add_block(&b16, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         assert_matches!(
             cache.mark_block_as_validation_scheduled(&b16.block_hash),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(
             check_earliest_not_onchain(
@@ -2757,7 +2780,7 @@ mod tests {
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
         // Verify the longest chain state isn't changed by b16 pending Vdf validation
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(_));
@@ -2770,7 +2793,7 @@ mod tests {
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
         assert_eq!(
             cache.get_block_and_status(&b16.block_hash).unwrap(),
@@ -2790,7 +2813,7 @@ mod tests {
                 &ChainState::NotOnchain(BlockState::Unknown),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 0, &cache), Ok(_));
 
@@ -2800,7 +2823,7 @@ mod tests {
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(&b12, comm_cache.clone(), dummy_ema_snapshot()),
-            Ok(_)
+            Ok((_, _))
         );
         let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
@@ -2817,7 +2840,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidationScheduled)
             ),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(_));
 
@@ -2829,7 +2852,7 @@ mod tests {
                 &ChainState::Validated(BlockState::ValidationScheduled),
                 &cache
             ),
-            Ok(())
+            Ok(_)
         );
 
         // <Reset the cache>
@@ -2845,7 +2868,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
@@ -2862,7 +2885,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
         assert_matches!(
             cache.add_common(
@@ -2871,7 +2894,7 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
 
         assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 1, &cache), Ok(_));
@@ -2888,12 +2911,12 @@ mod tests {
                 dummy_ema_snapshot(),
                 ChainState::Validated(BlockState::ValidBlock)
             ),
-            Ok(())
+            Ok(_)
         );
 
         assert_matches!(
             check_longest_chain(&[&b11, &b12, &b13b, &b14b], 2, &cache),
-            Ok(())
+            Ok(_)
         );
 
         // Mark the new tip
@@ -2901,7 +2924,7 @@ mod tests {
 
         assert_matches!(
             check_longest_chain(&[&b11, &b12, &b13b, &b14b], 0, &cache),
-            Ok(())
+            Ok(_)
         );
     }
 
@@ -2998,7 +3021,7 @@ mod tests {
             block.cumulative_diff = prev_block.cumulative_diff + diff;
 
             // Add block with specified state
-            cache
+            let _ = cache
                 .add_common(&block, comm_cache.clone(), dummy_ema_snapshot(), state)
                 .unwrap();
 
