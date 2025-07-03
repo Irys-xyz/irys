@@ -1005,7 +1005,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     );
     loop {
         let res = sub.recv().await.unwrap();
-        if res.block.block_hash == new_block.block_hash {
+        if res.block_hash == new_block.block_hash {
             break;
         }
     }
