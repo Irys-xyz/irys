@@ -1148,7 +1148,7 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
-                block_discovery_service: block_discovery.clone(),
+                block_discovery_service: block_discovery,
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_service,
                 db: irys_db,
