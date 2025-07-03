@@ -6,7 +6,6 @@ use alloy_genesis::GenesisAccount;
 use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
-use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
     UnpackedChunk,

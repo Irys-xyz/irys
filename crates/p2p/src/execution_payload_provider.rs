@@ -7,7 +7,6 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
 use reth::builder::Block as _;
 use reth::core::primitives::SealedBlock;
-use reth::network::types::HashOrNumber;
 use reth::primitives::Block;
 use reth::providers::BlockReader as _;
 use reth::revm::primitives::B256;

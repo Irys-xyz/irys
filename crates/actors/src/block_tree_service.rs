@@ -1563,7 +1563,7 @@ impl BlockTreeCache {
 
     /// Check if a block can be built upon
     pub fn can_be_built_upon(&self, block_hash: &BlockHash) -> bool {
-        self.blocks.get(block_hash).map_or(false, |entry| {
+        self.blocks.get(block_hash).is_some_and(|entry| {
             matches!(
                 entry.chain_state,
                 ChainState::Onchain | ChainState::Validated(BlockState::ValidBlock)
