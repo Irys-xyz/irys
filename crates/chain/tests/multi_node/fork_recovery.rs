@@ -501,20 +501,20 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;
         node_c.wait_for_block(&b_block3.block_hash, 10).await?;
-        // check node A has not recieved blocks from B
+        // check node A has not received blocks from B
         assert!(
             node_a
                 .wait_for_block(&b_block2.block_hash, 1)
                 .await
                 .is_err(),
-            "Node A should not yet have recieved block 2 from Node B"
+            "Node A should not yet have received block 2 from Node B"
         );
         assert!(
             node_a
                 .wait_for_block(&b_block3.block_hash, 1)
                 .await
                 .is_err(),
-            "Node A should not yet have recieved block 3 from Node B"
+            "Node A should not yet have received block 3 from Node B"
         );
     }
 

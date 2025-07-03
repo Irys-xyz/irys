@@ -31,13 +31,13 @@ pub async fn post_block(
         Ok(_) => Ok(()),
         Err(res) => {
             tracing::error!(
-                "Recieved block {:?} ({}) failed pre-validation: {:?}",
+                "Received block {:?} ({}) failed pre-validation: {:?}",
                 &irys_block.block_hash.0,
                 &irys_block.height,
                 res
             );
             Err(eyre!(
-                "Recieved block {:?} ({}) failed pre-validation: {:?}",
+                "Received block {:?} ({}) failed pre-validation: {:?}",
                 &irys_block.block_hash.0,
                 &irys_block.height,
                 res
