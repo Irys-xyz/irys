@@ -317,12 +317,12 @@ pub async fn sync_chain(
                 block_hash,
                 sync_state_clone.sync_target_height()
             );
+            sync_state_clone.increment_sync_target_height();
             match peer_list_clone
                 .request_block_from_the_network(block_hash, sync_state_clone.is_trusted_sync())
                 .await
             {
                 Ok(()) => {
-                    sync_state_clone.increment_sync_target_height();
                     info!(
                         "Sync task: Successfully requested block {:?} (sync height is {}) from the network",
                         block_hash,
@@ -552,7 +552,6 @@ mod tests {
             // There should be three calls total: two that got items and one that didn't
             let data_requests = block_index_requests.lock().unwrap();
             assert_eq!(data_requests.len(), 3);
-            let starts_at = data_requests[0].height;
             debug!("Data requests: {:?}", data_requests);
             assert_eq!(data_requests[0].height, 10);
             assert_eq!(data_requests[1].height, 11);
