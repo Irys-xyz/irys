@@ -2,6 +2,7 @@ use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
+use color_eyre::owo_colors::OwoColorize;
 use eyre::OptionExt as _;
 use irys_actors::block_tree_service::ChainState;
 use irys_actors::mempool_service::TxIngressError;
@@ -150,15 +151,18 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
     for i in 1..10 {
         info!("manually producing block {}", i);
-        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+        node.mine_block().await?;
+        let block_hash = node.wait_until_height(i, 10).await?;
+        let block = node.get_block_by_hash(&block_hash)?;
 
         //check reth for built block
         let reth_block = reth_context
             .inner
             .provider
-            .block_by_hash(block.evm_block_hash)?
+            .find_block_by_hash(block.evm_block_hash, reth::providers::BlockSource::Any)
+            .unwrap()
             .unwrap();
-        assert_eq!(i, reth_block.header.number as u32);
+        assert_eq!(i, reth_block.header.number);
         assert_eq!(reth_block.number, block.height);
 
         // check irys DB for built block
