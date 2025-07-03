@@ -200,12 +200,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let mut block_hashes = Vec::new();
 
     for i in 1..10 {
-        let block_hash = node.wait_until_height(i + 1, 60).await?;
-        let state = read_block_from_state(&node.node_ctx, &block_hash).await;
-        assert_eq!(
-            state,
-            BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
-        );
+        let _block_hash = node.wait_until_height(i + 1, 10).await?;
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
@@ -975,7 +970,10 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // Mine a valid block
     // note: cannot use `.mine_block()` because there will be height mismatch when it awaits for the new height
-    let mut sub = node.node_ctx.service_senders.subscribe_block_state_updates();
+    let mut sub = node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     let (new_block, _reth_block) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }

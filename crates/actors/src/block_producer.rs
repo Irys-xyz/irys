@@ -237,35 +237,38 @@ pub trait BlockProdStrategy {
     }
 
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        // todo: compute this from the vdf difficulty
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-        // Subscribe to canonical chain events
-        let mut canonical_chain_rx = self.inner().service_senders.subscribe_block_state_updates();
+        
+        // Subscribe to block state updates to monitor changes
+        let mut block_state_rx = self.inner().service_senders.subscribe_block_state_updates();
 
-        // Get latest canonical chain state
-        let (mut parent_block_hash, mut parent_height, blocks_awaiting_validation) = {
+        // Get the block with maximum cumulative difficulty
+        let (mut target_block_hash, mut max_difficulty) = {
             let read = self.inner().block_tree_guard.read();
-            let parent_entry = read.get_latest_canonical_entry();
-            let blocks_awaiting = read.get_num_blocks_awaiting_validation_on_canonical_chain();
-
-            (
-                parent_entry.block_hash,
-                parent_entry.height,
-                blocks_awaiting,
-            )
+            read.get_max_cumulative_difficulty_block()
         };
 
-        // Wait for validation to complete if there are blocks awaiting validation
+        // Check validation status of the max difficulty block
+        let (mut blocks_awaiting_validation, mut fallback_block_hash) = {
+            let read = self.inner().block_tree_guard.read();
+            read.get_validation_chain_status(&target_block_hash)
+        };
+
+        debug!(
+            "Max difficulty block: {} (difficulty: {}), {} blocks awaiting validation",
+            target_block_hash, max_difficulty, blocks_awaiting_validation
+        );
+
+        // Wait for validation if needed
         if blocks_awaiting_validation > 0 {
             debug!(
-                "Waiting for {} blocks to be validated before producing new block",
+                "Waiting for {} blocks to be validated before producing on max difficulty block",
                 blocks_awaiting_validation
             );
 
-            // Wait with timeout for all blocks to be validated
-            let _ = tokio::time::timeout(MAX_WAIT_TIME, async {
+            let wait_result = tokio::time::timeout(MAX_WAIT_TIME, async {
                 loop {
-                    let event = canonical_chain_rx
+                    let event = block_state_rx
                         .recv()
                         .await
                         .expect("channel must never be closed");
@@ -275,49 +278,96 @@ pub trait BlockProdStrategy {
                         continue;
                     }
 
-                    // Update parent block info
-                    parent_block_hash = event.block.block_hash;
-                    parent_height = event.block.height;
-
-                    // Check if we need to wait for more validations
-                    let blocks_awaiting = {
+                    // Check if max difficulty has changed
+                    let (new_max_block, new_max_diff) = {
                         let read = self.inner().block_tree_guard.read();
-                        read.get_num_blocks_awaiting_validation_on_canonical_chain()
+                        read.get_max_cumulative_difficulty_block()
                     };
 
-                    debug!(
-                        "Canonical chain update: {} blocks awaiting validation",
-                        blocks_awaiting
-                    );
+                    if new_max_block != target_block_hash {
+                        debug!(
+                            "Max difficulty block changed from {} to {} (difficulty: {} -> {})",
+                            target_block_hash, new_max_block, max_difficulty, new_max_diff
+                        );
+                        target_block_hash = new_max_block;
+                        max_difficulty = new_max_diff;
+                        
+                        // Re-check validation status for the new max block
+                        let (new_blocks_awaiting, new_fallback) = {
+                            let read = self.inner().block_tree_guard.read();
+                            read.get_validation_chain_status(&target_block_hash)
+                        };
+                        blocks_awaiting_validation = new_blocks_awaiting;
+                        fallback_block_hash = new_fallback;
+                    }
 
-                    if blocks_awaiting == 0 {
+                    // Check if the current target block is now fully validated
+                    let is_validated = {
+                        let read = self.inner().block_tree_guard.read();
+                        read.is_block_fully_validated(&target_block_hash)
+                    };
+
+                    if is_validated && blocks_awaiting_validation == 0 {
+                        debug!("Max difficulty block {} is now fully validated", target_block_hash);
+                        break;
+                    }
+
+                    // Re-check validation status
+                    let (current_blocks_awaiting, current_fallback) = {
+                        let read = self.inner().block_tree_guard.read();
+                        read.get_validation_chain_status(&target_block_hash)
+                    };
+                    
+                    if current_blocks_awaiting < blocks_awaiting_validation {
+                        debug!(
+                            "Validation progress: {} blocks remaining",
+                            current_blocks_awaiting
+                        );
+                    }
+                    
+                    blocks_awaiting_validation = current_blocks_awaiting;
+                    fallback_block_hash = current_fallback;
+
+                    if blocks_awaiting_validation == 0 {
                         break;
                     }
                 }
             })
-            .await
-            .inspect_err(|_err| {
+            .await;
+
+            if wait_result.is_err() {
                 warn!(
-                    "Timeout waiting for blocks to be validated after {:?}, proceeding anyway",
+                    "Timeout waiting for blocks to be validated after {:?}",
                     MAX_WAIT_TIME
                 );
-            });
+                
+                // Use fallback block if available
+                if let Some(fallback) = fallback_block_hash {
+                    warn!(
+                        "Falling back to latest validated block {} instead of max difficulty block {}",
+                        fallback, target_block_hash
+                    );
+                    target_block_hash = fallback;
+                } else {
+                    return Err(eyre!("No validated blocks found in the chain"));
+                }
+            }
         }
 
-        info!(
-            ?parent_block_hash,
-            ?parent_height,
-            blocks_awaiting_validation,
-            "Starting block production, previous block"
-        );
-
-        // Fetch full block header from mempool or database
+        // Fetch the parent block header
+        let parent_block_hash = target_block_hash;
         let header = self.fetch_block_header(parent_block_hash).await?;
 
+        info!(
+            "Starting block production with parent block {} at height {}",
+            parent_block_hash, header.height
+        );
+
+        // Get the EMA snapshot
         let ema_snapshot = {
             let read = self.inner().block_tree_guard.read();
             read.get_ema_snapshot(&header.block_hash)
-                .expect("ema snapshot must be present")
+                .ok_or_else(|| eyre!("EMA snapshot not found for block {}", header.block_hash))?
         };
 
         Ok((header, ema_snapshot))

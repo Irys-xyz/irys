@@ -1553,6 +1553,59 @@ impl BlockTreeCache {
             .map(|entry| (&entry.block, &entry.chain_state))
     }
 
+    /// Get the block with maximum cumulative difficulty
+    pub fn get_max_cumulative_difficulty_block(&self) -> (BlockHash, U256) {
+        (self.max_cumulative_difficulty.1, self.max_cumulative_difficulty.0)
+    }
+
+    /// Check if a block is fully validated (either Onchain or Validated with ValidBlock state)
+    pub fn is_block_fully_validated(&self, block_hash: &BlockHash) -> bool {
+        self.blocks.get(block_hash).map_or(false, |entry| {
+            matches!(
+                entry.chain_state,
+                ChainState::Onchain | ChainState::Validated(BlockState::ValidBlock)
+            )
+        })
+    }
+
+    /// Walk backwards from a block to find the validation status of the chain
+    /// Returns: (blocks_awaiting_validation, last_validated_block_hash)
+    pub fn get_validation_chain_status(&self, from_block_hash: &BlockHash) -> (usize, Option<BlockHash>) {
+        let mut current_hash = *from_block_hash;
+        let mut blocks_awaiting = 0;
+        let mut last_validated = None;
+
+        while let Some(entry) = self.blocks.get(&current_hash) {
+            match entry.chain_state {
+                ChainState::Onchain | ChainState::Validated(BlockState::ValidBlock) => {
+                    // Found a validated block
+                    if last_validated.is_none() {
+                        last_validated = Some(current_hash);
+                    }
+                }
+                ChainState::NotOnchain(BlockState::ValidBlock) => {
+                    // This block passed validation but isn't on chain yet
+                    if last_validated.is_none() {
+                        blocks_awaiting += 1;
+                    }
+                }
+                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled) |
+                ChainState::Validated(BlockState::Unknown | BlockState::ValidationScheduled) => {
+                    // This block is awaiting validation
+                    blocks_awaiting += 1;
+                }
+            }
+
+            if entry.block.height == 0 {
+                break; // Reached genesis
+            }
+
+            current_hash = entry.block.previous_block_hash;
+        }
+
+        (blocks_awaiting, last_validated)
+    }
+
     /// Collect previous blocks up to the last on-chain block
     fn get_fork_blocks(&self, block: &IrysBlockHeader) -> Vec<&IrysBlockHeader> {
         let mut prev_hash = block.previous_block_hash;
