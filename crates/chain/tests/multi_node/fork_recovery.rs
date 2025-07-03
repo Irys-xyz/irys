@@ -3,7 +3,6 @@ use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
-use reth::network::Peers as _;
 use tracing::debug;
 
 #[actix_web::test]
