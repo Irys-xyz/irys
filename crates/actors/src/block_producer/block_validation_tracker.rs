@@ -1,6 +1,36 @@
+//! Block validation tracking for parent selection in block production.
+//!
+//! # Problem
+//! Block producers must select the block with highest cumulative difficulty as parent,
+//! but only if that block and all its ancestors are fully validated. Validation is
+//! asynchronous and may lag behind block discovery, creating a race condition.
+//!
+//! # Solution
+//! Monitor validation progress with a 10-second timeout. Track the best candidate
+//! (highest difficulty) while waiting for validation. If timeout occurs, fall back
+//! to the latest fully validated block to ensure production continues.
+//!
+//! # Algorithm
+//! 1. Identify block with maximum cumulative difficulty
+//! 2. Check if fully validated (including all ancestors)
+//! 3. If not validated:
+//!    - Monitor block state updates
+//!    - Track if a new max-difficulty block appears
+//!    - Track validation progress
+//!    - Reset 10s timer on significant changes
+//! 4. Return selected block or fallback on timeout
+//!
+//! # Timer Resets
+//! The 10-second timer resets when:
+//! - A new block with higher cumulative difficulty appears
+//! - Validation progresses (fewer blocks awaiting validation)
+//!
+//! This ensures each significant change gets a fresh timeout window, preventing
+//! premature fallbacks during active network progress.
+
 use eyre::eyre;
 use irys_types::{H256, U256};
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
 use tracing::{debug, warn};

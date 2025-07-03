@@ -246,34 +246,13 @@ pub trait BlockProdStrategy {
             .ok_or_else(|| eyre!("EMA snapshot not found for block {}", block_hash))
     }
 
-    /// Determines the parent block for new block production by finding the block with maximum
-    /// cumulative difficulty and ensuring it's fully validated.
+    /// Selects the parent block for new block production.
     ///
-    /// # Logic Flow
-    /// 1. Identifies the block with the highest cumulative difficulty in the network
-    /// 2. Checks if this block and all its ancestors are fully validated
-    /// 3. If validation is pending, waits up to 10 seconds for completion
-    /// 4. Falls back to the latest fully validated block if timeout occurs
+    /// Targets the block with highest cumulative difficulty, but only if fully validated.
+    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
+    /// the latest validated block on timeout to ensure production continues.
     ///
-    /// # Waiting Behavior
-    /// - Monitors BlockStateUpdated events for validation progress
-    /// - Resets 10-second timer when:
-    ///   - A new block with higher cumulative difficulty appears
-    ///   - Validation makes progress (fewer blocks awaiting validation)
-    /// - This ensures each significant change gets a fresh timeout window
-    ///
-    /// # Sequential Validation
-    /// Blocks must be validated in order from oldest to newest. If block B depends on
-    /// block A, then A must be validated before B can be considered fully validated.
-    /// This method counts all blocks in the chain awaiting validation.
-    ///
-    /// # Fallback Strategy
-    /// On timeout, falls back to the latest block in the chain that is fully validated,
-    /// ensuring block production can continue even if some blocks take too long to validate.
-    ///
-    /// # Returns
-    /// - The selected parent block header and its EMA snapshot
-    /// - Error if no validated blocks exist in the chain
+    /// Returns the selected parent block header and its EMA snapshot.
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
 
