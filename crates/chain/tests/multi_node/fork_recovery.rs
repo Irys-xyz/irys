@@ -337,7 +337,6 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 ///   We need to verify that
 ///    - all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - new balance changes are applied based on the new canonical branch
-/// possibly out of scope: it is important that we can reorg at a much faster rate than 1 block per blocktime.
 #[test_log::test(actix_web::test)]
 async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     initialize_tracing();
