@@ -317,12 +317,6 @@ where
             ));
         }
 
-        self.handle_execution_payload_for_prevalidated_block(
-            block_header.evm_block_hash,
-            true,
-            block_header.clone(),
-        );
-
         debug!("Block pool: Migrating block {:?}", block_header.block_hash);
         self.mempool
             .migrate_block(block_header.clone())
@@ -340,7 +334,7 @@ where
         let (sender, receiver) = oneshot::channel();
         self.block_tree_sender
             .send(BlockTreeServiceMessage::FastTrackStorageFinalized {
-                block_header,
+                block_header: block_header.clone(),
                 response: sender,
             })
             .map_err(|send_err| {
@@ -382,8 +376,31 @@ where
             })?;
 
         debug!(
-            "Block pool: Block {:?} fast tracked successfully",
-            block_hash
+            "Block pool: Validating and submitting execution payload for block {:?}",
+            block_header.block_hash
+        );
+        match self
+            .execution_payload_provider
+            .fetch_validate_and_submit_payload(
+                &self.config,
+                &self.service_senders,
+                &block_header,
+                &self.db,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(err) => {
+                return Err(BlockPoolError::OtherInternal(format!(
+                    "Failed to validate and submit the execution payload for block {:?}: {:?}",
+                    block_header.block_hash, err
+                )));
+            }
+        }
+
+        debug!(
+            "Block pool: Execution payload for block {:?} validated and submitted",
+            block_header.block_hash
         );
 
         // After the block is inserted into the index, we can fast forward the VDF steps to

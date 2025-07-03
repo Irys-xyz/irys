@@ -342,13 +342,15 @@ where
         irys_block_header: &IrysBlockHeader,
         db: &DatabaseProvider,
     ) -> Result<(), ExecutionPayloadProviderError> {
-        // let block_hash = irys_block_header.block_hash;
-        //     config: &Config,
-        //     service_senders: &ServiceSenders,
-        //     block: &IrysBlockHeader,
-        //     reth_adapter: &IrysRethNodeAdapter,
-        //     db: &DatabaseProvider,
-        //     payload_provider: impl PayloadProvider,
+        // For test that specifically want to mock the payload provider
+        // All tests that do not is going to use the real provider
+        #[cfg(test)]
+        {
+            if let RethBlockProvider::Mock(_) = &self.reth_payload_provider {
+                return Ok(());
+            }
+        }
+
         let adapter = self
             .reth_payload_provider
             .as_irys_reth_adapter()
@@ -365,12 +367,6 @@ where
         .await;
 
         result.map_err(ExecutionPayloadProviderError::PayloadValidationError)
-        // debug!("Block pool: Shadow transactions validation result for Irys block {:?}: {:?}", block_hash, result);
-        // let execution_data = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
-        //
-        // self.reth_payload_provider
-        //     .submit_validated_payload(execution_data)
-        //     .await
     }
 }
 
