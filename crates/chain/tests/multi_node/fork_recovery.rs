@@ -394,6 +394,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // mine a single block, and let everyone sync so future txs start at block height 1.
     node_a.mine_block().await?; // mine block a1
+    node_a.wait_until_height(1, seconds_to_wait).await?;
     let a_block1 = node_a.get_block_by_height(1).await?; // get block a1
     node_b.wait_for_block(&a_block1.block_hash, 10).await?;
     node_c.wait_for_block(&a_block1.block_hash, 10).await?;
@@ -518,6 +519,13 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     //
 
     // Node C mines on top of B's chain and does not gossip it back to B
+    if let Err(does_not_reach_height) = node_c.wait_until_height(3, seconds_to_wait).await {
+        tracing::error!(
+            "Node C Failed to reach block height 3: {:?}",
+            does_not_reach_height
+        );
+        Err(does_not_reach_height)?
+    }
     let (c_block4, _) = node_c.mine_block_without_gossip().await?;
     if let Err(does_not_reach_height) = node_c.wait_until_height(4, seconds_to_wait).await {
         tracing::error!(
