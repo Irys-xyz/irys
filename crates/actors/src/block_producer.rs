@@ -55,6 +55,9 @@ use std::{
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn, Instrument as _, Span};
 
+mod block_validation_tracker;
+pub use block_validation_tracker::BlockValidationTracker;
+
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
 
@@ -236,6 +239,13 @@ pub trait BlockProdStrategy {
         }
     }
 
+    /// Gets the EMA snapshot for a given block
+    fn get_block_ema_snapshot(&self, block_hash: &H256) -> eyre::Result<Arc<EmaSnapshot>> {
+        let read = self.inner().block_tree_guard.read();
+        read.get_ema_snapshot(block_hash)
+            .ok_or_else(|| eyre!("EMA snapshot not found for block {}", block_hash))
+    }
+
     /// Determines the parent block for new block production by finding the block with maximum
     /// cumulative difficulty and ensuring it's fully validated.
     ///
@@ -267,17 +277,14 @@ pub trait BlockProdStrategy {
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
 
-        // Subscribe to block state updates to monitor changes
-        let mut block_state_rx = self.inner().service_senders.subscribe_block_state_updates();
-
         // Get the block with maximum cumulative difficulty
-        let (mut target_block_hash, mut max_difficulty) = {
+        let (target_block_hash, max_difficulty) = {
             let read = self.inner().block_tree_guard.read();
             read.get_max_cumulative_difficulty_block()
         };
 
         // Check validation status of the max difficulty block
-        let (mut blocks_awaiting_validation, mut fallback_block_hash) = {
+        let (blocks_awaiting_validation, fallback_block_hash) = {
             let read = self.inner().block_tree_guard.read();
             read.get_validation_chain_status(&target_block_hash)
         };
@@ -288,129 +295,26 @@ pub trait BlockProdStrategy {
         );
 
         // Wait for validation if needed
-        if blocks_awaiting_validation > 0 {
-            debug!(
-                "Waiting for {} blocks to be validated before producing on max difficulty block",
-                blocks_awaiting_validation
+        let parent_block_hash = if blocks_awaiting_validation > 0 {
+            let mut tracker = BlockValidationTracker::new(
+                target_block_hash,
+                max_difficulty,
+                blocks_awaiting_validation,
+                fallback_block_hash,
+                MAX_WAIT_TIME,
+                self.inner(),
             );
 
-            // Use manual deadline tracking to allow timer resets
-            let mut deadline = tokio::time::Instant::now() + MAX_WAIT_TIME;
-            let mut timeout_occurred = false;
+            let mut block_state_rx = self.inner().service_senders.subscribe_block_state_updates();
 
-            loop {
-                // Check if we've exceeded the deadline
-                if tokio::time::Instant::now() >= deadline {
-                    timeout_occurred = true;
-                    break;
-                }
-
-                // Wait for either a block state event or the deadline
-                let event = tokio::select! {
-                    event = block_state_rx.recv() => {
-                        event.expect("channel must never be closed")
-                    }
-                    _ = tokio::time::sleep_until(deadline) => {
-                        timeout_occurred = true;
-                        break;
-                    }
-                };
-
-                // Skip discarded blocks
-                if event.discarded {
-                    continue;
-                }
-
-                // Check if max difficulty has changed
-                let (new_max_block, new_max_diff) = {
-                    let read = self.inner().block_tree_guard.read();
-                    read.get_max_cumulative_difficulty_block()
-                };
-
-                if new_max_block != target_block_hash {
-                    debug!(
-                        "Max difficulty block changed from {} to {} (difficulty: {} -> {})",
-                        target_block_hash, new_max_block, max_difficulty, new_max_diff
-                    );
-                    target_block_hash = new_max_block;
-                    max_difficulty = new_max_diff;
-
-                    // Re-check validation status for the new max block
-                    let (new_blocks_awaiting, new_fallback) = {
-                        let read = self.inner().block_tree_guard.read();
-                        read.get_validation_chain_status(&target_block_hash)
-                    };
-                    blocks_awaiting_validation = new_blocks_awaiting;
-                    fallback_block_hash = new_fallback;
-
-                    // Reset timer when target block changes
-                    deadline = tokio::time::Instant::now() + MAX_WAIT_TIME;
-                    debug!(
-                        "Reset timer: new target block, {} blocks awaiting validation",
-                        blocks_awaiting_validation
-                    );
-                }
-
-                // Check if the current target block can be used as a parent for a new block
-                let can_be_built_upon = {
-                    let read = self.inner().block_tree_guard.read();
-                    read.can_be_built_upon(&target_block_hash)
-                };
-
-                if can_be_built_upon && blocks_awaiting_validation == 0 {
-                    debug!(
-                        "Max difficulty block {} is now fully validated",
-                        target_block_hash
-                    );
-                    break;
-                }
-
-                // Re-check validation status
-                let (current_blocks_awaiting, current_fallback) = {
-                    let read = self.inner().block_tree_guard.read();
-                    read.get_validation_chain_status(&target_block_hash)
-                };
-
-                if current_blocks_awaiting < blocks_awaiting_validation {
-                    debug!(
-                        "Validation progress: {} blocks remaining (was {})",
-                        current_blocks_awaiting, blocks_awaiting_validation
-                    );
-
-                    // Reset timer when validation makes progress
-                    deadline = tokio::time::Instant::now() + MAX_WAIT_TIME;
-                    debug!("Reset timer: validation progress");
-                }
-
-                blocks_awaiting_validation = current_blocks_awaiting;
-                fallback_block_hash = current_fallback;
-
-                if blocks_awaiting_validation == 0 {
-                    break;
-                }
-            }
-
-            if timeout_occurred {
-                warn!(
-                    "Timeout waiting for blocks to be validated after {:?}",
-                    MAX_WAIT_TIME
-                );
-
-                // Use fallback block if available
-                if let Some(fallback) = fallback_block_hash {
-                    warn!(
-                        "Falling back to latest validated block {} instead of max difficulty block {}",
-                        fallback, target_block_hash
-                    );
-                    target_block_hash = fallback;
-                } else {
-                    return Err(eyre!("No validated blocks found in the chain"));
-                }
-            }
-        }
+            tracker
+                .wait_for_validation(MAX_WAIT_TIME, &mut block_state_rx)
+                .await?
+        } else {
+            target_block_hash
+        };
 
         // Fetch the parent block header
-        let parent_block_hash = target_block_hash;
         let header = self.fetch_block_header(parent_block_hash).await?;
 
         info!(
@@ -419,11 +323,7 @@ pub trait BlockProdStrategy {
         );
 
         // Get the EMA snapshot
-        let ema_snapshot = {
-            let read = self.inner().block_tree_guard.read();
-            read.get_ema_snapshot(&header.block_hash)
-                .ok_or_else(|| eyre!("EMA snapshot not found for block {}", header.block_hash))?
-        };
+        let ema_snapshot = self.get_block_ema_snapshot(&header.block_hash)?;
 
         Ok((header, ema_snapshot))
     }

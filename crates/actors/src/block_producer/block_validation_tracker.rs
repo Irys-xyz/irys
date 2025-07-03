@@ -1,0 +1,198 @@
+use eyre::eyre;
+use irys_types::{H256, U256};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::broadcast::Receiver;
+use tokio::time::Instant;
+use tracing::{debug, warn};
+
+use crate::{block_producer::BlockProducerInner, block_tree_service::BlockStateUpdated};
+
+/// Tracks the state of block validation during parent block selection
+#[derive(Debug)]
+pub struct BlockValidationTracker<'a> {
+    /// The block with maximum cumulative difficulty
+    pub target_block_hash: H256,
+    /// The maximum cumulative difficulty value
+    pub max_difficulty: U256,
+    /// Number of blocks in the chain awaiting validation
+    pub blocks_awaiting_validation: usize,
+    /// Fallback block hash (latest fully validated block)
+    pub fallback_block_hash: Option<H256>,
+    /// Deadline for waiting on validation
+    pub deadline: Instant,
+    /// Reference to the block producer inner state
+    inner: &'a BlockProducerInner,
+}
+
+impl<'a> BlockValidationTracker<'a> {
+    /// Creates a new tracker with initial state
+    pub fn new(
+        target_block_hash: H256,
+        max_difficulty: U256,
+        blocks_awaiting_validation: usize,
+        fallback_block_hash: Option<H256>,
+        wait_duration: Duration,
+        inner: &'a BlockProducerInner,
+    ) -> Self {
+        Self {
+            target_block_hash,
+            max_difficulty,
+            blocks_awaiting_validation,
+            fallback_block_hash,
+            deadline: Instant::now() + wait_duration,
+            inner,
+        }
+    }
+
+    /// Resets the deadline timer
+    pub fn reset_deadline(&mut self, wait_duration: Duration) {
+        self.deadline = Instant::now() + wait_duration;
+    }
+
+    /// Checks if the deadline has been exceeded
+    pub fn is_timeout(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    /// Updates the target block if a new max difficulty block is found
+    pub fn update_target(
+        &mut self,
+        new_target: H256,
+        new_max_diff: U256,
+        blocks_awaiting: usize,
+        fallback: Option<H256>,
+    ) {
+        self.target_block_hash = new_target;
+        self.max_difficulty = new_max_diff;
+        self.blocks_awaiting_validation = blocks_awaiting;
+        self.fallback_block_hash = fallback;
+    }
+
+    /// Selects the block with maximum cumulative difficulty from the block tree
+    fn select_max_difficulty_block(&self) -> (H256, U256) {
+        let read = self.inner.block_tree_guard.read();
+        read.get_max_cumulative_difficulty_block()
+    }
+
+    /// Checks the validation status of a block and its ancestors
+    /// Returns (blocks_awaiting_validation, fallback_block_hash)
+    fn check_block_validation_status(&self, block_hash: &H256) -> (usize, Option<H256>) {
+        let read = self.inner.block_tree_guard.read();
+        read.get_validation_chain_status(block_hash)
+    }
+
+    /// Checks if a block can be used as a parent for new block production
+    fn can_build_upon(&self, block_hash: &H256) -> bool {
+        let read = self.inner.block_tree_guard.read();
+        read.can_be_built_upon(block_hash)
+    }
+
+    /// Waits for a block to be fully validated, monitoring validation progress
+    /// Returns the final block hash to use (either the target or fallback)
+    pub async fn wait_for_validation(
+        &mut self,
+        max_wait_time: Duration,
+        block_state_rx: &mut Receiver<BlockStateUpdated>,
+    ) -> eyre::Result<H256> {
+        debug!(
+            "Waiting for {} blocks to be validated before producing on max difficulty block",
+            self.blocks_awaiting_validation
+        );
+
+        loop {
+            // Check timeout
+            if self.is_timeout() {
+                warn!(
+                    "Timeout waiting for blocks to be validated after {:?}",
+                    max_wait_time
+                );
+
+                // Use fallback block if available
+                if let Some(fallback) = self.fallback_block_hash {
+                    warn!(
+                        "Falling back to latest validated block {} instead of max difficulty block {}",
+                        fallback, self.target_block_hash
+                    );
+                    return Ok(fallback);
+                } else {
+                    return Err(eyre!("No validated blocks found in the chain"));
+                }
+            }
+
+            // Wait for either a block state event or the deadline
+            let event = tokio::select! {
+                event = block_state_rx.recv() => {
+                    event.expect("channel must never be closed")
+                }
+                _ = tokio::time::sleep_until(self.deadline) => {
+                    continue; // Will trigger timeout check on next iteration
+                }
+            };
+
+            // Skip discarded blocks
+            if event.discarded {
+                continue;
+            }
+
+            // Check if max difficulty has changed
+            let (new_max_block, new_max_diff) = self.select_max_difficulty_block();
+
+            if new_max_block != self.target_block_hash {
+                debug!(
+                    "Max difficulty block changed from {} to {} (difficulty: {} -> {})",
+                    self.target_block_hash, new_max_block, self.max_difficulty, new_max_diff
+                );
+
+                // Re-check validation status for the new max block
+                let (new_blocks_awaiting, new_fallback) =
+                    self.check_block_validation_status(&new_max_block);
+
+                self.update_target(
+                    new_max_block,
+                    new_max_diff,
+                    new_blocks_awaiting,
+                    new_fallback,
+                );
+
+                // Reset timer when target block changes
+                self.reset_deadline(max_wait_time);
+                debug!(
+                    "Reset timer: new target block, {} blocks awaiting validation",
+                    self.blocks_awaiting_validation
+                );
+            }
+
+            // Check if the current target block can be used as a parent
+            if self.can_build_upon(&self.target_block_hash) && self.blocks_awaiting_validation == 0
+            {
+                debug!(
+                    "Max difficulty block {} is now fully validated",
+                    self.target_block_hash
+                );
+                return Ok(self.target_block_hash);
+            }
+
+            // Re-check validation status
+            let (current_blocks_awaiting, current_fallback) =
+                self.check_block_validation_status(&self.target_block_hash);
+
+            if current_blocks_awaiting < self.blocks_awaiting_validation {
+                debug!(
+                    "Validation progress: {} blocks remaining (was {})",
+                    current_blocks_awaiting, self.blocks_awaiting_validation
+                );
+
+                // Reset timer when validation makes progress
+                self.reset_deadline(max_wait_time);
+                debug!("Reset timer: validation progress");
+            }
+
+            self.blocks_awaiting_validation = current_blocks_awaiting;
+            self.fallback_block_hash = current_fallback;
+
+            if self.blocks_awaiting_validation == 0 {
+                return Ok(self.target_block_hash);
+            }
+        }
+    }
+}
