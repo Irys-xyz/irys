@@ -22,9 +22,10 @@ use crate::{
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_types::{Address, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
+use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::VdfStep;
 use rand::prelude::SliceRandom as _;
@@ -169,6 +170,8 @@ impl P2PService {
         vdf_state: VdfStateReadonly,
         vdf_ff_sender: UnboundedSender<VdfStep>,
         block_tree_sender: UnboundedSender<BlockTreeServiceMessage>,
+        config: Config,
+        service_senders: ServiceSenders,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         A: ApiClient,
@@ -188,6 +191,8 @@ impl P2PService {
             vdf_state,
             vdf_ff_sender,
             block_tree_sender,
+            config,
+            service_senders,
         );
 
         let server_data_handler = GossipServerDataHandler {

@@ -30,6 +30,7 @@ async-trait = "0.1"
 reth.workspace = true
 alloy-rpc-types.workspace = true
 alloy-core.workspace = true
+log = "0.4.27"
 
 [dev-dependencies]
 irys-testing-utils.workspace = true

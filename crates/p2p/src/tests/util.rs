@@ -11,6 +11,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
@@ -484,6 +485,8 @@ impl GossipServiceTestFixture {
         let peer_list = self.peer_list.clone();
         let execution_payload_provider = self.execution_payload_provider.clone();
 
+        let (service_senders, _service_receivers) = ServiceSenders::new();
+
         gossip_service.sync_state.finish_sync();
         let service_handle = gossip_service
             .run(
@@ -499,6 +502,8 @@ impl GossipServiceTestFixture {
                 self.vdf_state_stub.clone(),
                 self.vdf_sender.clone(),
                 self.block_tree_sender.clone(),
+                self.config.clone(),
+                service_senders,
             )
             .expect("failed to run gossip service");
 

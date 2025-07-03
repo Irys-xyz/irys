@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use base58::ToBase58 as _;
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -129,6 +130,7 @@ struct MockedServices {
     vdf_state_stub: VdfStateReadonly,
     vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
     block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
+    service_senders: ServiceSenders,
 }
 
 impl MockedServices {
@@ -210,6 +212,8 @@ impl MockedServices {
             debug!("BlockTreeServiceMessage channel closed");
         });
 
+        let (service_senders, _service_receivers) = ServiceSenders::new();
+
         Self {
             block_status_provider_mock,
             block_discovery_stub,
@@ -220,6 +224,7 @@ impl MockedServices {
             vdf_state_stub,
             vdf_ff_sender: vdf_sender,
             block_tree_sender,
+            service_senders,
         }
     }
 }
@@ -238,6 +243,7 @@ async fn should_process_block() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        service_senders,
     } = MockedServices::new(&config).await;
 
     let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
@@ -255,6 +261,8 @@ async fn should_process_block() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        config,
+        service_senders,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
@@ -335,6 +343,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        service_senders,
     } = MockedServices::new(&config).await;
 
     // Set the mock client to return block2 when requested
@@ -372,6 +381,8 @@ async fn should_process_block_with_intermediate_block_in_api() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        config,
+        service_senders,
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
@@ -428,6 +439,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        service_senders,
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false, false);
@@ -446,6 +458,8 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        config,
+        service_senders,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -506,6 +520,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        service_senders,
     } = MockedServices::new(&config).await;
 
     let gossip_server = FakeGossipServer::new();
@@ -551,6 +566,8 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        config,
+        service_senders,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -644,6 +661,7 @@ async fn should_fast_track_block() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        service_senders,
     } = MockedServices::new(&config).await;
 
     let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
@@ -661,6 +679,8 @@ async fn should_fast_track_block() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        config,
+        service_senders,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
@@ -708,6 +728,7 @@ async fn should_not_fast_track_block_already_in_index() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        service_senders,
     } = MockedServices::new(&config).await;
 
     let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
@@ -725,6 +746,8 @@ async fn should_not_fast_track_block_already_in_index() {
         vdf_state_stub,
         vdf_ff_sender,
         block_tree_sender,
+        config,
+        service_senders,
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);

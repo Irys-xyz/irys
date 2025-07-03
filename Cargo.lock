@@ -5005,6 +5005,7 @@ dependencies = [
  "irys-testing-utils",
  "irys-types",
  "irys-vdf",
+ "log",
  "lru 0.14.0",
  "rand 0.8.5",
  "reqwest 0.11.27",

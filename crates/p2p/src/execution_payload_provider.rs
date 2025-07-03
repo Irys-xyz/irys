@@ -2,8 +2,10 @@ use crate::types::GossipDataRequest;
 use crate::PeerList;
 use alloy_rpc_types::engine::ExecutionData;
 use async_trait::async_trait;
-use irys_actors::block_validation::PayloadProvider;
+use irys_actors::block_validation::{shadow_transactions_are_valid, PayloadProvider};
+use irys_actors::services::ServiceSenders;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_types::{Config, DatabaseProvider, IrysBlockHeader};
 use lru::LruCache;
 use reth::builder::{BeaconOnNewPayloadError, Block as _};
 use reth::core::primitives::SealedBlock;
@@ -33,9 +35,11 @@ pub enum RethBlockProvider {
 #[derive(Debug)]
 pub enum ExecutionPayloadProviderError {
     ProviderError(reth::providers::ProviderError),
+    ProviderNotSet,
     PayloadNotFound(B256),
     BeaconOnNewPayloadError(BeaconOnNewPayloadError),
     UpdateForkchoiceError(eyre::Report),
+    PayloadValidationError(eyre::Report),
 }
 
 impl From<BeaconOnNewPayloadError> for ExecutionPayloadProviderError {
@@ -47,6 +51,14 @@ impl From<BeaconOnNewPayloadError> for ExecutionPayloadProviderError {
 impl RethBlockProvider {
     pub fn new(irys_reth_node_adapter: IrysRethNodeAdapter) -> Self {
         Self::IrysRethAdapter(irys_reth_node_adapter)
+    }
+
+    pub fn as_irys_reth_adapter(&self) -> Option<&IrysRethNodeAdapter> {
+        match self {
+            Self::IrysRethAdapter(adapter) => Some(adapter),
+            #[cfg(test)]
+            Self::Mock(_) => None,
+        }
     }
 
     #[cfg(test)]
@@ -80,46 +92,46 @@ impl RethBlockProvider {
         Some(evm_block)
     }
 
-    /// Submits a validated execution payload to the beacon engine. As the name implies,
-    /// you should validate the payload before submitting it.
-    pub async fn submit_validated_payload(
-        &self,
-        payload: ExecutionData,
-    ) -> Result<(), ExecutionPayloadProviderError> {
-        let payload_block_hash = payload.block_hash();
-        match self {
-            Self::IrysRethAdapter(adapter) => {
-                debug!("Submitting payload {payload_block_hash:?} to the beacon engine");
-                adapter
-                    .inner
-                    .add_ons_handle
-                    .beacon_engine_handle
-                    .new_payload(payload)
-                    .await?;
-                debug!("Successfully submitted payload {payload_block_hash:?}");
-
-                // trigger forkchoice update via engine api to commit the block to the blockchain
-                adapter
-                    .update_forkchoice_full(
-                        payload_block_hash,
-                        // TODO: we mark this block as confirmed because we produced it?
-                        Some(payload_block_hash),
-                        // TODO: marking a block as finalized is handled by a different service - not sure about this
-                        None,
-                    )
-                    .await
-                    .map_err(ExecutionPayloadProviderError::UpdateForkchoiceError)?;
-
-                debug!("Successfully updated forkchoice after submitting payload {payload_block_hash:?}");
-                Ok(())
-            }
-            #[cfg(test)]
-            Self::Mock(_) => {
-                debug!("Mock provider does not support submitting payloads");
-                Ok(())
-            }
-        }
-    }
+    // /// Submits a validated execution payload to the beacon engine. As the name implies,
+    // /// you should validate the payload before submitting it.
+    // pub async fn submit_validated_payload(
+    //     &self,
+    //     payload: ExecutionData,
+    // ) -> Result<(), ExecutionPayloadProviderError> {
+    //     let payload_block_hash = payload.block_hash();
+    //     match self {
+    //         Self::IrysRethAdapter(adapter) => {
+    //             debug!("Submitting payload {payload_block_hash:?} to the beacon engine");
+    //             adapter
+    //                 .inner
+    //                 .add_ons_handle
+    //                 .beacon_engine_handle
+    //                 .new_payload(payload)
+    //                 .await?;
+    //             debug!("Successfully submitted payload {payload_block_hash:?}");
+    //
+    //             // trigger forkchoice update via engine api to commit the block to the blockchain
+    //             adapter
+    //                 .update_forkchoice_full(
+    //                     payload_block_hash,
+    //                     // TODO: we mark this block as confirmed because we produced it?
+    //                     Some(payload_block_hash),
+    //                     // TODO: marking a block as finalized is handled by a different service - not sure about this
+    //                     None,
+    //                 )
+    //                 .await
+    //                 .map_err(ExecutionPayloadProviderError::UpdateForkchoiceError)?;
+    //
+    //             debug!("Successfully updated forkchoice after submitting payload {payload_block_hash:?}");
+    //             Ok(())
+    //         }
+    //         #[cfg(test)]
+    //         Self::Mock(_) => {
+    //             debug!("Mock provider does not support submitting payloads");
+    //             Ok(())
+    //         }
+    //     }
+    // }
 
     #[cfg(test)]
     pub fn evm_block_mock(&self, evm_block_hash: B256) -> Option<Block> {
@@ -323,17 +335,42 @@ where
         }
     }
 
-    /// This method is dangerous because it allows you to submit a payload without validating it.
-    /// Use at your own risk!
-    pub async fn dangerously_submit_validated_payload(
+    pub async fn fetch_validate_and_submit_payload(
         &self,
-        sealed_block: SealedBlock<Block>,
+        config: &Config,
+        service_senders: &ServiceSenders,
+        irys_block_header: &IrysBlockHeader,
+        db: &DatabaseProvider,
     ) -> Result<(), ExecutionPayloadProviderError> {
-        let execution_data = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
+        // let block_hash = irys_block_header.block_hash;
+        //     config: &Config,
+        //     service_senders: &ServiceSenders,
+        //     block: &IrysBlockHeader,
+        //     reth_adapter: &IrysRethNodeAdapter,
+        //     db: &DatabaseProvider,
+        //     payload_provider: impl PayloadProvider,
+        let adapter = self
+            .reth_payload_provider
+            .as_irys_reth_adapter()
+            .ok_or(ExecutionPayloadProviderError::ProviderNotSet)?;
 
-        self.reth_payload_provider
-            .submit_validated_payload(execution_data)
-            .await
+        let result = shadow_transactions_are_valid(
+            config,
+            service_senders,
+            irys_block_header,
+            adapter,
+            db,
+            self.clone(),
+        )
+        .await;
+
+        result.map_err(ExecutionPayloadProviderError::PayloadValidationError)
+        // debug!("Block pool: Shadow transactions validation result for Irys block {:?}: {:?}", block_hash, result);
+        // let execution_data = <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block);
+        //
+        // self.reth_payload_provider
+        //     .submit_validated_payload(execution_data)
+        //     .await
     }
 }
 

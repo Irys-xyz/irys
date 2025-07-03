@@ -3,11 +3,12 @@ use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
-    BlockHash, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
+    BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
     IrysBlockHeader,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -67,6 +68,9 @@ where
     vdf_state: VdfStateReadonly,
     vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
     block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
+
+    config: Config,
+    service_senders: ServiceSenders,
 }
 
 #[derive(Clone, Debug)]
@@ -217,6 +221,8 @@ where
         vdf_state: VdfStateReadonly,
         vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
         block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
+        config: Config,
+        service_senders: ServiceSenders,
     ) -> Self {
         Self {
             db,
@@ -231,6 +237,8 @@ where
             vdf_state,
             vdf_ff_sender,
             block_tree_sender,
+            config,
+            service_senders,
         }
     }
 
@@ -309,7 +317,11 @@ where
             ));
         }
 
-        self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, true);
+        self.handle_execution_payload_for_prevalidated_block(
+            block_header.evm_block_hash,
+            true,
+            block_header.clone(),
+        );
 
         debug!("Block pool: Migrating block {:?}", block_header.block_hash);
         self.mempool
@@ -504,6 +516,7 @@ where
             self.handle_execution_payload_for_prevalidated_block(
                 block_header.evm_block_hash,
                 false,
+                block_header.clone(),
             );
 
             debug!(
@@ -544,7 +557,8 @@ where
     pub(crate) fn handle_execution_payload_for_prevalidated_block(
         &self,
         evm_block_hash: B256,
-        skip_validation_and_submit_payload: bool,
+        validate_and_submit_payload: bool,
+        irys_block_header: IrysBlockHeader,
     ) {
         debug!(
             "Block pool: Handling execution payload for EVM block hash: {:?}",
@@ -552,41 +566,58 @@ where
         );
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
+        let database_provider = self.db.clone();
+        let service_senders = self.service_senders.clone();
+        let config = self.config.clone();
         tokio::spawn(async move {
-            if let Some(sealed_block) = execution_payload_provider
-                .wait_for_sealed_block(&evm_block_hash, skip_validation_and_submit_payload)
-                .await
-            {
-                if skip_validation_and_submit_payload {
-                    debug!(
-                        "Block pool: Skipping validation and submitting payload for block {:?}",
-                        evm_block_hash
-                    );
-                    if let Err(err) = execution_payload_provider
-                        .dangerously_submit_validated_payload(sealed_block.clone())
-                        .await
-                    {
-                        error!(
-                            "Failed to submit payload for block {:?}: {:?}",
-                            evm_block_hash, err
+            if validate_and_submit_payload {
+                debug!(
+                    "Block pool: Validating and submitting execution payload for block {:?}",
+                    evm_block_hash
+                );
+                match execution_payload_provider
+                    .fetch_validate_and_submit_payload(
+                        &config,
+                        &service_senders,
+                        &irys_block_header,
+                        &database_provider,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        debug!(
+                            "Block pool: Execution payload for block {:?} validated and submitted",
+                            evm_block_hash
                         );
                     }
+                    Err(err) => {
+                        error!(
+                            "Block pool: Failed to validate and submit execution payload for block {:?}: {:?}",
+                            evm_block_hash, err
+                        );
+                        return;
+                    }
                 }
-
-                let evm_block = sealed_block.into_block();
-                if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
-                    GossipCacheKey::ExecutionPayload(evm_block_hash),
-                    GossipData::ExecutionPayload(evm_block),
-                )) {
-                    error!(
-                        "Failed to broadcast execution payload for block {:?}: {:?}",
-                        evm_block_hash, err
-                    );
-                } else {
-                    debug!(
-                        "Execution payload for block {:?} has been broadcasted",
-                        evm_block_hash
-                    );
+            } else {
+                if let Some(sealed_block) = execution_payload_provider
+                    .wait_for_sealed_block(&evm_block_hash, validate_and_submit_payload)
+                    .await
+                {
+                    let evm_block = sealed_block.into_block();
+                    if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
+                        GossipCacheKey::ExecutionPayload(evm_block_hash),
+                        GossipData::ExecutionPayload(evm_block),
+                    )) {
+                        error!(
+                            "Failed to broadcast execution payload for block {:?}: {:?}",
+                            evm_block_hash, err
+                        );
+                    } else {
+                        debug!(
+                            "Execution payload for block {:?} has been broadcasted",
+                            evm_block_hash
+                        );
+                    }
                 }
             }
         });
