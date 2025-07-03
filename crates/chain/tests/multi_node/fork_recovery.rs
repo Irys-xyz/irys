@@ -442,13 +442,13 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     //
     // Stage 6: FINAL SYNC / RE-ORGs
     //
-
-    // Gossip all blocks so everyone syncs
-    node_b.gossip_block(&b_block2)?;
-    node_b.gossip_block(&b_block3)?;
-    node_c.gossip_block(&c_block4)?;
-    node_a.gossip_block(&a_block2)?;
-
+    {
+        // Gossip all blocks so everyone syncs
+        node_b.gossip_block(&b_block2)?;
+        node_b.gossip_block(&b_block3)?;
+        node_c.gossip_block(&c_block4)?;
+        node_a.gossip_block(&a_block2)?;
+    }
     //
     // Stage 7: FINAL STATE CHECKS
     //
