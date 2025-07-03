@@ -397,35 +397,54 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let a_block1 = node_a.get_block_by_height(1).await?; // get block a1
     node_b.wait_for_block(&a_block1.block_hash, 10).await?;
     node_c.wait_for_block(&a_block1.block_hash, 10).await?;
+    let b_block1 = node_b.get_block_by_height(1).await?; // get block b1
+    let c_block1 = node_c.get_block_by_height(1).await?; // get block c1
 
     //
     // Stage 3: GENERATE ISOLATED txs
     //
 
-    // node_b generates txs in isolation for inclusion in block 1
-    let peer_b_b1_stake_tx = node_b
-        .post_stake_commitment_without_gossip(genesis_block_hash)
+    // node_b generates txs in isolation for inclusion in block 2
+    let peer_b_b2_stake_tx = node_b
+        .post_stake_commitment_without_gossip(b_block1.block_hash)
         .await;
-    let peer_b_b1_pledge_tx = node_b
-        .post_pledge_commitment_without_gossip(genesis_block_hash)
+    let peer_b_b2_pledge_tx = node_b
+        .post_pledge_commitment_without_gossip(peer_b_b2_stake_tx.id)
         .await;
+    let peer_b_b2_txs = vec![peer_b_b2_stake_tx.clone(), peer_b_b2_pledge_tx.clone()];
 
-    // node_c generates txs in isolation for inclusion block 1
-    let peer_c_c1_stake_tx = node_c
-        .post_stake_commitment_without_gossip(genesis_block_hash)
+    // node_c generates txs in isolation for inclusion block 2
+    let peer_c_b2_stake_tx = node_c
+        .post_stake_commitment_without_gossip(c_block1.block_hash)
         .await;
-    let peer_c_c1_pledge_tx = node_c
-        .post_pledge_commitment_without_gossip(genesis_block_hash)
+    let peer_c_b2_pledge_tx = node_c
+        .post_pledge_commitment_without_gossip(peer_c_b2_stake_tx.id)
         .await;
+    let peer_c_b2_txs = vec![peer_c_b2_stake_tx.clone(), peer_c_b2_pledge_tx.clone()];
 
     //
     // Stage 4: MINE FORK A and B TO HEIGHT 2 and 3
     //
-
+    node_b
+        .wait_for_mempool_commitment_txs(vec![peer_c_b2_stake_tx.id], seconds_to_wait)
+        .await?;
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+
+    // check how txs made it into each block, we expect no more than 2
+    assert_eq!(a_block2.system_ledgers.len(), 0); // 0 commitments, also means 0 system ledgers
+    tracing::error!(
+        "commitment txs bb2: {:?}",
+        b_block2.system_ledgers[0].tx_ids
+    ); // why is this getting 3 txs ?!
+    tracing::error!("peer_b_b2_stake_tx: {:?}", peer_b_b2_stake_tx);
+    tracing::error!("peer_b_b2_pledge_tx: {:?}", peer_b_b2_pledge_tx);
+    tracing::error!("peer_c_b2_stake_tx: {:?}", peer_c_b2_stake_tx); // somehow this is finding it's way over to node B :/
+    tracing::error!("peer_c_b2_pledge_tx: {:?}", peer_c_b2_pledge_tx);
+
+    panic!("some debug");
 
     let peer_c = PeerAddress {
         gossip: format!(
@@ -449,8 +468,8 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // post commitment txs and then the blocks to node c
     // this will cause a reorg on node c to match the chain on node b
     {
-        node_c.post_commitment_tx(&peer_b_b1_stake_tx).await;
-        node_c.post_commitment_tx(&peer_b_b1_pledge_tx).await;
+        node_c.post_commitment_tx(&peer_b_b2_stake_tx).await;
+        node_c.post_commitment_tx(&peer_b_b2_pledge_tx).await;
         node_b.post_block_to_peer(&peer_c, &b_block2).await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
         node_b.post_block_to_peer(&peer_c, &b_block3).await?;
@@ -469,6 +488,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // Node C mines on top of B's chain and does not gossip it back to B
     let (c_block4, _) = node_c.mine_block_without_gossip().await?;
+    node_c.wait_until_height(4, seconds_to_wait).await?;
     assert_eq!(c_block4.height, 4); // block c4
 
     //
@@ -517,9 +537,9 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // confirm that all txs have made it to all peers, regardless of canon status
     // Canonical blocks by mining peer: A1, B2, B3, C4
     {
-        let mut peer_b_commitment_txs = vec![peer_b_b1_stake_tx.id, peer_b_b1_pledge_tx.id];
+        let mut peer_b_commitment_txs = vec![peer_b_b2_stake_tx.id, peer_b_b2_pledge_tx.id];
         peer_b_commitment_txs.sort();
-        let mut peer_c_commitment_txs = vec![peer_c_c1_stake_tx.id, peer_c_c1_pledge_tx.id];
+        let mut peer_c_commitment_txs = vec![peer_c_b2_stake_tx.id, peer_c_b2_pledge_tx.id];
         peer_c_commitment_txs.sort();
         let mut all_commitment_txs = peer_b_commitment_txs.clone();
         all_commitment_txs.extend(peer_c_commitment_txs);
@@ -548,11 +568,23 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
             Ok(txs)
         }
 
-        // check which txs made it into specific blocks
+        // check non canonical blocks are as expected
+
+        // check correct txs made it into specific canon blocks, that are now synced across every node
         assert_eq!(sorted_commitments_at(&node_a, 1).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_a, 2).await?, all_commitment_txs); // this is suprising
+        assert_eq!(sorted_commitments_at(&node_a, 2).await?, all_commitment_txs); // this is suprising as I expected only the two txs included in Peer B B2
         assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
         assert_eq!(sorted_commitments_at(&node_a, 4).await?, vec![]);
+
+        assert_eq!(sorted_commitments_at(&node_b, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, 2).await?, all_commitment_txs); // this is suprising
+        assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, 4).await?, vec![]);
+
+        assert_eq!(sorted_commitments_at(&node_c, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_c, 2).await?, all_commitment_txs); // this is suprising
+        assert_eq!(sorted_commitments_at(&node_c, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_c, 4).await?, vec![]);
     }
 
     // TODO: stretch goal, make original chain B the longest chain again and see if txs come back
