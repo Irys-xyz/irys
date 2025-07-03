@@ -29,7 +29,7 @@ use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
-use std::{pin::pin, sync::Arc};
+use std::{pin::pin, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver},
     task::JoinHandle,
@@ -81,6 +81,8 @@ pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
     pub(crate) pool: rayon::ThreadPool,
     /// Execution payload provider for shadow transaction validation
     pub(crate) execution_payload_provider: T,
+    /// Toggle to enable/disable validation message processing
+    pub validation_enabled: Arc<AtomicBool>,
 }
 
 impl<T: PayloadProvider> ValidationService<T> {
@@ -97,12 +99,14 @@ impl<T: PayloadProvider> ValidationService<T> {
         db: DatabaseProvider,
         execution_payload_provider: T,
         rx: UnboundedReceiver<ValidationServiceMessage>,
-    ) -> JoinHandle<()> {
+    ) -> (JoinHandle<()>, Arc<AtomicBool>) {
         let config = config.clone();
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
+        let validation_enabled = Arc::new(AtomicBool::new(true));
+        let validation_enabled_clone = validation_enabled.clone();
 
-        exec.spawn_critical_with_graceful_shutdown_signal(
+        let handle = exec.spawn_critical_with_graceful_shutdown_signal(
             "Validation Service",
             |shutdown| async move {
                 let validation_service = Self {
@@ -123,6 +127,7 @@ impl<T: PayloadProvider> ValidationService<T> {
                         reth_node_adapter,
                         db,
                         execution_payload_provider,
+                        validation_enabled: validation_enabled_clone,
                     }),
                 };
 
@@ -131,7 +136,9 @@ impl<T: PayloadProvider> ValidationService<T> {
                     .await
                     .expect("validation service encountered an irrecoverable error")
             },
-        )
+        );
+        
+        (handle, validation_enabled)
     }
 
     /// Main service loop
@@ -154,8 +161,8 @@ impl<T: PayloadProvider> ValidationService<T> {
                     break;
                 }
 
-                // Receive new validation messages
-                msg = self.msg_rx.recv() => {
+                // Receive new validation messages (only when validation is enabled)
+                msg = self.msg_rx.recv(), if self.inner.validation_enabled.load(Ordering::Relaxed) => {
                     match msg {
                         Some(msg) => {
                             // Transform message to validation future
