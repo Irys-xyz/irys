@@ -396,8 +396,12 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     node_a.mine_block().await?; // mine block a1
     node_a.wait_until_height(1, seconds_to_wait).await?;
     let a_block1 = node_a.get_block_by_height(1).await?; // get block a1
-    node_b.wait_for_block(&a_block1.block_hash, 10).await?;
-    node_c.wait_for_block(&a_block1.block_hash, 10).await?;
+    node_b
+        .wait_for_block(&a_block1.block_hash, seconds_to_wait)
+        .await?;
+    node_c
+        .wait_for_block(&a_block1.block_hash, seconds_to_wait)
+        .await?;
     let b_block1 = node_b.get_block_by_height(1).await?; // get block b1
     let c_block1 = node_c.get_block_by_height(1).await?; // get block c1
 
