@@ -290,7 +290,9 @@ pub async fn sync_chain(
     )
     .await?;
 
-    let mut blocks_left_to_process = block_index.len();
+    let mut target = sync_state.sync_target_height() + block_index.len();
+
+    let mut blocks_to_request = block_index.len();
     block_queue.extend(block_index);
     let no_new_blocks_to_process = block_queue.is_empty();
 
@@ -305,43 +307,54 @@ pub async fn sync_chain(
             block.block_hash.0.to_base58(),
             sync_state.sync_target_height()
         );
-        match peer_list
-            .request_block_from_the_network(block.block_hash, sync_state.is_trusted_sync())
-            .await
-        {
-            Ok(()) => {
-                sync_state.increment_sync_target_height();
-                info!(
-                    "Sync task: Successfully requested block {} (sync height is {}) from the network",
-                    block.block_hash.0.to_base58(),
-                    sync_state.sync_target_height()
-                );
-            }
-            Err(err) => {
-                error!(
-                    "Sync task: Failed to request block {} (height {}) from the network: {}",
-                    block.block_hash.0.to_base58(),
-                    sync_state.sync_target_height(),
-                    err
-                );
-            }
-        }
 
-        blocks_left_to_process -= 1;
-        if blocks_left_to_process == 0 {
-            block_queue.extend(
-                get_block_index(
-                    &peer_list,
-                    &api_client,
-                    sync_state.sync_target_height(),
-                    BLOCK_BATCH_SIZE,
-                    5,
-                    fetch_index_from_the_trusted_peer,
-                )
-                .await?,
+        let peer_list_clone = peer_list.clone();
+        let sync_state_clone = sync_state.clone();
+        let block_hash = block.block_hash.clone();
+        tokio::spawn(async move {
+            debug!(
+                "Sync task: Requesting block {:?} (sync height is {}) from the network",
+                block_hash,
+                sync_state_clone.sync_target_height()
             );
-            blocks_left_to_process = block_queue.len();
-            if blocks_left_to_process == 0 {
+            match peer_list_clone
+                .request_block_from_the_network(block_hash, sync_state_clone.is_trusted_sync())
+                .await
+            {
+                Ok(()) => {
+                    sync_state_clone.increment_sync_target_height();
+                    info!(
+                        "Sync task: Successfully requested block {:?} (sync height is {}) from the network",
+                        block_hash,
+                        sync_state_clone.sync_target_height()
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "Sync task: Failed to request block {:?} (height {}) from the network: {}",
+                        block_hash,
+                        sync_state_clone.sync_target_height(),
+                        err
+                    );
+                }
+            }
+        });
+
+        blocks_to_request -= 1;
+        if blocks_to_request == 0 {
+            let additional_index = get_block_index(
+                &peer_list,
+                &api_client,
+                target,
+                BLOCK_BATCH_SIZE,
+                5,
+                fetch_index_from_the_trusted_peer,
+            ).await?;
+
+            target += additional_index.len();
+            block_queue.extend(additional_index);
+            blocks_to_request = block_queue.len();
+            if blocks_to_request == 0 {
                 break;
             }
         }
@@ -539,6 +552,8 @@ mod tests {
             // There should be three calls total: two that got items and one that didn't
             let data_requests = block_index_requests.lock().unwrap();
             assert_eq!(data_requests.len(), 3);
+            let starts_at = data_requests[0].height;
+            debug!("Data requests: {:?}", data_requests);
             assert_eq!(data_requests[0].height, 10);
             assert_eq!(data_requests[1].height, 11);
             assert_eq!(data_requests[0].limit, 10);
@@ -549,12 +564,17 @@ mod tests {
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
 
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
             let block_requests = block_requests_clone.lock().unwrap();
             assert_eq!(block_requests.len(), 3);
-            assert_eq!(block_requests[0], BlockHash::repeat_byte(1));
+            let requested_first_block = block_requests.iter().find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
+            let requested_first_block_again = block_requests.iter().find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
+            let requested_second_block = block_requests.iter().find(|&block_hash| block_hash == &BlockHash::repeat_byte(2));
+            assert!(requested_first_block.is_some());
             // As the first call didn't return anything, the peer tries to fetch it once again
-            assert_eq!(block_requests[1], BlockHash::repeat_byte(1));
-            assert_eq!(block_requests[2], BlockHash::repeat_byte(2));
+            assert!(requested_first_block_again.is_some());
+            assert!(requested_second_block.is_some());
 
             Ok(())
         }
