@@ -1,5 +1,5 @@
 use crate::{
-    block_discovery::{get_data_tx_in_parallel, BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
         ema_snapshot::{EmaBlock, EmaSnapshot},
         BlockState, BlockTreeReadGuard, ChainState,
@@ -22,10 +22,7 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
 use eyre::eyre;
-use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
-    tables::IngressProofs, SystemLedger,
-};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_shadow_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -44,11 +41,8 @@ use reth::{
     core::primitives::SealedBlock, payload::EthBuiltPayload, revm::primitives::B256,
     rpc::types::BlockId,
 };
-use reth_db::cursor::*;
-use reth_db::Database as _;
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -253,7 +247,7 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let (system_tx_ledger, commitment_txs_to_bill, submit_txs) =
+        let (system_tx_ledger, commitment_txs_to_bill, submit_txs, publish_txs) =
             self.get_mempool_txs(&prev_block_header).await?;
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
         let eth_built_payload = self
@@ -273,6 +267,7 @@ pub trait BlockProdStrategy {
                 solution,
                 &prev_block_header,
                 submit_txs,
+                publish_txs,
                 system_tx_ledger,
                 current_timestamp,
                 block_reward,
@@ -372,6 +367,7 @@ pub trait BlockProdStrategy {
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
         submit_txs: Vec<IrysTransactionHeader>,
+        publish_txs: (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
@@ -388,7 +384,7 @@ pub trait BlockProdStrategy {
             return Ok(None);
         }
 
-        let (publish_txs, proofs) = self.get_publish_txs_and_proofs().await?;
+        let (publish_txs, proofs) = publish_txs;
 
         // Publish Ledger Transactions
         let publish_chunks_added =
@@ -657,6 +653,7 @@ pub trait BlockProdStrategy {
         Vec<SystemTransactionLedger>,
         Vec<CommitmentTransaction>,
         Vec<IrysTransactionHeader>,
+        (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
     )> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()
@@ -667,7 +664,7 @@ pub trait BlockProdStrategy {
                 tx,
             ))
             .expect("to send MempoolServiceMessage");
-        let mempool_txs = rx.await.expect("to receive txns");
+        let mempool_txs = rx.await.expect("to receive txns")?;
         let block_height = prev_block_header.height + 1;
         let is_epoch_block =
             block_height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0;
@@ -746,84 +743,8 @@ pub trait BlockProdStrategy {
             system_ledgers,
             commitment_txs_to_bill,
             mempool_txs.submit_tx,
+            mempool_txs.publish_tx,
         ))
-    }
-
-    async fn get_publish_txs_and_proofs(
-        &self,
-    ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
-        let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
-        let mut proofs: Vec<TxIngressProof> = Vec::new();
-        {
-            let read_tx = self
-                .inner()
-                .db
-                .tx()
-                .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
-
-            let mut read_cursor = read_tx
-                .new_cursor::<IngressProofs>()
-                .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
-
-            let walker = read_cursor
-                .walk(None)
-                .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
-
-            let ingress_proofs = walker
-                .collect::<Result<HashMap<_, _>, _>>()
-                .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
-
-            let mut publish_txids: Vec<H256> = Vec::new();
-            // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
-            for data_root in ingress_proofs.keys() {
-                let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
-                if let Some(cached_data_root) = cached_data_root {
-                    debug!(tx_ids = ?cached_data_root.txid_set, "publishing");
-                    publish_txids.extend(cached_data_root.txid_set);
-                }
-            }
-
-            // Loop though all the pending tx to see which haven't been promoted
-            let tx_headers = get_data_tx_in_parallel(
-                publish_txids,
-                &self.inner().service_senders.mempool,
-                &self.inner().db,
-            )
-            .await
-            .unwrap_or(vec![]);
-            for tx_header in &tx_headers {
-                // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
-                if tx_header.ingress_proofs.is_none() {
-                    // Get the proof
-                    match ingress_proofs.get(&tx_header.data_root) {
-                        Some(proof) => {
-                            let mut tx_header = tx_header.clone();
-                            let proof = TxIngressProof {
-                                proof: proof.proof,
-                                signature: proof.signature,
-                            };
-                            proofs.push(proof.clone());
-                            tx_header.ingress_proofs = Some(proof);
-                            publish_txs.push(tx_header);
-                        }
-                        None => {
-                            error!(
-                                "No ingress proof found for data_root: {}",
-                                tx_header.data_root
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        let txs = &publish_txs
-            .iter()
-            .map(|h| h.id.0.to_base58())
-            .collect::<Vec<_>>();
-        debug!(?txs, "Publish transactions");
-        Ok((publish_txs, proofs))
     }
 
     async fn get_evm_block(
