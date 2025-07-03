@@ -37,6 +37,7 @@ pub enum BlockPoolError {
     TryingToReprocessFinalizedBlock(BlockHash),
     PreviousBlockDoesNotMatch(String),
     VdfFFError(String),
+    ForckchoiceFailed(String),
 }
 
 impl From<PeerListFacadeError> for BlockPoolError {
@@ -462,14 +463,21 @@ where
                 block_header.block_hash
             );
             reth_service
-                .try_send(ForkChoiceUpdateMessage {
+                .send(ForkChoiceUpdateMessage {
                     head_hash: BlockHashType::Irys(block_header.block_hash),
                     confirmed_hash: None,
                     finalized_hash: None,
                 })
+                .await
                 .map_err(|err| {
                     BlockPoolError::OtherInternal(format!(
                         "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
+                        err
+                    ))
+                })?
+                .map_err(|err| {
+                    BlockPoolError::ForckchoiceFailed(format!(
+                        "Failed to update fork choice in Reth service: {:?}",
                         err
                     ))
                 })?;
