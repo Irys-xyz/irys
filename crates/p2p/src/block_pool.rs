@@ -38,6 +38,7 @@ pub enum BlockPoolError {
     PreviousBlockDoesNotMatch(String),
     VdfFFError(String),
     ForckchoiceFailed(String),
+    PreviousBlockNotFound(BlockHash),
 }
 
 impl From<PeerListFacadeError> for BlockPoolError {
@@ -477,6 +478,28 @@ where
             prev_output_step_number
         );
         self.vdf_state.wait_for_step(prev_output_step_number).await;
+
+        let prev_block = self.get_block_data(&previous_block_hash).await?.ok_or_else(|| {
+            BlockPoolError::PreviousBlockNotFound(previous_block_hash)
+        })?;
+
+        let prev_payload_exists = self
+            .execution_payload_provider
+            .get_locally_stored_sealed_block(&prev_block.evm_block_hash)
+            .await
+            .is_some();
+
+        if !prev_payload_exists {
+            debug!(
+                "Block pool: Previous execution payload not found for block {:?} (height {}), requesting it from the network",
+                block_header.block_hash, block_height,
+            );
+        } else {
+            debug!(
+                "Block pool: Previous execution payload found for block {:?} (height {})",
+                block_header.block_hash, block_height,
+            );
+        }
 
         self.insert_poa_to_mempool(&block_header).await?;
         self.wait_for_parent_to_appear_in_index(&block_header)
