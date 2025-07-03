@@ -1,6 +1,6 @@
 pub mod error;
 pub mod routes;
-
+use actix::Addr;
 use actix_cors::Cors;
 use actix_web::{
     dev::{HttpServiceFactory, Server},
@@ -9,8 +9,8 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::{
-    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
-    mempool_service::MempoolServiceMessage,
+    block_discovery::BlockDiscoveryActor, block_index_service::BlockIndexReadGuard,
+    block_tree_service::BlockTreeReadGuard, mempool_service::MempoolServiceMessage,
 };
 use irys_p2p::{PeerList as _, PeerListServiceFacade, SyncState};
 use irys_reth_node_bridge::node::RethNodeProvider;
@@ -30,6 +30,7 @@ use tracing::{debug, info};
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool_service: UnboundedSender<MempoolServiceMessage>,
+    pub block_discovery_service: Addr<BlockDiscoveryActor>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub peer_list: PeerListServiceFacade,
     pub db: DatabaseProvider,

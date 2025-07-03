@@ -4,7 +4,8 @@ use actix_web::{
     HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool_service::MempoolServiceMessage;
+use eyre::eyre;
+use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_types::IrysBlockHeader;
 use std::sync::Arc;
 use tracing::info;
@@ -19,19 +20,35 @@ pub async fn post_block(
     state: web::Data<ApiState>,
     body: Json<IrysBlockHeader>,
 ) -> actix_web::Result<HttpResponse> {
-    let block = Arc::new(body.into_inner());
+    let irys_block = Arc::new(body.into_inner());
     info!("Received block");
 
-    // Create a message and send it
-    let tx_ingress_msg = MempoolServiceMessage::IngestBlocks {
-        prevalidated_blocks: vec![block],
+    let validation_result = match state
+        .block_discovery_service
+        .send(BlockDiscoveredMessage(irys_block.clone()))
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(res) => {
+            tracing::error!(
+                "Recieved block {:?} ({}) failed pre-validation: {:?}",
+                &irys_block.block_hash.0,
+                &irys_block.height,
+                res
+            );
+            Err(eyre!(
+                "Recieved block {:?} ({}) failed pre-validation: {:?}",
+                &irys_block.block_hash.0,
+                &irys_block.height,
+                res
+            ))
+        }
     };
 
-    // Handle failure to deliver the message (e.g., channel closed)
-    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
-        tracing::error!("Failed to send to mempool channel: {:?}", err);
+    // handle block validation failure
+    if let Err(e) = validation_result {
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to send to mempool channel: {:?}", err)));
+            .body(format!("Block failed validation: {:?}", e)));
     }
 
     // We don't know if everything succeeded, return an HTTP 200 OK response anyway
