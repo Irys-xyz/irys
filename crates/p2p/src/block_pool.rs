@@ -1,5 +1,5 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
-use crate::execution_payload_provider::ExecutionPayloadProvider;
+use crate::execution_payload_provider::{ExecutionPayloadProvider, ExecutionPayloadProviderError};
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info};
 
-const BLOCK_POOL_CACHE_SIZE: usize = 1000;
+const EXECUTION_PAYLOAD_CACHE_SIZE: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockPoolError {
@@ -166,10 +166,10 @@ impl BlockCacheInner {
     fn new() -> Self {
         Self {
             orphaned_blocks_by_parent: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+                NonZeroUsize::new(EXECUTION_PAYLOAD_CACHE_SIZE).unwrap(),
             ),
             block_hash_to_parent_hash: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
+                NonZeroUsize::new(EXECUTION_PAYLOAD_CACHE_SIZE).unwrap(),
             ),
             requested_blocks: HashSet::new(),
         }
@@ -242,15 +242,176 @@ where
         }
     }
 
+    async fn insert_poa_to_mempool(&self, header: &IrysBlockHeader) -> Result<(), BlockPoolError> {
+        if let Some(chunk) = &header.poa.chunk {
+            debug!(
+                "Block pool: Inserting POA chunk for block {:?}",
+                header.block_hash
+            );
+            self.mempool
+                .insert_poa_chunk(header.block_hash, chunk.clone())
+                .await
+                .map_err(|report| BlockPoolError::MempoolError(report.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    async fn wait_for_parent_to_appear_in_index(
+        &self,
+        header: &IrysBlockHeader,
+    ) -> Result<(), BlockPoolError> {
+        let block_height = header.height;
+
+        if block_height > 0 {
+            if !self
+                .block_status_provider
+                .is_height_in_the_index(block_height - 1)
+            {
+                debug!(
+                    "Block pool: Parent block {:?} is not in the index, waiting for it to appear",
+                    block_height - 1
+                );
+                self.block_status_provider
+                    .wait_for_block_to_appear_in_index(block_height - 1)
+                    .await;
+            }
+
+            Ok(())
+        } else {
+            Err(BlockPoolError::BlockError(
+                "Cannot fast track genesis block".to_string(),
+            ))
+        }
+    }
+
+    async fn migrate_block(&self, header: &IrysBlockHeader) -> Result<(), BlockPoolError> {
+        debug!("Block pool: Migrating block {:?}", header.block_hash);
+        self.mempool
+            .migrate_block(header.clone())
+            .await
+            .map_err(|err| {
+                BlockPoolError::MempoolError(format!("Mempool migration error: {:?}", err))
+            })
+            .map(|_| ())
+    }
+
+    async fn finalize_block_storage(&self, header: &IrysBlockHeader) -> Result<(), BlockPoolError> {
+        let hash = header.block_hash;
+        let (sender, receiver) = oneshot::channel();
+        self.block_tree_sender
+            .send(BlockTreeServiceMessage::FastTrackStorageFinalized {
+                block_header: header.clone(),
+                response: sender,
+            })
+            .map_err(|send_err| {
+                error!(
+                    "Block pool: Failed to send a fast track request to block tree service: {:?}",
+                    send_err
+                );
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to send a fast track request to block tree service: {:?}",
+                    send_err
+                ))
+            })?;
+
+        debug!(
+            "Block pool: Fast track request sent to block tree service for block {:?}",
+            hash
+        );
+        receiver
+            .await
+            .map_err(|recv_err| {
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to receive a response from block tree service: {:?}",
+                    recv_err
+                ))
+            })?
+            .map_err(|err| {
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to fast-track block in storage: {:?}",
+                    err
+                ))
+            })
+    }
+
+    async fn validate_and_submit_reth_payload(
+        &self,
+        block_header: &IrysBlockHeader,
+    ) -> Result<(), BlockPoolError> {
+        debug!(
+            "Block pool: Validating and submitting execution payload for block {:?}",
+            block_header.block_hash
+        );
+        match self
+            .execution_payload_provider
+            .fetch_validate_and_submit_payload(
+                &self.config,
+                &self.service_senders,
+                block_header,
+                &self.db,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(err) => {
+                return Err(BlockPoolError::OtherInternal(format!(
+                    "Failed to validate and submit the execution payload for block {:?}: {:?}",
+                    block_header.block_hash, err
+                )));
+            }
+        }
+        debug!(
+            "Block pool: Execution payload for block {:?} validated and submitted",
+            block_header.block_hash
+        );
+        Ok(())
+    }
+
+    async fn reload_block_tree(&self) -> Result<(), BlockPoolError> {
+        let (tx, rx) = oneshot::channel();
+        self.block_tree_sender
+            .send(BlockTreeServiceMessage::ReloadCacheFromDb { response: tx })
+            .map_err(|err| {
+                error!("Failed to send ReloadCacheFromDb message: {:?}", err);
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to send ReloadCacheFromDb message: {:?}",
+                    err
+                ))
+            })?;
+        rx.await.map_err(|err| {
+            error!(
+                "Failed to receive response for ReloadCacheFromDb: {:?}",
+                err
+            );
+            BlockPoolError::OtherInternal(format!(
+                "Failed to receive response for ReloadCacheFromDb: {:?}",
+                err
+            ))
+        })?;
+        debug!("Block pool: Reloaded block tree cache");
+        Ok(())
+    }
+
     /// Fast tracks a block by migrating it to the mempool without performing any validation.
     /// This is useful when syncing a block from a node you trust
     async fn fast_track_block(&self, block_header: IrysBlockHeader) -> Result<(), BlockPoolError> {
         let block_height = block_header.height;
         let block_hash = block_header.block_hash;
+        let evm_block_hash = block_header.evm_block_hash;
+        let execution_payload_provider = self.execution_payload_provider.clone();
         debug!(
             "Fast tracking block {:?} (height {})",
             block_header.block_hash, block_height,
         );
+
+        // Preemptively request the execution payload from the network, so when we need
+        // to validate and submit it, it will be already available
+        tokio::spawn(async move {
+            execution_payload_provider
+                .request_payload_from_the_network(evm_block_hash, true)
+                .await;
+        });
 
         if self
             .block_status_provider
@@ -282,130 +443,16 @@ where
         );
         self.vdf_state.wait_for_step(prev_output_step_number).await;
 
-        debug!(
-            "Block pool: Fast forwarding VDF steps for block {:?}",
-            block_header.block_hash
-        );
-
-        if let Some(chunk) = &block_header.poa.chunk {
-            debug!(
-                "Block pool: Inserting POA chunk for block {:?}",
-                block_header.block_hash
-            );
-            self.mempool
-                .insert_poa_chunk(block_header.block_hash, chunk.clone())
-                .await
-                .map_err(|report| BlockPoolError::MempoolError(report.to_string()))?;
-        };
-
-        if block_height > 0 {
-            if !self
-                .block_status_provider
-                .is_height_in_the_index(block_height - 1)
-            {
-                debug!(
-                    "Block pool: Parent block {:?} is not in the index, waiting for it to appear",
-                    block_height - 1
-                );
-                self.block_status_provider
-                    .wait_for_block_to_appear_in_index(block_height - 1)
-                    .await;
-            }
-        } else {
-            return Err(BlockPoolError::BlockError(
-                "Cannot fast track genesis block".to_string(),
-            ));
-        }
-
-        debug!("Block pool: Migrating block {:?}", block_header.block_hash);
-        self.mempool
-            .migrate_block(block_header.clone())
-            .await
-            .map_err(|err| {
-                BlockPoolError::MempoolError(format!("Mempool migration error: {:?}", err))
-            })?;
-
-        debug!(
-            "Block pool: Block {:?} migrated, fast tracking index now",
-            block_hash
-        );
-
-        let vdf_info = block_header.vdf_limiter_info.clone();
-        let (sender, receiver) = oneshot::channel();
-        self.block_tree_sender
-            .send(BlockTreeServiceMessage::FastTrackStorageFinalized {
-                block_header: block_header.clone(),
-                response: sender,
-            })
-            .map_err(|send_err| {
-                error!(
-                    "Block pool: Failed to send a fast track request to block tree service: {:?}",
-                    send_err
-                );
-                BlockPoolError::OtherInternal(format!(
-                    "Failed to send a fast track request to block tree service: {:?}",
-                    send_err
-                ))
-            })?;
-
-        debug!(
-            "Block pool: Fast track request sent to block tree service for block {:?}",
-            block_hash
-        );
-        receiver
-            .await
-            .map_err(|recv_err| {
-                error!(
-                    "Block pool: Failed to receive a response from block tree service: {:?}",
-                    recv_err
-                );
-                BlockPoolError::OtherInternal(format!(
-                    "Failed to receive a response from block tree service: {:?}",
-                    recv_err
-                ))
-            })?
-            .map_err(|err| {
-                error!(
-                    "Block pool: Failed to fast track block in storage: {:?}",
-                    err
-                );
-                BlockPoolError::OtherInternal(format!(
-                    "Failed to fast-track block in storage: {:?}",
-                    err
-                ))
-            })?;
-
-        debug!(
-            "Block pool: Validating and submitting execution payload for block {:?}",
-            block_header.block_hash
-        );
-        match self
-            .execution_payload_provider
-            .fetch_validate_and_submit_payload(
-                &self.config,
-                &self.service_senders,
-                &block_header,
-                &self.db,
-            )
-            .await
-        {
-            Ok(()) => {}
-            Err(err) => {
-                return Err(BlockPoolError::OtherInternal(format!(
-                    "Failed to validate and submit the execution payload for block {:?}: {:?}",
-                    block_header.block_hash, err
-                )));
-            }
-        }
-
-        debug!(
-            "Block pool: Execution payload for block {:?} validated and submitted",
-            block_header.block_hash
-        );
+        self.insert_poa_to_mempool(&block_header).await?;
+        self.wait_for_parent_to_appear_in_index(&block_header)
+            .await?;
+        self.migrate_block(&block_header).await?;
+        self.finalize_block_storage(&block_header).await?;
+        self.validate_and_submit_reth_payload(&block_header).await?;
 
         // After the block is inserted into the index, we can fast forward the VDF steps to
         // unblock next blocks processing
-        fast_forward_vdf_steps_from_block(&vdf_info, &self.vdf_ff_sender)
+        fast_forward_vdf_steps_from_block(&block_header.vdf_limiter_info, &self.vdf_ff_sender)
             .map_err(|report| BlockPoolError::VdfFFError(report.to_string()))?;
 
         let mut process_ancestor = false;
@@ -416,27 +463,7 @@ where
             let switch_at_the_next_block =
                 block_height as usize == switch_to_full_validation_at_height;
             if switch_at_the_next_block {
-                let (tx, rx) = oneshot::channel();
-                self.block_tree_sender
-                    .send(BlockTreeServiceMessage::ReloadCacheFromDb { response: tx })
-                    .map_err(|err| {
-                        error!("Failed to send ReloadCacheFromDb message: {:?}", err);
-                        BlockPoolError::OtherInternal(format!(
-                            "Failed to send ReloadCacheFromDb message: {:?}",
-                            err
-                        ))
-                    })?;
-                rx.await.map_err(|err| {
-                    error!(
-                        "Failed to receive response for ReloadCacheFromDb: {:?}",
-                        err
-                    );
-                    BlockPoolError::OtherInternal(format!(
-                        "Failed to receive response for ReloadCacheFromDb: {:?}",
-                        err
-                    ))
-                })?;
-                debug!("Block pool: Reloaded block tree cache");
+                self.reload_block_tree().await?;
                 process_ancestor = true;
             }
         }
@@ -534,6 +561,7 @@ where
                 block_header.evm_block_hash,
                 false,
                 block_header.clone(),
+                None,
             );
 
             debug!(
@@ -576,6 +604,7 @@ where
         evm_block_hash: B256,
         validate_and_submit_payload: bool,
         irys_block_header: IrysBlockHeader,
+        response: Option<oneshot::Sender<Result<(), ExecutionPayloadProviderError>>>,
     ) {
         debug!(
             "Block pool: Handling execution payload for EVM block hash: {:?}",
@@ -592,25 +621,19 @@ where
                     "Block pool: Validating and submitting execution payload for block {:?}",
                     evm_block_hash
                 );
-                match execution_payload_provider
+                let res = execution_payload_provider
                     .fetch_validate_and_submit_payload(
                         &config,
                         &service_senders,
                         &irys_block_header,
                         &database_provider,
                     )
-                    .await
-                {
-                    Ok(()) => {
-                        debug!(
-                            "Block pool: Execution payload for block {:?} validated and submitted",
-                            evm_block_hash
-                        );
-                    }
-                    Err(err) => {
+                    .await;
+                if let Some(sender) = response {
+                    if let Err(err) = sender.send(res) {
                         error!(
-                            "Block pool: Failed to validate and submit execution payload for block {:?}: {:?}",
-                            evm_block_hash, err
+                            "Failed to send response for execution payload validation: {:?}",
+                            err
                         );
                     }
                 }
@@ -632,6 +655,15 @@ where
                         "Execution payload for block {:?} has been broadcasted",
                         evm_block_hash
                     );
+                }
+
+                if let Some(sender) = response {
+                    if let Err(err) = sender.send(Ok(())) {
+                        error!(
+                            "Failed to send response for execution payload broadcast: {:?}",
+                            err
+                        );
+                    }
                 }
             }
         });
