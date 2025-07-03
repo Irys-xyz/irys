@@ -156,10 +156,10 @@ impl P2PService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<A, P>(
+    pub fn run<M, B, A, P>(
         mut self,
-        mempool: impl MempoolFacade,
-        block_discovery: impl BlockDiscoveryFacade,
+        mempool: M,
+        block_discovery: B,
         api_client: A,
         task_executor: &TaskExecutor,
         peer_list: P,
@@ -172,8 +172,10 @@ impl P2PService {
         block_tree_sender: UnboundedSender<BlockTreeServiceMessage>,
         config: Config,
         service_senders: ServiceSenders,
-    ) -> GossipResult<ServiceHandleWithShutdownSignal>
+    ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<P, B, M>>)>
     where
+        M: MempoolFacade,
+        B: BlockDiscoveryFacade,
         A: ApiClient,
         P: PeerList,
     {
@@ -195,9 +197,11 @@ impl P2PService {
             service_senders,
         );
 
+        let arc_pool = Arc::new(block_pool);
+
         let server_data_handler = GossipServerDataHandler {
             mempool,
-            block_pool,
+            block_pool: Arc::clone(&arc_pool),
             api_client,
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
@@ -233,7 +237,7 @@ impl P2PService {
             task_executor,
         );
 
-        Ok(gossip_service_handle)
+        Ok((gossip_service_handle, arc_pool))
     }
 
     async fn broadcast_data<P>(

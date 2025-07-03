@@ -1,12 +1,12 @@
 use irys_actors::block_index_service::BlockIndexReadGuard;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_types::{BlockHash, H256};
+use irys_types::{BlockHash, BlockIndexItem, H256};
 use tracing::debug;
 #[cfg(test)]
 use {
     irys_actors::block_tree_service::BlockTreeCache,
     irys_database::BlockIndex,
-    irys_types::{BlockIndexItem, IrysBlockHeader, NodeConfig},
+    irys_types::{IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
     tracing::warn,
 };
@@ -154,6 +154,11 @@ impl BlockStatusProvider {
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
         index_item.is_some()
+    }
+
+    pub fn latest_block_in_index(&self) -> Option<BlockIndexItem> {
+        let binding = self.block_index_read_guard.read();
+        binding.get_latest_item().cloned()
     }
 }
 

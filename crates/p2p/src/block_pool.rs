@@ -21,23 +21,35 @@ use reth::revm::primitives::B256;
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info};
 
 const EXECUTION_PAYLOAD_CACHE_SIZE: usize = 1000;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum BlockPoolError {
+    #[error("Database error: {0}")]
     DatabaseError(String),
+    #[error("Mempool error: {0}")]
     MempoolError(String),
+    #[error("Internal BlockPool error: {0}")]
     OtherInternal(String),
+    #[error("Block error: {0}")]
     BlockError(String),
+    #[error("Block {0:?} has already been processed")]
     AlreadyProcessed(BlockHash),
+    #[error("Block {0:?} is already being fast tracked")]
     AlreadyFastTracking(BlockHash),
+    #[error("Block {0:?} is already being processed or has been processed")]
     TryingToReprocessFinalizedBlock(BlockHash),
+    #[error("Block mismatch: {0}")]
     PreviousBlockDoesNotMatch(String),
+    #[error("VDF Fast Forward error: {0}")]
     VdfFFError(String),
-    ForckchoiceFailed(String),
+    #[error("Reth ForkChoiceUpdate failed: {0}")]
+    ForkChoiceFailed(String),
+    #[error("Previous block {0:?} not found")]
     PreviousBlockNotFound(BlockHash),
 }
 
@@ -48,7 +60,7 @@ impl From<PeerListFacadeError> for BlockPoolError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BlockPool<P, B, M>
+pub struct BlockPool<P, B, M>
 where
     P: PeerList,
     B: BlockDiscoveryFacade,
@@ -393,7 +405,7 @@ where
                     ))
                 })?
                 .map_err(|err| {
-                    BlockPoolError::ForckchoiceFailed(format!(
+                    BlockPoolError::ForkChoiceFailed(format!(
                         "Failed to update fork choice in Reth service: {:?}",
                         err
                     ))
@@ -428,12 +440,56 @@ where
         Ok(())
     }
 
+    pub async fn repair_missing_payloads_if_any(
+        &self,
+        reth_service: Option<Addr<RethServiceActor>>,
+    ) -> Result<(), BlockPoolError> {
+        let Some(latest_block_in_index) = self.block_status_provider.latest_block_in_index() else {
+            return Ok(());
+        };
+
+        let mut block_hash = latest_block_in_index.block_hash;
+        let mut blocks_with_missing_payloads = vec![];
+
+        loop {
+            let block = self
+                .get_block_data(&block_hash)
+                .await?
+                .ok_or(BlockPoolError::PreviousBlockNotFound(block_hash))?;
+
+            let prev_payload_exists = self
+                .execution_payload_provider
+                .get_locally_stored_sealed_block(&block.evm_block_hash)
+                .await
+                .is_some();
+
+            // Found a block with a payload or reached the genesis block
+            if prev_payload_exists || block.height <= 1 {
+                break;
+            }
+
+            block_hash = block.previous_block_hash;
+            blocks_with_missing_payloads.push(block);
+        }
+
+        // The last block in the list is the oldest block with a missing payload
+        while let Some(block) = blocks_with_missing_payloads.pop() {
+            debug!(
+                "Block pool: Repairing missing payload for block {:?}",
+                block.block_hash
+            );
+            self.validate_and_submit_reth_payload(&block, reth_service.clone())
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// Fast tracks a block by migrating it to the mempool without performing any validation.
     /// This is useful when syncing a block from a node you trust
     async fn fast_track_block(&self, block_header: IrysBlockHeader) -> Result<(), BlockPoolError> {
         let block_height = block_header.height;
         let block_hash = block_header.block_hash;
-        let previous_block_hash = block_header.previous_block_hash;
         let evm_block_hash = block_header.evm_block_hash;
         let execution_payload_provider = self.execution_payload_provider.clone();
         debug!(
@@ -479,28 +535,6 @@ where
         );
         self.vdf_state.wait_for_step(prev_output_step_number).await;
 
-        let prev_block = self.get_block_data(&previous_block_hash).await?.ok_or_else(|| {
-            BlockPoolError::PreviousBlockNotFound(previous_block_hash)
-        })?;
-
-        let prev_payload_exists = self
-            .execution_payload_provider
-            .get_locally_stored_sealed_block(&prev_block.evm_block_hash)
-            .await
-            .is_some();
-
-        if !prev_payload_exists {
-            debug!(
-                "Block pool: Previous execution payload not found for block {:?} (height {}), requesting it from the network",
-                block_header.block_hash, block_height,
-            );
-        } else {
-            debug!(
-                "Block pool: Previous execution payload found for block {:?} (height {})",
-                block_header.block_hash, block_height,
-            );
-        }
-
         self.insert_poa_to_mempool(&block_header).await?;
         self.wait_for_parent_to_appear_in_index(&block_header)
             .await?;
@@ -508,7 +542,8 @@ where
         let reth_service = self.finalize_block_storage(&block_header).await?;
 
         // Validate the payload and submit it to the Reth service
-        self.validate_and_submit_reth_payload(&block_header, reth_service).await?;
+        self.validate_and_submit_reth_payload(&block_header, reth_service)
+            .await?;
 
         // After the block is inserted into the index, we can fast forward the VDF steps to
         // unblock next blocks processing

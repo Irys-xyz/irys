@@ -488,7 +488,7 @@ impl GossipServiceTestFixture {
         let (service_senders, _service_receivers) = ServiceSenders::new();
 
         gossip_service.sync_state.finish_sync();
-        let service_handle = gossip_service
+        let (service_handle, _block_pool) = gossip_service
             .run(
                 mempool_stub,
                 block_discovery_stub,

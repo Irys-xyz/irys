@@ -36,7 +36,7 @@ use irys_database::{
 };
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
-    BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
+    BlockPool, BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -109,6 +109,8 @@ pub struct IrysNodeCtx {
     pub peer_list: PeerListServiceFacade,
     pub sync_state: SyncState,
     pub shadow_tx_store: ShadowTxStore,
+    pub block_pool:
+        Arc<BlockPool<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
 }
 
 impl IrysNodeCtx {
@@ -609,6 +611,8 @@ impl IrysNode {
             node_mode,
             latest_known_block_height as usize,
             &ctx.config,
+            Some(Arc::clone(&ctx.block_pool)),
+            Some(ctx.actor_addresses.reth.clone()),
         )
         .await?;
 
@@ -999,7 +1003,7 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        let p2p_service_handle: ServiceHandleWithShutdownSignal = p2p_service.run(
+        let (p2p_service_handle, block_pool) = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
@@ -1104,6 +1108,7 @@ impl IrysNode {
             reth_node_adapter,
             commitment_state_guard,
             block_producer_inner,
+            block_pool,
         };
 
         // Spawn the StorageModuleService to manage the lifecycle of storage modules
