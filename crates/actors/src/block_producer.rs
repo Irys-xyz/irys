@@ -236,9 +236,37 @@ pub trait BlockProdStrategy {
         }
     }
 
+    /// Determines the parent block for new block production by finding the block with maximum
+    /// cumulative difficulty and ensuring it's fully validated.
+    ///
+    /// # Logic Flow
+    /// 1. Identifies the block with the highest cumulative difficulty in the network
+    /// 2. Checks if this block and all its ancestors are fully validated
+    /// 3. If validation is pending, waits up to 10 seconds for completion
+    /// 4. Falls back to the latest fully validated block if timeout occurs
+    ///
+    /// # Waiting Behavior
+    /// - Monitors BlockStateUpdated events for validation progress
+    /// - Resets 10-second timer when:
+    ///   - A new block with higher cumulative difficulty appears
+    ///   - Validation makes progress (fewer blocks awaiting validation)
+    /// - This ensures each significant change gets a fresh timeout window
+    ///
+    /// # Sequential Validation
+    /// Blocks must be validated in order from oldest to newest. If block B depends on
+    /// block A, then A must be validated before B can be considered fully validated.
+    /// This method counts all blocks in the chain awaiting validation.
+    ///
+    /// # Fallback Strategy
+    /// On timeout, falls back to the latest block in the chain that is fully validated,
+    /// ensuring block production can continue even if some blocks take too long to validate.
+    ///
+    /// # Returns
+    /// - The selected parent block header and its EMA snapshot
+    /// - Error if no validated blocks exist in the chain
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-        
+
         // Subscribe to block state updates to monitor changes
         let mut block_state_rx = self.inner().service_senders.subscribe_block_state_updates();
 
@@ -266,81 +294,108 @@ pub trait BlockProdStrategy {
                 blocks_awaiting_validation
             );
 
-            let wait_result = tokio::time::timeout(MAX_WAIT_TIME, async {
-                loop {
-                    let event = block_state_rx
-                        .recv()
-                        .await
-                        .expect("channel must never be closed");
+            // Use manual deadline tracking to allow timer resets
+            let mut deadline = tokio::time::Instant::now() + MAX_WAIT_TIME;
+            let mut timeout_occurred = false;
 
-                    // Skip discarded blocks
-                    if event.discarded {
-                        continue;
+            loop {
+                // Check if we've exceeded the deadline
+                if tokio::time::Instant::now() >= deadline {
+                    timeout_occurred = true;
+                    break;
+                }
+
+                // Wait for either a block state event or the deadline
+                let event = tokio::select! {
+                    event = block_state_rx.recv() => {
+                        event.expect("channel must never be closed")
                     }
-
-                    // Check if max difficulty has changed
-                    let (new_max_block, new_max_diff) = {
-                        let read = self.inner().block_tree_guard.read();
-                        read.get_max_cumulative_difficulty_block()
-                    };
-
-                    if new_max_block != target_block_hash {
-                        debug!(
-                            "Max difficulty block changed from {} to {} (difficulty: {} -> {})",
-                            target_block_hash, new_max_block, max_difficulty, new_max_diff
-                        );
-                        target_block_hash = new_max_block;
-                        max_difficulty = new_max_diff;
-                        
-                        // Re-check validation status for the new max block
-                        let (new_blocks_awaiting, new_fallback) = {
-                            let read = self.inner().block_tree_guard.read();
-                            read.get_validation_chain_status(&target_block_hash)
-                        };
-                        blocks_awaiting_validation = new_blocks_awaiting;
-                        fallback_block_hash = new_fallback;
-                    }
-
-                    // Check if the current target block is now fully validated
-                    let is_validated = {
-                        let read = self.inner().block_tree_guard.read();
-                        read.is_block_fully_validated(&target_block_hash)
-                    };
-
-                    if is_validated && blocks_awaiting_validation == 0 {
-                        debug!("Max difficulty block {} is now fully validated", target_block_hash);
+                    _ = tokio::time::sleep_until(deadline) => {
+                        timeout_occurred = true;
                         break;
                     }
+                };
 
-                    // Re-check validation status
-                    let (current_blocks_awaiting, current_fallback) = {
+                // Skip discarded blocks
+                if event.discarded {
+                    continue;
+                }
+
+                // Check if max difficulty has changed
+                let (new_max_block, new_max_diff) = {
+                    let read = self.inner().block_tree_guard.read();
+                    read.get_max_cumulative_difficulty_block()
+                };
+
+                if new_max_block != target_block_hash {
+                    debug!(
+                        "Max difficulty block changed from {} to {} (difficulty: {} -> {})",
+                        target_block_hash, new_max_block, max_difficulty, new_max_diff
+                    );
+                    target_block_hash = new_max_block;
+                    max_difficulty = new_max_diff;
+
+                    // Re-check validation status for the new max block
+                    let (new_blocks_awaiting, new_fallback) = {
                         let read = self.inner().block_tree_guard.read();
                         read.get_validation_chain_status(&target_block_hash)
                     };
-                    
-                    if current_blocks_awaiting < blocks_awaiting_validation {
-                        debug!(
-                            "Validation progress: {} blocks remaining",
-                            current_blocks_awaiting
-                        );
-                    }
-                    
-                    blocks_awaiting_validation = current_blocks_awaiting;
-                    fallback_block_hash = current_fallback;
+                    blocks_awaiting_validation = new_blocks_awaiting;
+                    fallback_block_hash = new_fallback;
 
-                    if blocks_awaiting_validation == 0 {
-                        break;
-                    }
+                    // Reset timer when target block changes
+                    deadline = tokio::time::Instant::now() + MAX_WAIT_TIME;
+                    debug!(
+                        "Reset timer: new target block, {} blocks awaiting validation",
+                        blocks_awaiting_validation
+                    );
                 }
-            })
-            .await;
 
-            if wait_result.is_err() {
+                // Check if the current target block can be used as a parent for a new block
+                let can_be_built_upon = {
+                    let read = self.inner().block_tree_guard.read();
+                    read.can_be_built_upon(&target_block_hash)
+                };
+
+                if can_be_built_upon && blocks_awaiting_validation == 0 {
+                    debug!(
+                        "Max difficulty block {} is now fully validated",
+                        target_block_hash
+                    );
+                    break;
+                }
+
+                // Re-check validation status
+                let (current_blocks_awaiting, current_fallback) = {
+                    let read = self.inner().block_tree_guard.read();
+                    read.get_validation_chain_status(&target_block_hash)
+                };
+
+                if current_blocks_awaiting < blocks_awaiting_validation {
+                    debug!(
+                        "Validation progress: {} blocks remaining (was {})",
+                        current_blocks_awaiting, blocks_awaiting_validation
+                    );
+
+                    // Reset timer when validation makes progress
+                    deadline = tokio::time::Instant::now() + MAX_WAIT_TIME;
+                    debug!("Reset timer: validation progress");
+                }
+
+                blocks_awaiting_validation = current_blocks_awaiting;
+                fallback_block_hash = current_fallback;
+
+                if blocks_awaiting_validation == 0 {
+                    break;
+                }
+            }
+
+            if timeout_occurred {
                 warn!(
                     "Timeout waiting for blocks to be validated after {:?}",
                     MAX_WAIT_TIME
                 );
-                
+
                 // Use fallback block if available
                 if let Some(fallback) = fallback_block_hash {
                     warn!(

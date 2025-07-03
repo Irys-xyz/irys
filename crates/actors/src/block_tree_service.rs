@@ -1555,11 +1555,14 @@ impl BlockTreeCache {
 
     /// Get the block with maximum cumulative difficulty
     pub fn get_max_cumulative_difficulty_block(&self) -> (BlockHash, U256) {
-        (self.max_cumulative_difficulty.1, self.max_cumulative_difficulty.0)
+        (
+            self.max_cumulative_difficulty.1,
+            self.max_cumulative_difficulty.0,
+        )
     }
 
-    /// Check if a block is fully validated (either Onchain or Validated with ValidBlock state)
-    pub fn is_block_fully_validated(&self, block_hash: &BlockHash) -> bool {
+    /// Check if a block can be built upon
+    pub fn can_be_built_upon(&self, block_hash: &BlockHash) -> bool {
         self.blocks.get(block_hash).map_or(false, |entry| {
             matches!(
                 entry.chain_state,
@@ -1570,7 +1573,10 @@ impl BlockTreeCache {
 
     /// Walk backwards from a block to find the validation status of the chain
     /// Returns: (blocks_awaiting_validation, last_validated_block_hash)
-    pub fn get_validation_chain_status(&self, from_block_hash: &BlockHash) -> (usize, Option<BlockHash>) {
+    pub fn get_validation_chain_status(
+        &self,
+        from_block_hash: &BlockHash,
+    ) -> (usize, Option<BlockHash>) {
         let mut current_hash = *from_block_hash;
         let mut blocks_awaiting = 0;
         let mut last_validated = None;
@@ -1589,8 +1595,8 @@ impl BlockTreeCache {
                         blocks_awaiting += 1;
                     }
                 }
-                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled) |
-                ChainState::Validated(BlockState::Unknown | BlockState::ValidationScheduled) => {
+                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled)
+                | ChainState::Validated(BlockState::Unknown | BlockState::ValidationScheduled) => {
                     // This block is awaiting validation
                     blocks_awaiting += 1;
                 }
