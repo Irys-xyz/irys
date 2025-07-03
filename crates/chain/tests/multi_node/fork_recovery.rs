@@ -640,7 +640,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         assert_eq!(
             sorted_commitments_at(&node_b, 2).await?,
             peer_b_commitment_txs
-        ); // this is suprising
+        );
         assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
         assert_eq!(
             sorted_commitments_at(&node_b, 4).await?,
@@ -651,7 +651,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         assert_eq!(
             sorted_commitments_at(&node_c, 2).await?,
             peer_b_commitment_txs
-        ); // this is suprising
+        );
         assert_eq!(sorted_commitments_at(&node_c, 3).await?, vec![]);
         assert_eq!(
             sorted_commitments_at(&node_c, 4).await?,
