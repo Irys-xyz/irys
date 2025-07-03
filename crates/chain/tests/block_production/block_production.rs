@@ -2,7 +2,6 @@ use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
-use color_eyre::owo_colors::OwoColorize;
 use eyre::OptionExt as _;
 use irys_actors::block_tree_service::ChainState;
 use irys_actors::mempool_service::TxIngressError;
@@ -59,6 +58,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .await?;
 
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
         .inner
@@ -318,7 +318,8 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .create_submit_data_tx(&account1, data_bytes.clone())
         .await?;
 
-    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    node.wait_until_height(irys_block.height, 10).await?;
 
     // Get the transaction hashes from the block in order
     let block_txs = reth_exec_env
@@ -399,7 +400,8 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
         let reth_block = reth_context
             .inner
             .provider
-            .block_by_hash(block.evm_block_hash)?
+            .find_block_by_hash(block.evm_block_hash, reth::providers::BlockSource::Any)
+            .unwrap()
             .unwrap();
         let new_ts = reth_block.header.timestamp as u128;
 
@@ -626,7 +628,8 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     assert_eq!(tx.header.total_fee(), 2, "Total fee should be 2");
 
     // Mine a block - should contain block reward and storage fee transactions
-    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
         .inner
@@ -742,7 +745,10 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .await?;
 
     // Mine a block to get the stake commitment included
-    let (_irys_block1, reth_exec_env1) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+    let (irys_block1, reth_exec_env1) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+    genesis_node
+        .wait_until_height(irys_block1.height, 10)
+        .await?;
 
     // Get receipts for the first block
     let receipts1 = reth_context
@@ -823,7 +829,10 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // Mine another block to verify the system continues to work
-    let (_irys_block2, reth_exec_env2) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+    let (irys_block2, reth_exec_env2) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+    genesis_node
+        .wait_until_height(irys_block2.height, 10)
+        .await?;
 
     // Get receipts for the second block
     let receipts2 = reth_context

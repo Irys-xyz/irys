@@ -141,8 +141,11 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
 
     // mine 3 blocks
     let (header_1, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.wait_until_height(header_1.height, 10).await?;
     let (header_2, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.wait_until_height(header_2.height, 10).await?;
     let (header_3, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    ctx.wait_until_height(header_3.height, 10).await?;
 
     // assert that all of the prices are the max allowed ones (guaranteed by the mock oracle reporting inflated values)
     let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
