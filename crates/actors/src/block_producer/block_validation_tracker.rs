@@ -1,12 +1,12 @@
 //! Block validation tracking for parent selection in block production.
 //!
 //! # Problem
-//! Block producers must select the block with highest cumulative difficulty as parent,
+//! Block producer must select the block with highest cumulative difficulty as parent,
 //! but only if that block and all its ancestors are fully validated. Validation is
-//! asynchronous and may lag behind block discovery, creating a race condition.
+//! asynchronous and lags behind block discovery. But we don't want to create unnecessary forks.
 //!
 //! # Solution
-//! Monitor validation progress with a 10-second timeout. Track the best candidate
+//! Monitor validation progress with a timeout. Track the best candidate
 //! (highest difficulty) while waiting for validation. If timeout occurs, fall back
 //! to the latest fully validated block to ensure production continues.
 //!
@@ -17,11 +17,11 @@
 //!    - Monitor block state updates
 //!    - Track if a new max-difficulty block appears
 //!    - Track validation progress
-//!    - Reset 10s timer on significant changes
+//!    - Reset timer on significant changes
 //! 4. Return selected block or fallback on timeout
 //!
 //! # Timer Resets
-//! The 10-second timer resets when:
+//! The timer resets when:
 //! - A new block with higher cumulative difficulty appears
 //! - Validation progresses (fewer blocks awaiting validation)
 //!
@@ -33,7 +33,7 @@ use irys_types::{H256, U256};
 use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::{block_producer::BlockProducerInner, block_tree_service::BlockStateUpdated};
 
@@ -124,27 +124,36 @@ impl<'a> BlockValidationTracker<'a> {
         max_wait_time: Duration,
         block_state_rx: &mut Receiver<BlockStateUpdated>,
     ) -> eyre::Result<H256> {
+        let start_time = Instant::now();
+
         debug!(
-            "Waiting for {} blocks to be validated before producing on max difficulty block",
-            self.blocks_awaiting_validation
+            target_block = %self.target_block_hash,
+            blocks_awaiting = self.blocks_awaiting_validation,
+            fallback_block = ?self.fallback_block_hash,
+            "Starting validation wait"
         );
 
         loop {
             // Check timeout
             if self.is_timeout() {
-                warn!(
-                    "Timeout waiting for blocks to be validated after {:?}",
-                    max_wait_time
-                );
+                let elapsed = start_time.elapsed();
 
-                // Use fallback block if available
                 if let Some(fallback) = self.fallback_block_hash {
                     warn!(
-                        "Falling back to latest validated block {} instead of max difficulty block {}",
-                        fallback, self.target_block_hash
+                        target_block = %self.target_block_hash,
+                        fallback_block = %fallback,
+                        elapsed_ms = elapsed.as_millis(),
+                        blocks_still_awaiting = self.blocks_awaiting_validation,
+                        "Validation timeout - using fallback block"
                     );
                     return Ok(fallback);
                 } else {
+                    warn!(
+                        target_block = %self.target_block_hash,
+                        elapsed_ms = elapsed.as_millis(),
+                        blocks_still_awaiting = self.blocks_awaiting_validation,
+                        "Validation timeout - no fallback available"
+                    );
                     return Err(eyre!("No validated blocks found in the chain"));
                 }
             }
@@ -155,9 +164,16 @@ impl<'a> BlockValidationTracker<'a> {
                     event.expect("channel must never be closed")
                 }
                 _ = tokio::time::sleep_until(self.deadline) => {
+                    trace!("Deadline sleep completed, checking timeout");
                     continue; // Will trigger timeout check on next iteration
                 }
             };
+
+            trace!(
+                block_hash = %event.block.block_hash,
+                discarded = event.discarded,
+                "Received block state event"
+            );
 
             // Skip discarded blocks
             if event.discarded {
@@ -169,8 +185,12 @@ impl<'a> BlockValidationTracker<'a> {
 
             if new_max_block != self.target_block_hash {
                 debug!(
-                    "Max difficulty block changed from {} to {} (difficulty: {} -> {})",
-                    self.target_block_hash, new_max_block, self.max_difficulty, new_max_diff
+                    old_target = %self.target_block_hash,
+                    new_target = %new_max_block,
+                    old_difficulty = %self.max_difficulty,
+                    new_difficulty = %new_max_diff,
+                    elapsed_ms = start_time.elapsed().as_millis(),
+                    "Max difficulty block changed during validation wait"
                 );
 
                 // Re-check validation status for the new max block
@@ -187,17 +207,19 @@ impl<'a> BlockValidationTracker<'a> {
                 // Reset timer when target block changes
                 self.reset_deadline(max_wait_time);
                 debug!(
-                    "Reset timer: new target block, {} blocks awaiting validation",
-                    self.blocks_awaiting_validation
+                    new_blocks_awaiting = self.blocks_awaiting_validation,
+                    "Timer reset due to new target block"
                 );
             }
 
             // Check if the current target block can be used as a parent
             if self.can_build_upon(&self.target_block_hash) && self.blocks_awaiting_validation == 0
             {
-                debug!(
-                    "Max difficulty block {} is now fully validated",
-                    self.target_block_hash
+                let elapsed = start_time.elapsed();
+                info!(
+                    target_block = %self.target_block_hash,
+                    elapsed_ms = elapsed.as_millis(),
+                    "Target block validated successfully"
                 );
                 return Ok(self.target_block_hash);
             }
@@ -207,20 +229,30 @@ impl<'a> BlockValidationTracker<'a> {
                 self.check_block_validation_status(&self.target_block_hash);
 
             if current_blocks_awaiting < self.blocks_awaiting_validation {
+                let validated_count = self.blocks_awaiting_validation - current_blocks_awaiting;
                 debug!(
-                    "Validation progress: {} blocks remaining (was {})",
-                    current_blocks_awaiting, self.blocks_awaiting_validation
+                    blocks_validated = validated_count,
+                    blocks_remaining = current_blocks_awaiting,
+                    blocks_were = self.blocks_awaiting_validation,
+                    elapsed_ms = start_time.elapsed().as_millis(),
+                    "Validation progress detected"
                 );
 
                 // Reset timer when validation makes progress
                 self.reset_deadline(max_wait_time);
-                debug!("Reset timer: validation progress");
+                trace!("Timer reset due to validation progress");
             }
 
             self.blocks_awaiting_validation = current_blocks_awaiting;
             self.fallback_block_hash = current_fallback;
 
             if self.blocks_awaiting_validation == 0 {
+                let elapsed = start_time.elapsed();
+                info!(
+                    target_block = %self.target_block_hash,
+                    elapsed_ms = elapsed.as_millis(),
+                    "All blocks validated successfully"
+                );
                 return Ok(self.target_block_hash);
             }
         }

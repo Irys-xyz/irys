@@ -247,8 +247,10 @@ pub trait BlockProdStrategy {
     /// the latest validated block on timeout to ensure production continues.
     ///
     /// Returns the selected parent block header and its EMA snapshot.
+    #[tracing::instrument(skip(self), level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+        let start_time = tokio::time::Instant::now();
 
         // Get the block with maximum cumulative difficulty
         let (target_block_hash, max_difficulty) = {
@@ -263,8 +265,11 @@ pub trait BlockProdStrategy {
         };
 
         debug!(
-            "Max difficulty block: {} (difficulty: {}), {} blocks awaiting validation",
-            target_block_hash, max_difficulty, blocks_awaiting_validation
+            target_block = %target_block_hash,
+            max_difficulty = %max_difficulty,
+            blocks_awaiting_validation,
+            fallback_block = ?fallback_block_hash,
+            "Selecting parent block for production"
         );
 
         // Wait for validation if needed
@@ -284,15 +289,23 @@ pub trait BlockProdStrategy {
                 .wait_for_validation(MAX_WAIT_TIME, &mut block_state_rx)
                 .await?
         } else {
+            info!(
+                target_block = %target_block_hash,
+                "Target block already validated, skipping wait"
+            );
             target_block_hash
         };
 
         // Fetch the parent block header
         let header = self.fetch_block_header(parent_block_hash).await?;
 
+        let elapsed = start_time.elapsed();
         info!(
-            "Starting block production with parent block {} at height {}",
-            parent_block_hash, header.height
+            parent_block = %parent_block_hash,
+            parent_height = header.height,
+            elapsed_ms = elapsed.as_millis(),
+            waited_for_validation = blocks_awaiting_validation > 0,
+            "Selected parent block for production"
         );
 
         // Get the EMA snapshot
