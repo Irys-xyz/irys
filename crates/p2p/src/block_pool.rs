@@ -278,8 +278,6 @@ where
             "Block pool: Fast forwarding VDF steps for block {:?}",
             block_header.block_hash
         );
-        fast_forward_vdf_steps_from_block(&block_header.vdf_limiter_info, &self.vdf_ff_sender)
-            .map_err(|report| BlockPoolError::VdfFFError(report.to_string()))?;
 
         if let Some(chunk) = &block_header.poa.chunk {
             debug!(
@@ -293,10 +291,6 @@ where
         };
 
         if block_height > 0 {
-            debug!(
-                "Block pool: Checking if the parent block for block {:?} is in the index ",
-                block_header.block_hash,
-            );
             if !self
                 .block_status_provider
                 .is_height_in_the_index(block_height - 1)
@@ -330,6 +324,7 @@ where
             block_hash
         );
 
+        let vdf_info = block_header.vdf_limiter_info.clone();
         let (sender, receiver) = oneshot::channel();
         self.block_tree_sender
             .send(BlockTreeServiceMessage::FastTrackStorageFinalized {
@@ -378,6 +373,11 @@ where
             "Block pool: Block {:?} fast tracked successfully",
             block_hash
         );
+
+        // After the block is inserted into the index, we can fast forward the VDF steps to
+        // unblock next blocks processing
+        fast_forward_vdf_steps_from_block(&vdf_info, &self.vdf_ff_sender)
+            .map_err(|report| BlockPoolError::VdfFFError(report.to_string()))?;
 
         let mut process_ancestor = false;
         if let Some(switch_to_full_validation_at_height) =

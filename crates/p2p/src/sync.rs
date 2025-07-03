@@ -310,7 +310,7 @@ pub async fn sync_chain(
 
         let peer_list_clone = peer_list.clone();
         let sync_state_clone = sync_state.clone();
-        let block_hash = block.block_hash.clone();
+        let block_hash = block.block_hash;
         tokio::spawn(async move {
             debug!(
                 "Sync task: Requesting block {:?} (sync height is {}) from the network",
@@ -349,7 +349,8 @@ pub async fn sync_chain(
                 BLOCK_BATCH_SIZE,
                 5,
                 fetch_index_from_the_trusted_peer,
-            ).await?;
+            )
+            .await?;
 
             target += additional_index.len();
             block_queue.extend(additional_index);
@@ -550,15 +551,17 @@ mod tests {
             .expect("to finish catching up");
 
             // There should be three calls total: two that got items and one that didn't
-            let data_requests = block_index_requests.lock().unwrap();
-            assert_eq!(data_requests.len(), 3);
-            debug!("Data requests: {:?}", data_requests);
-            assert_eq!(data_requests[0].height, 10);
-            assert_eq!(data_requests[1].height, 11);
-            assert_eq!(data_requests[0].limit, 10);
-            assert_eq!(data_requests[1].limit, 10);
-            assert_eq!(data_requests[2].height, 12);
-            assert_eq!(data_requests[2].limit, 10);
+            {
+                let data_requests = block_index_requests.lock().unwrap();
+                assert_eq!(data_requests.len(), 3);
+                debug!("Data requests: {:?}", data_requests);
+                assert_eq!(data_requests[0].height, 10);
+                assert_eq!(data_requests[1].height, 11);
+                assert_eq!(data_requests[0].limit, 10);
+                assert_eq!(data_requests[1].limit, 10);
+                assert_eq!(data_requests[2].height, 12);
+                assert_eq!(data_requests[2].limit, 10);
+            }
 
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
@@ -567,9 +570,15 @@ mod tests {
 
             let block_requests = block_requests_clone.lock().unwrap();
             assert_eq!(block_requests.len(), 3);
-            let requested_first_block = block_requests.iter().find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
-            let requested_first_block_again = block_requests.iter().find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
-            let requested_second_block = block_requests.iter().find(|&block_hash| block_hash == &BlockHash::repeat_byte(2));
+            let requested_first_block = block_requests
+                .iter()
+                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
+            let requested_first_block_again = block_requests
+                .iter()
+                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
+            let requested_second_block = block_requests
+                .iter()
+                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(2));
             assert!(requested_first_block.is_some());
             // As the first call didn't return anything, the peer tries to fetch it once again
             assert!(requested_first_block_again.is_some());
