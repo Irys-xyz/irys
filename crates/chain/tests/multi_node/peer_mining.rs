@@ -49,7 +49,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     // Mine another block to perform epoch tasks
     genesis_node.mine_blocks(block_migration_depth).await?;
     genesis_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_block_index_height(1, seconds_to_wait)
         .await?;
 
     // Get the genesis nodes view of the peers assignments

@@ -72,7 +72,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     genesis_node
         .mine_blocks((1 + block_migration_depth).try_into()?)
         .await?;
-    genesis_node.wait_until_height_on_chain(1, 5).await?;
+    genesis_node.wait_until_block_index_height(1, 5).await?;
 
     // Finally verify the chunks didn't get dropped
     genesis_node
@@ -552,7 +552,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
             tx,
         ))?;
 
-    let best_previous = rx.await?;
+    let best_previous = rx.await??;
     // previous block does not have the fund tx, the tx should not be present
     assert_eq!(
         best_previous.submit_tx.len(),
@@ -567,7 +567,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .service_senders
         .mempool
         .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
-    let best_current = rx.await?;
+    let best_current = rx.await??;
     // latest block has the fund tx, so it should be present
     assert_eq!(
         best_current.submit_tx.len(),
@@ -595,7 +595,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .service_senders
         .mempool
         .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
-    let best_current = rx.await?;
+    let best_current = rx.await??;
 
     assert_eq!(
         best_current.submit_tx.len(),

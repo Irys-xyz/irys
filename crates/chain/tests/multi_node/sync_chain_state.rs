@@ -210,7 +210,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await?;
     // wait for block index
     ctx_genesis_node
-        .wait_until_height_on_chain(required_index_blocks_height.try_into()?, max_seconds)
+        .wait_until_block_index_height(required_index_blocks_height.try_into()?, max_seconds)
         .await?;
 
     // start additional nodes (after we have mined some blocks on genesis node)
@@ -429,7 +429,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
 
         // check a block really was mined on genesis and the genesis node index increased
         ctx_genesis_node
-            .wait_until_height_on_chain(genesis_starting_index_height + 1, max_seconds)
+            .wait_until_block_index_height(genesis_starting_index_height + 1, max_seconds)
             .await?;
 
         let mut result_genesis = block_index_endpoint_request(

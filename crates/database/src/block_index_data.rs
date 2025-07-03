@@ -240,6 +240,7 @@ fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
     match OpenOptions::new().append(true).open(file_path) {
         Ok(mut file) => {
             file.write_all(&item.to_bytes())?;
+            file.sync_all()?;
             Ok(())
         }
         Err(err) => Err(eyre::eyre!(

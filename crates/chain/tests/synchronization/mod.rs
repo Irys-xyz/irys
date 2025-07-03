@@ -103,7 +103,8 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     node.mine_blocks(block_migration_depth.try_into()?).await?;
     node.wait_until_height(block_migration_depth + 1_u64, max_seconds)
         .await?;
-    node.wait_until_height_on_chain(1_u64, max_seconds).await?;
+    node.wait_until_block_index_height(1_u64, max_seconds)
+        .await?;
 
     // restarting the node means we lose blocks in mempool
     info!("Restarting node");
