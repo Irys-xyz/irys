@@ -400,8 +400,25 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let b_block1 = node_b.get_block_by_height(1).await?; // get block b1
     let c_block1 = node_c.get_block_by_height(1).await?; // get block c1
 
+    assert_eq!(
+        a_block1.system_ledgers.len(),
+        0,
+        "No txs should exist to be included in this block!"
+    );
+
     //
-    // Stage 3: GENERATE ISOLATED txs
+    // Stage 3: DISABLE ANY/ALL GOSSIP
+    //
+    {
+        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
+        //       broadcasts can be replaced with something more appropriate and correctly named
+        node_a.node_ctx.sync_state.set_is_syncing(true);
+        node_b.node_ctx.sync_state.set_is_syncing(true);
+        node_c.node_ctx.sync_state.set_is_syncing(true);
+    }
+
+    //
+    // Stage 4: GENERATE ISOLATED txs
     //
 
     // node_b generates txs in isolation for inclusion in block 2
@@ -423,28 +440,30 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let peer_c_b2_txs = vec![peer_c_b2_stake_tx.clone(), peer_c_b2_pledge_tx.clone()];
 
     //
-    // Stage 4: MINE FORK A and B TO HEIGHT 2 and 3
+    // Stage 5: MINE FORK A and B TO HEIGHT 2 and 3
     //
-    node_b
-        .wait_for_mempool_commitment_txs(vec![peer_c_b2_stake_tx.id], seconds_to_wait)
-        .await?;
+
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
 
-    // check how txs made it into each block, we expect no more than 2
-    assert_eq!(a_block2.system_ledgers.len(), 0); // 0 commitments, also means 0 system ledgers
-    tracing::error!(
-        "commitment txs bb2: {:?}",
-        b_block2.system_ledgers[0].tx_ids
-    ); // why is this getting 3 txs ?!
+    // check how many txs made it into each block, we expect no more than 2
     tracing::error!("peer_b_b2_stake_tx: {:?}", peer_b_b2_stake_tx);
     tracing::error!("peer_b_b2_pledge_tx: {:?}", peer_b_b2_pledge_tx);
     tracing::error!("peer_c_b2_stake_tx: {:?}", peer_c_b2_stake_tx); // somehow this is finding it's way over to node B :/
     tracing::error!("peer_c_b2_pledge_tx: {:?}", peer_c_b2_pledge_tx);
-
-    panic!("some debug");
+    assert_eq!(
+        b_block2.system_ledgers.len(),
+        1,
+        "Expect 1 of the 2 isolated txs on peer B to be in this block. The stake tx and not the pledge tx."
+    );
+    assert_eq!(
+        a_block2.system_ledgers.len(),
+        0,
+        "No txs should have been gossiped back to peer A! {:?}",
+        a_block2.system_ledgers[0].tx_ids
+    ); // 0 commitments, also means 0 system ledgers
 
     let peer_c = PeerAddress {
         gossip: format!(
@@ -483,7 +502,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     }
 
     //
-    // Stage 5: MINE FORK C TO HEIGHT 4
+    // Stage 6: MINE FORK C TO HEIGHT 4
     //
 
     // Node C mines on top of B's chain and does not gossip it back to B
@@ -492,7 +511,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     assert_eq!(c_block4.height, 4); // block c4
 
     //
-    // Stage 6: FINAL SYNC / RE-ORGs
+    // Stage 7: FINAL SYNC / RE-ORGs
     //
     {
         // Gossip all blocks so everyone syncs
@@ -502,7 +521,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         node_a.gossip_block(&a_block2)?;
     }
     //
-    // Stage 7: FINAL STATE CHECKS
+    // Stage 8: FINAL STATE CHECKS
     //
 
     // confirm all three nodes are at the same and expected height "4"
