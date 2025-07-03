@@ -595,29 +595,26 @@ where
                             "Block pool: Failed to validate and submit execution payload for block {:?}: {:?}",
                             evm_block_hash, err
                         );
-                        return;
                     }
                 }
-            } else {
-                if let Some(sealed_block) = execution_payload_provider
-                    .wait_for_sealed_block(&evm_block_hash, validate_and_submit_payload)
-                    .await
-                {
-                    let evm_block = sealed_block.into_block();
-                    if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
-                        GossipCacheKey::ExecutionPayload(evm_block_hash),
-                        GossipData::ExecutionPayload(evm_block),
-                    )) {
-                        error!(
-                            "Failed to broadcast execution payload for block {:?}: {:?}",
-                            evm_block_hash, err
-                        );
-                    } else {
-                        debug!(
-                            "Execution payload for block {:?} has been broadcasted",
-                            evm_block_hash
-                        );
-                    }
+            } else if let Some(sealed_block) = execution_payload_provider
+                .wait_for_sealed_block(&evm_block_hash, validate_and_submit_payload)
+                .await
+            {
+                let evm_block = sealed_block.into_block();
+                if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
+                    GossipCacheKey::ExecutionPayload(evm_block_hash),
+                    GossipData::ExecutionPayload(evm_block),
+                )) {
+                    error!(
+                        "Failed to broadcast execution payload for block {:?}: {:?}",
+                        evm_block_hash, err
+                    );
+                } else {
+                    debug!(
+                        "Execution payload for block {:?} has been broadcasted",
+                        evm_block_hash
+                    );
                 }
             }
         });
