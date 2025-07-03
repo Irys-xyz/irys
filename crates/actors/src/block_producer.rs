@@ -6,7 +6,7 @@ use crate::{
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    reth_service::RethServiceActor,
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
     EpochServiceMessage,
@@ -240,7 +240,7 @@ pub trait BlockProdStrategy {
         // todo: compute this from the vdf difficulty
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         // Subscribe to canonical chain events
-        let mut canonical_chain_rx = self.inner().service_senders.subscribe_canonical_chain();
+        let mut canonical_chain_rx = self.inner().service_senders.subscribe_block_state_updates();
 
         // Get latest canonical chain state
         let (mut parent_block_hash, mut parent_height, blocks_awaiting_validation) = {
@@ -269,13 +269,28 @@ pub trait BlockProdStrategy {
                         .recv()
                         .await
                         .expect("channel must never be closed");
+
+                    // Skip discarded blocks
+                    if event.discarded {
+                        continue;
+                    }
+
+                    // Update parent block info
+                    parent_block_hash = event.block.block_hash;
+                    parent_height = event.block.height;
+
+                    // Check if we need to wait for more validations
+                    let blocks_awaiting = {
+                        let read = self.inner().block_tree_guard.read();
+                        read.get_num_blocks_awaiting_validation_on_canonical_chain()
+                    };
+
                     debug!(
                         "Canonical chain update: {} blocks awaiting validation",
-                        event.blocks_awaiting_validation
+                        blocks_awaiting
                     );
-                    parent_block_hash = event.latest_block.block_hash;
-                    parent_height = event.latest_block.height;
-                    if event.blocks_awaiting_validation == 0 {
+
+                    if blocks_awaiting == 0 {
                         break;
                     }
                 }
@@ -413,18 +428,6 @@ pub trait BlockProdStrategy {
             .inner()
             .reth_node_adapter
             .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
-            .await?;
-
-        // trigger forkchoice update via engine api to commit the block to the blockchain
-        self.inner()
-            .reth_node_adapter
-            .update_forkchoice_full(
-                payload.block().hash(),
-                // we mark this block as confirmed because we produced it
-                Some(payload.block().hash()),
-                // marking a block as finalized is handled by a different service
-                None,
-            )
             .await?;
 
         Ok(payload)
@@ -635,16 +638,6 @@ pub trait BlockProdStrategy {
                 ))
             }
         }?;
-
-        // we set the canon head here, as we produced this block, and this lets us build off of it
-        self.inner()
-            .reth_service
-            .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(evm_block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .await??;
 
         if is_difficulty_updated {
             self.inner()

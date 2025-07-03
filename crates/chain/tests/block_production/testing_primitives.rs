@@ -1,12 +1,11 @@
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, NodeConfig};
 use tracing::info;
 
 use crate::utils::IrysNodeTest;
 
-#[actix::test]
+#[test_log::test(actix::test)]
 async fn heavy_test_wait_until_height() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_height().await;
@@ -23,7 +22,7 @@ async fn heavy_test_wait_until_height() {
     irys_node.stop().await;
 }
 
-#[actix::test]
+#[test_log::test(actix::test)]
 async fn heavy_test_mine() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_height().await;
@@ -37,10 +36,9 @@ async fn heavy_test_mine() {
     irys_node.stop().await;
 }
 
-#[actix::test]
+#[test_log::test(actix::test)]
 async fn heavy_test_mine_tx() {
     // output tracing
-    initialize_tracing();
     let mut config = NodeConfig::testnet();
     let account = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(

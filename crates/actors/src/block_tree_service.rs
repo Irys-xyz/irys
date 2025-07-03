@@ -124,9 +124,10 @@ pub struct BlockMigratedEvent {
 }
 
 #[derive(Debug, Clone)]
-pub struct CanonicalChainEvent {
-    pub latest_block: BlockTreeEntry,
-    pub blocks_awaiting_validation: usize,
+pub struct BlockStateUpdated {
+    pub block: BlockTreeEntry,
+    pub state: ChainState,
+    pub discarded: bool,
 }
 
 impl BlockTreeService {
@@ -519,9 +520,35 @@ impl BlockTreeServiceInner {
             ValidationResult::Invalid => {
                 error!(block_hash = %block_hash.0.to_base58(),"invalid block");
                 let mut cache = self.cache.write().unwrap();
-                let _ = cache
-                    .remove_block(&block_hash)
-                    .inspect_err(|err| tracing::error!(?err));
+
+                // Get block info before removal for the event
+                if let Some(block_entry) = cache.get_block(&block_hash) {
+                    let block_tree_entry = make_block_tree_entry(block_entry);
+                    let state = cache
+                        .get_block_and_status(&block_hash)
+                        .map(|(_, state)| *state)
+                        .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+
+                    // Remove the block
+                    let _ = cache
+                        .remove_block(&block_hash)
+                        .inspect_err(|err| tracing::error!(?err));
+
+                    // Emit event after removal
+                    drop(cache);
+                    let event = BlockStateUpdated {
+                        block: block_tree_entry,
+                        state,
+                        discarded: true,
+                    };
+                    if let Err(e) = self.service_senders.block_state_events.send(event) {
+                        debug!("No canonical chain subscribers: {:?}", e);
+                    }
+                } else {
+                    let _ = cache
+                        .remove_block(&block_hash)
+                        .inspect_err(|err| tracing::error!(?err));
+                }
             }
             ValidationResult::Valid => {
                 {
@@ -696,14 +723,20 @@ impl BlockTreeServiceInner {
     fn broadcast_canonical_chain_update(&self) {
         let cache = self.cache.read().unwrap();
         let latest_entry = cache.get_latest_canonical_entry();
-        let blocks_awaiting_validation =
-            cache.get_num_blocks_awaiting_validation_on_canonical_chain();
-        let event = CanonicalChainEvent {
-            latest_block: latest_entry.clone(),
-            blocks_awaiting_validation,
+
+        // Get the block's current state
+        let block_state = cache
+            .get_block_and_status(&latest_entry.block_hash)
+            .map(|(_, state)| *state)
+            .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+
+        let event = BlockStateUpdated {
+            block: latest_entry.clone(),
+            state: block_state,
+            discarded: false,
         };
         drop(cache);
-        if let Err(e) = self.service_senders.canonical_chain_events.send(event) {
+        if let Err(e) = self.service_senders.block_state_events.send(event) {
             debug!("No canonical chain subscribers: {:?}", e);
         }
     }
@@ -1265,6 +1298,10 @@ impl BlockTreeCache {
     #[must_use]
     pub fn get_canonical_chain(&self) -> (Vec<BlockTreeEntry>, usize) {
         self.longest_chain_cache.clone()
+    }
+
+    pub fn get_max_cumulative_difficulty(&self) -> U256 {
+        self.max_cumulative_difficulty.0
     }
 
     #[must_use]

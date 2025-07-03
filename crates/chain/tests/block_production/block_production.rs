@@ -975,7 +975,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // Mine a valid block
     // note: cannot use `.mine_block()` because there will be height mismatch when it awaits for the new height
-    let mut sub = node.node_ctx.service_senders.subscribe_canonical_chain();
+    let mut sub = node.node_ctx.service_senders.subscribe_block_state_updates();
     let (new_block, _reth_block) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
@@ -994,7 +994,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     );
     loop {
         let res = sub.recv().await.unwrap();
-        if res.latest_block.block_hash == new_block.block_hash {
+        if res.block.block_hash == new_block.block_hash {
             break;
         }
     }
