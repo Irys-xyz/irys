@@ -896,7 +896,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block
     // if None is provided, it will use the latest state.
-    pub async fn get_best_mempool_tx(&self, parent_evm_block_hash: Option<BlockId>) -> MempoolTxs {
+    pub async fn get_best_mempool_tx(
+        &self,
+        parent_evm_block_hash: Option<BlockId>,
+    ) -> eyre::Result<MempoolTxs> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.node_ctx
             .service_senders
