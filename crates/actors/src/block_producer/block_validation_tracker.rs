@@ -42,18 +42,22 @@ pub struct BlockValidationTracker<'a> {
     state: ValidationState,
     timer: Timer,
     inner: &'a BlockProducerInner,
+    block_state_rx: Receiver<BlockStateUpdated>,
 }
 
 impl<'a> BlockValidationTracker<'a> {
-    /// Creates a new tracker with initial state
-    pub fn new(
-        target_block_hash: H256,
-        max_difficulty: U256,
-        blocks_awaiting_validation: usize,
-        fallback_block_hash: Option<H256>,
-        wait_duration: Duration,
-        inner: &'a BlockProducerInner,
-    ) -> Self {
+    /// Creates a new tracker that automatically finds the highest cumulative difficulty block
+    pub fn new(inner: &'a BlockProducerInner, wait_duration: Duration) -> Self {
+        // Subscribe to block state updates
+        let block_state_rx = inner.service_senders.subscribe_block_state_updates();
+
+        // Get initial blockchain state
+        let tree = inner.block_tree_guard.read();
+        let (target_block_hash, max_difficulty) = tree.get_max_cumulative_difficulty_block();
+        let (blocks_awaiting_validation, fallback_block_hash) =
+            tree.get_validation_chain_status(&target_block_hash);
+        drop(tree);
+
         Self {
             state: ValidationState::new(
                 target_block_hash,
@@ -63,15 +67,13 @@ impl<'a> BlockValidationTracker<'a> {
             ),
             timer: Timer::new(wait_duration),
             inner,
+            block_state_rx,
         }
     }
 
     /// Waits for a block to be fully validated, monitoring validation progress
     /// Returns the final block hash to use (either the target or fallback)
-    pub async fn wait_for_validation(
-        &mut self,
-        block_state_rx: &mut Receiver<BlockStateUpdated>,
-    ) -> eyre::Result<H256> {
+    pub async fn wait_for_validation(&mut self) -> eyre::Result<H256> {
         let start_time = Instant::now();
 
         loop {
@@ -201,7 +203,7 @@ impl<'a> BlockValidationTracker<'a> {
 
             // Wait for next event or timeout; restart the loop
             let _event = tokio::select! {
-                event = block_state_rx.recv() => {
+                event = self.block_state_rx.recv() => {
                     Some(event.expect("channel must not close"))
                 }
                 _ = self.timer.sleep_until_deadline() => {

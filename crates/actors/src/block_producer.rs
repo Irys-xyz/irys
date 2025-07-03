@@ -250,61 +250,14 @@ pub trait BlockProdStrategy {
     #[tracing::instrument(skip(self), level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-        let start_time = tokio::time::Instant::now();
 
-        // Get the block with maximum cumulative difficulty
-        let (target_block_hash, max_difficulty) = {
-            let read = self.inner().block_tree_guard.read();
-            read.get_max_cumulative_difficulty_block()
-        };
-
-        // Check validation status of the max difficulty block
-        let (blocks_awaiting_validation, fallback_block_hash) = {
-            let read = self.inner().block_tree_guard.read();
-            read.get_validation_chain_status(&target_block_hash)
-        };
-
-        debug!(
-            target_block = %target_block_hash,
-            max_difficulty = %max_difficulty,
-            blocks_awaiting_validation,
-            fallback_block = ?fallback_block_hash,
-            "Selecting parent block for production"
-        );
-
-        // Wait for validation if needed
-        let parent_block_hash = if blocks_awaiting_validation > 0 {
-            let mut tracker = BlockValidationTracker::new(
-                target_block_hash,
-                max_difficulty,
-                blocks_awaiting_validation,
-                fallback_block_hash,
-                MAX_WAIT_TIME,
-                self.inner(),
-            );
-
-            let mut block_state_rx = self.inner().service_senders.subscribe_block_state_updates();
-
-            tracker.wait_for_validation(&mut block_state_rx).await?
-        } else {
-            info!(
-                target_block = %target_block_hash,
-                "Target block already validated, skipping wait"
-            );
-            target_block_hash
-        };
+        // Use BlockValidationTracker to select the parent block
+        let parent_block_hash = BlockValidationTracker::new(self.inner(), MAX_WAIT_TIME)
+            .wait_for_validation()
+            .await?;
 
         // Fetch the parent block header
         let header = self.fetch_block_header(parent_block_hash).await?;
-
-        let elapsed = start_time.elapsed();
-        info!(
-            parent_block = %parent_block_hash,
-            parent_height = header.height,
-            elapsed_ms = elapsed.as_millis(),
-            waited_for_validation = blocks_awaiting_validation > 0,
-            "Selected parent block for production"
-        );
 
         // Get the EMA snapshot
         let ema_snapshot = self.get_block_ema_snapshot(&header.block_hash)?;
