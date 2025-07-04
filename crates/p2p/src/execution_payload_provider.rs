@@ -158,10 +158,15 @@ where
     }
 
     pub async fn remove_payload_from_cache(&self, evm_block_hash: &B256) {
-        debug!("Removing execution payload from cache: {:?}", evm_block_hash);
+        debug!(
+            "Removing execution payload from cache: {:?}",
+            evm_block_hash
+        );
         let mut cache = self.cache.write().await;
         cache.payloads.pop(evm_block_hash);
-        cache.payloads_currently_requested_from_the_network.pop(evm_block_hash);
+        cache
+            .payloads_currently_requested_from_the_network
+            .pop(evm_block_hash);
         self.payload_senders.write().await.pop(evm_block_hash);
     }
 

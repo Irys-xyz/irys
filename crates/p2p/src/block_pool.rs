@@ -417,7 +417,9 @@ where
 
         // Remove the payload from the cache after it has been processed to prevent excessive memory usage
         // during the fast track process (The cache is LRU, but its upper limit is more for unexpected situations)
-        self.execution_payload_provider.remove_payload_from_cache(&block_header.evm_block_hash).await;
+        self.execution_payload_provider
+            .remove_payload_from_cache(&block_header.evm_block_hash)
+            .await;
 
         Ok(())
     }
@@ -602,12 +604,12 @@ where
                 block_header.block_hash, block_header.height,
             );
             return match self.fast_track_block(block_header).await {
-                Ok(()) => { Ok(()) }
+                Ok(()) => Ok(()),
                 Err(err) => {
                     self.blocks_cache.remove_block(&block_hash).await;
                     Err(err)
                 }
-            }
+            };
         }
 
         check_block_status(
