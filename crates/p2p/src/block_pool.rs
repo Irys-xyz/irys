@@ -1,5 +1,5 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
-use crate::execution_payload_provider::{ExecutionPayloadProvider, ExecutionPayloadProviderError};
+use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
 use actix::Addr;
@@ -91,7 +91,7 @@ where
 
 #[derive(Clone, Debug)]
 struct BlockCacheInner {
-    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, IrysBlockHeader>,
+    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, Arc<IrysBlockHeader>>,
     pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
     pub(crate) requested_blocks: HashSet<BlockHash>,
 }
@@ -108,7 +108,7 @@ impl BlockCache {
         }
     }
 
-    async fn add_block(&self, block_header: IrysBlockHeader) {
+    async fn add_block(&self, block_header: Arc<IrysBlockHeader>) {
         self.inner.write().await.add_block(block_header);
     }
 
@@ -120,7 +120,10 @@ impl BlockCache {
         self.inner.read().await.is_block_in_cache(block_hash)
     }
 
-    async fn get_block_header_cloned(&self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
+    async fn get_block_header_cloned(
+        &self,
+        block_hash: &BlockHash,
+    ) -> Option<Arc<IrysBlockHeader>> {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
@@ -152,7 +155,7 @@ impl BlockCache {
     async fn orphaned_blocks_by_parent_cloned(
         &self,
         block_hash: &BlockHash,
-    ) -> Option<IrysBlockHeader> {
+    ) -> Option<Arc<IrysBlockHeader>> {
         self.inner
             .write()
             .await
@@ -191,11 +194,11 @@ impl BlockCacheInner {
         }
     }
 
-    fn add_block(&mut self, block_header: IrysBlockHeader) {
-        self.orphaned_blocks_by_parent
-            .put(block_header.previous_block_hash, block_header.clone());
+    fn add_block(&mut self, block_header: Arc<IrysBlockHeader>) {
         self.block_hash_to_parent_hash
             .put(block_header.block_hash, block_header.previous_block_hash);
+        self.orphaned_blocks_by_parent
+            .put(block_header.previous_block_hash, block_header);
     }
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
@@ -204,10 +207,10 @@ impl BlockCacheInner {
         }
     }
 
-    fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
+    fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<Arc<IrysBlockHeader>> {
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
             if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return Some(header.clone());
+                return Some(Arc::clone(header));
             }
         }
 
@@ -301,10 +304,10 @@ where
         }
     }
 
-    async fn migrate_block(&self, header: &IrysBlockHeader) -> Result<(), BlockPoolError> {
+    async fn migrate_block(&self, header: &Arc<IrysBlockHeader>) -> Result<(), BlockPoolError> {
         debug!("Block pool: Migrating block {:?}", header.block_hash);
         self.mempool
-            .migrate_block(header.clone())
+            .migrate_block(Arc::clone(header))
             .await
             .map_err(|err| {
                 BlockPoolError::MempoolError(format!("Mempool migration error: {:?}", err))
@@ -487,7 +490,10 @@ where
 
     /// Fast tracks a block by migrating it to the mempool without performing any validation.
     /// This is useful when syncing a block from a node you trust
-    async fn fast_track_block(&self, block_header: IrysBlockHeader) -> Result<(), BlockPoolError> {
+    async fn fast_track_block(
+        &self,
+        block_header: Arc<IrysBlockHeader>,
+    ) -> Result<(), BlockPoolError> {
         let block_height = block_header.height;
         let block_hash = block_header.block_hash;
         let evm_block_hash = block_header.evm_block_hash;
@@ -582,7 +588,7 @@ where
 
     pub(crate) async fn process_block(
         &self,
-        block_header: IrysBlockHeader,
+        block_header: Arc<IrysBlockHeader>,
         skip_validation_for_fast_track: bool,
     ) -> Result<(), BlockPoolError> {
         if skip_validation_for_fast_track {
@@ -633,7 +639,7 @@ where
 
             if let Err(block_discovery_error) = self
                 .block_discovery
-                .handle_block(block_header.clone())
+                .handle_block(Arc::clone(&block_header))
                 .await
             {
                 error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
@@ -655,8 +661,6 @@ where
             self.handle_execution_payload_for_prevalidated_block(
                 block_header.evm_block_hash,
                 false,
-                block_header.clone(),
-                None,
             );
 
             debug!(
@@ -697,9 +701,7 @@ where
     pub(crate) fn handle_execution_payload_for_prevalidated_block(
         &self,
         evm_block_hash: B256,
-        validate_and_submit_payload: bool,
-        irys_block_header: IrysBlockHeader,
-        response: Option<oneshot::Sender<Result<(), ExecutionPayloadProviderError>>>,
+        use_trusted_peers_only: bool,
     ) {
         debug!(
             "Block pool: Handling execution payload for EVM block hash: {:?}",
@@ -707,33 +709,9 @@ where
         );
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
-        let database_provider = self.db.clone();
-        let service_senders = self.service_senders.clone();
-        let config = self.config.clone();
         tokio::spawn(async move {
-            if validate_and_submit_payload {
-                debug!(
-                    "Block pool: Validating and submitting execution payload for block {:?}",
-                    evm_block_hash
-                );
-                let res = execution_payload_provider
-                    .fetch_validate_and_submit_payload(
-                        &config,
-                        &service_senders,
-                        &irys_block_header,
-                        &database_provider,
-                    )
-                    .await;
-                if let Some(sender) = response {
-                    if let Err(err) = sender.send(res) {
-                        error!(
-                            "Failed to send response for execution payload validation: {:?}",
-                            err
-                        );
-                    }
-                }
-            } else if let Some(sealed_block) = execution_payload_provider
-                .wait_for_sealed_block(&evm_block_hash, validate_and_submit_payload)
+            if let Some(sealed_block) = execution_payload_provider
+                .wait_for_sealed_block(&evm_block_hash, use_trusted_peers_only)
                 .await
             {
                 let evm_block = sealed_block.into_block();
@@ -750,15 +728,6 @@ where
                         "Execution payload for block {:?} has been broadcasted",
                         evm_block_hash
                     );
-                }
-
-                if let Some(sender) = response {
-                    if let Err(err) = sender.send(Ok(())) {
-                        error!(
-                            "Failed to send response for execution payload broadcast: {:?}",
-                            err
-                        );
-                    }
                 }
             }
         });
@@ -870,13 +839,13 @@ where
     pub(crate) async fn get_block_data(
         &self,
         block_hash: &BlockHash,
-    ) -> Result<Option<IrysBlockHeader>, BlockPoolError> {
+    ) -> Result<Option<Arc<IrysBlockHeader>>, BlockPoolError> {
         if let Some(header) = self.blocks_cache.get_block_header_cloned(block_hash).await {
             return Ok(Some(header));
         }
 
         match self.mempool.get_block_header(*block_hash, true).await {
-            Ok(Some(header)) => return Ok(Some(header)),
+            Ok(Some(header)) => return Ok(Some(Arc::new(header))),
             Ok(None) => {}
             Err(err) => {
                 return Err(BlockPoolError::MempoolError(format!(
@@ -889,6 +858,7 @@ where
         self.db
             .view_eyre(|tx| block_header_by_hash(tx, block_hash, true))
             .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
+            .map(|block| block.map(Arc::new))
     }
 }
 

@@ -1068,11 +1068,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
-    pub fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+    pub fn gossip_block(&self, block_header: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessage::from((*block_header).clone()))?;
+            .send(GossipBroadcastMessage::from(Arc::clone(block_header)))?;
 
         Ok(())
     }

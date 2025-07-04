@@ -43,7 +43,7 @@ pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
-    pub migrated_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
 }
 
 impl MempoolStub {
@@ -137,7 +137,7 @@ impl MempoolFacade for MempoolStub {
 
     async fn migrate_block(
         &self,
-        irys_block_header: IrysBlockHeader,
+        irys_block_header: Arc<IrysBlockHeader>,
     ) -> std::result::Result<usize, TxIngressError> {
         self.migrated_blocks
             .write()
@@ -153,7 +153,7 @@ impl MempoolFacade for MempoolStub {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
-    pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
 }
 
@@ -161,7 +161,7 @@ pub(crate) struct BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
-        block: IrysBlockHeader,
+        block: Arc<IrysBlockHeader>,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.blocks
             .write()
@@ -299,7 +299,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub peer_list: PeerListMock,
     pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub api_client_stub: ApiClientStub,
     // Tets need the task manager to be stored somewhere
     #[expect(dead_code)]

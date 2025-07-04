@@ -95,19 +95,19 @@ fn create_test_config() -> Config {
 
 #[derive(Clone)]
 struct BlockDiscoveryStub {
-    received_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    received_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     block_status_provider: BlockStatusProvider,
 }
 
 impl BlockDiscoveryStub {
-    fn get_blocks(&self) -> Vec<IrysBlockHeader> {
+    fn get_blocks(&self) -> Vec<Arc<IrysBlockHeader>> {
         self.received_blocks.read().unwrap().clone()
     }
 }
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
-    async fn handle_block(&self, block: IrysBlockHeader) -> Result<(), BlockDiscoveryError> {
+    async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError> {
         self.block_status_provider
             .add_block_to_index_and_tree_for_testing(&block);
         self.received_blocks
@@ -278,8 +278,10 @@ async fn should_process_block() {
         test_header.previous_block_hash.0.to_base58()
     );
 
+    let test_header = Arc::new(test_header.clone());
+
     service
-        .process_block(test_header.clone(), false)
+        .process_block(Arc::clone(&test_header), false)
         .await
         .expect("can't process block");
 
@@ -394,19 +396,22 @@ async fn should_process_block_with_intermediate_block_in_api() {
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
         tokio::spawn(async move {
             debug!("Send block to block pool");
-            pool.process_block(block.clone(), false)
+            pool.process_block(Arc::new(block.clone()), false)
                 .await
                 .expect("to process block");
         });
         true
     });
 
+    let block2 = Arc::new(block2.clone());
+    let block3 = Arc::new(block3.clone());
+
     // Insert block1 into the database
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
     block_pool
-        .process_block(block3.clone(), false)
+        .process_block(Arc::clone(&block3), false)
         .await
         .expect("can't process block");
 
@@ -496,7 +501,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     );
 
     let res = block_pool
-        .process_block(header_building_on_very_old_block.clone(), false)
+        .process_block(Arc::new(header_building_on_very_old_block.clone()), false)
         .await;
 
     assert!(res.is_err());
@@ -621,7 +626,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         if let Some(block) = block {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                let res = pool.process_block(block.clone(), false).await;
+                let res = pool.process_block(Arc::new(block.clone()), false).await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
                     errors_sender.send(err).unwrap();
@@ -637,7 +642,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     });
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
-    let res = block_pool.process_block(bogus_block, false).await;
+    let res = block_pool.process_block(Arc::new(bogus_block), false).await;
 
     assert!(res.is_ok());
     let processing_error = error_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -697,7 +702,7 @@ async fn should_fast_track_block() {
     );
 
     service
-        .process_block(test_header.clone(), true)
+        .process_block(Arc::new(test_header.clone()), true)
         .await
         .expect("can't process block");
 
@@ -765,7 +770,7 @@ async fn should_not_fast_track_block_already_in_index() {
     );
 
     let err = service
-        .process_block(test_header.clone(), true)
+        .process_block(Arc::new(test_header.clone()), true)
         .await
         .expect_err("to have an error");
 

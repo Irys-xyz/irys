@@ -420,7 +420,7 @@ where
                 .await?;
 
         self.block_pool
-            .process_block(block_header, skip_block_validation)
+            .process_block(Arc::new(block_header), skip_block_validation)
             .await
             .map_err(GossipError::BlockPool)?;
         Ok(())

@@ -2,6 +2,7 @@ use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
+use std::sync::Arc;
 use tracing::debug;
 
 #[actix_web::test]
@@ -175,6 +176,9 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
     // that the peers prefer the first block they saw with this cumulative difficulty,
     // their own.
     assert_eq!(peer1_block.cumulative_diff, peer2_block.cumulative_diff);
+
+    let peer2_block = Arc::new(peer2_block);
+    let peer1_block = Arc::new(peer1_block);
 
     peer2_node.gossip_block(&peer2_block)?;
     peer1_node.gossip_block(&peer1_block)?;

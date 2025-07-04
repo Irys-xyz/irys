@@ -31,7 +31,7 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     ) -> Result<Option<IrysBlockHeader>, TxReadError>;
     async fn migrate_block(
         &self,
-        irys_block_header: IrysBlockHeader,
+        irys_block_header: Arc<IrysBlockHeader>,
     ) -> Result<usize, TxIngressError>;
 
     async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()>;
@@ -137,11 +137,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
     async fn migrate_block(
         &self,
-        irys_block_header: IrysBlockHeader,
+        irys_block_header: Arc<IrysBlockHeader>,
     ) -> Result<usize, TxIngressError> {
         self.migration_sender
             .send(BlockMigratedEvent {
-                block: Arc::new(irys_block_header),
+                block: irys_block_header,
             })
             .map_err(|e| TxIngressError::Other(format!("Failed to send BlockMigratedEvent: {}", e)))
     }
