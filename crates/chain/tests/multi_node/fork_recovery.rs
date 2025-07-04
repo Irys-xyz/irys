@@ -525,9 +525,9 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     //
     {
         // Enable gossip
-        node_a.gossip_disable();
-        node_b.gossip_disable();
-        node_c.gossip_disable();
+        node_a.gossip_enable();
+        node_b.gossip_enable();
+        node_c.gossip_enable();
         // Gossip all blocks so everyone syncs
         node_b.gossip_block(&b_block2)?;
         node_b.gossip_block(&b_block3)?;
