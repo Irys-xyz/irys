@@ -314,7 +314,7 @@ where
         irys_block_header: &IrysBlockHeader,
         db: &DatabaseProvider,
     ) -> Result<(), ExecutionPayloadProviderError> {
-        // For test that specifically want to mock the payload provider
+        // For tests that specifically want to mock the payload provider
         // All tests that do not is going to use the real provider
         #[cfg(test)]
         {
