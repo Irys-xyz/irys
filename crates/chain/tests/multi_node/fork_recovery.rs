@@ -486,7 +486,8 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // NODE B -> Node C
     // post commitment txs and then the blocks to node c
-    // this will cause a reorg on node c to match the chain on node b
+    // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
+    // this will cause the txs that were previosuly canonical from C2 to become non canon
     {
         node_c.post_commitment_tx(&peer_b_b2_stake_tx).await;
         node_c.post_commitment_tx(&peer_b_b2_pledge_tx).await;
@@ -519,6 +520,8 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     //
 
     // Node C mines on top of B's chain and does not gossip it back to B
+    // Node C has the non canon txs from it's now non canon block 2.
+    // Node C will choose to include these txs in block C4
     if let Err(does_not_reach_height) = node_c.wait_until_height(3, seconds_to_wait).await {
         tracing::error!(
             "Node C Failed to reach block height 3: {:?}",
@@ -618,8 +621,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
             Ok(txs)
         }
 
-        // check non canonical blocks are as expected
-
         // check correct txs made it into specific canon blocks, that are now synced across every node
         assert_eq!(sorted_commitments_at(&node_a, 1).await?, vec![]);
         assert_eq!(
@@ -627,6 +628,9 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
             peer_b_commitment_txs
         ); // expect only the two txs included in Peer B B2
         assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
+        // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
+        // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as elligible txs
+        // To reiterate. These were previously mined in non canon block C2. They were then mined again in canon block C4
         assert_eq!(
             sorted_commitments_at(&node_a, 4).await?,
             peer_c_commitment_txs
@@ -654,8 +658,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
             peer_c_commitment_txs
         );
     }
-
-    // TODO: stretch goal, make original chain B the longest chain again and see if txs come back
 
     // gracefully shutdown nodes
     tokio::join!(node_a.stop(), node_b.stop(), node_c.stop(),);
