@@ -395,18 +395,16 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // mine a single block, and let everyone sync so future txs start at block height 1.
     node_a.mine_block().await?; // mine block a1
     node_a.wait_until_height(1, seconds_to_wait).await?;
-    let a_block1 = node_a.get_block_by_height(1).await?; // get block a1
+    let block_height_1 = node_a.get_block_by_height(1).await?; // get block a1
     node_b
-        .wait_for_block(&a_block1.block_hash, seconds_to_wait)
+        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
         .await?;
     node_c
-        .wait_for_block(&a_block1.block_hash, seconds_to_wait)
+        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
         .await?;
-    let b_block1 = node_b.get_block_by_height(1).await?; // get block b1
-    let c_block1 = node_c.get_block_by_height(1).await?; // get block c1
 
     assert_eq!(
-        a_block1.system_ledgers.len(),
+        block_height_1.system_ledgers.len(),
         0,
         "No txs should exist to be included in this block"
     );
@@ -426,7 +424,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
-        .post_stake_commitment_without_gossip(b_block1.block_hash)
+        .post_stake_commitment_without_gossip(block_height_1.block_hash)
         .await;
     let peer_b_b2_pledge_tx = node_b
         .post_pledge_commitment_without_gossip(peer_b_b2_stake_tx.id)
@@ -434,7 +432,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
 
     // node_c generates txs in isolation for inclusion block 2
     let peer_c_b2_stake_tx = node_c
-        .post_stake_commitment_without_gossip(c_block1.block_hash)
+        .post_stake_commitment_without_gossip(block_height_1.block_hash)
         .await;
     let peer_c_b2_pledge_tx = node_c
         .post_pledge_commitment_without_gossip(peer_c_b2_stake_tx.id)
