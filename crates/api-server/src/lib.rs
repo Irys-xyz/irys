@@ -17,8 +17,8 @@ use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
-    block, block_index, commitment, get_chunk, index, network_config, peer_list, post_block,
-    post_chunk, post_version, price, proxy::proxy, tx,
+    block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
+    post_version, price, proxy::proxy, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -54,7 +54,6 @@ impl ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
-        .route("/block", web::post().to(post_block::post_block))
         .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(
             "/block_index",
