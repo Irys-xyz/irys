@@ -202,8 +202,8 @@ pub async fn sync_chain<P, B, M>(
     node_mode: &NodeMode,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
-    // BlockPool is option because test structured in a way that adding it to the sync
-    //  will require testing the payload repair functionality, and for the sake of the speed we
+    // BlockPool is optional because tests are structured in a way that would require testing the
+    // payload repair functionality if BlockPool is not optional. For the sake of the speed we
     //  don't want to do that
     block_pool: Option<Arc<BlockPool<P, B, M>>>,
     reth_service: Option<Addr<RethServiceActor>>,
