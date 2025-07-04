@@ -1127,7 +1127,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// needing to send specific blocks between specific peers
     pub async fn send_block_to_peer(
         &self,
-        peer: &IrysNodeTest<IrysNodeCtx>,
+        peer: &Self,
         irys_block_header: &IrysBlockHeader,
     ) -> eyre::Result<()> {
         match peer
