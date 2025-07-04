@@ -88,7 +88,6 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
         }
         block_tree_cache
             .add_common(
-                block.block_hash,
                 block,
                 Arc::new(CommitmentSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -249,7 +248,6 @@ pub fn create_and_apply_fork(
 
             // Add to block tree as validated but not yet canonical
             tree.add_common(
-                header.block_hash,
                 &header,
                 Arc::new(CommitmentSnapshot::default()),
                 dummy_ema_snapshot(),

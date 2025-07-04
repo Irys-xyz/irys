@@ -292,7 +292,7 @@ impl BlockStatusProvider {
 
         self.block_tree_read_guard
             .write()
-            .add_peer_block(
+            .add_block(
                 block,
                 Arc::new(CommitmentSnapshot::default()),
                 Arc::new(EmaSnapshot::default()),
