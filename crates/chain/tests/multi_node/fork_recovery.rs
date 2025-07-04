@@ -334,13 +334,13 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
 /// Reorg where there are 3 forks and the tip moves across all of them as each is extended longer than the other.
 ///   We need to verify that
-///    - txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
-///    - txs do not appear twice, or are missing from canonical chain
+///    - commitment txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
+///    - commitment txs do not appear twice, or are missing from canonical chain
 ///    - all canonical blocks move to all peers
 ///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - TODO: new balance changes are applied based on the new canonical branch
 #[test_log::test(actix_web::test)]
-async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
+async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
@@ -450,10 +450,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
 
     // check how many txs made it into each block, we expect no more than 2
-    tracing::error!("peer_b_b2_stake_tx: {:?}", peer_b_b2_stake_tx);
-    tracing::error!("peer_b_b2_pledge_tx: {:?}", peer_b_b2_pledge_tx);
-    tracing::error!("peer_c_b2_stake_tx: {:?}", peer_c_b2_stake_tx);
-    tracing::error!("peer_c_b2_pledge_tx: {:?}", peer_c_b2_pledge_tx);
     assert_eq!(
         b_block2.system_ledgers.len(),
         1,
@@ -586,7 +582,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         node_c
             .wait_for_mempool_commitment_txs(all_commitment_txs.clone(), seconds_to_wait)
             .await
-            .expect("node_c and node_c txs to still be on node_c");
+            .expect("node_b and node_c txs to still be on node_c");
 
         // sort tx order
         async fn sorted_commitments_at(
