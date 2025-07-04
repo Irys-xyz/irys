@@ -4799,7 +4799,6 @@ dependencies = [
 name = "irys-api-server"
 version = "0.1.0"
 dependencies = [
- "actix",
  "actix-cors",
  "actix-web",
  "awc",
