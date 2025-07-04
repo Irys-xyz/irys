@@ -92,47 +92,6 @@ impl RethBlockProvider {
         Some(evm_block)
     }
 
-    // /// Submits a validated execution payload to the beacon engine. As the name implies,
-    // /// you should validate the payload before submitting it.
-    // pub async fn submit_validated_payload(
-    //     &self,
-    //     payload: ExecutionData,
-    // ) -> Result<(), ExecutionPayloadProviderError> {
-    //     let payload_block_hash = payload.block_hash();
-    //     match self {
-    //         Self::IrysRethAdapter(adapter) => {
-    //             debug!("Submitting payload {payload_block_hash:?} to the beacon engine");
-    //             adapter
-    //                 .inner
-    //                 .add_ons_handle
-    //                 .beacon_engine_handle
-    //                 .new_payload(payload)
-    //                 .await?;
-    //             debug!("Successfully submitted payload {payload_block_hash:?}");
-    //
-    //             // trigger forkchoice update via engine api to commit the block to the blockchain
-    //             adapter
-    //                 .update_forkchoice_full(
-    //                     payload_block_hash,
-    //                     // TODO: we mark this block as confirmed because we produced it?
-    //                     Some(payload_block_hash),
-    //                     // TODO: marking a block as finalized is handled by a different service - not sure about this
-    //                     None,
-    //                 )
-    //                 .await
-    //                 .map_err(ExecutionPayloadProviderError::UpdateForkchoiceError)?;
-    //
-    //             debug!("Successfully updated forkchoice after submitting payload {payload_block_hash:?}");
-    //             Ok(())
-    //         }
-    //         #[cfg(test)]
-    //         Self::Mock(_) => {
-    //             debug!("Mock provider does not support submitting payloads");
-    //             Ok(())
-    //         }
-    //     }
-    // }
-
     #[cfg(test)]
     pub fn evm_block_mock(&self, evm_block_hash: B256) -> Option<Block> {
         if let Self::Mock(payloads) = self {
@@ -196,6 +155,14 @@ where
                 }
             }
         }
+    }
+
+    pub async fn remove_payload_from_cache(&self, evm_block_hash: &B256) {
+        debug!("Removing execution payload from cache: {:?}", evm_block_hash);
+        let mut cache = self.cache.write().await;
+        cache.payloads.pop(evm_block_hash);
+        cache.payloads_currently_requested_from_the_network.pop(evm_block_hash);
+        self.payload_senders.write().await.pop(evm_block_hash);
     }
 
     /// DO NOT USE THIS METHOD ANYWHERE WHERE YOU NEED TO RELIABLY GET THE PAYLOAD!

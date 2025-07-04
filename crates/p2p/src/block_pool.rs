@@ -25,7 +25,7 @@ use thiserror::Error;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info};
 
-const EXECUTION_PAYLOAD_CACHE_SIZE: usize = 1000;
+const BLOCK_POOL_CACHE_SIZE: usize = 250;
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum BlockPoolError {
@@ -185,10 +185,10 @@ impl BlockCacheInner {
     fn new() -> Self {
         Self {
             orphaned_blocks_by_parent: LruCache::new(
-                NonZeroUsize::new(EXECUTION_PAYLOAD_CACHE_SIZE).unwrap(),
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
             ),
             block_hash_to_parent_hash: LruCache::new(
-                NonZeroUsize::new(EXECUTION_PAYLOAD_CACHE_SIZE).unwrap(),
+                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
             ),
             requested_blocks: HashSet::new(),
         }
@@ -415,6 +415,10 @@ where
                 })?;
         }
 
+        // Remove the payload from the cache after it has been processed to prevent excessive memory usage
+        // during the fast track process (The cache is LRU, but its upper limit is more for unexpected situations)
+        self.execution_payload_provider.remove_payload_from_cache(&block_header.evm_block_hash).await;
+
         Ok(())
     }
 
@@ -591,12 +595,19 @@ where
         block_header: Arc<IrysBlockHeader>,
         skip_validation_for_fast_track: bool,
     ) -> Result<(), BlockPoolError> {
+        let block_hash = block_header.block_hash;
         if skip_validation_for_fast_track {
             debug!(
                 "Block pool: The block {:?} (height {}) is marked for fast track, skipping validation",
                 block_header.block_hash, block_header.height,
             );
-            return self.fast_track_block(block_header).await;
+            return match self.fast_track_block(block_header).await {
+                Ok(()) => { Ok(()) }
+                Err(err) => {
+                    self.blocks_cache.remove_block(&block_hash).await;
+                    Err(err)
+                }
+            }
         }
 
         check_block_status(
