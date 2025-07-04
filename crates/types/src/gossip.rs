@@ -7,6 +7,7 @@ use base58::ToBase58 as _;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct GossipBroadcastMessage {
@@ -56,8 +57,8 @@ impl From<CommitmentTransaction> for GossipBroadcastMessage {
     }
 }
 
-impl From<IrysBlockHeader> for GossipBroadcastMessage {
-    fn from(block: IrysBlockHeader) -> Self {
+impl From<Arc<IrysBlockHeader>> for GossipBroadcastMessage {
+    fn from(block: Arc<IrysBlockHeader>) -> Self {
         let key = GossipCacheKey::irys_block(&block);
         let value = GossipData::Block(block);
         Self::new(key, value)
@@ -99,7 +100,7 @@ pub enum GossipData {
     Chunk(UnpackedChunk),
     Transaction(IrysTransactionHeader),
     CommitmentTransaction(CommitmentTransaction),
-    Block(IrysBlockHeader),
+    Block(Arc<IrysBlockHeader>),
     ExecutionPayload(Block),
 }
 

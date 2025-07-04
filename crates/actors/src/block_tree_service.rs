@@ -78,6 +78,13 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
+    FastTrackStorageFinalized {
+        block_header: IrysBlockHeader,
+        response: oneshot::Sender<eyre::Result<Option<Addr<RethServiceActor>>>>,
+    },
+    ReloadCacheFromDb {
+        response: oneshot::Sender<()>,
+    },
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -243,8 +250,71 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
             }
+            BlockTreeServiceMessage::FastTrackStorageFinalized {
+                block_header,
+                response,
+            } => {
+                let result = self
+                    .fast_track_storage_finalized_message(block_header)
+                    .await;
+                let _ = response.send(result);
+            }
+            BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
+                self.reload_cache_from_db();
+                let _ = response.send(());
+            }
         }
         Ok(())
+    }
+
+    fn reload_cache_from_db(&self) {
+        debug!("Reloading block tree cache from database");
+        let new_block_tree_cache = BlockTreeCache::restore_from_db(
+            self.block_index_guard.clone(),
+            self.commitment_state_guard.clone(),
+            self.reth_service_actor.clone(),
+            self.db.clone(),
+            self.consensus_config.clone(),
+        );
+        *self.cache.write().unwrap() = new_block_tree_cache;
+    }
+
+    /// Fast tracks the storage finalization of a block by retrieving transaction headers. Do
+    /// after the block has been migrated.
+    async fn fast_track_storage_finalized_message(
+        &self,
+        block_header: IrysBlockHeader,
+    ) -> eyre::Result<Option<Addr<RethServiceActor>>> {
+        let submit_txs = self
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
+            .await?;
+        let publish_txs = self
+            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
+            .await?;
+
+        let mut all_txs = vec![];
+        all_txs.extend(publish_txs);
+        all_txs.extend(submit_txs);
+
+        info!(
+            "Migrating to block_index - hash: {} height: {}",
+            &block_header.block_hash.0.to_base58(),
+            &block_header.height
+        );
+
+        // HACK
+        System::set_current(self.system.clone());
+
+        let chunk_migration = ChunkMigrationService::from_registry();
+        let block_index = BlockIndexService::from_registry();
+        let block_finalized_message = BlockFinalizedMessage {
+            block_header: Arc::new(block_header),
+            all_txs: Arc::new(all_txs),
+        };
+
+        block_index.do_send(block_finalized_message.clone());
+        chunk_migration.do_send(block_finalized_message);
+        Ok(Some(self.reth_service_actor.clone()))
     }
 
     async fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
@@ -1625,10 +1695,10 @@ impl BlockTreeCache {
         while prev_block.height > 0 && depth_count < self.consensus_config.block_cache_depth {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
-            debug!(
-                "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
-                prev_entry.chain_state, prev_hash, prev_entry.block.height
-            );
+            // debug!(
+            //     "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
+            //     prev_entry.chain_state, prev_hash, prev_entry.block.height
+            // );
             match prev_entry.chain_state {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
                     return Some((
@@ -1681,6 +1751,32 @@ impl BlockTreeCache {
         } else {
             None
         }
+    }
+
+    pub fn get_earliest_unvalidated_block_height(&self) -> Option<u64> {
+        // Get the block with max cumulative difficulty
+        self.get_earliest_not_onchain_in_longest_chain()
+            .map(|(_entry, headers, _time)| {
+                headers
+                    .iter()
+                    .min_by(|header, header2| header.height.cmp(&header2.height))
+                    .map(|header| header.height)
+            })?
+    }
+
+    pub fn can_process_height(&self, height: u64) -> bool {
+        let max_tree_depth = self.consensus_config.block_migration_depth as u64;
+        if height < max_tree_depth {
+            return true;
+        }
+        let earliest_unvalidated_height = self.get_earliest_unvalidated_block_height();
+
+        earliest_unvalidated_height
+            .map(|earliest_height| {
+                let max_height = earliest_height + (max_tree_depth / 2);
+                height <= max_height
+            })
+            .unwrap_or(true)
     }
 
     /// Gets block with matching solution hash, excluding specified block.

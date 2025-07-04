@@ -2,10 +2,12 @@ use crate::types::GossipDataRequest;
 use crate::PeerList;
 use alloy_rpc_types::engine::ExecutionData;
 use async_trait::async_trait;
-use irys_actors::block_validation::PayloadProvider;
+use irys_actors::block_validation::{shadow_transactions_are_valid, PayloadProvider};
+use irys_actors::services::ServiceSenders;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_types::{Config, DatabaseProvider, IrysBlockHeader};
 use lru::LruCache;
-use reth::builder::Block as _;
+use reth::builder::{BeaconOnNewPayloadError, Block as _};
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
 use reth::providers::BlockReader as _;
@@ -29,9 +31,33 @@ pub enum RethBlockProvider {
     Mock(Arc<std::sync::RwLock<HashMap<B256, Block>>>),
 }
 
+#[derive(Debug)]
+pub enum ExecutionPayloadProviderError {
+    ProviderError(reth::providers::ProviderError),
+    ProviderNotSet,
+    PayloadNotFound(B256),
+    BeaconOnNewPayloadError(BeaconOnNewPayloadError),
+    UpdateForkchoiceError(eyre::Report),
+    PayloadValidationError(eyre::Report),
+}
+
+impl From<BeaconOnNewPayloadError> for ExecutionPayloadProviderError {
+    fn from(err: BeaconOnNewPayloadError) -> Self {
+        Self::BeaconOnNewPayloadError(err)
+    }
+}
+
 impl RethBlockProvider {
     pub fn new(irys_reth_node_adapter: IrysRethNodeAdapter) -> Self {
         Self::IrysRethAdapter(irys_reth_node_adapter)
+    }
+
+    pub fn as_irys_reth_adapter(&self) -> Option<&IrysRethNodeAdapter> {
+        match self {
+            Self::IrysRethAdapter(adapter) => Some(adapter),
+            #[cfg(test)]
+            Self::Mock(_) => None,
+        }
     }
 
     #[cfg(test)]
@@ -130,6 +156,19 @@ where
         }
     }
 
+    pub async fn remove_payload_from_cache(&self, evm_block_hash: &B256) {
+        debug!(
+            "Removing execution payload from cache: {:?}",
+            evm_block_hash
+        );
+        let mut cache = self.cache.write().await;
+        cache.payloads.pop(evm_block_hash);
+        cache
+            .payloads_currently_requested_from_the_network
+            .pop(evm_block_hash);
+        self.payload_senders.write().await.pop(evm_block_hash);
+    }
+
     /// DO NOT USE THIS METHOD ANYWHERE WHERE YOU NEED TO RELIABLY GET THE PAYLOAD!
     /// Use [ExecutionPayloadProvider::wait_for_payload] instead.
     /// This method is used to retrieve the payload from the local cache or EVM node.
@@ -175,24 +214,33 @@ where
     /// let evm_block_hash = irys_block.evm_block_hash;
     /// ```
     pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        self.wait_for_sealed_block(evm_block_hash).await.map(|sealed_block| {
+        self.wait_for_sealed_block(evm_block_hash, false).await.map(|sealed_block| {
             <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block)
         })
     }
 
     /// Same as [ExecutionPayloadProvider::wait_for_payload], but returns the sealed block instead
     /// of the execution data.
-    pub async fn wait_for_sealed_block(&self, evm_block_hash: &B256) -> Option<SealedBlock<Block>> {
+    pub async fn wait_for_sealed_block(
+        &self,
+        evm_block_hash: &B256,
+        request_only_from_trusted_peers: bool,
+    ) -> Option<SealedBlock<Block>> {
         if let Some(sealed_block) = self.get_locally_stored_sealed_block(evm_block_hash).await {
             return Some(sealed_block);
         }
 
         let receiver = self.block_receiver(*evm_block_hash).await;
-        self.request_payload_from_the_network(*evm_block_hash).await;
+        self.request_payload_from_the_network(*evm_block_hash, request_only_from_trusted_peers)
+            .await;
         receiver.await.ok()
     }
 
-    pub async fn request_payload_from_the_network(&self, evm_block_hash: B256) {
+    pub async fn request_payload_from_the_network(
+        &self,
+        evm_block_hash: B256,
+        use_trusted_peers_only: bool,
+    ) {
         self.cache
             .write()
             .await
@@ -200,7 +248,10 @@ where
             .put(evm_block_hash, ());
         if let Err(peer_list_error) = self
             .peer_list
-            .request_data_from_the_network(GossipDataRequest::ExecutionPayload(evm_block_hash))
+            .request_data_from_the_network(
+                GossipDataRequest::ExecutionPayload(evm_block_hash),
+                use_trusted_peers_only,
+            )
             .await
         {
             self.cache
@@ -253,6 +304,40 @@ where
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    pub async fn fetch_validate_and_submit_payload(
+        &self,
+        config: &Config,
+        service_senders: &ServiceSenders,
+        irys_block_header: &IrysBlockHeader,
+        db: &DatabaseProvider,
+    ) -> Result<(), ExecutionPayloadProviderError> {
+        // For tests that specifically want to mock the payload provider
+        // All tests that do not is going to use the real provider
+        #[cfg(test)]
+        {
+            if let RethBlockProvider::Mock(_) = &self.reth_payload_provider {
+                return Ok(());
+            }
+        }
+
+        let adapter = self
+            .reth_payload_provider
+            .as_irys_reth_adapter()
+            .ok_or(ExecutionPayloadProviderError::ProviderNotSet)?;
+
+        let result = shadow_transactions_are_valid(
+            config,
+            service_senders,
+            irys_block_header,
+            adapter,
+            db,
+            self.clone(),
+        )
+        .await;
+
+        result.map_err(ExecutionPayloadProviderError::PayloadValidationError)
     }
 }
 

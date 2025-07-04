@@ -131,6 +131,10 @@ where
     ) -> HttpResponse {
         let gossip_request = irys_block_header_json.0;
         let source_miner_address = gossip_request.miner_address;
+        let Some(source_socket_addr) = req.peer_addr() else {
+            return HttpResponse::BadRequest().finish();
+        };
+
         let peer =
             match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address).await {
                 Ok(peer_address) => peer_address,
@@ -143,7 +147,7 @@ where
             let block_hash_string = gossip_request.data.block_hash.0.to_base58();
             if let Err(error) = server
                 .data_handler
-                .handle_block_header_request(gossip_request, peer.address.api)
+                .handle_block_header_request(gossip_request, peer.address.api, source_socket_addr)
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;

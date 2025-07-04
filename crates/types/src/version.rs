@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use crate::{Arbitrary, RethPeerInfo};
+use crate::{Arbitrary, RethPeerInfo, H256};
 use alloy_primitives::Address;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -245,4 +245,18 @@ pub enum RejectionReason {
     BadHandshake,       // Malformed or invalid handshake request
     Untrusted,          // Peer doesn't meet trust requirements
     InternalError,      // Unable to complete request
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeInfo {
+    pub version: String,
+    pub peer_count: usize,
+    pub chain_id: u64,
+    pub height: u64,
+    pub block_hash: H256,
+    pub block_index_height: u64,
+    pub blocks: u64,
+    pub is_syncing: bool,
+    pub current_sync_height: usize,
 }

@@ -7,9 +7,8 @@ use crate::{
     utils::IrysNodeTest,
 };
 use actix_web::{http::header::ContentType, HttpMessage as _};
-use irys_api_server::routes::index::NodeInfo;
 use irys_testing_utils::initialize_tracing;
-use irys_types::BlockIndexItem;
+use irys_types::{BlockIndexItem, NodeInfo};
 use tracing::info;
 
 #[actix::test]

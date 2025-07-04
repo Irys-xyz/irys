@@ -95,6 +95,7 @@ pub trait PeerList: Send + Sync + Clone + Unpin + 'static {
     async fn request_data_from_the_network(
         &self,
         gossip_data_request: GossipDataRequest,
+        use_trusted_peers_only: bool,
     ) -> Result<(), PeerListFacadeError>;
 
     /// Requests the block to be gossiped over the network. Returns when the block is successfully
@@ -102,7 +103,14 @@ pub trait PeerList: Send + Sync + Clone + Unpin + 'static {
     async fn request_block_from_the_network(
         &self,
         block_hash: BlockHash,
+        use_trusted_peers_only: bool,
     ) -> Result<(), PeerListFacadeError>;
+
+    async fn is_a_trusted_peer(
+        &self,
+        miner_address: Address,
+        source_ip: IpAddr,
+    ) -> Result<bool, PeerListFacadeError>;
 }
 
 #[async_trait::async_trait]
@@ -204,10 +212,12 @@ where
     async fn request_data_from_the_network(
         &self,
         gossip_data_request: GossipDataRequest,
+        use_trusted_peers_only: bool,
     ) -> Result<(), PeerListFacadeError> {
         Ok(self
             .send(RequestDataFromTheNetwork {
                 data_request: gossip_data_request,
+                use_trusted_peers_only,
             })
             .await??)
     }
@@ -217,9 +227,26 @@ where
     async fn request_block_from_the_network(
         &self,
         block_hash: BlockHash,
+        use_trusted_peers_only: bool,
     ) -> Result<(), PeerListFacadeError> {
-        self.request_data_from_the_network(GossipDataRequest::Block(block_hash))
-            .await
+        self.request_data_from_the_network(
+            GossipDataRequest::Block(block_hash),
+            use_trusted_peers_only,
+        )
+        .await
+    }
+
+    async fn is_a_trusted_peer(
+        &self,
+        miner_address: Address,
+        source_ip: IpAddr,
+    ) -> Result<bool, PeerListFacadeError> {
+        self.send(IsATrustedPeerRequest {
+            peer_source_miner_address: miner_address,
+            peer_source_ip_address: source_ip,
+        })
+        .await
+        .map_err(PeerListFacadeError::from)
     }
 }
 
@@ -351,7 +378,6 @@ where
                 .iter()
                 .map(|p| p.api)
                 .collect(),
-
             reth_service_addr: Some(reth_actor),
         }
     }
@@ -923,6 +949,41 @@ where
     }
 }
 
+/// Get the list of active trusted peers
+#[derive(Message, Debug)]
+#[rtype(result = "bool")]
+pub struct IsATrustedPeerRequest {
+    pub peer_source_miner_address: Address,
+    pub peer_source_ip_address: IpAddr,
+}
+
+impl<A, R> Handler<IsATrustedPeerRequest> for PeerListServiceWithClient<A, R>
+where
+    A: ApiClient,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    type Result = bool;
+
+    fn handle(&mut self, msg: IsATrustedPeerRequest, _ctx: &mut Self::Context) -> Self::Result {
+        let source_miner_addr = msg.peer_source_miner_address;
+        let source_ip = msg.peer_source_ip_address;
+
+        let Some(peer) = self.peer_list_cache.get(&source_miner_addr) else {
+            return false;
+        };
+        let peer_api_ip = peer.address.api.ip();
+        let peer_gossip_ip = peer.address.gossip.ip();
+
+        let ip_matches_cached_ip = source_ip == peer_gossip_ip;
+        let ip_is_in_a_trusted_list = self
+            .trusted_peers_api_addresses
+            .iter()
+            .any(|socket_addr| socket_addr.ip() == peer_api_ip);
+
+        ip_matches_cached_ip && ip_is_in_a_trusted_list
+    }
+}
+
 /// Get the list of active peers
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<(Address, PeerListItem)>")]
@@ -1277,6 +1338,7 @@ where
 #[rtype(result = "Result<(), PeerListServiceError>")]
 pub struct RequestDataFromTheNetwork {
     data_request: GossipDataRequest,
+    use_trusted_peers_only: bool,
 }
 
 impl<A, R> Handler<RequestDataFromTheNetwork> for PeerListServiceWithClient<A, R>
@@ -1288,21 +1350,27 @@ where
 
     fn handle(&mut self, msg: RequestDataFromTheNetwork, ctx: &mut Self::Context) -> Self::Result {
         let data_request = msg.data_request;
+        let use_trusted_peers_only = msg.use_trusted_peers_only;
         let gossip_client = self.gossip_client.clone();
         let self_addr = ctx.address();
 
         Box::pin(
             async move {
-                // Get top 10 most active peers
-                let mut peers = self_addr
-                    .send(TopActivePeersRequest {
-                        truncate: Some(10),
-                        exclude_peers: None,
-                    })
-                    .await?;
-                // Shuffle them
+                let mut peers = if use_trusted_peers_only {
+                    self_addr.send(TrustedPeersRequest).await?
+                } else {
+                    // Get the top 10 most active peers
+                    self_addr
+                        .send(TopActivePeersRequest {
+                            truncate: Some(10),
+                            exclude_peers: None,
+                        })
+                        .await?
+                };
+
+                // Shuffle peers to randomize the selection
                 peers.shuffle(&mut rand::thread_rng());
-                // Take random 5 out of top 10
+                // Take random 5
                 peers.truncate(5);
 
                 if peers.is_empty() {

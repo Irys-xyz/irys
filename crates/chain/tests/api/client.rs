@@ -139,6 +139,19 @@ async fn check_get_block_endpoint(
     debug!("block: {:?}", block);
 }
 
+async fn check_info_endpoint(
+    api_client: &IrysApiClient,
+    api_address: SocketAddr,
+    ctx: &IrysNodeTest<IrysNodeCtx>,
+) {
+    let info = api_client
+        .node_info(api_address)
+        .await
+        .expect("valid get info response");
+
+    assert_eq!(info.chain_id, ctx.node_ctx.config.consensus.chain_id);
+}
+
 #[test_log::test(actix_rt::test)]
 async fn heavy_api_client_all_endpoints_should_work() {
     let config = NodeConfig::testnet();
@@ -155,6 +168,7 @@ async fn heavy_api_client_all_endpoints_should_work() {
     check_transaction_endpoints(&api_client, api_address, &ctx).await;
     check_get_block_endpoint(&api_client, api_address, &ctx).await;
     check_get_block_index_endpoint(&api_client, api_address, &ctx).await;
+    check_info_endpoint(&api_client, api_address, &ctx).await;
 
     ctx.node_ctx.stop().await;
 }

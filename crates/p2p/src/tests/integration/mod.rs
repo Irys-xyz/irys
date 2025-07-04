@@ -7,6 +7,7 @@ use irys_types::{
 };
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
+use std::sync::Arc;
 use tracing::debug;
 
 #[actix_web::test]
@@ -314,7 +315,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessage::from(block))
+        .send(GossipBroadcastMessage::from(Arc::new(block)))
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and fetch transactions
@@ -368,7 +369,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessage::from(block))
+        .send(GossipBroadcastMessage::from(Arc::new(block)))
         .expect("Failed to send block to service 1");
 
     // Wait for service 2 to process the block and attempt to fetch transactions
@@ -439,7 +440,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessage::from(block.clone()))
+        .send(GossipBroadcastMessage::from(Arc::new(block.clone())))
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and receive the execution payload with a timeout of 10 seconds
