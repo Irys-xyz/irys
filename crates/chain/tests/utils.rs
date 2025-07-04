@@ -747,7 +747,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
         self.mine_blocks(num_blocks).await?;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         Ok(())
@@ -757,7 +757,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
         let res = mine_block(&self.node_ctx).await?.unwrap();
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         Ok(res)
@@ -1162,7 +1162,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         signer: &IrysSigner,
     ) -> IrysTransaction {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
         let tx = self.post_data_tx(anchor, data, signer).await;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         tx
@@ -1297,7 +1297,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         anchor: H256,
     ) -> CommitmentTransaction {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
 
         let stake_tx = self.post_pledge_commitment(anchor).await;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
@@ -1330,7 +1330,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         anchor: H256,
     ) -> CommitmentTransaction {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
 
         let stake_tx = self.post_stake_commitment(anchor).await;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
