@@ -334,7 +334,7 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
 
 /// Reorg where there are 3 forks and the tip moves across all of them as each is extended longer than the other.
 ///   We need to verify that
-///    - txs are elligible for inclusion in future blocks once they are no longer part of the canoncial chain
+///    - txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
 ///    - txs do not appear twice, or are missing from canonical chain
 ///    - all canonical blocks move to all peers
 ///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
