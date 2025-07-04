@@ -16,7 +16,6 @@ use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeServiceMessage, ReorgEvent, ValidationResult},
     block_validation::PayloadProvider,
-    epoch_service::PartitionAssignmentsReadGuard,
     services::ServiceSenders,
 };
 use active_validations::ActiveValidations;
@@ -63,8 +62,6 @@ pub struct ValidationService<T: PayloadProvider> {
 pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
     /// Read only view of the block index
     pub(crate) block_index_guard: BlockIndexReadGuard,
-    /// `PartitionAssignmentsReadGuard` for looking up ledger info
-    pub(crate) partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// VDF steps read guard
     pub(crate) vdf_state: VdfStateReadonly,
     /// Reference to global config for node
@@ -89,7 +86,6 @@ impl<T: PayloadProvider> ValidationService<T> {
         exec: &TaskExecutor,
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
-        partition_assignments_guard: PartitionAssignmentsReadGuard,
         vdf_state_readonly: VdfStateReadonly,
         config: &Config,
         service_senders: &ServiceSenders,
@@ -115,7 +111,6 @@ impl<T: PayloadProvider> ValidationService<T> {
                             .build()
                             .expect("to be able to build vdf validation pool"),
                         block_index_guard,
-                        partition_assignments_guard,
                         vdf_state: vdf_state_readonly,
                         config,
                         service_senders,

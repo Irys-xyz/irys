@@ -15,7 +15,6 @@ use futures::future::select;
 use irys_actors::block_tree_service::{BlockState, ChainState, ReorgEvent};
 
 use irys_actors::mempool_service::MempoolTxs;
-use irys_actors::EpochServiceMessage;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     block_tree_service::get_canonical_chain,
@@ -782,7 +781,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let is_staked = self
             .node_ctx
-            .commitment_state_guard
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .commitment_state
+            .read()
+            .unwrap()
             .is_staked(commitment_tx.signer);
         commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
     }
@@ -1285,18 +1289,15 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn get_partition_assignments(
         &self,
-        mining_address: Address,
+        miner_address: Address,
     ) -> Vec<PartitionAssignment> {
-        let epoch_service = self.node_ctx.service_senders.epoch_service.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .send(EpochServiceMessage::GetMinerPartitionAssignments(
-                mining_address,
-                tx,
-            ))
-            .expect("message should be delivered to epoch service");
-        rx.await
-            .expect("to retrieve partition assignments for miner")
+        let epoch_snapshot = self
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot();
+
+        epoch_snapshot.get_partition_assignments(miner_address)
     }
 
     async fn post_commitment_tx_request(
@@ -1308,11 +1309,18 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
-        let mut response = client
+        let result = client
             .post(url)
             .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
-            .await
-            .expect("client post failed");
+            .await;
+
+        let mut response = match result {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to post commitment transaction: {e}");
+                return;
+            }
+        };
 
         if response.status() != StatusCode::OK {
             // Read the response body

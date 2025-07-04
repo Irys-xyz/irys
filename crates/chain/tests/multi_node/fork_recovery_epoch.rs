@@ -119,7 +119,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     assert_eq!(genesis_hash, fork1_3.0.block_hash);
 
     // Have peer1 and peer2 both mine their 4th block, but don't gossip peer2s
-    let peer2_epoch = peer2_node.mine_block_without_gossip().await?.0;
+    let _peer2_epoch = peer2_node.mine_block_without_gossip().await?.0;
     let peer1_epoch = peer1_node.mine_block().await.unwrap();
 
     // Wait for peer1_epoch block to arrive at genesis node

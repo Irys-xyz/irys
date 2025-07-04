@@ -32,7 +32,7 @@ impl PartitionAssignments {
         }
     }
 
-    /// Retrieves a `PartitionAssignment` by partition hash if it exists
+    /// Retrieves a `PartitionAssignment` to a data partition by partition hash if it exists
     pub fn get_assignment(&self, partition_hash: H256) -> Option<PartitionAssignment> {
         self.data_partitions
             .get(&partition_hash)

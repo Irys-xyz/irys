@@ -2,7 +2,6 @@ use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeReadGuard, BlockTreeServiceMessage},
     block_validation::prevalidate_block,
-    epoch_service::PartitionAssignmentsReadGuard,
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
 };
@@ -33,8 +32,6 @@ pub struct BlockDiscoveryActor {
     pub block_index_guard: BlockIndexReadGuard,
     /// Read only view of the block_tree
     pub block_tree_guard: BlockTreeReadGuard,
-    /// `PartitionAssignmentsReadGuard` for looking up ledger info
-    pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Reference to the global config
     pub config: Config,
     /// The block reward curve
@@ -141,14 +138,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let _span = span.enter();
         // Validate discovered block
         let new_block_header = msg.0;
-        let prev_block_hash = new_block_header.previous_block_hash;
+        let parent_block_hash = new_block_header.previous_block_hash;
 
         //====================================
         // Block header pre-validation
         //------------------------------------
-        let block_index_guard = self.block_index_guard.clone();
         let block_tree_guard = self.block_tree_guard.clone();
-        let partitions_guard = self.partition_assignments_guard.clone();
         let config = self.config.clone();
         let db = self.db.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
@@ -156,7 +151,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let span2 = self.span.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
-        let epoch_sender = self.service_senders.epoch_service.clone();
 
         debug!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -177,7 +171,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 let (tx_prev, rx_prev) = oneshot::channel();
                 mempool_sender
                     .send(MempoolServiceMessage::GetBlockHeader(
-                        prev_block_hash,
+                        parent_block_hash,
                         false,
                         tx_prev,
                     ))
@@ -190,10 +184,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 {
                     Some(hdr) => hdr,
                     None => db
-                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
+                        .view_eyre(|tx| block_header_by_hash(tx, &parent_block_hash, false))
                         .map_err(BlockDiscoveryInternalError::DatabaseError)?
                         .ok_or_else(|| BlockDiscoveryError::PreviousBlockNotFound {
-                            previous_block_hash: prev_block_hash,
+                            previous_block_hash: parent_block_hash,
                         })?,
                 }
             };
@@ -401,15 +395,22 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 }
             }
 
-            let parent_ema_snapshot = {
+            let (parent_ema_snapshot, parent_epoch_snapshot) = {
                 let read = block_tree_guard.read();
-                read.get_ema_snapshot(&prev_block_hash)
-                    .expect("parent block to be in block tree")
+                let ema_snapshot = read
+                    .get_ema_snapshot(&parent_block_hash)
+                    .expect("parent block to be in block tree");
+                // FIXME: Does this need to be for the current block if it's an epoch block?
+                let epoch_snapshot = read
+                    .get_epoch_snapshot(&parent_block_hash)
+                    .expect("parent block to be in block_tree");
+                (ema_snapshot, epoch_snapshot)
             };
+
             let validation_result = prevalidate_block(
                 block_header,
                 previous_block_header,
-                partitions_guard,
+                parent_epoch_snapshot.clone(),
                 config,
                 reward_curve,
                 &parent_ema_snapshot,
@@ -440,24 +441,17 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                     let arc_commitment_txs = Arc::new(commitments);
 
-                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    epoch_sender
-                        .send(crate::EpochServiceMessage::GetCommitmentStateGuard(
-                            oneshot_tx,
-                        ))
-                        .map_err(|e| {
-                            BlockDiscoveryInternalError::EpochRequestFailed(format!(
-                                "Failed to send GetCommitmentStateGuard message: {}",
-                                e
-                            ))
-                        })?;
+                    let epoch_snapshot = block_tree_guard
+                        .read()
+                        .get_epoch_snapshot(&parent_block_hash)
+                        .expect("parent blocks epoch_snapshot should be retrievable");
 
-                    let commitment_state_guard = oneshot_rx.await.unwrap();
+                    let commitment_state_guard = epoch_snapshot.commitment_state.read().unwrap();
 
                     // Get the current epoch snapshot from the parent block
                     let mut parent_commitment_snapshot = block_tree_guard
                         .read()
-                        .get_commitment_snapshot(&prev_block_hash)
+                        .get_commitment_snapshot(&parent_block_hash)
                         .expect("parent block to be in block_tree")
                         .as_ref()
                         .clone();
@@ -479,49 +473,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                                 "Epoch block commitments don't match expected".to_string(),
                             ));
                         }
-
-                        // Send NewEpochMessage with previous and current epoch blocks
-                        let block_item = block_index_guard
-                            .read()
-                            .get_item(block_height - blocks_in_epoch)
-                            .expect("previous epoch block to be in block index")
-                            .clone();
-                        let previous_epoch_block = db
-                            .view(|tx| block_header_by_hash(tx, &block_item.block_hash, false))
-                            .map_err(|e| {
-                                BlockDiscoveryInternalError::DatabaseError(eyre::eyre!(
-                                    "Database error retrieving previous epoch block: {:?}",
-                                    e
-                                ))
-                            })?
-                            .map_err(|report| {
-                                BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                                    "Previous epoch block not found in database: {}",
-                                    report
-                                ))
-                            })?;
-
-                        // FIXME: this should be done only if this extends the canonical chain
-                        let (oneshot_tx, rx) = tokio::sync::oneshot::channel();
-                        epoch_sender
-                            .send(crate::EpochServiceMessage::NewEpoch {
-                                new_epoch_block: new_block_header.clone(),
-                                previous_epoch_block,
-                                commitments: arc_commitment_txs.clone(),
-                                sender: oneshot_tx,
-                            })
-                            .map_err(|e| {
-                                BlockDiscoveryInternalError::EpochRequestFailed(format!(
-                                    "Failed to send NewEpoch message: {}",
-                                    e
-                                ))
-                            })?;
-                        let _ = rx.await.map_err(|e| {
-                            BlockDiscoveryInternalError::EpochRequestFailed(format!(
-                                "Failed to receive response for NewEpoch: {}",
-                                e
-                            ))
-                        })?;
                     } else {
                         // Validate and add each commitment transaction for non-epoch blocks
                         for commitment_tx in arc_commitment_txs.iter() {
