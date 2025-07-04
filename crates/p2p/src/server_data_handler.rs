@@ -79,6 +79,12 @@ where
         &self,
         chunk_request: GossipRequest<UnpackedChunk>,
     ) -> GossipResult<()> {
+        // Check if gossip reception is enabled
+        if !self.sync_state.is_gossip_reception_enabled() {
+            debug!("Gossip reception is disabled, skipping chunk handling");
+            return Ok(());
+        }
+
         let source_miner_address = chunk_request.miner_address;
         let chunk = chunk_request.data;
         let chunk_path_hash = chunk.chunk_path_hash();
@@ -129,6 +135,12 @@ where
         &self,
         transaction_request: GossipRequest<IrysTransactionHeader>,
     ) -> GossipResult<()> {
+        // Check if gossip reception is enabled
+        if !self.sync_state.is_gossip_reception_enabled() {
+            debug!("Gossip reception is disabled, skipping transaction handling");
+            return Ok(());
+        }
+
         debug!(
             "Node {}: Gossip transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
@@ -191,6 +203,12 @@ where
         &self,
         transaction_request: GossipRequest<CommitmentTransaction>,
     ) -> GossipResult<()> {
+        // Check if gossip reception is enabled
+        if !self.sync_state.is_gossip_reception_enabled() {
+            debug!("Gossip reception is disabled, skipping commitment transaction handling");
+            return Ok(());
+        }
+
         debug!(
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
@@ -257,6 +275,12 @@ where
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
     ) -> GossipResult<()> {
+        // Check if gossip reception is enabled
+        if !self.sync_state.is_gossip_reception_enabled() {
+            debug!("Gossip reception is disabled, skipping block header handling");
+            return Ok(());
+        }
+
         let span = self.span.clone();
         let _span = span.enter();
         let source_miner_address = block_header_request.miner_address;
@@ -417,6 +441,12 @@ where
         &self,
         execution_payload_request: GossipRequest<Block>,
     ) -> GossipResult<()> {
+        // Check if gossip reception is enabled
+        if !self.sync_state.is_gossip_reception_enabled() {
+            debug!("Gossip reception is disabled, skipping execution payload handling");
+            return Ok(());
+        }
+
         let source_miner_address = execution_payload_request.miner_address;
         let evm_block = execution_payload_request.data;
         let sealed_block = evm_block.seal_slow();
@@ -470,6 +500,12 @@ where
         peer_info: &PeerListItem,
         request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<bool> {
+        // Check if gossip reception is enabled
+        if !self.sync_state.is_gossip_reception_enabled() {
+            debug!("Gossip reception is disabled, skipping data request handling");
+            return Ok(false);
+        }
+
         match request.data {
             GossipDataRequest::Block(block_hash) => {
                 let block_result = self.block_pool.get_block_data(&block_hash).await;
