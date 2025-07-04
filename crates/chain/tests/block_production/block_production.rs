@@ -1025,7 +1025,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .block_tree_guard
         .read()
         .get_max_cumulative_difficulty_block()
-        .0;
+        .1;
     let new_block_state = *node
         .node_ctx
         .block_tree_guard
@@ -1059,7 +1059,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
         // without waiting for validation, enabling optimistic mining
         async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
             // Get the block with highest cumulative difficulty immediately
-            let (parent_block_hash, _) = self
+            let (_, parent_block_hash) = self
                 .inner()
                 .block_tree_guard
                 .read()

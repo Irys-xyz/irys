@@ -1297,10 +1297,6 @@ impl BlockTreeCache {
         self.longest_chain_cache.clone()
     }
 
-    pub fn get_max_cumulative_difficulty(&self) -> U256 {
-        self.max_cumulative_difficulty.0
-    }
-
     fn update_longest_chain_cache(&mut self) {
         let pairs = {
             self.longest_chain_cache.0.clear();
@@ -1539,11 +1535,8 @@ impl BlockTreeCache {
     }
 
     /// Get the block with maximum cumulative difficulty
-    pub fn get_max_cumulative_difficulty_block(&self) -> (BlockHash, U256) {
-        (
-            self.max_cumulative_difficulty.1,
-            self.max_cumulative_difficulty.0,
-        )
+    pub fn get_max_cumulative_difficulty_block(&self) -> (U256, BlockHash) {
+        self.max_cumulative_difficulty
     }
 
     /// Check if a block can be built upon

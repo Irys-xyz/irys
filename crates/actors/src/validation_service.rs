@@ -160,11 +160,12 @@ impl<T: PayloadProvider> ValidationService<T> {
         // act as a trigger point for re-evaluation. Rather than relying on a timer.
         let mut validation_timer = interval(Duration::from_millis(100));
 
-        // Timer to check validation enabled state changes
-        let mut state_check_timer = interval(Duration::from_secs(1));
-        let mut prev_validation_state = self.inner.validation_enabled.load(Ordering::Relaxed);
-
         loop {
+            if !self.inner.validation_enabled.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+
             tokio::select! {
                 // Check for shutdown signal
                 _ = &mut self.shutdown => {
@@ -191,7 +192,7 @@ impl<T: PayloadProvider> ValidationService<T> {
                 }
 
                 // Process active validations every 100ms (only if not empty)
-                _ = validation_timer.tick(), if !active_validations.is_empty() && self.inner.validation_enabled.load(Ordering::Relaxed) => {
+                _ = validation_timer.tick(), if !active_validations.is_empty()   => {
                     // Process any completed validations (non-blocking)
                     let tasks_completed = active_validations.process_completed().await;
                     if tasks_completed {
@@ -211,30 +212,6 @@ impl<T: PayloadProvider> ValidationService<T> {
                         // lagged, skipping messages
                         Ok(None) => { },
                         Err(_) => break,
-                    }
-                }
-
-                // Check validation enabled state changes every 1 second
-                _ = state_check_timer.tick() => {
-                    let current_state = self.inner.validation_enabled.load(Ordering::Relaxed);
-                    if current_state != prev_validation_state {
-                        if current_state {
-                            // Validation re-enabled
-                            info!("Validation re-enabled, restarting processing loop");
-                            validation_timer.reset();
-                            // Clear any stale messages that accumulated while validation was disabled
-                            let mut cleared_count = 0;
-                            while self.msg_rx.try_recv().is_ok() {
-                                cleared_count += 1;
-                            }
-                            if cleared_count > 0 {
-                                debug!("Cleared {} stale validation messages", cleared_count);
-                            }
-                        } else {
-                            // Validation disabled
-                            info!("Validation disabled, pausing new message processing");
-                        }
-                        prev_validation_state = current_state;
                     }
                 }
             }

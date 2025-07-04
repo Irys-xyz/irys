@@ -52,7 +52,7 @@ impl<'a> BlockValidationTracker<'a> {
 
         // Get initial blockchain state
         let tree = inner.block_tree_guard.read();
-        let (target_block_hash, max_difficulty) = tree.get_max_cumulative_difficulty_block();
+        let (max_difficulty, target_block_hash) = tree.get_max_cumulative_difficulty_block();
         let target_block_height = tree
             .get_block(&target_block_hash)
             .map(|b| b.height)
@@ -222,7 +222,7 @@ impl<'a> BlockValidationTracker<'a> {
     fn capture_blockchain_snapshot(&self) -> eyre::Result<BlockchainSnapshot> {
         let tree = self.inner.block_tree_guard.read();
 
-        let (max_hash, max_diff) = tree.get_max_cumulative_difficulty_block();
+        let (max_diff, max_hash) = tree.get_max_cumulative_difficulty_block();
         let max_height = tree.get_block(&max_hash).map(|b| b.height).unwrap_or(0);
         let (awaiting, fallback_hash) = tree.get_validation_chain_status(&max_hash);
         let fallback = fallback_hash
