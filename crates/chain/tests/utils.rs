@@ -1425,16 +1425,14 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // enable node to gossip until disabled
     pub fn gossip_enable(&self) {
-        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
-        //       broadcasts can be replaced with something more appropriate and correctly named
-        self.node_ctx.sync_state.set_is_syncing(false);
+        self.node_ctx.sync_state.set_gossip_reception_enabled(true);
+        self.node_ctx.sync_state.set_gossip_broadcast_enabled(true);
     }
 
     // disable node ability to gossip until enabled
     pub fn gossip_disable(&self) {
-        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
-        //       broadcasts can be replaced with something more appropriate and correctly named
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.node_ctx.sync_state.set_gossip_reception_enabled(false);
+        self.node_ctx.sync_state.set_gossip_broadcast_enabled(false);
     }
 }
 

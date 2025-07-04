@@ -230,8 +230,9 @@ impl P2PService {
     where
         P: PeerList,
     {
-        if self.is_syncing() {
-            // If we are syncing, we don't want to broadcast data
+        // Check if gossip broadcast is enabled
+        if !self.sync_state.is_gossip_broadcast_enabled() || self.is_syncing() {
+            debug!("Gossip broadcast is disabled, skipping broadcast");
             return Ok(());
         }
 
