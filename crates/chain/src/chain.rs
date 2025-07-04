@@ -1073,7 +1073,7 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
-                block_discovery_addr: block_discovery.clone(),
+                block_discovery_addr: block_discovery,
                 block_producer: block_producer_addr,
                 packing: packing_actor_addr,
                 block_index: block_index_service_actor,
