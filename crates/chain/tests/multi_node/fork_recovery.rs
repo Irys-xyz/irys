@@ -487,7 +487,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // NODE B -> Node C
     // post commitment txs and then the blocks to node c
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
-    // this will cause the txs that were previosuly canonical from C2 to become non canon
+    // this will cause the txs that were previously canonical from C2 to become non canon
     {
         node_c.post_commitment_tx(&peer_b_b2_stake_tx).await;
         node_c.post_commitment_tx(&peer_b_b2_pledge_tx).await;
@@ -629,7 +629,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         ); // expect only the two txs included in Peer B B2
         assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
         // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
-        // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as elligible txs
+        // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as eligible txs
         // To reiterate. These were previously mined in non canon block C2. They were then mined again in canon block C4
         assert_eq!(
             sorted_commitments_at(&node_a, 4).await?,
