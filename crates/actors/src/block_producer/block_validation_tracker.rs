@@ -28,8 +28,7 @@
 //! This ensures each significant change gets a fresh timeout window, preventing
 //! premature fallbacks during active network progress.
 
-use eyre::eyre;
-use irys_types::{H256, U256};
+use irys_types::{BlockHash, U256};
 use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
@@ -60,8 +59,9 @@ impl<'a> BlockValidationTracker<'a> {
             .unwrap_or(0);
         let (blocks_awaiting_validation, fallback_block_hash) =
             tree.get_validation_chain_status(&target_block_hash);
-        let fallback_block_height_opt =
-            fallback_block_hash.and_then(|hash| tree.get_block(&hash).map(|b| (hash, b.height)));
+        let fallback_block = fallback_block_hash
+            .and_then(|hash| tree.get_block(&hash).map(|b| (hash, b.height)))
+            .expect("fallback block must be present");
         drop(tree);
 
         Self {
@@ -70,7 +70,7 @@ impl<'a> BlockValidationTracker<'a> {
                 target_block_height,
                 max_difficulty,
                 blocks_awaiting_validation,
-                fallback_block_height_opt,
+                fallback_block,
             ),
             timer: Timer::new(wait_duration),
             inner,
@@ -80,7 +80,7 @@ impl<'a> BlockValidationTracker<'a> {
 
     /// Waits for a block to be fully validated, monitoring validation progress
     /// Returns the final block hash to use (either the target or fallback)
-    pub async fn wait_for_validation(&mut self) -> eyre::Result<H256> {
+    pub async fn wait_for_validation(&mut self) -> eyre::Result<BlockHash> {
         let start_time = Instant::now();
 
         loop {
@@ -105,13 +105,15 @@ impl<'a> BlockValidationTracker<'a> {
                     abandoned_target,
                     abandoned_target_height,
                 } => {
-                    return fallback_block.map(|(hash, _)| hash).ok_or_else(|| {
-                        eyre!(
-                            "No validated blocks available (abandoned target: {} at height {})",
-                            abandoned_target,
-                            abandoned_target_height
-                        )
-                    });
+                    let (fb_hash, fb_height) = fallback_block;
+                    warn!(
+                        target_block = %abandoned_target,
+                        target_height = abandoned_target_height,
+                        fallback_block = %fb_hash,
+                        fallback_height = fb_height,
+                        "Validation timeout - using fallback block"
+                    );
+                    return Ok(fb_hash);
                 }
 
                 ref mut state @ ValidationState::Tracking {
@@ -133,21 +135,6 @@ impl<'a> BlockValidationTracker<'a> {
                             abandoned_target_height,
                         };
 
-                        if let Some((fb_hash, fb_height)) = fallback_block {
-                            warn!(
-                                target_block = %abandoned_target,
-                                target_height = abandoned_target_height,
-                                fallback_block = %fb_hash,
-                                fallback_height = fb_height,
-                                "Validation timeout - using fallback block"
-                            );
-                        } else {
-                            warn!(
-                                target_block = %abandoned_target,
-                                target_height = abandoned_target_height,
-                                "Validation timeout - no fallback available"
-                            );
-                        }
                         // Will handle in TimedOut arm
                         continue;
                     }
@@ -185,18 +172,11 @@ impl<'a> BlockValidationTracker<'a> {
                 );
 
                 // Update to new target
-                match &mut self.state {
-                    ValidationState::Tracking {
-                        target,
-                        awaiting_validation,
-                        fallback,
-                    } => {
-                        *target = snapshot.max_block;
-                        *awaiting_validation = snapshot.awaiting_validation;
-                        *fallback = snapshot.fallback_block;
-                    }
-                    _ => unreachable!(),
-                }
+                self.state = ValidationState::Tracking {
+                    target: snapshot.max_block,
+                    awaiting_validation: snapshot.awaiting_validation,
+                    fallback: snapshot.fallback_block,
+                };
 
                 // Reset timer for new target
                 self.timer.reset();
@@ -245,8 +225,9 @@ impl<'a> BlockValidationTracker<'a> {
         let (max_hash, max_diff) = tree.get_max_cumulative_difficulty_block();
         let max_height = tree.get_block(&max_hash).map(|b| b.height).unwrap_or(0);
         let (awaiting, fallback_hash) = tree.get_validation_chain_status(&max_hash);
-        let fallback =
-            fallback_hash.and_then(|hash| tree.get_block(&hash).map(|b| (hash, b.height)));
+        let fallback = fallback_hash
+            .and_then(|hash| tree.get_block(&hash).map(|b| (hash, b.height)))
+            .expect("fallback block must be present");
         let can_build = tree.can_be_built_upon(&max_hash);
 
         Ok(BlockchainSnapshot {
@@ -272,18 +253,21 @@ pub(super) enum ValidationState {
         /// Number of blocks in the chain awaiting validation
         awaiting_validation: usize,
         /// Fallback option if we timeout (latest fully validated block)
-        fallback: Option<(H256, u64)>,
+        fallback: (BlockHash, u64),
     },
 
     /// Target block is fully validated and ready to use
-    Validated { block_hash: H256, block_height: u64 },
+    Validated {
+        block_hash: BlockHash,
+        block_height: u64,
+    },
 
     /// Timed out waiting for validation
     TimedOut {
-        /// The fallback block we'll use (if available)
-        fallback_block: Option<(H256, u64)>,
+        /// The fallback block we'll use
+        fallback_block: (BlockHash, u64),
         /// The block we were waiting for (for logging)
-        abandoned_target: H256,
+        abandoned_target: BlockHash,
         abandoned_target_height: u64,
     },
 }
@@ -291,7 +275,7 @@ pub(super) enum ValidationState {
 /// Information about a target block being tracked
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TargetBlock {
-    pub hash: H256,
+    pub hash: BlockHash,
     pub height: u64,
     pub cumulative_difficulty: U256,
 }
@@ -306,18 +290,18 @@ pub(super) struct Timer {
 struct BlockchainSnapshot {
     max_block: TargetBlock,
     awaiting_validation: usize,
-    fallback_block: Option<(H256, u64)>,
+    fallback_block: (BlockHash, u64),
     can_build_upon: bool,
 }
 
 impl ValidationState {
     /// Initial state when starting validation tracking
     pub(super) fn new(
-        target: H256,
+        target: BlockHash,
         target_height: u64,
         difficulty: U256,
         awaiting: usize,
-        fallback: Option<(H256, u64)>,
+        fallback: (BlockHash, u64),
     ) -> Self {
         Self::Tracking {
             target: TargetBlock {
