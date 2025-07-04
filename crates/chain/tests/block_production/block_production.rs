@@ -1125,7 +1125,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
         );
     }
 
-    // enable back validation
+    // re-enable validation
     node.node_ctx.set_validation_enabled(true);
 
     // Now mine a new block using the normal mining method
