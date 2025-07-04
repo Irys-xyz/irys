@@ -419,28 +419,9 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(recipient2_balance, expected_recipient2_balance);
 
     // disconnect peers
-    let disconnect_all = async |ctx: &IrysRethNodeAdapter| -> eyre::Result<Vec<PeerInfo>> {
-        let all_peers1 = ctx.inner.network.get_all_peers().await?;
-        for peer in all_peers1.iter() {
-            ctx.inner.network.disconnect_peer(peer.remote_id);
-        }
-
-        while !ctx.inner.network.get_all_peers().await?.is_empty() {
-            sleep(Duration::from_millis(100)).await;
-        }
-
-        let all_peers2 = ctx.inner.network.get_all_peers().await?;
-        assert!(
-            all_peers2.is_empty(),
-            "the peer should be completely disconnected",
-        );
-
-        Ok(all_peers1)
-    };
-
-    let genesis_peers = disconnect_all(&genesis_reth_context).await?;
-    let peer1_peers = disconnect_all(&peer1_reth_context).await?;
-    let peer2_peers = disconnect_all(&peer2_reth_context).await?;
+    let genesis_peers = genesis.disconnect_all_reth_peers().await?;
+    let peer1_peers = peer1.disconnect_all_reth_peers().await?;
+    let peer2_peers = peer2.disconnect_all_reth_peers().await?;
 
     let wait_for_evm_tx = async |ctx: &IrysRethNodeAdapter, hash: &B256| -> eyre::Result<()> {
         // wait until the tx shows up
