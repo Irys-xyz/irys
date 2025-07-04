@@ -15,7 +15,6 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
-use irys_vdf::VdfStep;
 use lru::LruCache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
@@ -80,10 +79,7 @@ where
     block_status_provider: BlockStatusProvider,
     execution_payload_provider: ExecutionPayloadProvider<P>,
 
-    gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
     vdf_state: VdfStateReadonly,
-    vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
-    block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
 
     config: Config,
     service_senders: ServiceSenders,
@@ -236,10 +232,7 @@ where
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
-        gossip_broadcast_sender: tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
         vdf_state: VdfStateReadonly,
-        vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
-        block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
         config: Config,
         service_senders: ServiceSenders,
     ) -> Self {
@@ -252,10 +245,7 @@ where
             sync_state,
             block_status_provider,
             execution_payload_provider,
-            gossip_broadcast_sender,
             vdf_state,
-            vdf_ff_sender,
-            block_tree_sender,
             config,
             service_senders,
         }
@@ -321,7 +311,8 @@ where
     ) -> Result<Option<Addr<RethServiceActor>>, BlockPoolError> {
         let hash = header.block_hash;
         let (sender, receiver) = oneshot::channel();
-        self.block_tree_sender
+        self.service_senders
+            .block_tree
             .send(BlockTreeServiceMessage::FastTrackStorageFinalized {
                 block_header: header.clone(),
                 response: sender,
@@ -426,7 +417,8 @@ where
 
     async fn reload_block_tree(&self) -> Result<(), BlockPoolError> {
         let (tx, rx) = oneshot::channel();
-        self.block_tree_sender
+        self.service_senders
+            .block_tree
             .send(BlockTreeServiceMessage::ReloadCacheFromDb { response: tx })
             .map_err(|err| {
                 error!("Failed to send ReloadCacheFromDb message: {:?}", err);
@@ -559,8 +551,11 @@ where
 
         // After the block is inserted into the index, we can fast forward the VDF steps to
         // unblock next blocks processing
-        fast_forward_vdf_steps_from_block(&block_header.vdf_limiter_info, &self.vdf_ff_sender)
-            .map_err(|report| BlockPoolError::VdfFFError(report.to_string()))?;
+        fast_forward_vdf_steps_from_block(
+            &block_header.vdf_limiter_info,
+            &self.service_senders.vdf_fast_forward,
+        )
+        .map_err(|report| BlockPoolError::VdfFFError(report.to_string()))?;
 
         let mut process_ancestor = false;
         if let Some(switch_to_full_validation_at_height) =
@@ -721,7 +716,7 @@ where
             evm_block_hash
         );
         let execution_payload_provider = self.execution_payload_provider.clone();
-        let gossip_broadcast_sender = self.gossip_broadcast_sender.clone();
+        let gossip_broadcast_sender = self.service_senders.gossip_broadcast.clone();
         tokio::spawn(async move {
             if let Some(sealed_block) = execution_payload_provider
                 .wait_for_sealed_block(&evm_block_hash, use_trusted_peers_only)

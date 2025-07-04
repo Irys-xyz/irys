@@ -21,18 +21,16 @@ use crate::{
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
-use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::VdfStep;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -111,7 +109,6 @@ impl ServiceHandleWithShutdownSignal {
 pub struct P2PService {
     cache: Arc<GossipCache>,
     broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
-    broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
@@ -133,7 +130,6 @@ impl P2PService {
     pub fn new(
         mining_address: Address,
         broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
-        broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -144,7 +140,6 @@ impl P2PService {
             client,
             cache,
             broadcast_data_receiver: Some(broadcast_data_receiver),
-            broadcast_data_sender,
             sync_state: SyncState::new(true, false),
         }
     }
@@ -168,8 +163,6 @@ impl P2PService {
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
         vdf_state: VdfStateReadonly,
-        vdf_ff_sender: UnboundedSender<VdfStep>,
-        block_tree_sender: UnboundedSender<BlockTreeServiceMessage>,
         config: Config,
         service_senders: ServiceSenders,
     ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<P, B, M>>)>
@@ -189,10 +182,7 @@ impl P2PService {
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
-            self.broadcast_data_sender.clone(),
             vdf_state,
-            vdf_ff_sender,
-            block_tree_sender,
             config,
             service_senders,
         );

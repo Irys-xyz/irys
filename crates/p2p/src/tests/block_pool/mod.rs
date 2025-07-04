@@ -18,7 +18,6 @@ use irys_types::{
     NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
-use irys_vdf::VdfStep;
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
@@ -128,8 +127,6 @@ struct MockedServices {
     >,
     mempool_stub: MempoolStub,
     vdf_state_stub: VdfStateReadonly,
-    vdf_ff_sender: tokio::sync::mpsc::UnboundedSender<VdfStep>,
-    block_tree_sender: tokio::sync::mpsc::UnboundedSender<BlockTreeServiceMessage>,
     service_senders: ServiceSenders,
 }
 
@@ -171,7 +168,10 @@ impl MockedServices {
             seeds: Default::default(),
             mining_state_sender: None,
         })));
-        let (vdf_sender, mut vdf_receiver) = tokio::sync::mpsc::unbounded_channel::<VdfStep>();
+
+        let (service_senders, service_receivers) = ServiceSenders::new();
+
+        let mut vdf_receiver = service_receivers.vdf_fast_forward;
         let vdf_state = vdf_state_stub.clone();
         tokio::spawn(async move {
             loop {
@@ -190,8 +190,7 @@ impl MockedServices {
             }
         });
 
-        let (block_tree_sender, mut block_tree_receiver) =
-            tokio::sync::mpsc::unbounded_channel::<BlockTreeServiceMessage>();
+        let mut block_tree_receiver = service_receivers.block_tree;
 
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
@@ -212,8 +211,6 @@ impl MockedServices {
             debug!("BlockTreeServiceMessage channel closed");
         });
 
-        let (service_senders, _service_receivers) = ServiceSenders::new();
-
         Self {
             block_status_provider_mock,
             block_discovery_stub,
@@ -222,8 +219,6 @@ impl MockedServices {
             execution_payload_provider,
             mempool_stub,
             vdf_state_stub,
-            vdf_ff_sender: vdf_sender,
-            block_tree_sender,
             service_senders,
         }
     }
@@ -241,13 +236,9 @@ async fn should_process_block() {
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         service_senders,
     } = MockedServices::new(&config).await;
 
-    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
     let sync_state = SyncState::new(false, false);
     let service = BlockPool::new(
         db.clone(),
@@ -257,10 +248,7 @@ async fn should_process_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        gossip_broadcast_sender,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         config,
         service_senders,
     );
@@ -343,8 +331,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -368,8 +354,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("can't send message to peer list");
 
     let sync_state = SyncState::new(false, false);
-    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
 
     let block_pool = BlockPool::new(
         db.clone(),
@@ -379,10 +363,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        gossip_broadcast_sender,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         config,
         service_senders,
     );
@@ -442,14 +423,10 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         service_senders,
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false, false);
-    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
 
     let block_pool = BlockPool::new(
         db.clone(),
@@ -459,10 +436,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider,
-        gossip_broadcast_sender,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         config,
         service_senders,
     );
@@ -523,8 +497,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -556,8 +528,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         .expect("can't send message to peer list");
 
     let sync_state = SyncState::new(false, false);
-    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
 
     let block_pool = BlockPool::new(
         db.clone(),
@@ -567,10 +537,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        gossip_broadcast_sender,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         config,
         service_senders,
     );
@@ -664,13 +631,9 @@ async fn should_fast_track_block() {
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         service_senders,
     } = MockedServices::new(&config).await;
 
-    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
     let sync_state = SyncState::new(false, true);
     let service = BlockPool::new(
         db.clone(),
@@ -680,10 +643,7 @@ async fn should_fast_track_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        gossip_broadcast_sender,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         config,
         service_senders,
     );
@@ -731,13 +691,9 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         service_senders,
     } = MockedServices::new(&config).await;
 
-    let (gossip_broadcast_sender, _gossip_broadcast_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
     let sync_state = SyncState::new(false, true);
     let service = BlockPool::new(
         db.clone(),
@@ -747,10 +703,7 @@ async fn should_not_fast_track_block_already_in_index() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        gossip_broadcast_sender,
         vdf_state_stub,
-        vdf_ff_sender,
-        block_tree_sender,
         config,
         service_senders,
     );

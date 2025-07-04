@@ -902,7 +902,6 @@ impl IrysNode {
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
             receivers.gossip_broadcast,
-            service_senders.gossip_broadcast.clone(),
         );
         let sync_state = p2p_service.sync_state.clone();
 
@@ -1014,8 +1013,6 @@ impl IrysNode {
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
             execution_payload_provider,
             vdf_state_readonly.clone(),
-            service_senders.vdf_fast_forward.clone(),
-            service_senders.block_tree.clone(),
             config.clone(),
             service_senders.clone(),
         )?;
