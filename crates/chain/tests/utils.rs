@@ -1422,6 +1422,20 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .connect_peer(peer.remote_id, peer.remote_addr);
         }
     }
+
+    // enable node to gossip until disabled
+    pub fn gossip_enable(&self) {
+        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
+        //       broadcasts can be replaced with something more appropriate and correctly named
+        self.node_ctx.sync_state.set_is_syncing(false);
+    }
+
+    // disable node ability to gossip until enaabled
+    pub fn gossip_disable(&self) {
+        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
+        //       broadcasts can be replaced with something more appropriate and correctly named
+        self.node_ctx.sync_state.set_is_syncing(true);
+    }
 }
 
 pub async fn mine_blocks(
