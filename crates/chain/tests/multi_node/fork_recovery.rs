@@ -452,7 +452,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     // check how many txs made it into each block, we expect no more than 2
     tracing::error!("peer_b_b2_stake_tx: {:?}", peer_b_b2_stake_tx);
     tracing::error!("peer_b_b2_pledge_tx: {:?}", peer_b_b2_pledge_tx);
-    tracing::error!("peer_c_b2_stake_tx: {:?}", peer_c_b2_stake_tx); // somehow this is finding it's way over to node B :/
+    tracing::error!("peer_c_b2_stake_tx: {:?}", peer_c_b2_stake_tx);
     tracing::error!("peer_c_b2_pledge_tx: {:?}", peer_c_b2_pledge_tx);
     assert_eq!(
         b_block2.system_ledgers.len(),
