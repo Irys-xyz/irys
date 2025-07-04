@@ -1388,9 +1388,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    // disconnect all peers from network
+    // disconnect all Reth peers from network
     // return Vec<PeerInfo>> as it was prior to disconnect
-    pub async fn disconnect_all_peers(&self) -> eyre::Result<Vec<PeerInfo>> {
+    pub async fn disconnect_all_reth_peers(&self) -> eyre::Result<Vec<PeerInfo>> {
         let ctx = self.node_ctx.reth_node_adapter.clone();
 
         let all_peers_prior = ctx.inner.network.get_all_peers().await?;
@@ -1411,8 +1411,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(all_peers_prior)
     }
 
-    // Reconnect peers passed to fn
-    pub fn reconnect_all_peers(&self, peers: &Vec<PeerInfo>) {
+    // Reconnect Reth peers passed to fn
+    pub fn reconnect_all_reth_peers(&self, peers: &Vec<PeerInfo>) {
         for peer in peers {
             self.node_ctx
                 .reth_node_adapter

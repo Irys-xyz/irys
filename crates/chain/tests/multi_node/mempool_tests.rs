@@ -419,9 +419,9 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(recipient2_balance, expected_recipient2_balance);
 
     // disconnect peers
-    let genesis_peers = genesis.disconnect_all_peers().await?;
-    let peer1_peers = peer1.disconnect_all_peers().await?;
-    let peer2_peers = peer2.disconnect_all_peers().await?;
+    let genesis_peers = genesis.disconnect_all_reth_peers().await?;
+    let peer1_peers = peer1.disconnect_all_reth_peers().await?;
+    let peer2_peers = peer2.disconnect_all_reth_peers().await?;
 
     let wait_for_evm_tx = async |ctx: &IrysRethNodeAdapter, hash: &B256| -> eyre::Result<()> {
         // wait until the tx shows up
