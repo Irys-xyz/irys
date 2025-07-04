@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
-use irys_types::{DataLedger, IrysTransaction, NodeConfig, PeerAddress, RethPeerInfo, H256};
+use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
 use tracing::debug;
 
 #[actix_web::test]
@@ -468,24 +468,6 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
         a_block2.system_ledgers[0].tx_ids
     ); // 0 commitments, also means 0 system ledgers
 
-    let peer_c = PeerAddress {
-        gossip: format!(
-            "{}:{}",
-            &node_c.node_ctx.config.node_config.gossip.bind_ip,
-            &node_c.node_ctx.config.node_config.gossip.bind_port
-        )
-        .parse()
-        .expect("valid socket address"),
-        api: format!(
-            "{}:{}",
-            &node_c.node_ctx.config.node_config.http.bind_ip,
-            &node_c.node_ctx.config.node_config.http.bind_port
-        )
-        .parse()
-        .expect("valid socket address"),
-        execution: RethPeerInfo::default(),
-    };
-
     // NODE B -> Node C
     // post commitment txs and then the blocks to node c
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
@@ -493,9 +475,9 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     {
         node_c.post_commitment_tx(&peer_b_b2_stake_tx).await;
         node_c.post_commitment_tx(&peer_b_b2_pledge_tx).await;
-        node_b.post_block_to_peer(&peer_c, &b_block2).await?;
+        node_b.send_block_to_peer(&node_c, &b_block2).await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
-        node_b.post_block_to_peer(&peer_c, &b_block3).await?;
+        node_b.send_block_to_peer(&node_c, &b_block3).await?;
         tracing::error!("posted block 3: {:?}", b_block3.block_hash);
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;

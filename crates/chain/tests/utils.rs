@@ -10,9 +10,10 @@ use actix_web::{
 use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
-use eyre::OptionExt as _;
+use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::{
+    block_discovery::BlockDiscoveredMessage,
     block_producer::SolutionFoundMessage,
     block_tree_service::{get_canonical_chain, BlockState, ChainState, ReorgEvent},
     block_validation,
@@ -1124,33 +1125,33 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// useful in tests when creating forks and
     /// needing to send specific blocks between specific peers
-    pub async fn post_block_to_peer(
+    pub async fn send_block_to_peer(
         &self,
-        peer: &PeerAddress,
-        block_header: &IrysBlockHeader,
+        peer: &IrysNodeTest<IrysNodeCtx>,
+        irys_block_header: &IrysBlockHeader,
     ) -> eyre::Result<()> {
-        let client = awc::Client::default();
-        let url = format!("http://{}/v1/block", peer.api);
-
-        let mut response = client
-            .post(url)
-            .send_json(&block_header)
+        match peer
+            .node_ctx
+            .actor_addresses
+            .block_discovery_addr
+            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
             .await
-            .map_err(|e| eyre::eyre!("client post failed: {}", e))?;
-
-        if response.status() != StatusCode::OK {
-            let body_bytes = response
-                .body()
-                .await
-                .map_err(|e| eyre::eyre!("Failed to read response body: {}", e))?;
-            let body_str = String::from_utf8_lossy(&body_bytes);
-            Err(eyre::eyre!(
-                "Response status: {} - {}",
-                response.status(),
-                body_str
-            ))
-        } else {
-            Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(res) => {
+                tracing::error!(
+                    "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
+                    &irys_block_header.block_hash.0,
+                    &irys_block_header.height,
+                    res
+                );
+                Err(eyre!(
+                    "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
+                    &irys_block_header.block_hash.0,
+                    &irys_block_header.height,
+                    res
+                ))
+            }
         }
     }
 
