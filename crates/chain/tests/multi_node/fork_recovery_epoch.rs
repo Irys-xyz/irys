@@ -73,12 +73,8 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     let epoch_block = genesis_node.mine_block().await.unwrap();
 
     // Get the genesis nodes view of the peers assignments
-    let peer1_assignments = genesis_node
-        .get_partition_assignments(peer1_signer.address())
-        .await;
-    let peer2_assignments = genesis_node
-        .get_partition_assignments(peer2_signer.address())
-        .await;
+    let peer1_assignments = genesis_node.get_partition_assignments(peer1_signer.address());
+    let peer2_assignments = genesis_node.get_partition_assignments(peer2_signer.address());
 
     // Verify that one partition has been assigned to each peer to match its pledge
     assert_eq!(peer1_assignments.len(), 1);

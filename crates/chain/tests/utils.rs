@@ -358,9 +358,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_node.wait_for_packing(seconds_to_wait).await;
 
         // Verify that partition assignments were created
-        let peer_assignments = peer_node
-            .get_partition_assignments(peer_signer.address())
-            .await;
+        let peer_assignments = peer_node.get_partition_assignments(peer_signer.address());
 
         // Ensure at least one partition has been assigned
         assert!(
@@ -1287,10 +1285,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         stake_tx
     }
 
-    pub async fn get_partition_assignments(
-        &self,
-        miner_address: Address,
-    ) -> Vec<PartitionAssignment> {
+    pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
         let epoch_snapshot = self
             .node_ctx
             .block_tree_guard
