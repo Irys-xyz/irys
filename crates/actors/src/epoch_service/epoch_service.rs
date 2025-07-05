@@ -418,6 +418,7 @@ impl EpochSnapshot {
 
         // Use the previous epoch hash as a seed/entropy to the prng
         let seed = self.epoch_block.last_epoch_hash.to_u32();
+        debug!("RNG seed: {}", self.epoch_block.last_epoch_hash);
         let mut rng = SimpleRNG::new(seed);
 
         // Loop though all of the ledgers processing their slot needs

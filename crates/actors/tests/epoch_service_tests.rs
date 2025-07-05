@@ -884,6 +884,18 @@ async fn partitions_assignment_determinism_test() {
         .unwrap()
         .print_assignments();
 
+    // Because we aren't actually building blocks with block_producer we need to
+    // stub out some block hashes, for this tests we use the capacity partition hashes
+    // as the source because it doubles down on determinism.
+    let test_hashes: Vec<_> = epoch_snapshot
+        .partition_assignments
+        .read()
+        .unwrap()
+        .capacity_partitions
+        .keys()
+        .cloned()
+        .collect();
+
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let total_epoch_messages = 6;
     let mut epoch_num = 1;
@@ -891,16 +903,22 @@ async fn partitions_assignment_determinism_test() {
     new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition;
     new_epoch_block.data_ledgers[DataLedger::Publish].max_chunk_offset = num_chunks_in_partition;
 
-    let mut previous_epoch_block = Some(genesis_block.clone());
+    let mut previous_epoch_block = genesis_block.clone();
+
     while epoch_num <= total_epoch_messages {
-        new_epoch_block.height = epoch_num * num_blocks_in_epoch;
-        //(testnet_config.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
+        new_epoch_block.block_hash = test_hashes[epoch_num as usize]; // Pick a stable block hash from our test hashes list
+        new_epoch_block.last_epoch_hash = previous_epoch_block.block_hash; // Make sure the new epoch block has the hash of the old one
+        new_epoch_block.height = epoch_num * num_blocks_in_epoch; // Give the new block a valid epoch height
+
         epoch_num += 1;
         debug!("epoch block {}", new_epoch_block.height);
 
-        let _ =
-            epoch_snapshot.perform_epoch_tasks(&previous_epoch_block, &new_epoch_block, Vec::new());
-        previous_epoch_block = Some(new_epoch_block.clone());
+        let _ = epoch_snapshot.perform_epoch_tasks(
+            &Some(previous_epoch_block),
+            &new_epoch_block,
+            Vec::new(),
+        );
+        previous_epoch_block = new_epoch_block.clone();
     }
 
     epoch_snapshot
