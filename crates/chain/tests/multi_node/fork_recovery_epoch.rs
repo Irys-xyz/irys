@@ -122,6 +122,10 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     let genesis_epoch_hash = genesis_node.wait_until_height(4, seconds_to_wait).await?;
     assert_eq!(peer1_epoch.block_hash, genesis_epoch_hash);
 
+    // TODO: Verify pledge1 is in the genesis epoch state
+    // Verify that packing is started on peer1 for whatever partition_hash was assigned to pledge1
+    // Verify that a Miner is started on peer1 for whatever partition_hash was assigned to pledge1
+
     // Then extend peer2's chain to be the longest
     peer2_node.mine_blocks(1).await?;
     let peer2_hash = peer2_node.wait_until_height(5, seconds_to_wait).await?;
@@ -165,6 +169,12 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
         .iter()
         .find(|cse| cse.id == pledge1.id)
         .is_none());
+
+    // TODO:
+    // Verify that packing is started on peer2 for whatever partition_hash was assigned to pledge2
+    // Verify that a Miner is started on peer2 for whatever partition_hash was assigned to pledge2
+    // Verify that packing is stopped on peer1 for whatever partition_hash was assigned to pledge1
+    // Verify that a Miner is stopped on peer1 for whatever partition_hash was assigned to pledge1
 
     // Wind down test
     genesis_node.stop().await;
