@@ -465,7 +465,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                     if is_epoch_block {
                         let expected_commitment_tx =
-                            parent_commitment_snapshot.get_epoch_commitments();
+                            parent_commitment_snapshot.get_all_commitments();
 
                         // Validate epoch block has expected commitments in correct order
                         let commitments_match =
