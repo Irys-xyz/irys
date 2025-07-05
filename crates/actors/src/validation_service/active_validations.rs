@@ -419,7 +419,6 @@ mod tests {
 
             // Add blocks to tree as NotOnchain
             tree.add_common(
-                fork_block_11.block_hash,
                 &fork_block_11,
                 Arc::new(CommitmentSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -427,7 +426,6 @@ mod tests {
             )
             .unwrap();
             tree.add_common(
-                fork_block_12.block_hash,
                 &fork_block_12,
                 Arc::new(CommitmentSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -435,7 +433,6 @@ mod tests {
             )
             .unwrap();
             tree.add_common(
-                extension_block_21.block_hash,
                 &extension_block_21,
                 Arc::new(CommitmentSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -443,7 +440,6 @@ mod tests {
             )
             .unwrap();
             tree.add_common(
-                extension_block_22.block_hash,
                 &extension_block_22,
                 Arc::new(CommitmentSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -714,7 +710,6 @@ mod tests {
                 last_hash = header.block_hash;
 
                 tree.add_common(
-                    header.block_hash,
                     &header,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_ema_snapshot(),
@@ -759,7 +754,6 @@ mod tests {
                 last_hash = header.block_hash;
 
                 tree.add_common(
-                    header.block_hash,
                     &header,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_ema_snapshot(),
