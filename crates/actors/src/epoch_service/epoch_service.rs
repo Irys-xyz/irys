@@ -17,13 +17,10 @@ use irys_types::{
     PartitionChunkOffset,
 };
 use openssl::sha;
-use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{
     collections::VecDeque,
-    pin::pin,
     sync::{Arc, RwLock},
 };
-use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn, Span};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
@@ -106,7 +103,7 @@ pub enum EpochServiceError {
 
 #[derive(Debug)]
 pub struct EpochService {
-    shutdown: GracefulShutdown,
+    // shutdown: GracefulShutdown,
     // msg_rx: UnboundedReceiver<EpochServiceMessage>,
     // reorg_rx: broadcast::Receiver<ReorgEvent>, // reorg broadcast receiver
     // service_senders: ServiceSenders,
@@ -494,7 +491,7 @@ impl EpochSnapshot {
     /// hash to compute the next partitions hash.
     fn add_capacity_partitions(&mut self, parts_to_add: u64) {
         let mut prev_partition_hash = match self.all_active_partitions.last() {
-            Some(last_hash) => last_hash.clone(),
+            Some(last_hash) => *last_hash,
             None => self.epoch_block.last_epoch_hash,
         };
 
@@ -955,72 +952,6 @@ fn truncate_to_3_decimals(value: f64) -> f64 {
 
 /// mpsc style service wrapper for the Epoch Service
 impl EpochService {
-    /// Spawn a new Epoch sService
-    pub fn spawn_service(exec: &TaskExecutor) -> JoinHandle<()> {
-        let system = System::current();
-        let span = Span::current();
-
-        exec.spawn_critical_with_graceful_shutdown_signal("Epoch Service", |shutdown| async move {
-            let pending_epoch_service = Self {
-                shutdown,
-                system,
-                span,
-            };
-
-            match pending_epoch_service.start().await {
-                Ok(_) => {}
-                Err(err) => {
-                    tracing::error!("EpochService encountered an irrecoverable error: {}", err)
-                }
-            };
-        })
-    }
-
-    async fn start(self) -> eyre::Result<()> {
-        tracing::info!("starting Epoch service");
-
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            tokio::select! {
-                // Handle regular epoch service messages
-                // msg = self.msg_rx.recv() => {
-                //     match msg {
-                //         Some(msg) => Self::handle_message(&mut self.inner, &self.service_senders, &self.system, msg)?,
-                //         None => {
-                //             tracing::warn!("receiver channel closed");
-                //             break None;
-                //         }
-                //     }
-                // }
-
-                // Handle reorg events
-                // reorg_result = self.reorg_rx.recv() => {
-                //     if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
-                //         let mempool = self.service_senders.mempool.clone();
-                //         // handle_reorg(&mut self.inner, &mempool, event).await?;
-                //     }
-                // }
-
-                // Handle shutdown signal
-                shutdown = &mut shutdown_future => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
-                }
-            }
-        };
-
-        // tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        // while let Ok(msg) = self.msg_rx.try_recv() {
-        //     self.inner.handle_message(msg)?;
-        // }
-
-        // explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
-
-        tracing::info!("shutting down epoch service");
-        Ok(())
-    }
-
     // fn handle_message(
     //     inner: &mut EpochSnapshot,
     //     service_senders: &ServiceSenders,

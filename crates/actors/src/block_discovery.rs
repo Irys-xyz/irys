@@ -446,75 +446,85 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         .get_epoch_snapshot(&parent_block_hash)
                         .expect("parent blocks epoch_snapshot should be retrievable");
 
-                    let commitment_state_guard = epoch_snapshot.commitment_state.read().unwrap();
+                    {
+                        let commitment_state_guard =
+                            epoch_snapshot.commitment_state.read().unwrap();
 
-                    // Get the current epoch snapshot from the parent block
-                    let mut parent_commitment_snapshot = block_tree_guard
-                        .read()
-                        .get_commitment_snapshot(&parent_block_hash)
-                        .expect("parent block to be in block_tree")
-                        .as_ref()
-                        .clone();
+                        // Get the current epoch snapshot from the parent block
+                        let mut parent_commitment_snapshot = block_tree_guard
+                            .read()
+                            .get_commitment_snapshot(&parent_block_hash)
+                            .expect("parent block to be in block_tree")
+                            .as_ref()
+                            .clone();
 
-                    if is_epoch_block {
-                        let expected_commitment_tx =
-                            parent_commitment_snapshot.get_epoch_commitments();
+                        if is_epoch_block {
+                            let expected_commitment_tx =
+                                parent_commitment_snapshot.get_epoch_commitments();
 
-                        // Validate epoch block has expected commitments in correct order
-                        let commitments_match =
-                            expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
-                        if !commitments_match {
-                            debug!(
+                            // Validate epoch block has expected commitments in correct order
+                            let commitments_match =
+                                expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
+                            if !commitments_match {
+                                debug!(
                                 "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
                                 expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
                                 arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
-                            return Err(BlockDiscoveryError::InvalidEpochBlock(
-                                "Epoch block commitments don't match expected".to_string(),
-                            ));
-                        }
-                    } else {
-                        // Validate and add each commitment transaction for non-epoch blocks
-                        for commitment_tx in arc_commitment_txs.iter() {
-                            let is_staked = commitment_state_guard.is_staked(commitment_tx.signer);
-                            let status = parent_commitment_snapshot
-                                .get_commitment_status(commitment_tx, is_staked);
-
-                            // Ensure commitment is unknown (new) and from staked address
-                            match status {
-                                CommitmentSnapshotStatus::Accepted => {
-                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        "Commitment tx included in prior block".to_string(),
-                                    ));
-                                }
-                                CommitmentSnapshotStatus::Unsupported => {
-                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        "Commitment tx of unsupported type".to_string(),
-                                    ));
-                                }
-                                CommitmentSnapshotStatus::Unstaked => {
-                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        format!(
-                                            "Commitment tx {} from unstaked address {:?}",
-                                            commitment_tx.id, commitment_tx.signer
-                                        ),
-                                    ));
-                                }
-                                CommitmentSnapshotStatus::Unknown => {} // Success case
-                            }
-
-                            // Add commitment and validate it's accepted
-                            let is_staked_in_current_epoch =
-                                commitment_state_guard.is_staked(commitment_tx.signer);
-                            let add_status = parent_commitment_snapshot
-                                .add_commitment(commitment_tx, is_staked_in_current_epoch);
-                            if add_status != CommitmentSnapshotStatus::Accepted {
-                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                    "Commitment tx is invalid".to_string(),
+                                return Err(BlockDiscoveryError::InvalidEpochBlock(
+                                    "Epoch block commitments don't match expected".to_string(),
                                 ));
                             }
+                        } else {
+                            // Validate and add each commitment transaction for non-epoch blocks
+                            for commitment_tx in arc_commitment_txs.iter() {
+                                let is_staked =
+                                    commitment_state_guard.is_staked(commitment_tx.signer);
+                                let status = parent_commitment_snapshot
+                                    .get_commitment_status(commitment_tx, is_staked);
+
+                                // Ensure commitment is unknown (new) and from staked address
+                                match status {
+                                    CommitmentSnapshotStatus::Accepted => {
+                                        return Err(
+                                            BlockDiscoveryError::InvalidCommitmentTransaction(
+                                                "Commitment tx included in prior block".to_string(),
+                                            ),
+                                        );
+                                    }
+                                    CommitmentSnapshotStatus::Unsupported => {
+                                        return Err(
+                                            BlockDiscoveryError::InvalidCommitmentTransaction(
+                                                "Commitment tx of unsupported type".to_string(),
+                                            ),
+                                        );
+                                    }
+                                    CommitmentSnapshotStatus::Unstaked => {
+                                        return Err(
+                                            BlockDiscoveryError::InvalidCommitmentTransaction(
+                                                format!(
+                                                    "Commitment tx {} from unstaked address {:?}",
+                                                    commitment_tx.id, commitment_tx.signer
+                                                ),
+                                            ),
+                                        );
+                                    }
+                                    CommitmentSnapshotStatus::Unknown => {} // Success case
+                                }
+
+                                // Add commitment and validate it's accepted
+                                let is_staked_in_current_epoch =
+                                    commitment_state_guard.is_staked(commitment_tx.signer);
+                                let add_status = parent_commitment_snapshot
+                                    .add_commitment(commitment_tx, is_staked_in_current_epoch);
+                                if add_status != CommitmentSnapshotStatus::Accepted {
+                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                        "Commitment tx is invalid".to_string(),
+                                    ));
+                                }
+                            }
                         }
-                    }
+                    } // Force drop commitment_state_guard.read() for clippy to understand :/
 
                     // WARNING: All block pre-validation needs to be completed before
                     // sending this message.

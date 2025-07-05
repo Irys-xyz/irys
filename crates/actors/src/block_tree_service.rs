@@ -1059,7 +1059,7 @@ impl BlockTreeCache {
 
         // Filter epoch blocks to only include those at or below our start height,
         // ensuring we don't replay beyond our intended starting point
-        let mut epoch_blocks = epoch_replay_data.epoch_blocks.clone();
+        let mut epoch_blocks = epoch_replay_data.epoch_blocks;
         epoch_blocks.retain(|epoch_block_data| epoch_block_data.epoch_block.height <= start);
 
         // Replay filtered epoch transitions to reconstruct the epoch state
@@ -1097,7 +1097,7 @@ impl BlockTreeCache {
                 block_index_guard.clone(),
                 arc_epoch_snapshot.clone(),
                 db.clone(),
-                &consensus_config,
+                consensus_config,
             );
 
         let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
@@ -1113,7 +1113,7 @@ impl BlockTreeCache {
 
         // Create EMA cache for start block
         let ema_snapshot =
-            build_current_ema_snapshot_from_index(&latest_block, db.clone(), &consensus_config);
+            build_current_ema_snapshot_from_index(&latest_block, db.clone(), consensus_config);
 
         // Create a Block Entry for the start block
         let block_entry = BlockEntry {
@@ -1156,7 +1156,7 @@ impl BlockTreeCache {
                 load_commitment_transactions(&block, &db).expect("to load transactions from db");
 
             let arc_ema_snapshot = prev_ema_snapshot
-                .next_snapshot(&block, &prev_block, &consensus_config)
+                .next_snapshot(&block, &prev_block, consensus_config)
                 .expect("failed to create EMA snapshot");
 
             // Start with the previous block's epoch snapshot as the baseline
@@ -1166,7 +1166,7 @@ impl BlockTreeCache {
             let epoch_snapshot = if is_epoch_block {
                 // Epoch boundary reached: create a fresh epoch snapshot that incorporates
                 // all commitments from the commitment cache and computes the epoch state for the new epoch
-                create_epoch_snapshot_for_block(&block, &parent_block_entry, &consensus_config)
+                create_epoch_snapshot_for_block(&block, parent_block_entry, consensus_config)
             } else {
                 // Just copy the previous blocks epoch_snapshot reference
                 let epoch_snapshot = parent_block_entry.epoch_snapshot.clone();
@@ -1190,7 +1190,7 @@ impl BlockTreeCache {
                 &commitment_txs,
                 &prev_commitment_snapshot,
                 epoch_snapshot.clone(),
-                &consensus_config,
+                consensus_config,
             );
 
             prev_commitment_snapshot = arc_commitment_snapshot.clone();
