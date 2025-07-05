@@ -150,31 +150,32 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
         .read()
         .canonical_epoch_snapshot();
 
-    let cs = epoch_snapshot.commitment_state.read().unwrap();
+    {
+        let cs = epoch_snapshot.commitment_state.read().unwrap();
 
-    // Verify Peer2's pledge is in the commitment state now
-    assert!(cs
-        .pledge_commitments
-        .get(&peer2_signer.address())
-        .unwrap()
-        .iter()
-        .find(|cse| cse.id == pledge2.id)
-        .is_some());
+        // Verify Peer2's pledge is in the commitment state now
+        assert!(cs
+            .pledge_commitments
+            .get(&peer2_signer.address())
+            .unwrap()
+            .iter()
+            .any(|cse| cse.id == pledge2.id));
 
-    // Verify peer1's pledge has been removed
-    assert!(cs
-        .pledge_commitments
-        .get(&peer1_signer.address())
-        .unwrap()
-        .iter()
-        .find(|cse| cse.id == pledge1.id)
-        .is_none());
+        // Verify peer1's pledge has been removed (note the !cs)
+        assert!(!cs
+            .pledge_commitments
+            .get(&peer1_signer.address())
+            .unwrap()
+            .iter()
+            .any(|cse| cse.id == pledge1.id));
 
-    // TODO:
-    // Verify that packing is started on peer2 for whatever partition_hash was assigned to pledge2
-    // Verify that a Miner is started on peer2 for whatever partition_hash was assigned to pledge2
-    // Verify that packing is stopped on peer1 for whatever partition_hash was assigned to pledge1
-    // Verify that a Miner is stopped on peer1 for whatever partition_hash was assigned to pledge1
+        // TODO:
+        // Verify that packing is started on peer2 for whatever partition_hash was assigned to pledge2
+        // Verify that a Miner is started on peer2 for whatever partition_hash was assigned to pledge2
+        // Verify that packing is stopped on peer1 for whatever partition_hash was assigned to pledge1
+        // Verify that a Miner is stopped on peer1 for whatever partition_hash was assigned to pledge1
+        //
+    } // Make clippy happy about dropping cs
 
     // Wind down test
     genesis_node.stop().await;
