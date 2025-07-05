@@ -11,7 +11,6 @@ pub use inner::*;
 
 use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
 use crate::services::ServiceSenders;
-use crate::CommitmentStateReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_storage::StorageModulesReadGuard;
 use irys_types::{app_state::DatabaseProvider, Config};
@@ -48,7 +47,6 @@ impl MempoolService {
         reth_node_adapter: IrysRethNodeAdapter,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
-        commitment_state_guard: &CommitmentStateReadGuard,
         rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
         service_senders: &ServiceSenders,
@@ -59,7 +57,6 @@ impl MempoolService {
         let mempool_config = &config.consensus.mempool;
         let mempool_state = create_state(mempool_config);
         let exec = exec.clone();
-        let commitment_state_guard = commitment_state_guard.clone();
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
@@ -75,7 +72,6 @@ impl MempoolService {
                     block_migrated_rx,
                     inner: Inner {
                         block_tree_read_guard,
-                        commitment_state_guard,
                         config,
                         exec,
                         irys_db,

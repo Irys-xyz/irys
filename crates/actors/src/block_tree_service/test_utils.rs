@@ -8,7 +8,10 @@ use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysToke
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
-use crate::services::{ServiceReceivers, ServiceSenders};
+use crate::{
+    services::{ServiceReceivers, ServiceSenders},
+    EpochSnapshot,
+};
 
 use super::{
     ema_snapshot::EmaSnapshot, BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent,
@@ -63,6 +66,10 @@ pub fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
     EmaSnapshot::genesis(&genesis_header)
 }
 
+pub fn dummy_epoch_snapshot() -> Arc<EpochSnapshot> {
+    Arc::new(EpochSnapshot::default())
+}
+
 pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
     let mut block_hash = if blocks[0].0.block_hash == H256::default() {
         H256::random()
@@ -88,8 +95,10 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
         }
         block_tree_cache
             .add_common(
+                block.block_hash,
                 block,
                 Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),
                 *state,
             )
@@ -248,8 +257,10 @@ pub fn create_and_apply_fork(
 
             // Add to block tree as validated but not yet canonical
             tree.add_common(
+                header.block_hash,
                 &header,
                 Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),
                 chain_state,
             )
@@ -282,6 +293,7 @@ pub fn create_and_apply_fork(
         fork_parent,
         new_tip,
         timestamp: SystemTime::now(),
+        db: None,
     };
 
     (reorg_event, fork_prices)

@@ -855,9 +855,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // Get the genesis nodes view of the peers assignments
-    let peer_assignments = genesis_node
-        .get_partition_assignments(peer_signer.address())
-        .await;
+    let peer_assignments = genesis_node.get_partition_assignments(peer_signer.address());
 
     // Verify that one partition has been assigned to the peer to match its pledge
     assert_eq!(peer_assignments.len(), 1);

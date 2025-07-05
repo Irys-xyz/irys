@@ -2,7 +2,6 @@ use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::mempool_service::ChunkIngressError;
 use crate::services::ServiceSenders;
-use crate::CommitmentStateReadGuard;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use futures::future::BoxFuture;
@@ -40,7 +39,6 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug)]
 pub struct Inner {
     pub block_tree_read_guard: BlockTreeReadGuard,
-    pub commitment_state_guard: CommitmentStateReadGuard,
     pub config: Config,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
     /// instead of the actor executor runtime, while also providing some `QoL`

@@ -194,7 +194,7 @@ impl ActiveValidations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_tree_service::test_utils::genesis_tree;
+    use crate::block_tree_service::test_utils::{dummy_epoch_snapshot, genesis_tree};
     use crate::block_tree_service::{BlockState, ChainState};
     use futures::future::{pending, ready};
     use irys_database::CommitmentSnapshot;
@@ -419,29 +419,37 @@ mod tests {
 
             // Add blocks to tree as NotOnchain
             tree.add_common(
+                fork_block_11.block_hash,
                 &fork_block_11,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
             .unwrap();
             tree.add_common(
+                fork_block_12.block_hash,
                 &fork_block_12,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
             .unwrap();
             tree.add_common(
+                extension_block_21.block_hash,
                 &extension_block_21,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
             .unwrap();
             tree.add_common(
+                extension_block_22.block_hash,
                 &extension_block_22,
                 Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
                 ChainState::NotOnchain(BlockState::ValidationScheduled),
             )
@@ -710,8 +718,10 @@ mod tests {
                 last_hash = header.block_hash;
 
                 tree.add_common(
+                    header.block_hash,
                     &header,
                     Arc::new(CommitmentSnapshot::default()),
+                    dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
                     ChainState::NotOnchain(BlockState::ValidationScheduled),
                 )
@@ -754,8 +764,10 @@ mod tests {
                 last_hash = header.block_hash;
 
                 tree.add_common(
+                    header.block_hash,
                     &header,
                     Arc::new(CommitmentSnapshot::default()),
+                    dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
                     ChainState::NotOnchain(BlockState::ValidationScheduled),
                 )

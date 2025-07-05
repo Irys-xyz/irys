@@ -53,9 +53,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
         .await?;
 
     // Get the genesis nodes view of the peers assignments
-    let peer_assignments = genesis_node
-        .get_partition_assignments(peer_signer.address())
-        .await;
+    let peer_assignments = genesis_node.get_partition_assignments(peer_signer.address());
 
     // Verify that one partition has been assigned to the peer to match its pledge
     assert_eq!(peer_assignments.len(), 1);
@@ -67,9 +65,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     peer_node.wait_for_packing(seconds_to_wait).await;
 
     // Verify that the peer has the same view of its own assignments
-    let peer_assignments_on_peer = peer_node
-        .get_partition_assignments(peer_signer.address())
-        .await;
+    let peer_assignments_on_peer = peer_node.get_partition_assignments(peer_signer.address());
 
     // Verify the peer has the same view of assignments as the genesis node
     assert_eq!(peer_assignments_on_peer.len(), 1);

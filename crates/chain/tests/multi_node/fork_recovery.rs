@@ -6,12 +6,13 @@ use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
 use tracing::debug;
 
 #[actix_web::test]
-async fn heavy_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
-    );
+    // std::env::set_var(
+    //     "RUST_LOG",
+    //     "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
+    // );
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=debug,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
@@ -72,25 +73,26 @@ async fn heavy_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // Mine a block to get the commitments included
-    genesis_node.mine_block().await.unwrap();
+    let block1 = genesis_node.mine_block().await.unwrap();
+
+    debug!("block1: {}", block1.height);
 
     // Mine another block to perform epoch tasks, and assign partition_hash's to the peers
-    genesis_node.mine_block().await.unwrap();
+    let block2 = genesis_node.mine_block().await.unwrap();
+
+    debug!("block1: {} block2: {}", block1.height, block2.height);
 
     // wait for block mining to reach tree height
     genesis_node.wait_until_height(2, seconds_to_wait).await?;
+
     // wait for migration to reach index height
     genesis_node
         .wait_until_block_index_height(1, seconds_to_wait)
         .await?;
 
     // Get the genesis nodes view of the peers assignments
-    let peer1_assignments = genesis_node
-        .get_partition_assignments(peer1_signer.address())
-        .await;
-    let peer2_assignments = genesis_node
-        .get_partition_assignments(peer2_signer.address())
-        .await;
+    let peer1_assignments = genesis_node.get_partition_assignments(peer1_signer.address());
+    let peer2_assignments = genesis_node.get_partition_assignments(peer2_signer.address());
 
     // Verify that one partition has been assigned to each peer to match its pledge
     assert_eq!(peer1_assignments.len(), 1);
