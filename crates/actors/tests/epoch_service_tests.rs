@@ -1,5 +1,5 @@
 use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
-use actix::{Actor as _, SystemService};
+use actix::{Actor as _, SystemService as _};
 use base58::ToBase58 as _;
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
@@ -893,7 +893,7 @@ async fn partitions_assignment_determinism_test() {
         .unwrap()
         .capacity_partitions
         .keys()
-        .cloned()
+        .copied()
         .collect();
 
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
