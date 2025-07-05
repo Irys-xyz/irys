@@ -640,6 +640,16 @@ impl BlockTreeServiceInner {
                     // Get the new canonical chain that's replacing the orphaned blocks
                     let new_canonical = cache.get_canonical_chain();
 
+                    for o in old_canonical.iter() {
+                        debug!("old_canonical({}) - {}", o.height, o.block_hash);
+                    }
+
+                    for o in new_canonical.0.iter() {
+                        debug!("new_canonical({}) - {}", o.height, o.block_hash);
+                    }
+
+                    debug!("fork_height: {} fork_hash: {}", fork_height, fork_hash);
+
                     // Trim both chains back to their common ancestor to isolate the divergent portions
                     let (old_fork, new_fork) = prune_chains_at_ancestor(
                         old_canonical,
@@ -1782,6 +1792,7 @@ impl BlockTreeCache {
             }
         }
 
+        fork_blocks.reverse();
         fork_blocks
     }
 

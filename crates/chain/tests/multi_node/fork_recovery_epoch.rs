@@ -89,12 +89,12 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
     // Now it's time to create different epoch timelines for each peers fork
-    let _pledge1 = peer1_node
+    let pledge1 = peer1_node
         .post_pledge_commitment_without_gossip(epoch_block.block_hash)
         .await;
     let fork1_3 = peer1_node.mine_block_without_gossip().await?;
 
-    let _pledge2 = peer2_node
+    let pledge2 = peer2_node
         .post_pledge_commitment_without_gossip(epoch_block.block_hash)
         .await;
     let fork2_3 = peer2_node.mine_block_without_gossip().await?;
@@ -115,7 +115,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     assert_eq!(genesis_hash, fork1_3.0.block_hash);
 
     // Have peer1 and peer2 both mine their 4th block, but don't gossip peer2s
-    let _peer2_epoch = peer2_node.mine_block_without_gossip().await?.0;
+    let peer2_epoch = peer2_node.mine_block_without_gossip().await?.0;
     let peer1_epoch = peer1_node.mine_block().await.unwrap();
 
     // Wait for peer1_epoch block to arrive at genesis node
@@ -131,6 +131,40 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     assert_ne!(peer2_head.previous_block_hash, genesis_epoch_hash);
 
     // Validate that the genesis node reorgs the epoch/commitment state correctly
+    genesis_node.gossip_block(&peer2_epoch)?;
+    genesis_node.gossip_block(&peer2_head)?;
+
+    let genesis_hash = genesis_node.wait_until_height(5, seconds_to_wait).await?;
+    let _genesis_head = genesis_node.get_block_by_hash(&genesis_hash)?;
+
+    assert_eq!(genesis_hash, peer2_hash);
+
+    // Verify the genesis epoch state that it has peer2s pledge and not peer1s
+    let epoch_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_epoch_snapshot();
+
+    let cs = epoch_snapshot.commitment_state.read().unwrap();
+
+    // Verify Peer2's pledge is in the commitment state now
+    assert!(cs
+        .pledge_commitments
+        .get(&peer2_signer.address())
+        .unwrap()
+        .iter()
+        .find(|cse| cse.id == pledge2.id)
+        .is_some());
+
+    // Verify peer1's pledge has been removed
+    assert!(cs
+        .pledge_commitments
+        .get(&peer1_signer.address())
+        .unwrap()
+        .iter()
+        .find(|cse| cse.id == pledge1.id)
+        .is_none());
 
     // Wind down test
     genesis_node.stop().await;
