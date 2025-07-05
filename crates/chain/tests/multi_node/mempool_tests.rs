@@ -72,7 +72,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     genesis_node
         .mine_blocks((1 + block_migration_depth).try_into()?)
         .await?;
-    genesis_node.wait_until_height_on_chain(1, 5).await?;
+    genesis_node.wait_until_block_index_height(1, 5).await?;
 
     // Finally verify the chunks didn't get dropped
     genesis_node
@@ -419,28 +419,9 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(recipient2_balance, expected_recipient2_balance);
 
     // disconnect peers
-    let disconnect_all = async |ctx: &IrysRethNodeAdapter| -> eyre::Result<Vec<PeerInfo>> {
-        let all_peers1 = ctx.inner.network.get_all_peers().await?;
-        for peer in all_peers1.iter() {
-            ctx.inner.network.disconnect_peer(peer.remote_id);
-        }
-
-        while !ctx.inner.network.get_all_peers().await?.is_empty() {
-            sleep(Duration::from_millis(100)).await;
-        }
-
-        let all_peers2 = ctx.inner.network.get_all_peers().await?;
-        assert!(
-            all_peers2.is_empty(),
-            "the peer should be completely disconnected",
-        );
-
-        Ok(all_peers1)
-    };
-
-    let genesis_peers = disconnect_all(&genesis_reth_context).await?;
-    let peer1_peers = disconnect_all(&peer1_reth_context).await?;
-    let peer2_peers = disconnect_all(&peer2_reth_context).await?;
+    let genesis_peers = genesis.disconnect_all_reth_peers().await?;
+    let peer1_peers = peer1.disconnect_all_reth_peers().await?;
+    let peer2_peers = peer2.disconnect_all_reth_peers().await?;
 
     let wait_for_evm_tx = async |ctx: &IrysRethNodeAdapter, hash: &B256| -> eyre::Result<()> {
         // wait until the tx shows up
@@ -552,7 +533,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
             tx,
         ))?;
 
-    let best_previous = rx.await?;
+    let best_previous = rx.await??;
     // previous block does not have the fund tx, the tx should not be present
     assert_eq!(
         best_previous.submit_tx.len(),
@@ -567,7 +548,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .service_senders
         .mempool
         .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
-    let best_current = rx.await?;
+    let best_current = rx.await??;
     // latest block has the fund tx, so it should be present
     assert_eq!(
         best_current.submit_tx.len(),
@@ -595,7 +576,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .service_senders
         .mempool
         .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
-    let best_current = rx.await?;
+    let best_current = rx.await??;
 
     assert_eq!(
         best_current.submit_tx.len(),

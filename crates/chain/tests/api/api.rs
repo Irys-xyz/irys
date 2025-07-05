@@ -6,7 +6,6 @@ use alloy_genesis::GenesisAccount;
 use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
-use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
     UnpackedChunk,
@@ -16,9 +15,8 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
-    initialize_tracing();
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await?;
     } else {
@@ -27,9 +25,8 @@ async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
-    initialize_tracing();
     api_end_to_end_test(256 * 1024).await?;
     Ok(())
 }

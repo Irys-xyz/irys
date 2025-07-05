@@ -67,10 +67,9 @@ use reth::{
     tasks::{TaskExecutor, TaskManager},
 };
 use reth_db::Database as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     net::TcpListener,
-    sync::atomic::AtomicU64,
     sync::{Arc, RwLock},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
@@ -105,6 +104,7 @@ pub struct IrysNodeCtx {
     pub peer_list: PeerListServiceFacade,
     pub sync_state: SyncState,
     pub shadow_tx_store: ShadowTxStore,
+    pub validation_enabled: Arc<AtomicBool>,
 }
 
 impl IrysNodeCtx {
@@ -169,6 +169,11 @@ impl IrysNodeCtx {
     // sets the running state of the VDF thread
     pub async fn vdf_state(&self, running: bool) -> eyre::Result<()> {
         Ok(self.service_senders.vdf_mining.send(running).await?)
+    }
+
+    /// Sets whether the validation service should process incoming validation messages
+    pub fn set_validation_enabled(&self, enabled: bool) {
+        self.validation_enabled.store(enabled, Ordering::Relaxed);
     }
 }
 
@@ -940,7 +945,7 @@ impl IrysNode {
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
         // Spawn the validation service
-        let _handle = ValidationService::spawn_service(
+        let (_handle, validation_enabled) = ValidationService::spawn_service(
             task_exec,
             block_index_guard.clone(),
             block_tree_guard.clone(),
@@ -1071,6 +1076,7 @@ impl IrysNode {
             shadow_tx_store,
             reth_node_adapter,
             block_producer_inner,
+            validation_enabled,
         };
 
         // Spawn the StorageModuleService to manage the lifecycle of storage modules

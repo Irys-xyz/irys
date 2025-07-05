@@ -1,8 +1,8 @@
 use crate::{
-    block_discovery::{get_data_tx_in_parallel, BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
         ema_snapshot::{EmaBlock, EmaSnapshot},
-        BlockState, BlockTreeReadGuard, ChainState,
+        BlockTreeReadGuard,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
@@ -21,10 +21,7 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
 use eyre::eyre;
-use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, db::IrysDatabaseExt as _,
-    tables::IngressProofs, SystemLedger,
-};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_shadow_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -43,16 +40,16 @@ use reth::{
     core::primitives::SealedBlock, payload::EthBuiltPayload, revm::primitives::B256,
     rpc::types::BlockId,
 };
-use reth_db::cursor::*;
-use reth_db::Database as _;
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn, Span};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
+
+mod block_validation_tracker;
+pub use block_validation_tracker::BlockValidationTracker;
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -144,6 +141,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let span = self.span.clone();
+        let span2 = span.clone();
         let _span = span.enter();
         let solution = msg.0;
         info!(
@@ -168,6 +166,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     .fully_produce_new_block(solution)
                     .await
             }
+            .instrument(span2)
             .into_actor(self)
             .map(move |result, actor, _ctx| {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
@@ -191,55 +190,78 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
-    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        loop {
-            // hold guard briefly to get latest canonical chain state
-            let (parent_block, status, ema_snapshot) = {
-                let read = self.inner().block_tree_guard.read();
-                let parent_entry = read.get_latest_canonical_entry();
-                let (parent_block, status) = read
-                    .get_block_and_status(&parent_entry.block_hash)
-                    .ok_or_else(|| eyre!("Parent block not found in block tree"))?;
-                let ema_snapshot = read
-                    .get_ema_snapshot(&parent_block.block_hash)
-                    .ok_or_else(|| eyre!("EMA snapshot not found for parent block"))?;
+    /// Creates PoA data from the solution context
+    /// Returns (PoaData, chunk_hash)
+    fn create_poa_data(
+        &self,
+        solution: &SolutionContext,
+        ledger_id: Option<u32>,
+    ) -> eyre::Result<(PoaData, H256)> {
+        let poa_chunk = Base64(solution.chunk.clone());
+        let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
+        let poa = PoaData {
+            tx_path: solution.tx_path.clone().map(Base64),
+            data_path: solution.data_path.clone().map(Base64),
+            chunk: Some(poa_chunk),
+            recall_chunk_index: solution.recall_chunk_index,
+            ledger_id,
+            partition_chunk_offset: solution.chunk_offset,
+            partition_hash: solution.partition_hash,
+        };
+        Ok((poa, poa_chunk_hash))
+    }
 
-                (parent_block.clone(), *status, ema_snapshot)
-            };
+    /// Fetches a block header from mempool or database
+    async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
+        // Try mempool first
+        let (tx, rx) = oneshot::channel();
+        self.inner()
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
 
-            // Closure to fetch full block header from mempool or database
-            let fetch_block_header = async move |block_hash: H256| {
-                let (tx_prev, rx_prev) = oneshot::channel();
-                self.inner().service_senders.mempool.send(
-                    MempoolServiceMessage::GetBlockHeader(block_hash, false, tx_prev),
-                )?;
-                let header = match rx_prev.await? {
-                    Some(header) => header,
-                    None => self
-                        .inner()
-                        .db
-                        .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-                        .ok_or_else(|| eyre!("No block header found for hash {}", block_hash,))?,
-                };
-                Ok::<_, eyre::Error>(header)
-            };
-
-            match status {
-                ChainState::Onchain
-                | ChainState::Validated(BlockState::ValidBlock)
-                | ChainState::NotOnchain(BlockState::ValidBlock) => {
-                    // Block is ready to use as parent
-                    info!(?parent_block.block_hash, ?parent_block.height, "Starting block production, previous block");
-
-                    let header = fetch_block_header(parent_block.block_hash).await?;
-                    return Ok((header, ema_snapshot));
-                }
-                _ => {
-                    // Block is not yet marked as ValidBlock, wait briefly
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+        match rx.await? {
+            Some(header) => Ok(header),
+            None => {
+                // Fall back to database
+                self.inner()
+                    .db
+                    .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+                    .ok_or_else(|| eyre!("No block header found for hash {}", block_hash))
             }
         }
+    }
+
+    /// Gets the EMA snapshot for a given block
+    fn get_block_ema_snapshot(&self, block_hash: &H256) -> eyre::Result<Arc<EmaSnapshot>> {
+        let read = self.inner().block_tree_guard.read();
+        read.get_ema_snapshot(block_hash)
+            .ok_or_else(|| eyre!("EMA snapshot not found for block {}", block_hash))
+    }
+
+    /// Selects the parent block for new block production.
+    ///
+    /// Targets the block with highest cumulative difficulty, but only if fully validated.
+    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
+    /// the latest validated block on timeout to ensure production continues.
+    ///
+    /// Returns the selected parent block header and its EMA snapshot.
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+
+        // Use BlockValidationTracker to select the parent block
+        let parent_block_hash = BlockValidationTracker::new(self.inner(), MAX_WAIT_TIME)
+            .wait_for_validation()
+            .await?;
+
+        // Fetch the parent block header
+        let header = self.fetch_block_header(parent_block_hash).await?;
+
+        // Get the EMA snapshot
+        let ema_snapshot = self.get_block_ema_snapshot(&header.block_hash)?;
+
+        Ok((header, ema_snapshot))
     }
 
     async fn fully_produce_new_block(
@@ -250,7 +272,7 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let (system_tx_ledger, commitment_txs_to_bill, submit_txs) =
+        let (system_tx_ledger, commitment_txs_to_bill, submit_txs, publish_txs) =
             self.get_mempool_txs(&prev_block_header).await?;
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
         let eth_built_payload = self
@@ -270,6 +292,7 @@ pub trait BlockProdStrategy {
                 solution,
                 &prev_block_header,
                 submit_txs,
+                publish_txs,
                 system_tx_ledger,
                 current_timestamp,
                 block_reward,
@@ -349,18 +372,6 @@ pub trait BlockProdStrategy {
             .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
             .await?;
 
-        // trigger forkchoice update via engine api to commit the block to the blockchain
-        self.inner()
-            .reth_node_adapter
-            .update_forkchoice_full(
-                payload.block().hash(),
-                // we mark this block as confirmed because we produced it
-                Some(payload.block().hash()),
-                // marking a block as finalized is handled by a different service
-                None,
-            )
-            .await?;
-
         Ok(payload)
     }
 
@@ -369,6 +380,7 @@ pub trait BlockProdStrategy {
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
         submit_txs: Vec<IrysTransactionHeader>,
+        publish_txs: (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
@@ -384,7 +396,7 @@ pub trait BlockProdStrategy {
             return Ok(None);
         }
 
-        let (publish_txs, proofs) = self.get_publish_txs_and_proofs().await?;
+        let (publish_txs, proofs) = publish_txs;
 
         // Publish Ledger Transactions
         let publish_chunks_added =
@@ -437,17 +449,8 @@ pub trait BlockProdStrategy {
             .get_data_partition_assignment(solution.partition_hash)
             .and_then(|pa| pa.ledger_id);
 
-        let poa_chunk = Base64(solution.chunk);
-        let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
-        let poa = PoaData {
-            tx_path: solution.tx_path.map(Base64),
-            data_path: solution.data_path.map(Base64),
-            chunk: Some(poa_chunk),
-            recall_chunk_index: solution.recall_chunk_index,
-            ledger_id,
-            partition_chunk_offset: solution.chunk_offset,
-            partition_hash: solution.partition_hash,
-        };
+        // Create PoA data using the trait method
+        let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
 
         let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1
             > solution.vdf_step - 1
@@ -543,6 +546,15 @@ pub trait BlockProdStrategy {
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
+        let _res = self
+            .inner()
+            .reth_service
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Evm(irys_block.evm_block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            })
+            .await??;
 
         let block = Arc::new(irys_block);
         match self
@@ -579,16 +591,6 @@ pub trait BlockProdStrategy {
                 ))
             }
         }?;
-
-        // we set the canon head here, as we produced this block, and this lets us build off of it
-        self.inner()
-            .reth_service
-            .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(evm_block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .await??;
 
         if is_difficulty_updated {
             self.inner()
@@ -655,6 +657,7 @@ pub trait BlockProdStrategy {
         Vec<SystemTransactionLedger>,
         Vec<CommitmentTransaction>,
         Vec<IrysTransactionHeader>,
+        (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
     )> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()
@@ -665,7 +668,7 @@ pub trait BlockProdStrategy {
                 tx,
             ))
             .expect("to send MempoolServiceMessage");
-        let mempool_txs = rx.await.expect("to receive txns");
+        let mempool_txs = rx.await.expect("to receive txns")?;
         let block_height = prev_block_header.height + 1;
         let is_epoch_block =
             block_height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0;
@@ -744,84 +747,8 @@ pub trait BlockProdStrategy {
             system_ledgers,
             commitment_txs_to_bill,
             mempool_txs.submit_tx,
+            mempool_txs.publish_tx,
         ))
-    }
-
-    async fn get_publish_txs_and_proofs(
-        &self,
-    ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
-        let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
-        let mut proofs: Vec<TxIngressProof> = Vec::new();
-        {
-            let read_tx = self
-                .inner()
-                .db
-                .tx()
-                .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
-
-            let mut read_cursor = read_tx
-                .new_cursor::<IngressProofs>()
-                .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
-
-            let walker = read_cursor
-                .walk(None)
-                .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
-
-            let ingress_proofs = walker
-                .collect::<Result<HashMap<_, _>, _>>()
-                .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
-
-            let mut publish_txids: Vec<H256> = Vec::new();
-            // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
-            for data_root in ingress_proofs.keys() {
-                let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
-                if let Some(cached_data_root) = cached_data_root {
-                    debug!(tx_ids = ?cached_data_root.txid_set, "publishing");
-                    publish_txids.extend(cached_data_root.txid_set);
-                }
-            }
-
-            // Loop though all the pending tx to see which haven't been promoted
-            let tx_headers = get_data_tx_in_parallel(
-                publish_txids,
-                &self.inner().service_senders.mempool,
-                &self.inner().db,
-            )
-            .await
-            .unwrap_or(vec![]);
-            for tx_header in &tx_headers {
-                // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
-                if tx_header.ingress_proofs.is_none() {
-                    // Get the proof
-                    match ingress_proofs.get(&tx_header.data_root) {
-                        Some(proof) => {
-                            let mut tx_header = tx_header.clone();
-                            let proof = TxIngressProof {
-                                proof: proof.proof,
-                                signature: proof.signature,
-                            };
-                            proofs.push(proof.clone());
-                            tx_header.ingress_proofs = Some(proof);
-                            publish_txs.push(tx_header);
-                        }
-                        None => {
-                            error!(
-                                "No ingress proof found for data_root: {}",
-                                tx_header.data_root
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        let txs = &publish_txs
-            .iter()
-            .map(|h| h.id.0.to_base58())
-            .collect::<Vec<_>>();
-        debug!(?txs, "Publish transactions");
-        Ok((publish_txs, proofs))
     }
 
     async fn get_evm_block(
@@ -860,10 +787,18 @@ pub trait BlockProdStrategy {
             }
         }
         .expect("Should be able to get the parent EVM block");
-        eyre::ensure!(
-            parent.header.hash_slow() == prev_block_header.evm_block_hash,
-            "reth parent block hash mismatch"
-        );
+        // TODO: fix genesis hash computation when using init-state (persist modified chainspec?)
+        // for now we just skip the check for the genesis block
+        if prev_block_header.height > 0 {
+            let computed_parent_evm_hash = parent.header.hash_slow();
+            eyre::ensure!(
+                computed_parent_evm_hash == prev_block_header.evm_block_hash,
+                "reth parent block hash mismatch for height {} - computed {} got {}",
+                &prev_block_header.height,
+                &computed_parent_evm_hash,
+                &prev_block_header.evm_block_hash
+            );
+        }
         Ok(parent)
     }
 }

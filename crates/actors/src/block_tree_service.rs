@@ -10,7 +10,7 @@ use crate::{
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
-use eyre::{ensure, eyre, Context as _};
+use eyre::{eyre, Context as _};
 use futures::future::Either;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
@@ -124,6 +124,14 @@ pub struct ReorgEvent {
 #[derive(Debug, Clone)]
 pub struct BlockMigratedEvent {
     pub block: Arc<IrysBlockHeader>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockStateUpdated {
+    pub block_hash: BlockHash,
+    pub height: u64,
+    pub state: ChainState,
+    pub discarded: bool,
 }
 
 impl BlockTreeService {
@@ -241,7 +249,7 @@ impl BlockTreeServiceInner {
                 validation_result,
             } => {
                 self.on_block_validation_finished(block_hash, validation_result)
-                    .await;
+                    .await?;
             }
         }
         Ok(())
@@ -420,9 +428,7 @@ impl BlockTreeServiceInner {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
     ) -> eyre::Result<()> {
-        let miner_address = self.miner_address;
         let block_hash = &block.block_hash;
-
         let mut cache = self.cache.write().expect("cache lock poisoned");
 
         // Early return if block already exists
@@ -462,23 +468,12 @@ impl BlockTreeServiceInner {
             &self.consensus_config,
         )?;
 
-        // Add block based on origin (local vs peer)
-        let add_result = if block.miner_address == miner_address {
-            cache.add_local_block(
-                &block,
-                ChainState::Validated(BlockState::Unknown),
-                commitment_snapshot,
-                arc_epoch_snapshot,
-                ema_snapshot,
-            )
-        } else {
-            cache.add_peer_block(
-                &block,
-                commitment_snapshot,
-                arc_epoch_snapshot,
-                ema_snapshot,
-            )
-        };
+        let add_result = cache.add_block(
+            &block,
+            commitment_snapshot,
+            arc_epoch_snapshot,
+            ema_snapshot,
+        );
 
         if add_result.is_ok() {
             // Schedule validation and mark as scheduled
@@ -525,7 +520,7 @@ impl BlockTreeServiceInner {
         &mut self,
         block_hash: H256,
         validation_result: ValidationResult,
-    ) {
+    ) -> eyre::Result<()> {
         let span = self.span.clone();
         let _span = span.enter();
 
@@ -545,12 +540,36 @@ impl BlockTreeServiceInner {
         if validation_result == ValidationResult::Invalid {
             error!(block_hash = %block_hash.0.to_base58(),"invalid block");
             let mut cache = self.cache.write().unwrap();
+
+            error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+            let Some(block_entry) = cache.get_block(&block_hash) else {
+                // block not in the tree
+                return Ok(());
+            };
+            // Get block state info before removal for the event
+            let height = block_entry.height;
+            let state = cache
+                .get_block_and_status(&block_hash)
+                .map(|(_, state)| *state)
+                .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+
+            // Remove the block
             let _ = cache
                 .remove_block(&block_hash)
                 .inspect_err(|err| tracing::error!(?err));
-            // Early out for invalid blocks
-            return;
+
+            let event = BlockStateUpdated {
+                block_hash,
+                height,
+                state,
+                discarded: true,
+            };
+            let _ = self.service_senders.block_state_events.send(event);
+
+            return Ok(());
         }
+
+        let state;
 
         let (arc_block, epoch_block, reorg_event) = {
             let binding = self.cache.clone();
@@ -565,7 +584,7 @@ impl BlockTreeServiceInner {
             // Mark block as validated in cache, this will update the canonical chain
             if let Err(err) = cache.mark_block_as_valid(&block_hash) {
                 error!("{}", err);
-                return;
+                return Ok(());
             }
 
             let Some((_block_entry, fork_blocks, _)) =
@@ -585,7 +604,7 @@ impl BlockTreeServiceInner {
                     old_tip_block.height
                 );
                 }
-                return;
+                return Ok(());
             };
 
             // if the old tip isn't in the fork_blocks, it's a reorg
@@ -692,6 +711,12 @@ impl BlockTreeServiceInner {
             } else {
                 (arc_block, None, None)
             };
+
+            state = cache
+                .get_block_and_status(&block_hash)
+                .map(|(_, state)| *state)
+                .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+
             mark_tip_result
         }; // RwLockWriteGuard is dropped here, before the await
 
@@ -714,6 +739,16 @@ impl BlockTreeServiceInner {
         // Handle block finalization (move chunks to disk and add to block_index)
         self.try_notify_services_of_block_migration(&arc_block)
             .await;
+
+        let event = BlockStateUpdated {
+            block_hash,
+            height,
+            state,
+            discarded: false,
+        };
+        let _ = self.service_senders.block_state_events.send(event);
+
+        Ok(())
     }
 
     fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
@@ -1197,12 +1232,13 @@ impl BlockTreeCache {
             prev_ema_snapshot = arc_ema_snapshot.clone();
             prev_block = block.clone();
             block_tree_cache
-                .add_local_block(
+                .add_common(
+                    block.block_hash,
                     &block,
-                    ChainState::Validated(BlockState::ValidBlock),
                     arc_commitment_snapshot,
                     epoch_snapshot,
                     arc_ema_snapshot,
+                    ChainState::Validated(BlockState::ValidBlock),
                 )
                 .unwrap();
         }
@@ -1291,7 +1327,7 @@ impl BlockTreeCache {
     ///
     /// This differs from locally produced blocks, which can be added with more
     /// flexible validation states to facilitate chain progress for local mining and initialization.
-    pub fn add_peer_block(
+    pub fn add_block(
         &mut self,
         block: &IrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
@@ -1320,56 +1356,6 @@ impl BlockTreeCache {
             epoch_snapshot,
             ema_snapshot,
             ChainState::NotOnchain(BlockState::Unknown),
-        )
-    }
-
-    /// Adds a locally cached or produced block to the block tree.
-    ///
-    /// Local blocks have more flexible validation requirements than peer blocks:
-    /// - **Peer blocks**: Must reach `BlockState::ValidBlock` before joining the canonical chain
-    /// - **Local blocks**: Can be added as `ChainState::Validated` with any `BlockState` override
-    ///
-    /// This flexibility allows the local node to:
-    /// - Continue building the chain while full validation runs in parallel
-    /// - Skip full validation for locally produced blocks entirely
-    ///
-    /// # Parameters
-    /// - Block must be locally produced (not received from peers)
-    /// - Can specify any `ChainState` and `BlockState` regardless of actual validation status
-    /// - Commitment snapshot reference for the block
-    pub fn add_local_block(
-        &mut self,
-        block: &IrysBlockHeader,
-        chain_state: ChainState,
-        commitment_snapshot: Arc<CommitmentSnapshot>,
-        epoch_snapshot: Arc<EpochSnapshot>,
-        ema_snapshot: Arc<EmaSnapshot>,
-    ) -> eyre::Result<()> {
-        let hash = block.block_hash;
-        let prev_hash = block.previous_block_hash;
-
-        debug!(
-            "adding validated block - hash: {} height: {}",
-            block.block_hash.0.to_base58(),
-            block.height,
-        );
-
-        // Verify parent is validated
-        ensure!(
-            !matches!(
-                self.blocks.get(&prev_hash).map(|b| b.chain_state),
-                Some(ChainState::NotOnchain(_))
-            ),
-            "Previous block not validated"
-        );
-
-        self.add_common(
-            hash,
-            block,
-            commitment_snapshot,
-            epoch_snapshot,
-            ema_snapshot,
-            chain_state,
         )
     }
 
@@ -1711,6 +1697,21 @@ impl BlockTreeCache {
         self.height_index.get(&height)
     }
 
+    /// Get the block with maximum cumulative difficulty
+    pub fn get_max_cumulative_difficulty_block(&self) -> (U256, BlockHash) {
+        self.max_cumulative_difficulty
+    }
+
+    /// Check if a block can be built upon
+    pub fn can_be_built_upon(&self, block_hash: &BlockHash) -> bool {
+        self.blocks.get(block_hash).is_some_and(|entry| {
+            matches!(
+                entry.chain_state,
+                ChainState::Onchain | ChainState::Validated(BlockState::ValidBlock)
+            )
+        })
+    }
+
     /// Gets block and its current validation status
     #[must_use]
     pub fn get_block_and_status(
@@ -1720,6 +1721,47 @@ impl BlockTreeCache {
         self.blocks
             .get(block_hash)
             .map(|entry| (&entry.block, &entry.chain_state))
+    }
+
+    /// Walk backwards from a block to find the validation status of the chain
+    /// Returns: (blocks_awaiting_validation, last_validated_block_hash)
+    pub fn get_validation_chain_status(
+        &self,
+        from_block_hash: &BlockHash,
+    ) -> (usize, Option<BlockHash>) {
+        let mut current_hash = *from_block_hash;
+        let mut blocks_awaiting = 0;
+        let mut last_validated = None;
+
+        while let Some(entry) = self.blocks.get(&current_hash) {
+            match entry.chain_state {
+                ChainState::Onchain | ChainState::Validated(BlockState::ValidBlock) => {
+                    // Found a validated block
+                    if last_validated.is_none() {
+                        last_validated = Some(current_hash);
+                    }
+                }
+                ChainState::NotOnchain(BlockState::ValidBlock) => {
+                    // This block passed validation but isn't on chain yet
+                    if last_validated.is_none() {
+                        blocks_awaiting += 1;
+                    }
+                }
+                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled)
+                | ChainState::Validated(BlockState::Unknown | BlockState::ValidationScheduled) => {
+                    // This block is awaiting validation
+                    blocks_awaiting += 1;
+                }
+            }
+
+            if entry.block.height == 0 {
+                break; // Reached genesis
+            }
+
+            current_hash = entry.block.previous_block_hash;
+        }
+
+        (blocks_awaiting, last_validated)
     }
 
     /// Collect previous blocks up to the last on-chain block
@@ -2226,7 +2268,7 @@ mod tests {
             .tx_ids
             .push(H256::random());
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b1_test,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2259,7 +2301,7 @@ mod tests {
         // Add b2 block as not_validated
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b2,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2283,7 +2325,7 @@ mod tests {
         let txid = H256::random();
         b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b2,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2323,7 +2365,7 @@ mod tests {
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b2,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2334,7 +2376,7 @@ mod tests {
         let mut b1_2 = extend_chain(random_block(U256::from(2)), &b1);
         b1_2.solution_hash = b1.solution_hash;
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b1_2,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2474,7 +2516,7 @@ mod tests {
         // has a lower cdiff.
         let mut cache = BlockTreeCache::new(&b1, ConsensusConfig::testnet());
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b1_2,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2483,7 +2525,7 @@ mod tests {
             Ok(())
         );
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b2,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2498,7 +2540,7 @@ mod tests {
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b2_2,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2523,7 +2565,7 @@ mod tests {
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b2_3,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2545,12 +2587,13 @@ mod tests {
 
         // Now b2_2->b2->b1 are validated.
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b2_2.block_hash,
                 &b2_2,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
@@ -2576,7 +2619,7 @@ mod tests {
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b3,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2585,12 +2628,13 @@ mod tests {
             Ok(())
         );
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b3.block_hash,
                 &b3,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
@@ -2618,7 +2662,7 @@ mod tests {
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b4,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2760,7 +2804,7 @@ mod tests {
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b12,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2786,12 +2830,13 @@ mod tests {
         println!("tip: {} before mark_tip()", cache.tip);
 
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b13.block_hash,
                 &b13,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
@@ -2837,7 +2882,7 @@ mod tests {
         // Extend the b13->b11 chain
         let b14 = extend_chain(random_block(U256::from(2)), &b13);
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b14,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2927,7 +2972,7 @@ mod tests {
         // add a b15 block
         let b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b15,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -2947,12 +2992,13 @@ mod tests {
 
         // Validate b14
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b14.block_hash,
                 &b14,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
@@ -2974,7 +3020,7 @@ mod tests {
         // add a b16 block
         let b16 = extend_chain(random_block(U256::from(4)), &b15);
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b16,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -3034,7 +3080,7 @@ mod tests {
         let mut cache = BlockTreeCache::new(&b11, ConsensusConfig::testnet());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_peer_block(
+            cache.add_block(
                 &b12,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
@@ -3051,12 +3097,13 @@ mod tests {
 
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b12.block_hash,
                 &b12,
-                ChainState::Validated(BlockState::ValidationScheduled),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidationScheduled),
             ),
             Ok(())
         );
@@ -3080,12 +3127,13 @@ mod tests {
 
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b12.block_hash,
                 &b12,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
@@ -3098,22 +3146,24 @@ mod tests {
         let b13b = extend_chain(random_block(U256::from(2)), &b12);
 
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b13a.block_hash,
                 &b13a,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b13b.block_hash,
                 &b13b,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
@@ -3126,12 +3176,13 @@ mod tests {
         // extend the fork to make it canonical
         let b14b = extend_chain(random_block(U256::from(3)), &b13b);
         assert_matches!(
-            cache.add_local_block(
+            cache.add_common(
+                b14b.block_hash,
                 &b14b,
-                ChainState::Validated(BlockState::ValidBlock),
                 comm_cache,
                 dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
             ),
             Ok(())
         );
