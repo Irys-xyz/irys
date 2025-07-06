@@ -5,14 +5,15 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_chain::IrysNodeCtx;
+use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::{
     ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransaction,
-    NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, DataLedger, IngressProofsList, IrysBlockHeader,
+    IrysTransaction, NodeConfig, TxIngressProof, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -24,6 +25,8 @@ use reth::{
         types::{Block, Header, TransactionRequest},
     },
 };
+use reth_db::transaction::DbTx as _;
+use reth_db::Database as _;
 use std::time::Duration;
 use tokio::{sync::oneshot, time::sleep};
 use tracing::debug;
@@ -634,13 +637,11 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
 /// goals:
 /// - ensure orphaned publish ledger txs are included in the mempool & in blocks post-reorg
 /// - ensure reorged publish txs are always associated with the canonical ingress proof(s)
-
 /// Steps:
 /// create 3 nodes: A (genesis), B and C
 /// mine commitments for B and C using A
 /// make sure all the nodes are synchronised
 /// prevent all gossip/P2P
-
 /// send A a storage Tx, ready for promotion
 /// send B a storage Tx
 /// prime a fork - mine one block on A and two on B
@@ -652,7 +653,6 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
 /// gossip A's tx to B & prepare it for promotion
 /// mine a block on B, assert A's tx is included correctly
 /// gossip B's block back to A, assert mempool state ingress proofs etc are correct
-
 // TODO: once longer forks are stable & if it's worthwhile:
 /// mine 4 blocks on C
 /// gossip these to A
@@ -935,7 +935,6 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     let a_blk1_tx1_proof1 = {
         let tx = a_node.node_ctx.db.tx()?;
-        use reth_db::transaction::DbTx as _;
         // TODO: why do we have two structs? TxIngressProof and IngressProof?
         // probably not worth worrying about given ingress proofs need a proper impl, and this should be handled then
         tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
