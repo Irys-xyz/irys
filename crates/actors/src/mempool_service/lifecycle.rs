@@ -146,7 +146,7 @@ impl Inner {
 
         self.handle_confirmed_data_tx_reorg(event.clone()).await?;
 
-        // self.handle_commitment_tx_reorg(event).await?;
+        self.handle_commitment_tx_reorg(event).await?;
 
         tracing::info!("Reorg handled, new tip: {}", &new_tip);
         Ok(())
