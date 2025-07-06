@@ -316,11 +316,9 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
 
     // Get the genesis nodes view of the peers assignments
     let peer1_assignments = genesis_node
-        .get_partition_assignments(peer1_signer.address())
-        .await;
+        .get_partition_assignments(peer1_signer.address());
     let peer2_assignments = genesis_node
-        .get_partition_assignments(peer2_signer.address())
-        .await;
+        .get_partition_assignments(peer2_signer.address());
 
     // Verify that one partition has been assigned to each peer to match its pledge
     assert_eq!(peer1_assignments.len(), 1);
@@ -750,8 +748,8 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
             .await?;
 
         // Get the a nodes view of the peers assignments
-        let b_assignments = a_node.get_partition_assignments(b_signer.address()).await;
-        let c_assignments = a_node.get_partition_assignments(c_signer.address()).await;
+        let b_assignments = a_node.get_partition_assignments(b_signer.address());
+        let c_assignments = a_node.get_partition_assignments(c_signer.address());
 
         // Verify that one partition has been assigned to each peer to match its pledge
         assert_eq!(b_assignments.len(), 1);

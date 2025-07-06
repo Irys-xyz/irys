@@ -233,7 +233,7 @@ impl Inner {
                 .block_tree_read_guard
                 .read()
                 .get_commitment_snapshot(&block.block_hash)?;
-            let all_commitments = entry.get_all_commitments();
+            let all_commitments = entry.get_epoch_commitments();
 
             // extract all the commitment txs
             // TODO: change this so the above orphan code creates a block height/hash -> orphan tx list mapping

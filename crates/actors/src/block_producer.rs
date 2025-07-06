@@ -9,7 +9,6 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
-    EpochServiceMessage,
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
@@ -391,7 +390,6 @@ pub trait BlockProdStrategy {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
-        let epoch_service = self.inner().service_senders.epoch_service.clone();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
             warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58());
@@ -440,14 +438,16 @@ pub trait BlockProdStrategy {
         let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
 
         // Use the partition hash to figure out what ledger it belongs to
-        let (sender, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .send(EpochServiceMessage::GetPartitionAssignment(
-                solution.partition_hash,
-                sender,
-            ))
-            .unwrap();
-        let ledger_id = rx.await?.and_then(|pa| pa.ledger_id);
+        let epoch_snapshot = self
+            .inner()
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&prev_block_hash)
+            .expect("parent epoch snapshot to be retrievable");
+
+        let ledger_id = epoch_snapshot
+            .get_data_partition_assignment(solution.partition_hash)
+            .and_then(|pa| pa.ledger_id);
 
         // Create PoA data using the trait method
         let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
@@ -695,7 +695,7 @@ pub trait BlockProdStrategy {
 
             if let Ok(entry) = entry {
                 let mut txids = H256List::new();
-                let commitments = entry.get_all_commitments();
+                let commitments = entry.get_epoch_commitments();
 
                 // Collect all commitment transaction IDs from the epoch
                 for tx in commitments.iter() {
