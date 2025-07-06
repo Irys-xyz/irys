@@ -5,7 +5,7 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_chain::IrysNodeCtx;
-use irys_database::tables::IngressProofs;
+use irys_database::{tables::IngressProofs, SystemLedger};
 use irys_reth_node_bridge::{
     ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
     IrysRethNodeAdapter,
@@ -1028,6 +1028,305 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
                 .clone()
         )
     );
+
+    // tada!
+
+    // gracefully shutdown nodes
+    tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);
+    debug!("DONE!");
+    Ok(())
+}
+
+/// this test tests reorging in the context of confirmed commitment transactions
+/// goals:
+/// - ensure orphaned commitment transactions are returned to the mempool correctly
+/// Steps:
+/// create 2 nodes: A (genesis) B and C (C is currently unused)
+/// mine commitments for B and C using A
+/// make sure all the nodes are synchronised
+/// prevent all gossip/P2P
+///
+/// send A a commitment Tx
+/// send B a commitment Tx
+/// prime a fork - mine one block on A and two on B
+/// assert A and B's blocks include their respective commitment txs
+/// trigger a reorg - gossip B's txs & blocks to A
+/// assert that A has a reorg event
+/// assert that A's tx is returned to the mempool
+/// gossip A's tx to B
+/// mine a block on B, assert A's tx is included correctly
+/// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
+
+#[actix_web::test]
+async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
+    std::env::set_var(
+        "RUST_LOG",
+        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+    );
+    initialize_tracing();
+
+    // config variables
+    let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
+    let seconds_to_wait = 15;
+
+    // setup config
+    let block_migration_depth: u64 = num_blocks_in_epoch - 1;
+    let mut a_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into().unwrap());
+    a_config.consensus.get_mut().chunk_size = 32;
+    a_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    // signers
+    // Create a signer (keypair) for the peer and fund it
+    let mut b_signer = a_config.new_random_signer();
+    b_signer.signer = SigningKey::from_slice(
+        hex::decode("b360d276e1a5a26c59d46e5b12e0cec0f5166cb69552b5ba282a661bf2f8fe3e")?.as_slice(),
+    )?;
+    let mut c_signer = a_config.new_random_signer();
+    c_signer.signer = SigningKey::from_slice(
+        hex::decode("ff235e7114eb975ca3bef4210db9aab2443c422497021e452f9dd4a327c562dc")?.as_slice(),
+    )?;
+
+    a_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
+
+    let a_node = IrysNodeTest::new_genesis(a_config.clone())
+        .start_and_wait_for_packing("NODE_A", seconds_to_wait)
+        .await;
+
+    // let a_signer = a_node.node_ctx.config.irys_signer();
+
+    //  additional configs for peers
+    let config_1 = a_node.testnet_peer_with_signer(&c_signer);
+    let config_2 = a_node.testnet_peer_with_signer(&b_signer);
+
+    // start peer nodes
+    let b_node = IrysNodeTest::new(config_1)
+        .start_and_wait_for_packing("NODE_B", seconds_to_wait)
+        .await;
+    let c_node = IrysNodeTest::new(config_2)
+        .start_and_wait_for_packing("NODE_C", seconds_to_wait)
+        .await;
+
+    let mut network_height = 0;
+    {
+        // Post stake + pledge commitments to b
+        let b_stake_tx = b_node.post_stake_commitment(H256::zero()).await; // zero() is the a block hash
+        let b_pledge_tx = b_node.post_pledge_commitment(H256::zero()).await;
+
+        // Post stake + pledge commitments to c
+        let c_stake_tx = c_node.post_stake_commitment(H256::zero()).await;
+        let c_pledge_tx = c_node.post_pledge_commitment(H256::zero()).await;
+
+        // Wait for all commitment tx to show up in the node_a's mempool
+        a_node
+            .wait_for_mempool(b_stake_tx.id, seconds_to_wait)
+            .await?;
+        a_node
+            .wait_for_mempool(b_pledge_tx.id, seconds_to_wait)
+            .await?;
+        a_node
+            .wait_for_mempool(c_stake_tx.id, seconds_to_wait)
+            .await?;
+        a_node
+            .wait_for_mempool(c_pledge_tx.id, seconds_to_wait)
+            .await?;
+
+        // Mine blocks to get the commitments included, epoch tasks performed, and assignments of partition_hash's to the peers
+        a_node
+            .mine_blocks(num_blocks_in_epoch.try_into().unwrap())
+            .await?;
+        network_height += num_blocks_in_epoch;
+        // wait for block mining to reach tree height
+        a_node
+            .wait_until_height(network_height, seconds_to_wait)
+            .await?;
+
+        // wait for migration to reach index height
+        a_node
+            .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
+            .await?;
+
+        // Get the a nodes view of the peers assignments
+        let b_assignments = a_node.get_partition_assignments(b_signer.address());
+        let c_assignments = a_node.get_partition_assignments(c_signer.address());
+
+        // Verify that one partition has been assigned to each peer to match its pledge
+        assert_eq!(b_assignments.len(), 1);
+        assert_eq!(c_assignments.len(), 1);
+
+        // Wait for the peers to receive & process the epoch block
+        b_node
+            .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
+            .await?;
+        c_node
+            .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
+            .await?;
+
+        // Wait for them to pack their storage modules with the partition_hashes
+        b_node.wait_for_packing(seconds_to_wait).await;
+        c_node.wait_for_packing(seconds_to_wait).await;
+    }
+
+    // check peer heights match a - i.e. that we are all in sync
+    network_height = a_node.get_height().await;
+
+    b_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+    c_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+
+    // disable P2P/gossip
+    {
+        a_node.gossip_disable();
+        b_node.gossip_disable();
+        c_node.gossip_disable();
+    }
+
+    let a_blk0 = a_node.get_block_by_height(network_height).await?;
+
+    // A: create tx & mine block 1 (relative)
+
+    let a_blk1_tx1 = a_node
+        .post_pledge_commitment_without_gossip(a_blk0.block_hash)
+        .await;
+
+    a_node.mine_block().await?;
+    network_height += 1;
+    a_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+
+    let a_blk1 = a_node.get_block_by_height(network_height).await?;
+    // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
+
+    assert_eq!(
+        a_blk1.system_ledgers[SystemLedger::Commitment].tx_ids,
+        vec![a_blk1_tx1.id]
+    );
+
+    // B: mine block 1
+
+    let b_blk1_tx1 = b_node
+        .post_pledge_commitment_without_gossip(a_blk0.block_hash)
+        .await;
+
+    b_node.mine_block().await?;
+    // network_height += 1;
+    b_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+
+    let b_blk1 = b_node.get_block_by_height(network_height).await?;
+    // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
+
+    assert_eq!(
+        b_blk1.system_ledgers[SystemLedger::Commitment].tx_ids,
+        vec![b_blk1_tx1.id]
+    );
+
+    // B: Tx & Block 2
+
+    let b_blk2_tx1 = b_node
+        .post_pledge_commitment_without_gossip(b_blk1.block_hash)
+        .await;
+
+    b_node.mine_block().await?;
+    network_height += 1;
+    b_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+
+    let b_blk2 = b_node.get_block_by_height(network_height).await?;
+    // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
+
+    assert_eq!(
+        b_blk2.system_ledgers[SystemLedger::Commitment].tx_ids,
+        vec![b_blk2_tx1.id]
+    );
+
+    // // Gossip B1&2 to A, causing a reorg
+
+    let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
+
+    // a_node.post_data_tx_raw(&b_blk1_tx1.header).await;
+    a_node.post_commitment_tx(&b_blk1_tx1).await;
+    b_node.send_block_to_peer(&a_node, &b_blk1).await?;
+
+    // a_node.post_data_tx_raw(&b_blk2_tx1.header).await;
+    a_node.post_commitment_tx(&b_blk2_tx1).await;
+    b_node.send_block_to_peer(&a_node, &b_blk2).await?;
+
+    a_node
+        .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
+        .await?;
+
+    a_node
+        .wait_for_block(&b_blk2.block_hash, seconds_to_wait)
+        .await?;
+
+    // wait for a reorg event
+
+    let _a1_b2_reorg = a1_b2_reorg_fut.await?;
+
+    a_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+
+    assert_eq!(
+        a_node.get_block_by_height(network_height).await?,
+        b_node.get_block_by_height(network_height).await?
+    );
+
+    // assert that a_blk1_tx1 is back in a's mempool
+    let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
+
+    assert_eq!(
+        a1_b2_reorg_mempool_txs.commitment_tx,
+        vec![a_blk1_tx1.clone()]
+    );
+
+    // gossip A's orphaned tx to B
+
+    b_node.post_commitment_tx(&a_blk1_tx1).await;
+
+    // B: Mine B3
+
+    b_node.mine_block().await?;
+    network_height += 1;
+
+    b_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+
+    let b_blk3 = b_node.get_block_by_height(network_height).await?;
+
+    // ensure a_blk1_tx1 is included
+    assert_eq!(
+        b_blk3.system_ledgers[SystemLedger::Commitment].tx_ids,
+        vec![a_blk1_tx1.id]
+    );
+
+    // now we gossip B3 back to A
+    // it shouldn't reorg, and should accept the block
+
+    b_node.send_block_to_peer(&a_node, &b_blk3).await?;
+
+    a_node
+        .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+
+    assert_eq!(
+        a_node.get_block_by_height(network_height).await?,
+        b_node.get_block_by_height(network_height).await?
+    );
+
+    // assert that a_blk1_tx1 is no longer present in the mempool
+    // (nothing should be in the mempool)
+    let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
+    assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.0.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.1.is_empty());
+    assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
 
     // tada!
 
