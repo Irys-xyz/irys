@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};

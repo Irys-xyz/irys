@@ -614,7 +614,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// wait for data tx to be in mempool and it's IngressProofs to be in database
     pub async fn wait_for_ingress_proofs(
         &self,
-        mut unconfirmed_promotions: Vec<H256>,
+        unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
         self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true)
@@ -624,7 +624,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// wait for data tx to be in mempool and it's IngressProofs to be in database. does this without mining new blocks.
     pub async fn wait_for_ingress_proofs_no_mining(
         &self,
-        mut unconfirmed_promotions: Vec<H256>,
+        unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
         self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false)

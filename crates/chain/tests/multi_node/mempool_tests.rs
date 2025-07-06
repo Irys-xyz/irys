@@ -339,9 +339,9 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
     struct ForkFnReturn {
-        shared_tx: (IrysTransaction, [[u8; 32]; 3]),
-        peer1_tx: (IrysTransaction, [[u8; 32]; 3]),
-        peer2_tx: (IrysTransaction, [[u8; 32]; 3]),
+        // shared_tx: (IrysTransaction, [[u8; 32]; 3]),
+        peer1_tx: (IrysTransaction /*  [[u8; 32]; 3] */,),
+        peer2_tx: (IrysTransaction /*  [[u8; 32]; 3] */,),
         peer1_block: IrysBlockHeader,
         peer2_block: IrysBlockHeader,
     }
@@ -484,9 +484,9 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     );
 
         Ok(ForkFnReturn {
-            shared_tx: (shared_tx, chunks3),
-            peer1_tx: (peer1_tx, chunks1),
-            peer2_tx: (peer2_tx, chunks2),
+            // shared_tx: (shared_tx, chunks3),
+            peer1_tx: (peer1_tx /* chunks1 */,),
+            peer2_tx: (peer2_tx /* chunks2 */,),
             peer1_block,
             peer2_block,
         })
@@ -495,8 +495,8 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     let fork = fork_fn(&mut expected_height).await?;
 
     let ForkFnReturn {
-        peer1_tx: (peer1_tx, chunks1),
-        peer2_tx: (peer2_tx, chunks2),
+        peer1_tx: (peer1_tx /*  chunks1 */,),
+        peer2_tx: (peer2_tx /* chunks2 */,),
         peer1_block,
         peer2_block,
         ..
@@ -621,7 +621,7 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     // assert_eq!(tx, Some(&reorg_tx.header));
 
     // with that ^ in mind, validate that the reorg tip block has the fork submit tx included
-    let (fork_winner, reorg_block, reorg_tx) =
+    let (_fork_winner, reorg_block, reorg_tx) =
         reorg_fn(peer1_tx, peer2_tx, &mut expected_height).await?;
 
     assert!(reorg_block.data_ledgers[DataLedger::Submit]
@@ -646,7 +646,7 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
 /// send B a storage Tx
 /// prime a fork - mine one block on A and two on B
 ///  the second B block should promote B's storage tx
-/// assert A and B's blocks include their repective promoted tx
+/// assert A and B's blocks include their respective promoted tx
 /// trigger a reorg - gossip B's txs & blocks to A
 /// assert that A has a reorg event
 /// assert that A's tx is returned to the mempool
@@ -914,7 +914,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     // wait for a reorg event
 
-    let a1_b2_reorg = a1_b2_reorg_fut.await?;
+    let _a1_b2_reorg = a1_b2_reorg_fut.await?;
 
     a_node
         .wait_until_height(network_height, seconds_to_wait)
@@ -964,13 +964,13 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
                 tx,
             ))?;
         let mempool_txs = rx.await?;
-        let a_blk1_tx1_mempool = mempool_txs.first().clone().unwrap().clone().unwrap();
+        let a_blk1_tx1_mempool = mempool_txs.first().unwrap().clone().unwrap();
         a_blk1_tx1_mempool
     };
 
     // ensure a_blk1_tx1 was orphaned back into the mempool, *without* an ingress proof
     // note: as [`get_publish_txs_and_proofs`] resolves ingress proofs, calling get_best_mempool_txs will return the header with an ingress proof.
-    // so we have a seperate path & assert to ensure the ingress proof is being removed when the tx is orphaned
+    // so we have a separate path & assert to ensure the ingress proof is being removed when the tx is orphaned
     assert_eq!(a_blk1_tx1_mempool, a_blk1_tx1.header);
 
     // gossip A's orphaned tx to B

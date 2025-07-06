@@ -25,7 +25,6 @@ use reth::rpc::types::BlockId;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
 use reth_db::{Database as _, DatabaseError};
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
