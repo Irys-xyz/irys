@@ -99,10 +99,36 @@ impl Inner {
         Ok(())
     }
 
+    /// Handles reorging confirmed commitments (system ledger txs)
+    /// Goals:
+    /// - resubmit orphaned commitments to the mempool
+    /// Steps:
+    /// 1) slice just the confirmed block ranges for each fork (old and new)
+    /// 2) reduce down both forks to a `HashMap<SystemLedger, HashSet<IrysTransactionId>>`
+    /// 3) reduce down to a set of SystemLedger specific orphaned transactions
+    /// 4) resubmit these orphaned commitment transactions to the mempool
     pub async fn handle_commitment_tx_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
+
+        let old_fork_confirmed = old_fork[0_usize
+            ..(self
+                .config
+                .consensus
+                .block_migration_depth
+                .min(old_fork.len().try_into()?))
+            .try_into()?]
+            .to_vec();
+
+        let new_fork_confirmed = new_fork[0_usize
+            ..(self
+                .config
+                .consensus
+                .block_migration_depth
+                .min(new_fork.len().try_into()?))
+            .try_into()?]
+            .to_vec();
 
         // reduce down the system tx ledgers (or well, ledger)
 
@@ -125,8 +151,8 @@ impl Inner {
             Ok(hm)
         };
 
-        let old_fork_red = reduce_system_ledgers(&old_fork)?;
-        let new_fork_red = reduce_system_ledgers(&new_fork)?;
+        let old_fork_red = reduce_system_ledgers(&old_fork_confirmed.into())?;
+        let new_fork_red = reduce_system_ledgers(&new_fork_confirmed.into())?;
 
         // diff the two
         let mut orphaned_system_txs: HashMap<SystemLedger, Vec<IrysTransactionId>> = HashMap::new();
@@ -195,8 +221,8 @@ impl Inner {
     }
 
     /// Handles reorging confirmed data (Submit, Publish) ledger transactions
-    /// goals:
-    /// - resubmit orphaned submit txs
+    /// Goals:
+    /// - resubmit orphaned submit txs to the mempool
     /// - handle orphaned promotions
     ///     - ensure that the mempool's state doesn't have an associated ingress proof for these txs
     /// - handle double-promotions (promoted in both forks)
@@ -211,7 +237,7 @@ impl Inner {
     /// 5) handle orphaned Publish txs
     ///     5.1) remove the orphaned ingress proofs from the mempool state
     ///          this is so when get_best_mempool_txs is called, the txs are eligible for promotion again.
-    /// 6) handle doulbe promotions (when a publish tx is promoted in both forks)
+    /// 6) handle double promotions (when a publish tx is promoted in both forks)
     ///     6.1) get the associated proof from the new fork
     ///     6.2) update mempool state valid_submit_ledger_tx to store the correct ingress proof
     pub async fn handle_confirmed_data_tx_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
