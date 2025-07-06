@@ -905,7 +905,7 @@ mod tests {
         decay_rate = 0.01
         chunk_size = 262144
         block_migration_depth = 6
-        block_cache_depth = 50
+        block_tree_depth = 50
         num_chunks_in_partition = 10
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1

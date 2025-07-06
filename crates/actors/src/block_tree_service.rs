@@ -1462,7 +1462,7 @@ impl BlockTreeCache {
     /// - **Non-onchain count**: Number of blocks not yet fully validated
     ///
     /// ## Canonical Chain Structure
-    /// * **First element**: Genesis block or the oldest block within `block_cache_depth`
+    /// * **First element**: Genesis block or the oldest block within `block_tree_depth`
     /// * **Last element**: Current chain tip (highest cumulative difficulty)
     /// * **Ordering**: Chronological from oldest to newest block
     ///
