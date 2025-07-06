@@ -5,7 +5,6 @@ use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, SystemLedger};
 use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256};
-use itertools::Itertools as _;
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -57,27 +56,6 @@ impl Inner {
                 let mempool_state = &self.mempool_state.clone();
                 let mut mempool_state_write_guard = mempool_state.write().await;
 
-                // debug_assert!(
-                //     mempool_state_write_guard
-                //         .valid_submit_ledger_tx
-                //         .contains_key(&tx_header.id),
-                //     "assert failed: valid_submit_ledger_tx {} {}",
-                //     &tx_header.id,
-                //     &block.block_hash
-                // );
-
-                // debug_assert!(
-                //     mempool_state_write_guard
-                //         .recent_valid_tx
-                //         .contains(&tx_header.id),
-                //     "assert failed: recent_valid_tx {} {}",
-                //     &tx_header.id,
-                //     &block.block_hash
-                // );
-                debug!(
-                    "JESSEDEBUG2 WRITING HEADER {} (ingress proof? {:?})",
-                    &tx_header.id, &tx_header.ingress_proofs
-                );
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .insert(tx_header.id, tx_header.clone());
@@ -318,11 +296,6 @@ impl Inner {
                         .or_default()
                         .extend(ledger.tx_ids.iter());
                     ledger.tx_ids.iter().for_each(|tx_id| {
-                        debug!(
-                            "JESSEDEBUG2 TXBLKMAP {} {:?} -> {}",
-                            tx_id, &ledger_id, &block.block_hash
-                        );
-
                         tx_blk_map
                             .entry(ledger_id)
                             .or_default()
@@ -355,7 +328,7 @@ impl Inner {
             // add them to the orphaned map
             let orphaned_txs = old_txs.difference(new_txs).collect::<Vec<_>>();
             debug!(
-                "JESSEDEBUG2 REORG ORPHANED {:?} TXS old_conf: {:?}, new_conf: {:?}, orphaned: {:?}",
+                "{:?} Ledger reorg txs, old_confirmed: {:?}, new_confirmed: {:?}, orphaned: {:?}",
                 &ledger, &old_txs, &new_txs, &orphaned_txs
             );
             orphaned_confirmed_ledger_txs
@@ -400,31 +373,16 @@ impl Inner {
         // these txs have been confirmed, but NOT migrated
         {
             let mut mempool_state_write_guard = self.mempool_state.write().await;
-            debug!(
-                "JESSEDEBUG2 REORG valid_submit_ledger_txs {:?}",
-                &mempool_state_write_guard
-                    .valid_submit_ledger_tx
-                    .iter()
-                    .collect_vec()
-            );
+
             for tx in orphaned_confirmed_publish_txs {
+                debug!("reorging orphaned publish tx: {}", &tx);
                 // if the tx is in `valid_submit_ledger_tx`, update it so `ingress_proofs` is `none`
                 // note: sometimes txs are *not* in this list, and I don't currently understand why
-                debug!("JESSEDEBUG2 REORG orphaned publish tx: {}", &tx);
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .entry(tx)
                     .and_modify(|tx| tx.ingress_proofs = None);
-                // mempool_state_write_guard.recent_valid_tx.remove(&tx);
             }
-
-            debug!(
-                "JESSEDEBUG2 REORG valid_submit_ledger_txs AFTER {:?}",
-                &mempool_state_write_guard
-                    .valid_submit_ledger_tx
-                    .iter()
-                    .collect_vec()
-            );
         }
 
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
@@ -440,10 +398,7 @@ impl Inner {
             .copied()
             .collect();
 
-        debug!(
-            "JESSEDEBUG2 REORG published in both forks: {:?}",
-            &published_in_both
-        );
+        debug!("published in both forks: {:?}", &published_in_both);
 
         let full_published_txs = self
             .handle_get_data_tx_message(published_in_both.clone())
@@ -456,10 +411,7 @@ impl Inner {
                 let promoted_in_block = publish_tx_blk_map
                     .get(&tx.id)
                     .unwrap_or_else(|| panic!("new fork tx blk map to contain tx {}", &tx.id));
-                debug!(
-                    "JESSEDEBUG2 TXBLKMAP2 {} -> {}",
-                    &tx.id, &promoted_in_block.block_hash
-                );
+
                 let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
                 // get publish tx pos
                 let proof_idx = publish_ledger
@@ -492,10 +444,7 @@ impl Inner {
                         .valid_submit_ledger_tx
                         .insert(tx.id, tx);
                 }
-                debug!(
-                    "JESSEDEBUG2 REORG UPDATED INGRESS PROOF {} for {}",
-                    &proof.proof, &id
-                );
+                debug!("Reorged dual-published proof {} for {}", &proof.proof, &id);
             } else {
                 eyre::bail!(
                     "Unable to get dual-published tx {:?}",
@@ -621,10 +570,6 @@ impl Inner {
         {
             let mut mempool_state_write_guard = mempool_state.write().await;
             for txid in submit_tx_ids.iter() {
-                debug!(
-                    "JESSEDEBUG2 REMOVING TX {} {}",
-                    &txid, &migrated_block.block_hash
-                );
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .remove(txid);

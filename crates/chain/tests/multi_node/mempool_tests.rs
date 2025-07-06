@@ -335,9 +335,8 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
     struct ForkFnReturn {
-        // shared_tx: (IrysTransaction, [[u8; 32]; 3]),
-        peer1_tx: (IrysTransaction /*  [[u8; 32]; 3] */,),
-        peer2_tx: (IrysTransaction /*  [[u8; 32]; 3] */,),
+        peer1_tx: IrysTransaction,
+        peer2_tx: IrysTransaction,
         peer1_block: IrysBlockHeader,
         peer2_block: IrysBlockHeader,
     }
@@ -365,11 +364,9 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
         // Wait for the transaction to gossip
 
         let txid = shared_tx.header.id;
-        debug!("JESSEDEBUG2 SHARED TX {}", &txid);
 
         peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
         peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
-        debug!("JESSEDEBUG2 WFMP DONE");
 
         // Post a unique storage transaction to each peer
         let peer1_tx = peer1_node
@@ -378,9 +375,6 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
         let peer2_tx = peer2_node
             .post_data_tx_without_gossip(H256::zero(), data2, &peer2_signer)
             .await;
-        let p1_height = peer1_node.get_height().await;
-        let p2_height = peer2_node.get_height().await;
-        debug!("JESSEDEBUG2 HEIGHTS {} {}", &p1_height, &p2_height);
 
         // Mine mine blocks on both peers in parallel
         let (result1, result2) = tokio::join!(
@@ -418,15 +412,6 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
         // Validate the peer blocks create forks with different transactions
         let peer1_block = peer1_node.get_block_by_height(*expected_height).await?;
         let peer2_block = peer2_node.get_block_by_height(*expected_height).await?;
-
-        debug!(
-            "JESSEDEBUG2 FRK LDGR BLK {} {:?}",
-            expected_height, &peer1_block.data_ledgers
-        );
-        debug!(
-            "JESSEDEBUG2 FRK LDGR BLK2 {} {:?}",
-            expected_height, &peer2_block.data_ledgers
-        );
 
         let peer1_block_txids = &peer1_block.data_ledgers[DataLedger::Submit].tx_ids.0;
         assert!(
@@ -480,9 +465,8 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     );
 
         Ok(ForkFnReturn {
-            // shared_tx: (shared_tx, chunks3),
-            peer1_tx: (peer1_tx /* chunks1 */,),
-            peer2_tx: (peer2_tx /* chunks2 */,),
+            peer1_tx,
+            peer2_tx,
             peer1_block,
             peer2_block,
         })
@@ -491,8 +475,8 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     let fork = fork_fn(&mut expected_height).await?;
 
     let ForkFnReturn {
-        peer1_tx: (peer1_tx /*  chunks1 */,),
-        peer2_tx: (peer2_tx /* chunks2 */,),
+        peer1_tx,
+        peer2_tx,
         peer1_block,
         peer2_block,
         ..
@@ -900,13 +884,6 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     a_node
         .wait_for_block(&b_blk2.block_hash, seconds_to_wait)
         .await?;
-
-    debug!(
-        "JESSEDEBUG2 B BLOCKS {} {} {}",
-        &b_blk1.block_hash,
-        &b_blk2.block_hash,
-        &b_node.get_height().await
-    );
 
     // wait for a reorg event
 

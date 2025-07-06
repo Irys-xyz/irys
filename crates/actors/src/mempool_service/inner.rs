@@ -337,31 +337,21 @@ impl Inner {
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
-            debug!("JESSEDEBUG2 GBMTX FILTERING SUBMIT {}", &tx.id);
+            debug!("Checking funding for {}", &tx.id);
             if check_funding(&tx) {
-                debug!("JESSEDEBUG2 GBMTX FILTERING PUSHED {}", &tx.id);
+                debug!("Submit tx {} passed the funding check", &tx.id);
                 submit_tx.push(tx);
                 if submit_tx.len() >= max_txs {
                     break;
                 }
             } else {
-                debug!("JESSEDEBUG2 GBMTX FILTERING CHKFUND FAIL {}", &tx.id)
+                debug!("Submit tx {} failed the funding check", &tx.id)
             }
         }
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
-        let publish_txs_and_proofs = self
-            .get_publish_txs_and_proofs(/* submit_tx.iter().map(|tx| tx.id).collect() */)
-            .await?;
+        let publish_txs_and_proofs = self.get_publish_txs_and_proofs().await?;
 
-        debug!(
-            "JESSEDEBUG2 PUBLISHING {:?}",
-            &publish_txs_and_proofs
-                .0
-                .iter()
-                .map(|tx| tx.id)
-                .collect::<Vec<IrysTransactionId>>()
-        );
         // Return selected transactions grouped by type
         Ok(MempoolTxs {
             commitment_tx,
@@ -372,10 +362,7 @@ impl Inner {
 
     pub async fn get_publish_txs_and_proofs(
         &self,
-        // submit_txs: HashSet<IrysTransactionId>, // filter out any promotions also in this submit_txs list
-        // this is to enforce that a tx cannot be promoted in the same block that it's submitted
     ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
-        // debug!("JESSEDEBUG2 PUBLISH FILTER {:?}", &submit_txs);
         let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
         let mut proofs: Vec<TxIngressProof> = Vec::new();
 
@@ -403,8 +390,7 @@ impl Inner {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                 if let Some(cached_data_root) = cached_data_root {
                     let txids = cached_data_root.txid_set;
-                    debug!("JESSEDEBUG2 PUBLISH CANDIDATES {:?}", &txids);
-                    debug!(tx_ids = ?txids, "publishing");
+                    debug!(tx_ids = ?txids, "Publish candidates");
                     publish_txids.extend(txids)
                 }
             }
@@ -426,24 +412,13 @@ impl Inner {
             .await
             .unwrap_or(vec![]);
 
-            debug!(
-                "JESSEDEBUG2 PUBLISH TXS: {:?} HEADERS: {:?}",
-                &txs.iter()
-                    .map(|tx| tx.clone().map(|t| t.id))
-                    .collect::<Vec<Option<IrysTransactionId>>>(),
-                &tx_headers
-                    .iter()
-                    .map(|h| h.id)
-                    .collect::<Vec<IrysTransactionId>>()
-            );
-
             // so the resulting publish_txs & proofs are sorted
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
 
             for tx_header in &tx_headers {
                 let has_ingress_proof = tx_header.ingress_proofs.is_some();
                 debug!(
-                    "JESSEDEBUG2 PUBLISH CANDIDATE {} has ingress proof?  {}",
+                    "Publish candidate {} has ingress proof? {}",
                     &tx_header.id,
                     &tx_header.ingress_proofs.is_some()
                 );
@@ -453,12 +428,12 @@ impl Inner {
                     match ingress_proofs.get(&tx_header.data_root) {
                         Some(proof) => {
                             let mut tx_header = tx_header.clone();
-                            let proof = TxIngressProof {
+                            let proof: TxIngressProof = TxIngressProof {
                                 proof: proof.proof,
                                 signature: proof.signature,
                             };
                             debug!(
-                                "JESSEDEBUG2 PUBLISH GOT INGRESS PROOF FOR data_root {} TX {}",
+                                "Got ingress proof {} for publish candidate {}",
                                 &tx_header.data_root, &tx_header.id
                             );
                             proofs.push(proof.clone());
