@@ -336,10 +336,6 @@ impl BlockTreeServiceInner {
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    /// Checks if a block that is `block_migration_depth` blocks behind `arc_block`
-    /// should be migrated. If eligible, sends migration message unless block
-    /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
-    /// inconsistent.
     async fn try_notify_services_of_block_migration(&self, arc_block: &Arc<IrysBlockHeader>) {
         let finalized_hash = {
             let binding = self.cache.clone();
@@ -500,22 +496,28 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    /// Handles the completion of full block validation.
+    // Handles the completion of full block validation.
     ///
     /// When a block passes validation:
     /// 1. Updates the block's state in the cache to `ValidBlock`
     /// 2. Moves the tip of the chain to this block if it is now the head of the longest chain
     /// 3. If the tip moves, checks whether it's a simple extension or a reorganization:
-    ///    - **Extension**: The new tip's parent is the current tip
-    ///    - **Reorg**: The new tip's parent is not the current tip (fork switch)
     /// 4. For reorgs, broadcasts a `ReorgEvent` containing:
     ///    - Blocks from the old fork (now orphaned)
     ///    - Blocks from the new fork (now canonical)
     ///    - The common ancestor where the fork occurred
-    /// 5. Notifies services of the new confirmed block
-    /// 6. Checks if any blocks are deep enough to be finalized to storage
+    /// 5. Detects and sends epoch events for any epoch blocks found (both in extensions and reorgs)
+    /// 6. Notifies services of the new confirmed block
+    /// 7. Handles block migration (migrates chunks to disk and updates block index)
+    /// 8. Broadcasts `BlockStateUpdated` event to inform subscribers of the block's new state
     ///
-    /// Invalid blocks are logged but currently remain in the cache.
+    /// When a block fails validation:
+    /// 1. Logs the invalid block
+    /// 2. Removes the block from the cache (also removes any children)
+    /// 3. Broadcasts `BlockStateUpdated` event marking the block as discarded
+    ///
+    /// The function carefully manages cache locks to avoid deadlocks during async operations,
+    /// releasing the write lock before sending events that may trigger callbacks.
     async fn on_block_validation_finished(
         &mut self,
         block_hash: H256,
@@ -746,7 +748,7 @@ impl BlockTreeServiceInner {
 
         self.notify_services_of_block_confirmation(block_hash, &arc_block);
 
-        // Handle block finalization (move chunks to disk and add to block_index)
+        // Handle block migration (move chunks to disk and add to block_index)
         self.try_notify_services_of_block_migration(&arc_block)
             .await;
 
@@ -968,8 +970,7 @@ pub enum ChainState {
     /// Block is confirmed (by another block) and part of the main chain
     Onchain,
     /// Block is Validated but may not be on the main chain
-    /// Locally produced blocks can have `BlockState::ValidationScheduled`
-    /// while maintaining `ChainState::Validated`
+    /// (used for blocks that are extending a fork / non canonical chain)
     Validated(BlockState),
     /// Block exists but is not conformed by any other block
     NotOnchain(BlockState),
@@ -1054,20 +1055,31 @@ impl BlockTreeCache {
 
     /// Restores the block tree cache from the database and `block_index` during startup.
     ///
-    /// Rebuilds the block tree by iterating the `block_index` and loading the most recent blocks from
-    /// the database (up to `block_cache_depth` blocks). For each block, it loads associated commitment
-    /// transactions and reconstructs the commitment snapshot for that block. The function also notifies
-    /// the Reth service of the current chain tip.
+    /// Rebuilds the block tree by loading the most recent blocks from the database (up to
+    /// `block_cache_depth` blocks). The restoration process involves:
+    ///
+    /// 1. **Determines block range**: Calculates start/end positions based on cache depth
+    /// 2. **Replays epoch history**: Initializes genesis epoch snapshot and replays historical
+    ///    epoch transitions to reconstruct epoch state at the start block
+    /// 3. **Loads start block**: Creates the initial block entry with commitment, epoch and EMA snapshots
+    /// 4. **Processes remaining blocks**: For each subsequent block:
+    ///    - Loads commitment transactions from database
+    ///    - Creates EMA snapshot based on previous block
+    ///    - Handles epoch transitions for epoch blocks or accumulates commitments for mid-epoch blocks
+    ///    - Creates commitment snapshot incorporating new transactions
+    ///    - Adds block to cache with all associated snapshots
+    /// 5. **Sets chain tip**: Marks the latest block as tip and notifies Reth service
     ///
     /// ## Arguments
     /// * `block_index_guard` - Read guard for accessing the block index
-    /// * `commitment_state_guard` - Read guard for checking staking status of a signer during commitment processing
+    /// * `epoch_replay_data` - Genesis state and historical epoch blocks for state reconstruction
     /// * `reth_service_actor` - Actor handle for sending fork choice updates to Reth
     /// * `db` - Database provider for querying block and transaction data
-    /// * `consensus_config` - Consensus configuration including epoch settings
+    /// * `storage_submodules_config` - Storage configuration for epoch snapshot creation (only ever used with `map_storage_modules_to_partition_assignments()`, could probably be refactored out)
+    /// * `config` - Full node configuration including consensus and epoch settings
     ///
     /// ## Returns
-    /// Fully initialized block tree cache ready for use (Self)
+    /// Fully initialized block tree cache with all snapshots ready for use (Self)
     ///
     /// ## Panics
     /// Panics if the block index is empty or if database queries fail unexpectedly
@@ -1328,15 +1340,12 @@ impl BlockTreeCache {
         Ok(())
     }
 
-    /// Adds a block received from a peer to the block tree.
+    /// Adds a block to the block tree.
     ///
     /// Peer blocks undergo strict validation before acceptance:
     /// 1. **Full validation sequence** - Full validation rules must be run and pass
     /// 2. **Confirmation required** - Block must be confirmed by another block building on it
     /// 3. **Block Index Migration** - Only then is the block added to the block_index
-    ///
-    /// This differs from locally produced blocks, which can be added with more
-    /// flexible validation states to facilitate chain progress for local mining and initialization.
     pub fn add_block(
         &mut self,
         block: &IrysBlockHeader,
@@ -1445,9 +1454,24 @@ impl BlockTreeCache {
             .unwrap_or((U256::zero(), BlockHash::default()))
     }
 
-    /// Returns: cache of longest chain: (block/tx pairs, count of non-onchain blocks)
-    /// 0th element -- genesis block
-    /// last element -- the latest block
+    /// Returns the canonical chain as a cached sequence of block entries.
+    ///
+    /// The canonical chain represents the longest valid chain from the earliest cached block
+    /// to the current tip. The chain is maintained as a cached tuple containing:
+    /// - **Block entries**: Ordered sequence from oldest to newest block in cache
+    /// - **Non-onchain count**: Number of blocks not yet fully validated
+    ///
+    /// ## Canonical Chain Structure
+    /// * **First element**: Genesis block or the oldest block within `block_cache_depth`
+    /// * **Last element**: Current chain tip (highest cumulative difficulty)
+    /// * **Ordering**: Chronological from oldest to newest block
+    ///
+    /// ## Returns
+    /// `(Vec<BlockTreeEntry>, usize)` - Tuple of (block entries, count of non-onchain blocks)
+    ///
+    /// ## Note
+    /// This returns a cloned copy of the cached chain for thread-safe access. The cache
+    /// is updated whenever the canonical chain changes due to new blocks or reorganizations.
     #[must_use]
     pub fn get_canonical_chain(&self) -> (Vec<BlockTreeEntry>, usize) {
         self.longest_chain_cache.clone()
