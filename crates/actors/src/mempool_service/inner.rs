@@ -25,6 +25,7 @@ use reth::rpc::types::BlockId;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
 use reth_db::{Database as _, DatabaseError};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
@@ -141,7 +142,8 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::IngestChunk(chunk, response) => {
-                    let response_value = self.handle_chunk_ingress_message(chunk).await;
+                    let response_value: Result<(), ChunkIngressError> =
+                        self.handle_chunk_ingress_message(chunk).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -318,7 +320,11 @@ impl Inner {
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
 
         // Sort data transactions by fee (highest first) to maximize revenue
-        submit_ledger_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+
+        submit_ledger_txs.sort_by(|a, b| match b.total_fee().cmp(&a.total_fee()) {
+            std::cmp::Ordering::Equal => a.id.cmp(&b.id),
+            fee_ordering => fee_ordering,
+        });
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
@@ -334,18 +340,31 @@ impl Inner {
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
+            debug!("JESSEDEBUG2 GBMTX FILTERING SUBMIT {}", &tx.id);
             if check_funding(&tx) {
+                debug!("JESSEDEBUG2 GBMTX FILTERING PUSHED {}", &tx.id);
                 submit_tx.push(tx);
                 if submit_tx.len() >= max_txs {
                     break;
                 }
+            } else {
+                debug!("JESSEDEBUG2 GBMTX FILTERING CHKFUND FAIL {}", &tx.id)
             }
         }
 
+        // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
         let publish_txs_and_proofs = self
-            .get_publish_txs_and_proofs(submit_tx.iter().map(|tx| tx.id).collect())
+            .get_publish_txs_and_proofs(/* submit_tx.iter().map(|tx| tx.id).collect() */)
             .await?;
 
+        debug!(
+            "JESSEDEBUG2 PUBLISHING {:?}",
+            &publish_txs_and_proofs
+                .0
+                .iter()
+                .map(|tx| tx.id)
+                .collect::<Vec<IrysTransactionId>>()
+        );
         // Return selected transactions grouped by type
         Ok(MempoolTxs {
             commitment_tx,
@@ -356,9 +375,10 @@ impl Inner {
 
     pub async fn get_publish_txs_and_proofs(
         &self,
-        submit_txs: HashSet<IrysTransactionId>, // filter out any promotions also in this submit_txs list
-                                                // this is to enforce that a tx cannot be promoted in the same block that it's submitted
+        // submit_txs: HashSet<IrysTransactionId>, // filter out any promotions also in this submit_txs list
+        // this is to enforce that a tx cannot be promoted in the same block that it's submitted
     ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+        // debug!("JESSEDEBUG2 PUBLISH FILTER {:?}", &submit_txs);
         let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
         let mut proofs: Vec<TxIngressProof> = Vec::new();
 
@@ -385,19 +405,17 @@ impl Inner {
             for data_root in ingress_proofs.keys() {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                 if let Some(cached_data_root) = cached_data_root {
-                    let filtered_publish = cached_data_root
-                        .txid_set
-                        .iter()
-                        .filter(|tx_id| !submit_txs.contains(tx_id));
-                    debug!(tx_ids = ?filtered_publish, "publishing");
-                    publish_txids.extend(filtered_publish)
+                    let txids = cached_data_root.txid_set;
+                    debug!("JESSEDEBUG2 PUBLISH CANDIDATES {:?}", &txids);
+                    debug!(tx_ids = ?txids, "publishing");
+                    publish_txids.extend(txids)
                 }
             }
 
             // Loop though all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
             // TODO: improve this
-            let tx_headers = get_data_tx_in_parallel_inner(
+            let mut tx_headers = get_data_tx_in_parallel_inner(
                 publish_txids,
                 |_tx_ids| {
                     {
@@ -411,9 +429,29 @@ impl Inner {
             .await
             .unwrap_or(vec![]);
 
+            debug!(
+                "JESSEDEBUG2 PUBLISH TXS: {:?} HEADERS: {:?}",
+                &txs.iter()
+                    .map(|tx| tx.clone().map(|t| t.id))
+                    .collect::<Vec<Option<IrysTransactionId>>>(),
+                &tx_headers
+                    .iter()
+                    .map(|h| h.id)
+                    .collect::<Vec<IrysTransactionId>>()
+            );
+
+            // so the resulting publish_txs & proofs are sorted
+            tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
+
             for tx_header in &tx_headers {
+                let has_ingress_proof = tx_header.ingress_proofs.is_some();
+                debug!(
+                    "JESSEDEBUG2 PUBLISH CANDIDATE {} has ingress proof?  {}",
+                    &tx_header.id,
+                    &tx_header.ingress_proofs.is_some()
+                );
                 // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
-                if tx_header.ingress_proofs.is_none() {
+                if !has_ingress_proof {
                     // Get the proof
                     match ingress_proofs.get(&tx_header.data_root) {
                         Some(proof) => {
@@ -422,14 +460,18 @@ impl Inner {
                                 proof: proof.proof,
                                 signature: proof.signature,
                             };
+                            debug!(
+                                "JESSEDEBUG2 PUBLISH GOT INGRESS PROOF FOR data_root {} TX {}",
+                                &tx_header.data_root, &tx_header.id
+                            );
                             proofs.push(proof.clone());
                             tx_header.ingress_proofs = Some(proof);
                             publish_txs.push(tx_header);
                         }
                         None => {
                             error!(
-                                "No ingress proof found for data_root: {}",
-                                tx_header.data_root
+                                "No ingress proof found for data_root: {} tx: {}",
+                                tx_header.data_root, &tx_header.id
                             );
                             continue;
                         }

@@ -1,11 +1,11 @@
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
-use eyre::eyre;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, SystemLedger};
 use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256};
+use itertools::Itertools as _;
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -74,7 +74,10 @@ impl Inner {
                 //     &tx_header.id,
                 //     &block.block_hash
                 // );
-
+                debug!(
+                    "JESSEDEBUG2 WRITING HEADER {} (ingress proof? {:?})",
+                    &tx_header.id, &tx_header.ingress_proofs
+                );
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .insert(tx_header.id, tx_header.clone());
@@ -298,22 +301,32 @@ impl Inner {
         // todo: if we only use the reductions to produce orphaned_ledger_txs, combine the logic
         let reduce_data_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<(
             HashMap<DataLedger, HashSet<IrysTransactionId>>,
-            HashMap<IrysTransactionId, Arc<IrysBlockHeader>>,
+            HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>,
         )> {
             let mut hm = HashMap::new();
             let mut tx_blk_map = HashMap::new();
             for ledger in DataLedger::ALL {
                 // blocks can not have a data ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
                 hm.insert(ledger, HashSet::new());
+                tx_blk_map.insert(ledger, HashMap::new());
             }
             for block in fork.iter().rev() {
                 for ledger in block.data_ledgers.iter() {
+                    let ledger_id: DataLedger = ledger.ledger_id.try_into()?;
                     // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
-                    hm.entry(ledger.ledger_id.try_into()?)
+                    hm.entry(ledger_id)
                         .or_default()
                         .extend(ledger.tx_ids.iter());
                     ledger.tx_ids.iter().for_each(|tx_id| {
-                        tx_blk_map.insert(*tx_id, Arc::clone(block));
+                        debug!(
+                            "JESSEDEBUG2 TXBLKMAP {} {:?} -> {}",
+                            tx_id, &ledger_id, &block.block_hash
+                        );
+
+                        tx_blk_map
+                            .entry(ledger_id)
+                            .or_default()
+                            .insert(*tx_id, Arc::clone(block));
                     });
                 }
             }
@@ -340,10 +353,15 @@ impl Inner {
                 .expect("should be populated");
             // get the txs in old that are not in new (orphans)
             // add them to the orphaned map
+            let orphaned_txs = old_txs.difference(new_txs).collect::<Vec<_>>();
+            debug!(
+                "JESSEDEBUG2 REORG ORPHANED {:?} TXS old_conf: {:?}, new_conf: {:?}, orphaned: {:?}",
+                &ledger, &old_txs, &new_txs, &orphaned_txs
+            );
             orphaned_confirmed_ledger_txs
                 .entry(ledger)
                 .or_default()
-                .extend(old_txs.difference(new_txs));
+                .extend(orphaned_txs);
         }
 
         // if a SUBMIT a tx is CONFIRMED in the old fork, but orphaned in the new - resubmit it to the mempool
@@ -382,17 +400,31 @@ impl Inner {
         // these txs have been confirmed, but NOT migrated
         {
             let mut mempool_state_write_guard = self.mempool_state.write().await;
-
+            debug!(
+                "JESSEDEBUG2 REORG valid_submit_ledger_txs {:?}",
+                &mempool_state_write_guard
+                    .valid_submit_ledger_tx
+                    .iter()
+                    .collect_vec()
+            );
             for tx in orphaned_confirmed_publish_txs {
                 // if the tx is in `valid_submit_ledger_tx`, update it so `ingress_proofs` is `none`
                 // note: sometimes txs are *not* in this list, and I don't currently understand why
-
+                debug!("JESSEDEBUG2 REORG orphaned publish tx: {}", &tx);
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .entry(tx)
                     .and_modify(|tx| tx.ingress_proofs = None);
                 // mempool_state_write_guard.recent_valid_tx.remove(&tx);
             }
+
+            debug!(
+                "JESSEDEBUG2 REORG valid_submit_ledger_txs AFTER {:?}",
+                &mempool_state_write_guard
+                    .valid_submit_ledger_tx
+                    .iter()
+                    .collect_vec()
+            );
         }
 
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
@@ -400,7 +432,7 @@ impl Inner {
         let published_in_both: Vec<IrysTransactionId> = old_fork_confirmed_reduction
             .get(&DataLedger::Publish)
             .expect("data ledger entry")
-            .difference(
+            .intersection(
                 new_fork_confirmed_reduction
                     .get(&DataLedger::Publish)
                     .expect("data ledger entry"),
@@ -408,21 +440,50 @@ impl Inner {
             .copied()
             .collect();
 
+        debug!(
+            "JESSEDEBUG2 REORG published in both forks: {:?}",
+            &published_in_both
+        );
+
         let full_published_txs = self
             .handle_get_data_tx_message(published_in_both.clone())
             .await;
+
+        let publish_tx_blk_map = new_fork_tx_blk_map.get(&DataLedger::Publish).unwrap();
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
-                let promoted_in_block = new_fork_tx_blk_map.get(&tx.id).unwrap();
+                let id = tx.id;
+                let promoted_in_block = publish_tx_blk_map
+                    .get(&tx.id)
+                    .unwrap_or_else(|| panic!("new fork tx blk map to contain tx {}", &tx.id));
+                debug!(
+                    "JESSEDEBUG2 TXBLKMAP2 {} -> {}",
+                    &tx.id, &promoted_in_block.block_hash
+                );
                 let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
                 // get publish tx pos
                 let proof_idx = publish_ledger
                     .tx_ids
                     .iter()
                     .position(|tx_id| *tx_id == tx.id)
-                    .unwrap();
-                let proofs = publish_ledger.proofs.clone().unwrap();
-                let proof = proofs.get(proof_idx).unwrap();
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "publish tx {} to be present in block {}",
+                            &tx.id, &promoted_in_block.block_hash
+                        )
+                    });
+                let proofs = publish_ledger.proofs.clone().unwrap_or_else(|| {
+                    panic!(
+                        "Publish ledger of block {} to have proofs",
+                        &promoted_in_block.block_hash
+                    )
+                });
+                let proof = proofs.get(proof_idx).unwrap_or_else(|| {
+                    panic!(
+                        "Publish ledger of block {} to have a proof at index {} for publish tx {}",
+                        &promoted_in_block.block_hash, &proof_idx, &tx.id
+                    )
+                });
                 tx.ingress_proofs = Some(proof.clone());
                 // update entry
                 {
@@ -431,6 +492,10 @@ impl Inner {
                         .valid_submit_ledger_tx
                         .insert(tx.id, tx);
                 }
+                debug!(
+                    "JESSEDEBUG2 REORG UPDATED INGRESS PROOF {} for {}",
+                    &proof.proof, &id
+                );
             } else {
                 eyre::bail!(
                     "Unable to get dual-published tx {:?}",
