@@ -1056,7 +1056,7 @@ impl BlockTreeCache {
     /// Restores the block tree cache from the database and `block_index` during startup.
     ///
     /// Rebuilds the block tree by loading the most recent blocks from the database (up to
-    /// `block_cache_depth` blocks). The restoration process involves:
+    /// `block_tree_depth` blocks). The restoration process involves:
     ///
     /// 1. **Determines block range**: Calculates start/end positions based on cache depth
     /// 2. **Replays epoch history**: Initializes genesis epoch snapshot and replays historical
@@ -1099,7 +1099,7 @@ impl BlockTreeCache {
 
             let start = block_index
                 .num_blocks()
-                .saturating_sub(consensus_config.block_cache_depth - 1);
+                .saturating_sub(consensus_config.block_tree_depth - 1);
             let end = block_index.num_blocks();
             let start_block_hash = block_index.get_item(start).unwrap().block_hash;
             (start, end, start_block_hash)
@@ -1493,7 +1493,7 @@ impl BlockTreeCache {
         let mut not_onchain_count = 0;
 
         let mut current = self.max_cumulative_difficulty.1;
-        let mut blocks_to_collect = self.consensus_config.block_cache_depth;
+        let mut blocks_to_collect = self.consensus_config.block_tree_depth;
         debug!(
             "updating canonical chain cache latest_cache_tip: {}",
             current
@@ -1507,7 +1507,7 @@ impl BlockTreeCache {
                     pairs.clear();
                     not_onchain_count = 0;
                     current = entry.block.previous_block_hash;
-                    blocks_to_collect = self.consensus_config.block_cache_depth;
+                    blocks_to_collect = self.consensus_config.block_tree_depth;
                     continue;
                 }
 
@@ -1831,7 +1831,7 @@ impl BlockTreeCache {
         let mut prev_block = &current_entry.block;
         let mut depth_count = 0;
 
-        while prev_block.height > 0 && depth_count < self.consensus_config.block_cache_depth {
+        while prev_block.height > 0 && depth_count < self.consensus_config.block_tree_depth {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
@@ -2040,7 +2040,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
     let canonical_chain = tokio::task::spawn_blocking(move || {
         let cache = tree.read();
 
-        let mut blocks_to_collect = cache.consensus_config.block_cache_depth;
+        let mut blocks_to_collect = cache.consensus_config.block_tree_depth;
         let mut chain_cache = Vec::with_capacity(
             blocks_to_collect
                 .try_into()

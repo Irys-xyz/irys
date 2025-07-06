@@ -114,8 +114,8 @@ pub struct ConsensusConfig {
     /// Defines how many blocks must pass before a block is marked as finalized
     pub block_migration_depth: u32,
 
-    /// Number of blocks to retain in cache from chain head
-    pub block_cache_depth: u64,
+    /// Number of blocks to retain in the block tree from chain head
+    pub block_tree_depth: u64,
 
     /// Number of chunks that make up a single partition
     pub num_chunks_in_partition: u64,
@@ -542,7 +542,7 @@ impl ConsensusConfig {
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
             block_migration_depth: 6,
-            block_cache_depth: 50,
+            block_tree_depth: 50,
             epoch: EpochConfig {
                 capacity_scalar: 100,
                 num_blocks_in_epoch: 100,
