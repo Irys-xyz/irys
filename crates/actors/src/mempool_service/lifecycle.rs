@@ -88,61 +88,8 @@ impl Inner {
         // 6. Similar work with commitment transactions (stake and pledge)
         //    - This may require adding some features to the commitment_snapshot so that stake/pledge tx can be rolled back and new ones applied
 
-        // currently done (`handle_confirmed_data_tx_reorg`)
-
-        // block confirmation does:
-        // 1.) grabs all publish txs, then
-        // for each publish tx:
-        // 1.1) grab their full header
-        // 1.2) add the proof into the header
-        // 1.3) update `valid_submit_ledger_tx` to include the published tx -- this is fine
-        // 1.4) update the `recent_valid_tx` to include the tx's ID
-
-        // reorg logic
-        // 1.) get the orphan transactions, by ledger, by comparing the old fork with the new fork
-        // and finding all the transactions that are in the old fork but not in the new
-        // for every orphan transaction:
-        // if it's part the [`DataLedger::Submit`]:
-        // 1.2) resubmit it to the mempool
-        // if it's part of [`DataLedger::Publish`]:
-        // (as `handle_block_confirmed_message` only processes Publish txs)
-        // 1.1) remove it from valid_submit_ledger_tx
-        // 1.2) remove it from recent_valid_tx
-        // 1.3) remove the ingress proof from the header
-        // 1.4) resubmit it to the mempool
-
         // needs to be done:
         // re-org support for migrated blocks
-
-        // block migration does:
-        // 1.) moves commitment transactions from tree to index
-        // this means:
-        // 1.1) get all commitment txs (ids -> full headers)
-        // 1.2) insert these into the database
-        // 1.3) remove the commitment tx from the mempool
-
-        // 2.) move submit transactions from tree to index
-        // for each submit tx:
-        // 2.1) get the full tx header from the mempool
-        // 2.2) insert it into the database
-
-        // 3.) publish txs: update submit transactions in the index now they have ingress proofs
-        // for each publish tx:
-        // 3.1) get the full tx header
-        // 3.2) insert it into the database
-
-        // 4.) Remove the submit tx from the pending valid_submit_ledger_tx pool
-        // for every submit tx:
-        // 4.1) remove it from the `valid_submit_ledger_tx` list
-        // 4.2) remove it from the `recent_valid_tx` list
-
-        // 5.) add block with optional poa chunk to index
-        // 5.1) grab the POA chunk from `prevalidated_blocks_poa`
-        // 5.2) insert it & the block header into the database
-
-        // 6.) Remove migrated block and poa chunk from mempool cache
-        // 6.1) remove the header from `prevalidated_blocks`
-        // 6.2) remove the the POA from `prevalidated_blocks_poa`
 
         self.handle_confirmed_data_tx_reorg(event.clone()).await?;
 
@@ -247,12 +194,30 @@ impl Inner {
         Ok(())
     }
 
+    /// Handles reorging confirmed data (Submit, Publish) ledger transactions
+    /// goals:
+    /// - resubmit orphaned submit txs
+    /// - handle orphaned promotions
+    ///     - ensure that the mempool's state doesn't have an associated ingress proof for these txs
+    /// - handle double-promotions (promoted in both forks)
+    ///     - ensure the transaction is associated only with the ingress proofs from the new fork
+    /// Steps:
+    /// 1) slice just the confirmed block ranges for each fork (old and new)
+    /// 2) reduce down both forks to a `HashMap<DataLedger, HashSet<IrysTransactionId>>`
+    ///     with a secondary `HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>` for reverse txid -> block lookups
+    /// 3) reduce these reductions down to just the list of orphaned transactions, using a set diff
+    /// 4) handle orphaned Submit transactions
+    ///     4.1) re-submit them back to the mempool
+    /// 5) handle orphaned Publish txs
+    ///     5.1) remove the orphaned ingress proofs from the mempool state
+    ///          this is so when get_best_mempool_txs is called, the txs are eligible for promotion again.
+    /// 6) handle doulbe promotions (when a publish tx is promoted in both forks)
+    ///     6.1) get the associated proof from the new fork
+    ///     6.2) update mempool state valid_submit_ledger_tx to store the correct ingress proof
     pub async fn handle_confirmed_data_tx_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
-
-        // we check for orphaned confirmed transactions from our fork, against the entire block range of the new fork
 
         // get the range of confirmed blocks from the old fork
         // we will then reduce these down into a list of txids, which we will check against the *entire* new fork block range
@@ -276,7 +241,6 @@ impl Inner {
             .to_vec();
 
         // reduce the old fork and new fork into a list of ledger-specific txids
-        // todo: if we only use the reductions to produce orphaned_ledger_txs, combine the logic
         let reduce_data_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<(
             HashMap<DataLedger, HashSet<IrysTransactionId>>,
             HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>,
@@ -306,8 +270,6 @@ impl Inner {
             Ok((hm, tx_blk_map))
         };
 
-        // let old_fork_red = reduce_data_ledgers(old_fork)?;
-        // reduction of the confirmed txs of the old fork
         let (old_fork_confirmed_reduction, _) = reduce_data_ledgers(&old_fork_confirmed.into())?;
 
         let (new_fork_confirmed_reduction, new_fork_tx_blk_map) =
@@ -442,7 +404,8 @@ impl Inner {
                     let mut mempool_state_write_guard = self.mempool_state.write().await;
                     mempool_state_write_guard
                         .valid_submit_ledger_tx
-                        .insert(tx.id, tx);
+                        .entry(tx.id)
+                        .and_modify(|t| *t = tx);
                 }
                 debug!("Reorged dual-published proof {} for {}", &proof.proof, &id);
             } else {
