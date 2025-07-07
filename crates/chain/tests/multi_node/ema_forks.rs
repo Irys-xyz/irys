@@ -1,15 +1,7 @@
-use std::sync::Arc;
-
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
-use irys_actors::{
-    async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
-};
+use crate::utils::IrysNodeTest;
 use irys_types::{
-    storage_pricing::Amount, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
-    NodeConfig, OracleConfig,
+    storage_pricing::Amount, NodeConfig, OracleConfig,
 };
-use reth::payload::EthBuiltPayload;
 use rust_decimal_macros::dec;
 
 #[test_log::test(actix_web::test)]
@@ -49,25 +41,14 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
     assert_eq!(common_height, node_2.get_max_difficulty_block().await);
     const BLOCKS_TO_MINE_NODE_1: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 3;
     const BLOCKS_TO_MINE_NODE_2: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 5;
-    node_1
-        .mine_blocks_without_gossip(BLOCKS_TO_MINE_NODE_1)
-        .await?;
-    node_2
-        .mine_blocks_without_gossip(BLOCKS_TO_MINE_NODE_2)
-        .await?;
+    // Mine blocks in parallel on both nodes to create fork
+    tokio::try_join!(
+        node_1.mine_blocks_without_gossip(BLOCKS_TO_MINE_NODE_1),
+        node_2.mine_blocks_without_gossip(BLOCKS_TO_MINE_NODE_2)
+    )?;
 
-    let chain_node_1 = node_1
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_canonical_chain()
-        .0;
-    let chain_node_2 = node_2
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_canonical_chain()
-        .0;
+    let chain_node_1 = node_1.get_canonical_chain();
+    let chain_node_2 = node_2.get_canonical_chain();
 
     // Find the height where chains diverged (last common block)
     let fork_height = common_height.height;
@@ -121,18 +102,8 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
 
     // Verify EMA differences for blocks after the delay period
     for (block_1, block_2) in &blocks_with_ema_diff {
-        let ema_1 = node_1
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .get_ema_snapshot(&block_1.block_hash)
-            .unwrap();
-        let ema_2 = node_2
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .get_ema_snapshot(&block_2.block_hash)
-            .unwrap();
+        let ema_1 = node_1.get_ema_snapshot(&block_1.block_hash).unwrap();
+        let ema_2 = node_2.get_ema_snapshot(&block_2.block_hash).unwrap();
 
         assert_ne!(
             ema_1, ema_2,
@@ -142,9 +113,6 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
     }
 
     // Calculate expected number of blocks with different EMA values
-    // We mined BLOCKS_TO_MINE_NODE_1 blocks after fork_height
-    // EMA differences start at min_height_for_ema_diff
-    // So we expect: (fork_height + BLOCKS_TO_MINE_NODE_1) - min_height_for_ema_diff + 1
     let last_mined_height = fork_height + BLOCKS_TO_MINE_NODE_1 as u64;
     let expected_blocks_with_ema_diff = (last_mined_height - min_height_for_ema_diff + 1) as usize;
 
@@ -178,18 +146,8 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
         .await?;
 
     // Verify both nodes have converged to the same canonical chain
-    let final_chain_node_1 = node_1
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_canonical_chain()
-        .0;
-    let final_chain_node_2 = node_2
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_canonical_chain()
-        .0;
+    let final_chain_node_1 = node_1.get_canonical_chain();
+    let final_chain_node_2 = node_2.get_canonical_chain();
 
     // Both chains should have the same length
     assert_eq!(
@@ -205,24 +163,11 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
             "Block hashes must be identical at height {} after convergence",
             block_1.height
         );
-        assert_eq!(
-            block_1.height, block_2.height,
-            "Block heights must match"
-        );
+        assert_eq!(block_1.height, block_2.height, "Block heights must match");
 
         // Get EMA snapshots for both blocks
-        let ema_1 = node_1
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .get_ema_snapshot(&block_1.block_hash)
-            .unwrap();
-        let ema_2 = node_2
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .get_ema_snapshot(&block_2.block_hash)
-            .unwrap();
+        let ema_1 = node_1.get_ema_snapshot(&block_1.block_hash).unwrap();
+        let ema_2 = node_2.get_ema_snapshot(&block_2.block_hash).unwrap();
 
         assert_eq!(
             ema_1, ema_2,

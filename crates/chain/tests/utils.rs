@@ -15,7 +15,7 @@ use futures::future::select;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     block_producer::SolutionFoundMessage,
-    block_tree_service::{get_canonical_chain, BlockState, ChainState, ReorgEvent},
+    block_tree_service::{ema_snapshot::EmaSnapshot, get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ReorgEvent},
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
@@ -1495,6 +1495,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         //FIXME: In future this "workaround" of using the syncing state to prevent gossip
         //       broadcasts can be replaced with something more appropriate and correctly named
         self.node_ctx.sync_state.set_is_syncing(true);
+    }
+
+    /// Get the full canonical chain as BlockTreeEntry items
+    pub fn get_canonical_chain(&self) -> Vec<BlockTreeEntry> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .get_canonical_chain()
+            .0
+    }
+
+    /// Get the EMA snapshot for a given block hash
+    pub fn get_ema_snapshot(&self, block_hash: &H256) -> Option<Arc<EmaSnapshot>> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(block_hash)
     }
 }
 
