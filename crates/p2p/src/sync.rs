@@ -105,7 +105,8 @@ impl SyncState {
 
     /// Sets whether gossip broadcast is enabled
     pub fn set_gossip_broadcast_enabled(&self, enabled: bool) {
-        self.gossip_broadcast_enabled.store(enabled, Ordering::Relaxed);
+        self.gossip_broadcast_enabled
+            .store(enabled, Ordering::Relaxed);
     }
 
     /// Returns whether gossip broadcast is enabled
@@ -115,7 +116,8 @@ impl SyncState {
 
     /// Sets whether gossip reception is enabled
     pub fn set_gossip_reception_enabled(&self, enabled: bool) {
-        self.gossip_reception_enabled.store(enabled, Ordering::Relaxed);
+        self.gossip_reception_enabled
+            .store(enabled, Ordering::Relaxed);
     }
 
     /// Returns whether gossip reception is enabled
