@@ -23,10 +23,7 @@ use irys_actors::{
     services::ServiceSenders,
     validation_service::ValidationService,
 };
-use irys_actors::{
-    ActorAddresses, CommitmentStateReadGuard, EpochReplayData, EpochService, EpochServiceMessage,
-    StorageModuleService,
-};
+use irys_actors::{ActorAddresses, EpochReplayData, StorageModuleService};
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -96,7 +93,6 @@ pub struct IrysNodeCtx {
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub block_tree_guard: BlockTreeReadGuard,
-    pub commitment_state_guard: CommitmentStateReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     // Shutdown channels
@@ -866,43 +862,16 @@ impl IrysNode {
         let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
 
         // start the epoch service
-        let (genesis_block, commitments, epoch_replay_data) =
+        let replay_data =
             EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config).await?;
+        // let (genesis_block, commitments, epoch_block_data) = (
+        //     &replay_data.genesis_block_header,
+        //     &replay_data.genesis_commitments,
+        //     &replay_data.epoch_blocks,
+        // );
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
-        let _handle = EpochService::spawn_service(
-            task_exec,
-            genesis_block,
-            commitments,
-            receivers.epoch_service,
-            &service_senders,
-            &storage_submodules_config,
-            &config,
-        );
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        service_senders
-            .epoch_service
-            .send(EpochServiceMessage::ReplayEpochData(epoch_replay_data, tx))?;
-        let storage_module_infos = rx.await?;
-
-        // Retrieve Partition assignment
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        service_senders
-            .epoch_service
-            .send(EpochServiceMessage::GetPartitionAssignmentsGuard(tx))?;
-        let partition_assignments_guard = rx.await?;
-
-        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
-        let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
-
-        // Retrieve Commitment State
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        service_senders
-            .epoch_service
-            .send(EpochServiceMessage::GetCommitmentStateGuard(tx))?;
-        let commitment_state_guard = rx.await?;
 
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
@@ -916,7 +885,8 @@ impl IrysNode {
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
-            commitment_state_guard.clone(),
+            &replay_data,
+            &storage_submodules_config,
             &config,
             &service_senders,
             reth_service_actor.clone(),
@@ -930,6 +900,12 @@ impl IrysNode {
         let block_tree_guard = oneshot_rx
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
+
+        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+
+        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) =
@@ -947,7 +923,6 @@ impl IrysNode {
             reth_node_adapter.clone(),
             storage_modules_guard.clone(),
             &block_tree_guard,
-            &commitment_state_guard,
             receivers.mempool,
             &config,
             &service_senders,
@@ -977,7 +952,6 @@ impl IrysNode {
             task_exec,
             block_index_guard.clone(),
             block_tree_guard.clone(),
-            partition_assignments_guard.clone(),
             vdf_state_readonly.clone(),
             &config,
             &service_senders,
@@ -1001,7 +975,6 @@ impl IrysNode {
             &service_senders,
             &block_index_guard,
             &block_tree_guard,
-            partition_assignments_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
         );
@@ -1108,7 +1081,6 @@ impl IrysNode {
             sync_state: sync_state.clone(),
             shadow_tx_store,
             reth_node_adapter,
-            commitment_state_guard,
             block_producer_inner,
             block_pool,
             validation_enabled,
@@ -1379,11 +1351,11 @@ impl IrysNode {
         let price_oracle = match config.node_config.oracle {
             OracleConfig::Mock {
                 initial_price,
-                percent_change,
+                incremental_change,
                 smoothing_interval,
             } => IrysPriceOracle::MockOracle(MockOracle::new(
                 initial_price,
-                percent_change,
+                incremental_change,
                 smoothing_interval,
             )),
             // note: depending on the oracle, it may require spawning an async background service.
@@ -1398,14 +1370,12 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
         block_tree_guard: &BlockTreeReadGuard,
-        partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
-            partition_assignments_guard,
             db: irys_db.clone(),
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),

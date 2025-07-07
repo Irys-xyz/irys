@@ -371,7 +371,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
                 .await?;
         }
 
-        let genesis_index_height = ctx_genesis_node.get_height_on_chain();
+        let genesis_index_height = ctx_genesis_node.get_block_index_height();
         // mine block on genesis
         ctx_genesis_node
             .mine_blocks(1)
@@ -419,7 +419,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     //
     {
         let additional_blocks_for_gossip_test: usize = 2;
-        let genesis_starting_index_height = ctx_genesis_node.get_height_on_chain();
+        let genesis_starting_index_height = ctx_genesis_node.get_block_index_height();
         mine_blocks(
             &ctx_genesis_node.node_ctx,
             additional_blocks_for_gossip_test,

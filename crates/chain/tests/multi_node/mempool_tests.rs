@@ -529,7 +529,9 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
         .service_senders
         .mempool
         .send(MempoolServiceMessage::GetBestMempoolTxs(
-            Some(BlockId::number(peer2.get_height().await - 1)),
+            Some(BlockId::number(
+                peer2.get_canonical_chain_height().await - 1,
+            )),
             tx,
         ))?;
 
@@ -557,7 +559,7 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     );
 
     // mine another block on peer1, so it's the longest chain (with gossip)
-    let height = peer1.get_height().await;
+    let height = peer1.get_canonical_chain_height().await;
     peer1.mine_block().await?;
     // peers should be able to sync
     let (gen, p2) = tokio::join!(

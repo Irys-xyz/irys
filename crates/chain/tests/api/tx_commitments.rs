@@ -2,15 +2,13 @@ use crate::utils::*;
 use assert_matches::assert_matches;
 use base58::ToBase58 as _;
 use eyre::eyre;
-use irys_actors::{
-    packing::wait_for_packing, CommitmentStateReadGuard, EpochServiceMessage,
-    PartitionAssignmentsReadGuard,
-};
+use irys_actors::{packing::wait_for_packing, EpochSnapshot};
 use irys_chain::IrysNodeCtx;
 use irys_database::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
+use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
 macro_rules! assert_ok {
@@ -63,23 +61,14 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .await;
 
         // Get access to commitment and partition services for verification
-        let epoch_service = node.node_ctx.service_senders.epoch_service.clone();
-
-        let (sender, rx) = tokio::sync::oneshot::channel();
-        epoch_service.send(EpochServiceMessage::GetCommitmentStateGuard(sender))?;
-        let commitment_state_guard = rx.await?;
-
-        let (sender, rx) = tokio::sync::oneshot::channel();
-        epoch_service.send(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))?;
-        let pa_guard = rx.await?;
+        let block_tree_guard = &node.node_ctx.block_tree_guard;
+        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
 
         // ===== PHASE 1: Verify Genesis Block Initialization =====
         // Check that the genesis block producer has the expected initial pledges
-
         {
             let genesis_block = node.get_block_by_height(0).await?;
-
-            let commitment_state = commitment_state_guard.read();
+            let commitment_state = epoch_snapshot.commitment_state.read().unwrap();
             let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
             let stakes = commitment_state.stake_commitments.get(&genesis_signer);
 
@@ -138,23 +127,24 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         assert!(expected_ids.iter().all(|id| commitments_2.contains(id)));
 
         // ===== PHASE 3: Verify First Epoch Assignments =====
+        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        debug!("Epoch height: {}", epoch_snapshot.epoch_block.height);
+
         // Verify that all pledges have been assigned partitions
         assert_ok!(validate_pledge_assignments(
-            &commitment_state_guard,
-            &pa_guard,
+            epoch_snapshot.clone(),
             "genesis",
             &genesis_signer,
         ));
         assert_ok!(validate_pledge_assignments(
-            &commitment_state_guard,
-            &pa_guard,
+            epoch_snapshot.clone(),
             "signer1",
             &signer1.address(),
         ));
 
         // Verify commitment state contains expected pledges and stakes
         {
-            let commitment_state = commitment_state_guard.read();
+            let commitment_state = epoch_snapshot.commitment_state.read().unwrap();
 
             // Check genesis miner pledges
             let pledges = commitment_state
@@ -201,22 +191,22 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         assert_eq!(commitments_3, vec![pledge3.id]);
 
         // ===== PHASE 5: Verify Second Epoch Assignments =====
+        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        debug!("Epoch height: {}", epoch_snapshot.epoch_block.height);
+
         // Verify all signers have proper partition assignments for all pledges
         genesis_parts_before = assert_ok!(validate_pledge_assignments(
-            &commitment_state_guard,
-            &pa_guard,
+            epoch_snapshot.clone(),
             "genesis",
             &genesis_signer,
         ));
         signer1_parts_before = assert_ok!(validate_pledge_assignments(
-            &commitment_state_guard,
-            &pa_guard,
+            epoch_snapshot.clone(),
             "signer1",
             &signer1_address,
         ));
         signer2_parts_before = assert_ok!(validate_pledge_assignments(
-            &commitment_state_guard,
-            &pa_guard,
+            epoch_snapshot.clone(),
             "signer2",
             &signer2_address,
         ));
@@ -235,24 +225,15 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     restarted_node.wait_for_packing(10).await;
 
     // Get access to commitment and partition services for verification
-    let epoch_service = restarted_node
-        .node_ctx
-        .service_senders
-        .epoch_service
-        .clone();
-
-    let (sender, rx) = tokio::sync::oneshot::channel();
-    epoch_service.send(EpochServiceMessage::GetCommitmentStateGuard(sender))?;
-    let commitment_state_guard = rx.await?;
-
-    let (sender, rx) = tokio::sync::oneshot::channel();
-    epoch_service.send(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))?;
-    let pa_guard = rx.await?;
+    let block_tree_guard = &restarted_node.node_ctx.block_tree_guard;
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
 
     // Make sure genesis has 3 commitments (1 stake, 2 pledge)
     assert_eq!(
-        commitment_state_guard
+        epoch_snapshot
+            .commitment_state
             .read()
+            .unwrap()
             .pledge_commitments
             .get(&genesis_signer)
             .expect("commitments for genesis miner")
@@ -262,8 +243,10 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     // Make sure signer1 has 2 commitments (1 stake, 1 pledge)
     assert_eq!(
-        commitment_state_guard
+        epoch_snapshot
+            .commitment_state
             .read()
+            .unwrap()
             .pledge_commitments
             .get(&signer1.address())
             .expect("commitments for genesis miner")
@@ -273,8 +256,10 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     // Make sure signer2 has 1 commitments (1 stake, 0 pledge)
     assert_eq!(
-        commitment_state_guard
+        epoch_snapshot
+            .commitment_state
             .read()
+            .unwrap()
             .pledge_commitments
             .get(&signer2.address())
             .expect("commitments for genesis miner")
@@ -284,20 +269,17 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     // Verify the partition assignments persist (and the map to the same pledges)
     let genesis_parts_after = assert_ok!(validate_pledge_assignments(
-        &commitment_state_guard,
-        &pa_guard,
+        epoch_snapshot.clone(),
         "genesis",
         &genesis_signer,
     ));
     let signer1_parts_after = assert_ok!(validate_pledge_assignments(
-        &commitment_state_guard,
-        &pa_guard,
+        epoch_snapshot.clone(),
         "signer1",
         &signer1.address(),
     ));
     let signer2_parts_after = assert_ok!(validate_pledge_assignments(
-        &commitment_state_guard,
-        &pa_guard,
+        epoch_snapshot.clone(),
         "signer2",
         &signer2.address(),
     ));
@@ -517,15 +499,16 @@ async fn post_pledge_commitment(
 }
 
 fn validate_pledge_assignments(
-    commitment_state_guard: &CommitmentStateReadGuard,
-    pa_guard: &PartitionAssignmentsReadGuard,
+    epoch_snapshot: Arc<EpochSnapshot>,
     address_name: &str,
     address: &Address,
 ) -> eyre::Result<Vec<H256>> {
     // Get all partition hashes from this address's pledges
     // Each pledge contains a partition_hash that identifies which partition the pledge is for
-    let partition_hashes: Vec<Option<H256>> = commitment_state_guard
+    let partition_hashes: Vec<Option<H256>> = epoch_snapshot
+        .commitment_state
         .read()
+        .unwrap()
         .pledge_commitments
         .get(address)
         .map(|pledges| pledges.iter().map(|pledge| pledge.partition_hash).collect())
@@ -534,7 +517,7 @@ fn validate_pledge_assignments(
     // Retrieve the full commitment state entries for this address
     // These entries contain the complete pledge information needed for validation
     // Note: mostly used for debug logging here
-    let binding = commitment_state_guard.read();
+    let binding = epoch_snapshot.commitment_state.read().unwrap();
     let result = binding.pledge_commitments.get(address);
     let direct = match result {
         Some(entries) => entries,
@@ -557,7 +540,7 @@ fn validate_pledge_assignments(
         if let Some(partition_hash) = partition_hash {
             // Check that the partition assignments state is in sync with the commitment state
             // with regards to the partition_hash
-            let pa = pa_guard.read().get_assignment(*partition_hash);
+            let pa = epoch_snapshot.get_data_partition_assignment(*partition_hash);
             match pa {
                 Some(pa) => {
                     // Verify the partition assignments in the partition assignment state

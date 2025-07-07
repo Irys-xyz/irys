@@ -287,7 +287,7 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::block_tree_service::ema_snapshot::EmaSnapshot;
+        use irys_actors::{block_tree_service::ema_snapshot::EmaSnapshot, EpochSnapshot};
         use irys_database::CommitmentSnapshot;
 
         self.block_tree_read_guard
@@ -295,6 +295,7 @@ impl BlockStatusProvider {
             .add_block(
                 block,
                 Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
                 Arc::new(EmaSnapshot::default()),
             )
             .expect("to add block to the tree");

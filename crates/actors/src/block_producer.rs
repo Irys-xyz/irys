@@ -1,7 +1,7 @@
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
-        ema_snapshot::{EmaBlock, EmaSnapshot},
+        ema_snapshot::{EmaSnapshot, ExponentialMarketAvgCalculation},
         BlockTreeReadGuard,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
@@ -9,7 +9,6 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
-    EpochServiceMessage,
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
@@ -391,7 +390,6 @@ pub trait BlockProdStrategy {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
-        let epoch_service = self.inner().service_senders.epoch_service.clone();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
             warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58());
@@ -440,14 +438,16 @@ pub trait BlockProdStrategy {
         let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
 
         // Use the partition hash to figure out what ledger it belongs to
-        let (sender, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .send(EpochServiceMessage::GetPartitionAssignment(
-                solution.partition_hash,
-                sender,
-            ))
-            .unwrap();
-        let ledger_id = rx.await?.and_then(|pa| pa.ledger_id);
+        let epoch_snapshot = self
+            .inner()
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&prev_block_hash)
+            .expect("parent epoch snapshot to be retrievable");
+
+        let ledger_id = epoch_snapshot
+            .get_data_partition_assignment(solution.partition_hash)
+            .and_then(|pa| pa.ledger_id);
 
         // Create PoA data using the trait method
         let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
@@ -462,7 +462,7 @@ pub trait BlockProdStrategy {
         };
         steps.push(solution.seed.0);
 
-        let ema_irys_price = self
+        let ema_calculation = self
             .get_ema_price(prev_block_header, perv_block_ema_snapshot)
             .await?;
 
@@ -539,8 +539,8 @@ pub trait BlockProdStrategy {
                 steps,
                 ..Default::default()
             },
-            oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
-            ema_irys_price: ema_irys_price.ema,
+            oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
+            ema_irys_price: ema_calculation.ema,
         };
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
@@ -638,16 +638,16 @@ pub trait BlockProdStrategy {
         &self,
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
-    ) -> eyre::Result<EmaBlock> {
+    ) -> eyre::Result<ExponentialMarketAvgCalculation> {
         let oracle_irys_price = self.inner().price_oracle.current_price().await?;
-        let ema_irys_price = parent_block_ema_snapshot.calculate_ema_for_new_block(
+        let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
             self.inner().config.consensus.token_price_safe_range,
             self.inner().config.consensus.ema.price_adjustment_interval,
         );
 
-        Ok(ema_irys_price)
+        Ok(ema_calculation)
     }
 
     async fn get_mempool_txs(

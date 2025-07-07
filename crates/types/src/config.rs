@@ -114,8 +114,8 @@ pub struct ConsensusConfig {
     /// Defines how many blocks must pass before a block is marked as finalized
     pub block_migration_depth: u32,
 
-    /// Number of blocks to retain in cache from chain head
-    pub block_cache_depth: u64,
+    /// Number of blocks to retain in the block tree from chain head
+    pub block_tree_depth: u64,
 
     /// Number of chunks that make up a single partition
     pub num_chunks_in_partition: u64,
@@ -308,10 +308,10 @@ pub enum OracleConfig {
 
         /// How much the price can change between updates
         #[serde(
-            deserialize_with = "serde_utils::percentage_amount",
-            serialize_with = "serde_utils::serializes_percentage_amount"
+            deserialize_with = "serde_utils::token_amount",
+            serialize_with = "serde_utils::serializes_token_amount"
         )]
-        percent_change: Amount<Percentage>,
+        incremental_change: Amount<(IrysPrice, Usd)>,
 
         /// Number of blocks between price updates
         smoothing_interval: u64,
@@ -545,7 +545,7 @@ impl ConsensusConfig {
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
             block_migration_depth: 6,
-            block_cache_depth: 50,
+            block_tree_depth: 50,
             epoch: EpochConfig {
                 capacity_scalar: 100,
                 num_blocks_in_epoch: 100,
@@ -674,7 +674,7 @@ impl NodeConfig {
 
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
-                percent_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+                incremental_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
                 smoothing_interval: 15,
             },
             mining_key,
@@ -908,7 +908,7 @@ mod tests {
         decay_rate = 0.01
         chunk_size = 262144
         block_migration_depth = 6
-        block_cache_depth = 50
+        block_tree_depth = 50
         num_chunks_in_partition = 10
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
@@ -1010,7 +1010,7 @@ mod tests {
         [oracle]
         type = "mock"
         initial_price = 1.0
-        percent_change = 0.01
+        incremental_change = 0.00000000000001
         smoothing_interval = 15
 
         [storage]

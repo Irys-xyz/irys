@@ -118,7 +118,7 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
 
         if let Some(tip_block) = block_tree.get_block(&tip_hash) {
             let height_diff = tip_block.height.saturating_sub(self.block.height);
-            height_diff > self.service_inner.config.consensus.block_cache_depth
+            height_diff > self.service_inner.config.consensus.block_tree_depth
         } else {
             false
         }
@@ -174,18 +174,23 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
         }
         .instrument(tracing::info_span!("recall_range_validation", block_hash = %self.block_hash, block_height = %self.block.height));
 
+        let epoch_snapshot = self
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&block.block_hash)
+            .expect("block should have an epoch snapshot in the block_tree");
+
         // POA validation
         let poa_task = {
             let consensus_config = self.service_inner.config.consensus.clone();
             let block_index_guard = self.service_inner.block_index_guard.clone();
-            let partitions_guard = self.service_inner.partition_assignments_guard.clone();
             let block_hash = self.block_hash;
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 poa_is_valid(
                     &poa,
                     &block_index_guard,
-                    &partitions_guard,
+                    &epoch_snapshot,
                     &consensus_config,
                     &miner_address,
                 )
