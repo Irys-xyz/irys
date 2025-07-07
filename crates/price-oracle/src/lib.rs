@@ -56,8 +56,8 @@ pub mod mock_oracle {
     pub struct MockOracle {
         /// Mutable price state
         context: Mutex<PriceContext>,
-        /// Percent change in decimal form; e.g. dec!(0.05) means 5%
-        percent_change: Amount<Percentage>,
+        /// Const value change on each call
+        incremental_change: Amount<(IrysPrice, Usd)>,
         /// After this many calls, we toggle the direction of change (up/down)
         smoothing_interval: u64,
     }
@@ -67,7 +67,7 @@ pub mod mock_oracle {
         #[must_use]
         pub const fn new(
             initial_price: Amount<(IrysPrice, Usd)>,
-            percent_change: Amount<Percentage>,
+            incremental_change: Amount<(IrysPrice, Usd)>,
             smoothing_interval: u64,
         ) -> Self {
             let price_context = PriceContext {
@@ -77,7 +77,7 @@ pub mod mock_oracle {
             };
             Self {
                 context: Mutex::new(price_context),
-                percent_change,
+                incremental_change,
                 smoothing_interval,
             }
         }
@@ -112,17 +112,21 @@ pub mod mock_oracle {
 
             // Update the price in the current direction
             if guard.going_up {
-                // Price goes up by percent_change
-                guard.price = guard
-                    .price
-                    .add_multiplier(self.percent_change)
-                    .unwrap_or_else(|_| Amount::token(dec!(1.0)).expect("valid token price"));
+                // Price goes up
+                guard.price = Amount::new(
+                    guard
+                        .price
+                        .amount
+                        .saturating_add(self.incremental_change.amount),
+                );
             } else {
-                // Price goes down by percent_change
-                guard.price = guard
-                    .price
-                    .sub_multiplier(self.percent_change)
-                    .unwrap_or_else(|_| Amount::token(dec!(1.0)).expect("valid token price"));
+                // Price goes down
+                guard.price = Amount::new(
+                    guard
+                        .price
+                        .amount
+                        .saturating_sub(self.incremental_change.amount),
+                );
             }
 
             Ok(Amount::new(guard.price.amount))
@@ -142,7 +146,7 @@ pub mod mock_oracle {
             let smoothing_interval = 2;
             let oracle = MockOracle::new(
                 Amount::token(dec!(1.0)).unwrap(),
-                Amount::percentage(dec!(0.05)).unwrap(),
+                Amount::token(dec!(0.05)).unwrap(),
                 smoothing_interval,
             );
 
@@ -161,7 +165,7 @@ pub mod mock_oracle {
             let smoothing_interval = 3;
             let oracle = MockOracle::new(
                 Amount::token(dec!(1.0)).unwrap(),
-                Amount::percentage(dec!(0.10)).unwrap(),
+                Amount::token(dec!(0.10)).unwrap(),
                 smoothing_interval,
             );
 
@@ -178,7 +182,7 @@ pub mod mock_oracle {
             let smoothing_interval = 2;
             let oracle = MockOracle::new(
                 Amount::token(dec!(1.0)).unwrap(),
-                Amount::percentage(dec!(0.10)).unwrap(),
+                Amount::token(dec!(0.10)).unwrap(),
                 smoothing_interval,
             );
 

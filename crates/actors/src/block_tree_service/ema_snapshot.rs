@@ -219,8 +219,6 @@ impl EmaSnapshot {
             safe_range,
             parent_block.oracle_irys_price,
         );
-        dbg!(&parent_block.height + 1);
-        dbg!(&oracle_price_for_calculation);
 
         let ema = oracle_price_for_calculation
             .calculate_ema(
