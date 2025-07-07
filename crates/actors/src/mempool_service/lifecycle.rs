@@ -93,7 +93,7 @@ impl Inner {
 
         self.handle_confirmed_data_tx_reorg(event.clone()).await?;
 
-        self.handle_commitment_tx_reorg(event).await?;
+        self.handle_confirmed_commitment_tx_reorg(event).await?;
 
         tracing::info!("Reorg handled, new tip: {}", &new_tip);
         Ok(())
@@ -107,7 +107,10 @@ impl Inner {
     /// 2) reduce down both forks to a `HashMap<SystemLedger, HashSet<IrysTransactionId>>`
     /// 3) reduce down to a set of SystemLedger specific orphaned transactions
     /// 4) resubmit these orphaned commitment transactions to the mempool
-    pub async fn handle_commitment_tx_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
+    pub async fn handle_confirmed_commitment_tx_reorg(
+        &mut self,
+        event: ReorgEvent,
+    ) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
