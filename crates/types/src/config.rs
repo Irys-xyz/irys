@@ -1007,7 +1007,7 @@ mod tests {
         [oracle]
         type = "mock"
         initial_price = 1.0
-        percent_change = 0.01
+        incremental_change = 0.00000000000001
         smoothing_interval = 15
 
         [storage]
