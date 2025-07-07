@@ -31,10 +31,7 @@ use irys_types::{
     app_state::DatabaseProvider,
     block_production::SolutionContext,
     calculate_difficulty, next_cumulative_diff,
-    storage_pricing::{
-        phantoms::{IrysPrice, Usd},
-        Amount,
-    },
+    storage_pricing::Amount,
     Base64, CommitmentTransaction, Config, DataLedger, DataTransactionLedger,
     GossipBroadcastMessage, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader,
     PoaData, Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,

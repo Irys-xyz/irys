@@ -407,44 +407,51 @@ mod test {
         )
     }
 
-    /// Helper function to calculate EMA price for a given block height
-    fn ema_price_for_height(height: u64) -> IrysTokenPrice {
-        deterministic_price(height)
-    }
-
     /// Utility function to build blocks with their corresponding snapshots
     fn build_blocks_with_snapshots(
         max_height: u64,
         config: &ConsensusConfig,
     ) -> Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        let mut current_snapshot: Arc<EmaSnapshot> = Arc::new(EmaSnapshot::default());
         let mut results: Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> = Vec::new();
 
         for height in 0..=max_height {
             let mut block = IrysBlockHeader::new_mock_header();
             block.height = height;
-            // Special handling for genesis block to use config.genesis_price
-            if height == 0 {
-                block.oracle_irys_price = config.genesis_price;
+
+            // Set oracle price for all blocks
+            block.oracle_irys_price = if height == 0 {
+                config.genesis_price
+            } else {
+                oracle_price_for_height(height)
+            };
+
+            // Calculate snapshot and EMA price based on block height
+            let snapshot = if height == 0 {
+                // Genesis block: use genesis price for EMA and create genesis snapshot
                 block.ema_irys_price = config.genesis_price;
+                EmaSnapshot::genesis(&block)
             } else {
-                block.oracle_irys_price = oracle_price_for_height(height);
-                block.ema_irys_price = ema_price_for_height(height);
-            }
+                // Non-genesis blocks: calculate EMA and create next snapshot
+                let (parent_block, parent_snapshot) = &results[height as usize - 1];
 
-            // Create snapshot for this block
-            if height == 0 {
-                // Genesis block
-                current_snapshot = EmaSnapshot::genesis(&block);
-            } else {
-                // Non-genesis blocks
-                let parent_block = &results.last().unwrap().0;
-                current_snapshot = current_snapshot
+                // Calculate and set EMA price before creating snapshot
+                block.ema_irys_price = parent_snapshot
+                    .calculate_ema_for_new_block(
+                        parent_block,
+                        block.oracle_irys_price,
+                        config.token_price_safe_range,
+                        config.ema.price_adjustment_interval,
+                    )
+                    .ema;
+
+                // Create next snapshot with the block that now has the correct EMA price
+                parent_snapshot
                     .next_snapshot(&block, parent_block, config)
-                    .unwrap();
-            }
+                    .unwrap()
+            };
 
-            results.push((block, current_snapshot.clone()));
+            // Store block and snapshot
+            results.push((block, snapshot));
         }
 
         results
@@ -781,8 +788,11 @@ mod test {
 
         // Calculate expected EMA using the formula:
         // oracle_price[prev_ema_predecessor_height].calculate_ema(interval, ema_price[prev_ema_height])
+        // We need to get the actual EMA from the built blocks, not the deterministic function
         let expected_oracle_price = oracle_price_for_height(prev_ema_predecessor_height);
-        let expected_prev_ema = ema_price_for_height(prev_ema_height);
+        let expected_prev_ema = blocks_and_snapshots[prev_ema_height as usize]
+            .0
+            .ema_irys_price;
         let expected_ema = expected_oracle_price
             .calculate_ema(config.ema.price_adjustment_interval, expected_prev_ema)
             .unwrap();
