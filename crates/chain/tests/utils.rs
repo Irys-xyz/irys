@@ -10,17 +10,14 @@ use actix_web::{
 use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
-use eyre::OptionExt as _;
+use eyre::{eyre, OptionExt as _};
 use futures::future::select;
-use irys_actors::block_tree_service::{BlockState, ChainState, ReorgEvent};
-
-use irys_actors::mempool_service::MempoolTxs;
-use irys_actors::EpochServiceMessage;
 use irys_actors::{
+    block_discovery::BlockDiscoveredMessage,
     block_producer::SolutionFoundMessage,
-    block_tree_service::get_canonical_chain,
+    block_tree_service::{get_canonical_chain, BlockState, ChainState, ReorgEvent},
     block_validation,
-    mempool_service::{MempoolServiceMessage, TxIngressError},
+    mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
     SetTestBlocksRemainingMessage,
 };
@@ -38,11 +35,9 @@ use irys_primitives::CommitmentType;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::irys::IrysSigner;
-use irys_types::partition::PartitionAssignment;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, Address, DataLedger,
-    GossipBroadcastMessage, H256List, H256,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List, H256,
 };
 use irys_types::{
     Base64, CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, IrysTransaction,
@@ -51,6 +46,7 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use reth::network::{PeerInfo, Peers as _};
 use reth::payload::EthBuiltPayload;
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
 use sha2::{Digest as _, Sha256};
@@ -359,9 +355,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_node.wait_for_packing(seconds_to_wait).await;
 
         // Verify that partition assignments were created
-        let peer_assignments = peer_node
-            .get_partition_assignments(peer_signer.address())
-            .await;
+        let peer_assignments = peer_node.get_partition_assignments(peer_signer.address());
 
         // Ensure at least one partition has been assigned
         assert!(
@@ -728,8 +722,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn mine_block(&self) -> eyre::Result<()> {
-        self.mine_blocks(1).await
+    pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
+        let height = self.get_height().await;
+        self.mine_blocks(1).await?;
+        let hash = self.wait_until_height(height + 1, 10).await?;
+        self.get_block_by_hash(&hash)
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -751,7 +748,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
         self.mine_blocks(num_blocks).await?;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         Ok(())
@@ -761,7 +758,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
         let res = mine_block(&self.node_ctx).await?.unwrap();
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         Ok(res)
@@ -779,12 +776,19 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let is_staked = self
             .node_ctx
-            .commitment_state_guard
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .commitment_state
+            .read()
+            .unwrap()
             .is_staked(commitment_tx.signer);
         commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
     }
 
-    // wait for block to be available via block tree guard
+    /// wait for specific block to be available via block tree guard
+    ///   i.e. in the case of a fork, check a specific block has been gossiped between peers,
+    ///        even though it may not become part of the canonical chain.
     pub async fn wait_for_block(
         &self,
         hash: &H256,
@@ -1125,6 +1129,38 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    /// useful in tests when creating forks and
+    /// needing to send specific blocks between specific peers
+    pub async fn send_block_to_peer(
+        &self,
+        peer: &Self,
+        irys_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        match peer
+            .node_ctx
+            .actor_addresses
+            .block_discovery_addr
+            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(res) => {
+                tracing::error!(
+                    "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
+                    &irys_block_header.block_hash.0,
+                    &irys_block_header.height,
+                    res
+                );
+                Err(eyre!(
+                    "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
+                    &irys_block_header.block_hash.0,
+                    &irys_block_header.height,
+                    res
+                ))
+            }
+        }
+    }
+
     pub async fn post_data_tx_without_gossip(
         &self,
         anchor: H256,
@@ -1132,7 +1168,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         signer: &IrysSigner,
     ) -> IrysTransaction {
         let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.gossip_disable();
         let tx = self.post_data_tx(anchor, data, signer).await;
         self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
         tx
@@ -1244,6 +1280,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await;
     }
 
+    pub async fn post_commitment_tx_raw_without_gossip(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) {
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        self.post_commitment_tx_request(&api_uri, commitment_tx)
+            .await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+    }
+
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let pledge_tx = CommitmentTransaction {
             commitment_type: CommitmentType::Pledge,
@@ -1260,6 +1308,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.post_commitment_tx_request(&api_uri, &pledge_tx).await;
 
         pledge_tx
+    }
+
+    pub async fn post_pledge_commitment_without_gossip(
+        &self,
+        anchor: H256,
+    ) -> CommitmentTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.gossip_disable();
+
+        let stake_tx = self.post_pledge_commitment(anchor).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+
+        stake_tx
     }
 
     pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1282,20 +1343,27 @@ impl IrysNodeTest<IrysNodeCtx> {
         stake_tx
     }
 
-    pub async fn get_partition_assignments(
+    pub async fn post_stake_commitment_without_gossip(
         &self,
-        mining_address: Address,
-    ) -> Vec<PartitionAssignment> {
-        let epoch_service = self.node_ctx.service_senders.epoch_service.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .send(EpochServiceMessage::GetMinerPartitionAssignments(
-                mining_address,
-                tx,
-            ))
-            .expect("message should be delivered to epoch service");
-        rx.await
-            .expect("to retrieve partition assignments for miner")
+        anchor: H256,
+    ) -> CommitmentTransaction {
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.gossip_disable();
+
+        let stake_tx = self.post_stake_commitment(anchor).await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+
+        stake_tx
+    }
+
+    pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
+        let epoch_snapshot = self
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot();
+
+        epoch_snapshot.get_partition_assignments(miner_address)
     }
 
     async fn post_commitment_tx_request(
@@ -1307,11 +1375,18 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
-        let mut response = client
+        let result = client
             .post(url)
             .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
-            .await
-            .expect("client post failed");
+            .await;
+
+        let mut response = match result {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to post commitment transaction: {e}");
+                return;
+            }
+        };
 
         if response.status() != StatusCode::OK {
             // Read the response body
@@ -1331,6 +1406,54 @@ impl IrysNodeTest<IrysNodeCtx> {
                 serde_json::to_string_pretty(&commitment_tx).unwrap()
             );
         }
+    }
+
+    // disconnect all Reth peers from network
+    // return Vec<PeerInfo>> as it was prior to disconnect
+    pub async fn disconnect_all_reth_peers(&self) -> eyre::Result<Vec<PeerInfo>> {
+        let ctx = self.node_ctx.reth_node_adapter.clone();
+
+        let all_peers_prior = ctx.inner.network.get_all_peers().await?;
+        for peer in all_peers_prior.iter() {
+            ctx.inner.network.disconnect_peer(peer.remote_id);
+        }
+
+        while !ctx.inner.network.get_all_peers().await?.is_empty() {
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let all_peers_after = ctx.inner.network.get_all_peers().await?;
+        assert!(
+            all_peers_after.is_empty(),
+            "the peer should be completely disconnected",
+        );
+
+        Ok(all_peers_prior)
+    }
+
+    // Reconnect Reth peers passed to fn
+    pub fn reconnect_all_reth_peers(&self, peers: &Vec<PeerInfo>) {
+        for peer in peers {
+            self.node_ctx
+                .reth_node_adapter
+                .inner
+                .network
+                .connect_peer(peer.remote_id, peer.remote_addr);
+        }
+    }
+
+    // enable node to gossip until disabled
+    pub fn gossip_enable(&self) {
+        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
+        //       broadcasts can be replaced with something more appropriate and correctly named
+        self.node_ctx.sync_state.set_is_syncing(false);
+    }
+
+    // disable node ability to gossip until enabled
+    pub fn gossip_disable(&self) {
+        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
+        //       broadcasts can be replaced with something more appropriate and correctly named
+        self.node_ctx.sync_state.set_is_syncing(true);
     }
 }
 
