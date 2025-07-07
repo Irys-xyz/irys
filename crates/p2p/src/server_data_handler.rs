@@ -35,7 +35,7 @@ where
     TPeerList: PeerList,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: BlockPool<TPeerList, TBlockDiscovery, TMempoolFacade>,
+    pub block_pool: Arc<BlockPool<TPeerList, TBlockDiscovery, TMempoolFacade>>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
@@ -256,6 +256,7 @@ where
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
+        data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
         let span = self.span.clone();
         let _span = span.enter();
@@ -406,8 +407,20 @@ where
             }
         }
 
+        let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
+        let is_in_the_trusted_sync_range = self
+            .sync_state
+            .is_in_trusted_sync_range(block_header.height as usize);
+
+        let skip_block_validation = is_syncing_from_a_trusted_peer
+            && is_in_the_trusted_sync_range
+            && self
+                .peer_list
+                .is_a_trusted_peer(source_miner_address, data_source_ip.ip())
+                .await?;
+
         self.block_pool
-            .process_block(block_header)
+            .process_block(Arc::new(block_header), skip_block_validation)
             .await
             .map_err(GossipError::BlockPool)?;
         Ok(())

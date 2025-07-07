@@ -15,7 +15,10 @@ use futures::future::select;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     block_producer::SolutionFoundMessage,
-    block_tree_service::{get_canonical_chain, BlockState, ChainState, ReorgEvent},
+    block_tree_service::{
+        ema_snapshot::EmaSnapshot, get_canonical_chain, BlockState, BlockTreeEntry, ChainState,
+        ReorgEvent,
+    },
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
@@ -286,25 +289,26 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
-        self.testnet_peer_with_assignments_and_name(peer_signer, "PEER")
+        // Create a new peer config using the provided signer
+        let peer_config = self.testnet_peer_with_signer(peer_signer);
+
+        self.testnet_peer_with_assignments_and_name(peer_config, "PEER")
             .await
     }
 
     pub async fn testnet_peer_with_assignments_and_name(
         &self,
-        peer_signer: &IrysSigner,
+        config: NodeConfig,
         name: &'static str,
     ) -> Self {
         let seconds_to_wait = 20;
-
-        // Create a new peer config using the provided signer
-        let peer_config = self.testnet_peer_with_signer(peer_signer);
+        let peer_address = config.miner_address();
 
         // Start the peer node
-        let peer_node = IrysNodeTest::new(peer_config).start_with_name(name).await;
+        let peer_node = IrysNodeTest::new(config).start_with_name(name).await;
 
         // Get the latest block hash to use as anchor
-        let current_height = self.get_height().await;
+        let current_height = self.get_canonical_chain_height().await;
         let latest_block = self
             .get_block_by_height(current_height)
             .await
@@ -323,14 +327,23 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
             .expect("pledge tx to be in mempool");
 
+        // Get height before mining the commitment block
+        let height_before_commitment = self.get_canonical_chain_height().await;
+
         // Mine a block to get the commitments included
         self.mine_block()
             .await
             .expect("to mine block with commitments");
 
+        // Wait for peer to sync the commitment block
+        peer_node
+            .wait_until_height(height_before_commitment + 1, seconds_to_wait)
+            .await
+            .expect("peer to sync commitment block");
+
         // Get epoch configuration to calculate when next epoch round occurs
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
-        let current_height_after_commitment = self.get_height().await;
+        let current_height_after_commitment = self.get_canonical_chain_height().await;
 
         // Calculate how many blocks we need to mine to reach the next epoch
         let blocks_until_next_epoch =
@@ -338,24 +351,35 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Mine blocks until we reach the next epoch round
         for _ in 0..blocks_until_next_epoch {
+            let height_before_mining = self.get_canonical_chain_height().await;
+
             self.mine_block()
                 .await
                 .expect("to mine block towards next epoch");
+
+            // Wait for peer to sync after each block to prevent race conditions
+            peer_node
+                .wait_until_height(height_before_mining + 1, seconds_to_wait)
+                .await
+                .expect("peer to sync to current height");
         }
 
-        let final_height = self.get_height().await;
+        let final_height = self.get_canonical_chain_height().await;
 
         // Wait for the peer to receive & process the epoch block
         peer_node
             .wait_until_height(final_height, seconds_to_wait)
             .await
             .expect("peer to sync to epoch height");
+        self.wait_until_height(final_height, seconds_to_wait)
+            .await
+            .unwrap();
 
         // Wait for packing to complete on the peer (this indicates partition assignments are active)
         peer_node.wait_for_packing(seconds_to_wait).await;
 
         // Verify that partition assignments were created
-        let peer_assignments = peer_node.get_partition_assignments(peer_signer.address());
+        let peer_assignments = peer_node.get_partition_assignments(peer_address);
 
         // Ensure at least one partition has been assigned
         assert!(
@@ -663,11 +687,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
-    pub fn get_height_on_chain(&self) -> u64 {
+    pub fn get_block_index_height(&self) -> u64 {
         self.node_ctx.block_index_guard.read().latest_height()
     }
 
-    pub async fn get_height(&self) -> u64 {
+    pub async fn get_canonical_chain_height(&self) -> u64 {
         get_canonical_chain(self.node_ctx.block_tree_guard.clone())
             .await
             .unwrap()
@@ -675,6 +699,21 @@ impl IrysNodeTest<IrysNodeCtx> {
             .last()
             .unwrap()
             .height
+    }
+
+    pub fn get_max_difficulty_block(&self) -> IrysBlockHeader {
+        let block = self
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .get_max_cumulative_difficulty_block()
+            .1;
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .get_block(&block)
+            .unwrap()
+            .clone()
     }
 
     /// Returns a future that resolves when a reorg is detected.
@@ -723,7 +762,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
-        let height = self.get_height().await;
+        let height = self.get_canonical_chain_height().await;
         self.mine_blocks(1).await?;
         let hash = self.wait_until_height(height + 1, 10).await?;
         self.get_block_by_hash(&hash)
@@ -734,7 +773,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .actor_addresses
             .block_producer
             .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
-        let height = self.get_height().await;
+        let height = self.get_canonical_chain_height().await;
         self.node_ctx.start_mining().await?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
@@ -1072,11 +1111,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
-    pub fn gossip_block(&self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+    pub fn gossip_block(&self, block_header: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessage::from((*block_header).clone()))?;
+            .send(GossipBroadcastMessage::from(Arc::clone(block_header)))?;
 
         Ok(())
     }
@@ -1452,6 +1491,23 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub fn gossip_disable(&self) {
         self.node_ctx.sync_state.set_gossip_reception_enabled(false);
         self.node_ctx.sync_state.set_gossip_broadcast_enabled(false);
+    }
+
+    /// Get the full canonical chain as BlockTreeEntry items
+    pub fn get_canonical_chain(&self) -> Vec<BlockTreeEntry> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .get_canonical_chain()
+            .0
+    }
+
+    /// Get the EMA snapshot for a given block hash
+    pub fn get_ema_snapshot(&self, block_hash: &H256) -> Option<Arc<EmaSnapshot>> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(block_hash)
     }
 }
 

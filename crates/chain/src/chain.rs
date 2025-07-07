@@ -33,7 +33,7 @@ use irys_database::{
 };
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
-    BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
+    BlockPool, BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -105,6 +105,8 @@ pub struct IrysNodeCtx {
     pub sync_state: SyncState,
     pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
+    pub block_pool:
+        Arc<BlockPool<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
 }
 
 impl IrysNodeCtx {
@@ -348,7 +350,7 @@ impl IrysNode {
                 // Create a new genesis block for network initialization
                 self.create_new_genesis_block(genesis_block.clone())
             }
-            NodeMode::PeerSync => {
+            NodeMode::PeerSync | NodeMode::TrustedPeerSync => {
                 // Fetch genesis data from trusted peer when joining network
                 self.fetch_genesis_from_trusted_peer().await
             }
@@ -609,7 +611,9 @@ impl IrysNode {
             ctx.peer_list.clone(),
             node_mode,
             latest_known_block_height as usize,
-            ctx.config.node_config.genesis_peer_discovery_timeout_millis,
+            &ctx.config,
+            Some(Arc::clone(&ctx.block_pool)),
+            Some(ctx.actor_addresses.reth.clone()),
         )
         .await?;
 
@@ -872,7 +876,6 @@ impl IrysNode {
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
             receivers.gossip_broadcast,
-            service_senders.gossip_broadcast.clone(),
         );
         let sync_state = p2p_service.sync_state.clone();
 
@@ -924,7 +927,7 @@ impl IrysNode {
             &config,
             &service_senders,
         );
-        let mempool_facade = MempoolServiceFacadeImpl::from(service_senders.mempool.clone());
+        let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
@@ -977,7 +980,7 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        let p2p_service_handle: ServiceHandleWithShutdownSignal = p2p_service.run(
+        let (p2p_service_handle, block_pool) = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
@@ -987,6 +990,9 @@ impl IrysNode {
             gossip_listener,
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
             execution_payload_provider,
+            vdf_state_readonly.clone(),
+            config.clone(),
+            service_senders.clone(),
         )?;
 
         // set up the price oracle
@@ -1076,6 +1082,7 @@ impl IrysNode {
             shadow_tx_store,
             reth_node_adapter,
             block_producer_inner,
+            block_pool,
             validation_enabled,
         };
 
@@ -1344,11 +1351,11 @@ impl IrysNode {
         let price_oracle = match config.node_config.oracle {
             OracleConfig::Mock {
                 initial_price,
-                percent_change,
+                incremental_change,
                 smoothing_interval,
             } => IrysPriceOracle::MockOracle(MockOracle::new(
                 initial_price,
-                percent_change,
+                incremental_change,
                 smoothing_interval,
             )),
             // note: depending on the oracle, it may require spawning an async background service.

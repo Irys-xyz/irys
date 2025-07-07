@@ -38,7 +38,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Mine a block and verify that it is included in a block
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 1);
+    assert_eq!(node.get_canonical_chain_height().await, 1);
     let block1 = node.get_block_by_height(1).await?;
     let txid_map = block1.get_data_ledger_tx_ids();
     assert!(txid_map.get(&DataLedger::Submit).unwrap().contains(&txid));
@@ -57,7 +57,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // Mine a block and verify the duplicate tx is not included again
     node.mine_block().await?;
     let block2 = node.get_block_by_height(2).await?;
-    assert_eq!(node.get_height().await, 2);
+    assert_eq!(node.get_canonical_chain_height().await, 2);
     let txid_map = block2.get_data_ledger_tx_ids();
     assert!(!txid_map.get(&DataLedger::Submit).unwrap().contains(&txid));
 
@@ -81,7 +81,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Mine a block and verify the stake commitment is included
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 3);
+    assert_eq!(node.get_canonical_chain_height().await, 3);
     let block3 = node.get_block_by_height(3).await?;
     let tx_ids = block3.get_commitment_ledger_tx_ids();
     let txid_map = block3.get_data_ledger_tx_ids();
@@ -96,7 +96,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Mine a block and make sure the commitment isn't included again
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 4);
+    assert_eq!(node.get_canonical_chain_height().await, 4);
     let block4 = node.get_block_by_height(4).await?;
     let tx_ids = block4.get_commitment_ledger_tx_ids();
     let txid_map = block4.get_data_ledger_tx_ids();
@@ -120,7 +120,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Mine a block and verify the pledge commitment is included
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 5);
+    assert_eq!(node.get_canonical_chain_height().await, 5);
     let block5 = node.get_block_by_height(5).await?;
     let tx_ids = block5.get_commitment_ledger_tx_ids();
     let txid_map = block5.get_data_ledger_tx_ids();
@@ -135,7 +135,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Mine a block and verify the pledge is not included again
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 6);
+    assert_eq!(node.get_canonical_chain_height().await, 6);
     let block6 = node.get_block_by_height(6).await?;
     let tx_ids = block6.get_commitment_ledger_tx_ids();
     let txid_map = block6.get_data_ledger_tx_ids();
@@ -145,7 +145,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // ===== TEST CASE 4: mine an epoch block and test duplicates again =====
     node.mine_blocks(2).await?;
-    assert_eq!(node.get_height().await, 8);
+    assert_eq!(node.get_canonical_chain_height().await, 8);
     let block8 = node.get_block_by_height(8).await?;
     let tx_ids = block8.get_commitment_ledger_tx_ids();
     let txid_map = block8.get_data_ledger_tx_ids();
@@ -170,7 +170,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Mine a block and validate that none of them are included
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 9);
+    assert_eq!(node.get_canonical_chain_height().await, 9);
     let block9 = node.get_block_by_height(9).await?;
     let txid_map = block9.get_data_ledger_tx_ids();
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);

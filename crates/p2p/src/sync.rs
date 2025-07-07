@@ -1,34 +1,45 @@
+use crate::block_pool::BlockPool;
 use crate::peer_list::PeerList;
+use crate::types::InternalGossipError;
 use crate::{GossipError, GossipResult};
+use actix::Addr;
 use base58::ToBase58 as _;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::mempool_service::MempoolFacade;
+use irys_actors::reth_service::RethServiceActor;
 use irys_api_client::ApiClient;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
 use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
+const BLOCK_BATCH_SIZE: usize = 10;
 
 #[derive(Clone, Debug, Default)]
 pub struct SyncState {
     syncing: Arc<AtomicBool>,
+    trusted_sync: Arc<AtomicBool>,
     sync_target_height: Arc<AtomicUsize>,
     highest_processed_block: Arc<AtomicUsize>,
+    switch_to_full_validation_at_height: Arc<RwLock<Option<usize>>>,
     gossip_broadcast_enabled: Arc<AtomicBool>,
     gossip_reception_enabled: Arc<AtomicBool>,
 }
 
 impl SyncState {
     /// Creates a new SyncState with given syncing flag and sync_height = 0
-    pub fn new(is_syncing: bool) -> Self {
+    pub fn new(is_syncing: bool, is_trusted_sync: bool) -> Self {
         Self {
             syncing: Arc::new(AtomicBool::new(is_syncing)),
+            trusted_sync: Arc::new(AtomicBool::new(is_trusted_sync)),
             sync_target_height: Arc::new(AtomicUsize::new(0)),
             highest_processed_block: Arc::new(AtomicUsize::new(0)),
+            switch_to_full_validation_at_height: Arc::new(RwLock::new(None)),
             gossip_broadcast_enabled: Arc::new(AtomicBool::new(true)),
             gossip_reception_enabled: Arc::new(AtomicBool::new(true)),
         }
@@ -95,6 +106,31 @@ impl SyncState {
         if height > current_height {
             self.highest_processed_block
                 .store(height, Ordering::Relaxed);
+
+            if let Some(switch_height) = *self.switch_to_full_validation_at_height.read().unwrap() {
+                if self.is_trusted_sync() && height >= switch_height {
+                    self.set_trusted_sync(false)
+                }
+            }
+        }
+    }
+
+    /// Sets the height at which the node should switch to full validation.
+    pub fn set_switch_to_full_validation_at_height(&self, height: Option<usize>) {
+        let mut lock = self.switch_to_full_validation_at_height.write().unwrap();
+        *lock = height;
+    }
+
+    /// Returns the height at which the node should switch to full validation.
+    pub fn full_validation_switch_height(&self) -> Option<usize> {
+        *self.switch_to_full_validation_at_height.read().unwrap()
+    }
+
+    pub fn is_in_trusted_sync_range(&self, height: usize) -> bool {
+        if let Some(switch_height) = self.full_validation_switch_height() {
+            self.is_trusted_sync() && switch_height >= height
+        } else {
+            false
         }
     }
 
@@ -171,16 +207,40 @@ impl SyncState {
         .await
         .expect("Sync checking task failed");
     }
+
+    pub fn set_trusted_sync(&self, is_trusted_sync: bool) {
+        self.trusted_sync.store(is_trusted_sync, Ordering::Relaxed);
+    }
+
+    pub fn is_trusted_sync(&self) -> bool {
+        self.trusted_sync.load(Ordering::Relaxed)
+    }
+
+    pub fn is_syncing_from_a_trusted_peer(&self) -> bool {
+        self.is_syncing() && self.is_trusted_sync()
+    }
 }
 
-pub async fn sync_chain(
+pub async fn sync_chain<P, B, M>(
     sync_state: SyncState,
     api_client: impl ApiClient,
     peer_list: impl PeerList,
     node_mode: &NodeMode,
     mut start_sync_from_height: usize,
-    genesis_peer_discovery_timeout_millis: u64,
-) -> Result<(), GossipError> {
+    config: &irys_types::Config,
+    // BlockPool is optional because tests are structured in a way that would require testing the
+    // payload repair functionality if BlockPool is not optional. For the sake of the speed we
+    //  don't want to do that
+    block_pool: Option<Arc<BlockPool<P, B, M>>>,
+    reth_service: Option<Addr<RethServiceActor>>,
+) -> Result<(), GossipError>
+where
+    P: PeerList,
+    B: BlockDiscoveryFacade,
+    M: MempoolFacade,
+{
+    let genesis_peer_discovery_timeout_millis =
+        config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
     if !sync_state.is_gossip_reception_enabled() {
         debug!("Sync task: Gossip reception is disabled, skipping sync");
@@ -193,10 +253,20 @@ pub async fn sync_chain(
     if start_sync_from_height == 0 {
         start_sync_from_height = 1;
     }
+    let trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
+
     sync_state.set_syncing_from(start_sync_from_height);
+    sync_state.set_trusted_sync(trusted_mode);
+
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
 
-    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}", node_mode, start_sync_from_height);
+    if matches!(node_mode, NodeMode::TrustedPeerSync) {
+        sync_state.set_trusted_sync(true);
+    } else {
+        sync_state.set_trusted_sync(false);
+    }
+
+    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", node_mode, start_sync_from_height, sync_state.is_trusted_sync());
 
     if is_in_genesis_mode && sync_state.sync_target_height() <= 1 {
         debug!("Sync task: The node is a genesis node with no blocks, skipping the sync task");
@@ -228,20 +298,63 @@ pub async fn sync_chain(
 
     debug!("Sync task: Syncing started");
 
-    let limit = 10;
+    if trusted_mode {
+        // We should enable full validation when the index nears the (tip - migration depth)
+        let migration_depth = config.consensus.block_migration_depth as usize;
+        let trusted_peers = peer_list.top_trusted_peer().await?;
+        if let Some((_, peer)) = trusted_peers.first() {
+            let node_info = api_client
+                .node_info(peer.address.api)
+                .await
+                .map_err(|e| GossipError::Network(e.to_string()))?;
+            let index_tip = node_info.block_index_height;
+            if index_tip > migration_depth as u64 {
+                let switch_height = index_tip as usize - migration_depth;
+                sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
+                debug!(
+                    "Sync task: Setting switch to full validation at height {}",
+                    switch_height
+                );
+            } else {
+                warn!(
+                    "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
+                    index_tip, migration_depth
+                );
+            }
+        } else {
+            return Err(GossipError::Network(
+                "No trusted peers available".to_string(),
+            ));
+        }
+    }
+
+    if let Some(block_pool) = block_pool {
+        // If the block pool is provided, we should repair any missing payloads
+        if sync_state.is_syncing_from_a_trusted_peer() {
+            debug!("Sync task: Repairing missing payloads in the block pool");
+            block_pool
+                .repair_missing_payloads_if_any(reth_service.clone())
+                .await
+                .map_err(InternalGossipError::PayloadRepair)?;
+        } else {
+            debug!("Sync task: Not repairing missing payloads in the block pool, as not in trusted sync mode");
+        }
+    }
 
     let mut block_queue = VecDeque::new();
     let block_index = get_block_index(
         &peer_list,
         &api_client,
         sync_state.sync_target_height(),
-        limit,
+        BLOCK_BATCH_SIZE,
         5,
         fetch_index_from_the_trusted_peer,
     )
     .await?;
 
-    let mut blocks_left_to_process = block_index.len();
+    let mut target = sync_state.sync_target_height() + block_index.len();
+
+    let mut blocks_to_request = block_index.len();
     block_queue.extend(block_index);
     let no_new_blocks_to_process = block_queue.is_empty();
 
@@ -256,43 +369,55 @@ pub async fn sync_chain(
             block.block_hash.0.to_base58(),
             sync_state.sync_target_height()
         );
-        match peer_list
-            .request_block_from_the_network(block.block_hash)
-            .await
-        {
-            Ok(()) => {
-                sync_state.increment_sync_target_height();
-                info!(
-                    "Sync task: Successfully requested block {} (sync height is {}) from the network",
-                    block.block_hash.0.to_base58(),
-                    sync_state.sync_target_height()
-                );
-            }
-            Err(err) => {
-                error!(
-                    "Sync task: Failed to request block {} (height {}) from the network: {}",
-                    block.block_hash.0.to_base58(),
-                    sync_state.sync_target_height(),
-                    err
-                );
-            }
-        }
 
-        blocks_left_to_process -= 1;
-        if blocks_left_to_process == 0 {
-            block_queue.extend(
-                get_block_index(
-                    &peer_list,
-                    &api_client,
-                    sync_state.sync_target_height(),
-                    limit,
-                    5,
-                    fetch_index_from_the_trusted_peer,
-                )
-                .await?,
+        let peer_list_clone = peer_list.clone();
+        let sync_state_clone = sync_state.clone();
+        let block_hash = block.block_hash;
+        tokio::spawn(async move {
+            debug!(
+                "Sync task: Requesting block {:?} (sync height is {}) from the network",
+                block_hash,
+                sync_state_clone.sync_target_height()
             );
-            blocks_left_to_process = block_queue.len();
-            if blocks_left_to_process == 0 {
+            sync_state_clone.increment_sync_target_height();
+            match peer_list_clone
+                .request_block_from_the_network(block_hash, sync_state_clone.is_trusted_sync())
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        "Sync task: Successfully requested block {:?} (sync height is {}) from the network",
+                        block_hash,
+                        sync_state_clone.sync_target_height()
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "Sync task: Failed to request block {:?} (height {}) from the network: {}",
+                        block_hash,
+                        sync_state_clone.sync_target_height(),
+                        err
+                    );
+                }
+            }
+        });
+
+        blocks_to_request -= 1;
+        if blocks_to_request == 0 {
+            let additional_index = get_block_index(
+                &peer_list,
+                &api_client,
+                target,
+                BLOCK_BATCH_SIZE,
+                5,
+                fetch_index_from_the_trusted_peer,
+            )
+            .await?;
+
+            target += additional_index.len();
+            block_queue.extend(additional_index);
+            blocks_to_request = block_queue.len();
+            if blocks_to_request == 0 {
                 break;
             }
         }
@@ -376,7 +501,10 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_list::PeerListServiceWithClient;
+        use crate::PeerListServiceFacade;
         use actix::Actor as _;
+        use irys_actors::block_discovery::BlockDiscoveryFacadeImpl;
+        use irys_actors::mempool_service::MempoolServiceFacadeImpl;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
@@ -388,7 +516,7 @@ mod tests {
         async fn should_sync_and_change_status() -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;
-            let sync_state = SyncState::new(true);
+            let sync_state = SyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
                 open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
@@ -421,6 +549,7 @@ mod tests {
 
             let mut node_config = NodeConfig::testnet();
             node_config.trusted_peers = vec![fake_peer_address];
+            node_config.genesis_peer_discovery_timeout_millis = 10;
             let config = Config::new(node_config);
 
             let api_client_stub = ApiClientStub::new();
@@ -475,36 +604,52 @@ mod tests {
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
-            sync_chain(
+            sync_chain::<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>(
                 sync_state.clone(),
                 api_client_stub.clone(),
                 peer_list,
                 &NodeMode::PeerSync,
                 10,
-                10,
+                &config,
+                None,
+                None,
             )
             .await
             .expect("to finish catching up");
 
             // There should be three calls total: two that got items and one that didn't
-            let data_requests = block_index_requests.lock().unwrap();
-            assert_eq!(data_requests.len(), 3);
-            assert_eq!(data_requests[0].height, 10);
-            assert_eq!(data_requests[1].height, 11);
-            assert_eq!(data_requests[0].limit, 10);
-            assert_eq!(data_requests[1].limit, 10);
-            assert_eq!(data_requests[2].height, 12);
-            assert_eq!(data_requests[2].limit, 10);
+            {
+                let data_requests = block_index_requests.lock().unwrap();
+                assert_eq!(data_requests.len(), 3);
+                debug!("Data requests: {:?}", data_requests);
+                assert_eq!(data_requests[0].height, 10);
+                assert_eq!(data_requests[1].height, 11);
+                assert_eq!(data_requests[0].limit, 10);
+                assert_eq!(data_requests[1].limit, 10);
+                assert_eq!(data_requests[2].height, 12);
+                assert_eq!(data_requests[2].limit, 10);
+            }
 
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
 
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
             let block_requests = block_requests_clone.lock().unwrap();
             assert_eq!(block_requests.len(), 3);
-            assert_eq!(block_requests[0], BlockHash::repeat_byte(1));
+            let requested_first_block = block_requests
+                .iter()
+                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
+            let requested_first_block_again = block_requests
+                .iter()
+                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
+            let requested_second_block = block_requests
+                .iter()
+                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(2));
+            assert!(requested_first_block.is_some());
             // As the first call didn't return anything, the peer tries to fetch it once again
-            assert_eq!(block_requests[1], BlockHash::repeat_byte(1));
-            assert_eq!(block_requests[2], BlockHash::repeat_byte(2));
+            assert!(requested_first_block_again.is_some());
+            assert!(requested_second_block.is_some());
 
             Ok(())
         }

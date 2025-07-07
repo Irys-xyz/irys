@@ -21,14 +21,16 @@ use crate::{
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
+use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_types::{Address, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
+use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
+use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{
     sync::mpsc::{channel, error::SendError, Receiver, Sender},
     time,
@@ -107,7 +109,6 @@ impl ServiceHandleWithShutdownSignal {
 pub struct P2PService {
     cache: Arc<GossipCache>,
     broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
-    broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     client: GossipClient,
     pub sync_state: SyncState,
 }
@@ -129,7 +130,6 @@ impl P2PService {
     pub fn new(
         mining_address: Address,
         broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
-        broadcast_data_sender: UnboundedSender<GossipBroadcastMessage>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -140,8 +140,7 @@ impl P2PService {
             client,
             cache,
             broadcast_data_receiver: Some(broadcast_data_receiver),
-            broadcast_data_sender,
-            sync_state: SyncState::new(true),
+            sync_state: SyncState::new(true, false),
         }
     }
 
@@ -152,10 +151,10 @@ impl P2PService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<A, P>(
+    pub fn run<M, B, A, P>(
         mut self,
-        mempool: impl MempoolFacade,
-        block_discovery: impl BlockDiscoveryFacade,
+        mempool: M,
+        block_discovery: B,
         api_client: A,
         task_executor: &TaskExecutor,
         peer_list: P,
@@ -163,8 +162,13 @@ impl P2PService {
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadProvider<P>,
-    ) -> GossipResult<ServiceHandleWithShutdownSignal>
+        vdf_state: VdfStateReadonly,
+        config: Config,
+        service_senders: ServiceSenders,
+    ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<P, B, M>>)>
     where
+        M: MempoolFacade,
+        B: BlockDiscoveryFacade,
         A: ApiClient,
         P: PeerList,
     {
@@ -178,12 +182,16 @@ impl P2PService {
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
-            self.broadcast_data_sender.clone(),
+            vdf_state,
+            config,
+            service_senders,
         );
+
+        let arc_pool = Arc::new(block_pool);
 
         let server_data_handler = GossipServerDataHandler {
             mempool,
-            block_pool,
+            block_pool: Arc::clone(&arc_pool),
             api_client,
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
@@ -219,7 +227,7 @@ impl P2PService {
             task_executor,
         );
 
-        Ok(gossip_service_handle)
+        Ok((gossip_service_handle, arc_pool))
     }
 
     async fn broadcast_data<P>(
