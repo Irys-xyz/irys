@@ -137,31 +137,36 @@ impl Inner {
         let reduce_system_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<
             HashMap<SystemLedger, HashSet<IrysTransactionId>>,
         > {
-            let mut hm = HashMap::<SystemLedger, HashSet<IrysTransactionId>>::new();
+            let mut ledger_txs_map = HashMap::<SystemLedger, HashSet<IrysTransactionId>>::new();
             for ledger in SystemLedger::ALL {
                 // blocks can not have a system ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
-                hm.insert(ledger, HashSet::new());
+                ledger_txs_map.insert(ledger, HashSet::new());
             }
             for block in fork.iter().rev() {
                 for ledger in block.system_ledgers.iter() {
                     // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
-                    hm.entry(ledger.ledger_id.try_into()?)
+                    ledger_txs_map
+                        .entry(ledger.ledger_id.try_into()?)
                         .or_default()
                         .extend(ledger.tx_ids.iter());
                 }
             }
-            Ok(hm)
+            Ok(ledger_txs_map)
         };
 
-        let old_fork_red = reduce_system_ledgers(&old_fork_confirmed.into())?;
-        let new_fork_red = reduce_system_ledgers(&new_fork_confirmed.into())?;
+        let old_fork_reduction = reduce_system_ledgers(&old_fork_confirmed.into())?;
+        let new_fork_reduction = reduce_system_ledgers(&new_fork_confirmed.into())?;
 
         // diff the two
         let mut orphaned_system_txs: HashMap<SystemLedger, Vec<IrysTransactionId>> = HashMap::new();
 
         for ledger in SystemLedger::ALL {
-            let new_txs = new_fork_red.get(&ledger).expect("should be populated");
-            let old_txs = old_fork_red.get(&ledger).expect("should be populated");
+            let new_txs = new_fork_reduction
+                .get(&ledger)
+                .expect("should be populated");
+            let old_txs = old_fork_reduction
+                .get(&ledger)
+                .expect("should be populated");
             // get the txs in old that are not in new (orphans)
             // add them to the orphaned map
             orphaned_system_txs
@@ -273,29 +278,30 @@ impl Inner {
             HashMap<DataLedger, HashSet<IrysTransactionId>>,
             HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>,
         )> {
-            let mut hm = HashMap::new();
-            let mut tx_blk_map = HashMap::new();
+            let mut ledger_txs_map = HashMap::new();
+            let mut tx_block_map = HashMap::new();
             for ledger in DataLedger::ALL {
                 // blocks can not have a data ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
-                hm.insert(ledger, HashSet::new());
-                tx_blk_map.insert(ledger, HashMap::new());
+                ledger_txs_map.insert(ledger, HashSet::new());
+                tx_block_map.insert(ledger, HashMap::new());
             }
             for block in fork.iter().rev() {
                 for ledger in block.data_ledgers.iter() {
                     let ledger_id: DataLedger = ledger.ledger_id.try_into()?;
                     // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
-                    hm.entry(ledger_id)
+                    ledger_txs_map
+                        .entry(ledger_id)
                         .or_default()
                         .extend(ledger.tx_ids.iter());
                     ledger.tx_ids.iter().for_each(|tx_id| {
-                        tx_blk_map
+                        tx_block_map
                             .entry(ledger_id)
                             .or_default()
                             .insert(*tx_id, Arc::clone(block));
                     });
                 }
             }
-            Ok((hm, tx_blk_map))
+            Ok((ledger_txs_map, tx_block_map))
         };
 
         let (old_fork_confirmed_reduction, _) = reduce_data_ledgers(&old_fork_confirmed.into())?;
