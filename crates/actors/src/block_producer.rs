@@ -640,7 +640,6 @@ pub trait BlockProdStrategy {
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
         let oracle_irys_price = self.inner().price_oracle.current_price().await?;
-        dbg!(&oracle_irys_price);
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
