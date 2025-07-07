@@ -88,8 +88,7 @@ impl Inner {
         // 6. Similar work with commitment transactions (stake and pledge)
         //    - This may require adding some features to the commitment_snapshot so that stake/pledge tx can be rolled back and new ones applied
 
-        // needs to be done:
-        // re-org support for migrated blocks
+        // TODO: re-org support for migrated blocks
 
         self.handle_confirmed_data_tx_reorg(event.clone()).await?;
 
