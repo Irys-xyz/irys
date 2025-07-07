@@ -658,8 +658,7 @@ mod test {
             .unwrap();
 
         assert_eq!(
-            ema_block.ema,
-            expected_ema,
+            ema_block.ema, expected_ema,
             "EMA should be calculated using current interval's EMA for blocks in first two intervals"
         );
     }
@@ -798,8 +797,7 @@ mod test {
             .unwrap();
 
         assert_eq!(
-            ema_block.ema,
-            expected_ema,
+            ema_block.ema, expected_ema,
             "EMA at block {} should be calculated using oracle price from block {} and EMA from block {}",
             new_block_height, prev_ema_predecessor_height, prev_ema_height
         );

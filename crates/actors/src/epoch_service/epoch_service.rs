@@ -1,66 +1,91 @@
-use actix::{System, SystemService as _};
+use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
+use crate::EpochBlockData;
+use actix::System;
 use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
+use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, SimpleRNG, H256,
+    IrysBlockHeader, NodeConfig, SimpleRNG, H256,
 };
 use irys_types::{
     partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig, DataLedger,
     PartitionChunkOffset,
 };
-use irys_types::{Config, H256List};
 use openssl::sha;
-use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::{
     collections::VecDeque,
-    pin::pin,
     sync::{Arc, RwLock},
 };
-use tokio::{
-    sync::{broadcast, mpsc::UnboundedReceiver},
-    task::JoinHandle,
-};
-
 use tracing::{debug, error, trace, warn, Span};
-
-use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
-use crate::StorageModuleServiceMessage;
-use crate::{block_tree_service::ReorgEvent, services::ServiceSenders};
-use crate::{
-    broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
-    EpochServiceMessage,
-};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
-pub struct EpochServiceInner {
-    /// Source of randomness derived from previous epoch
-    pub last_epoch_hash: H256,
+pub struct EpochSnapshot {
     /// Protocol-managed data ledgers (one permanent, N term)
-    pub ledgers: Arc<RwLock<Ledgers>>,
+    pub ledgers: Ledgers,
     /// Tracks active mining assignments for partitions (by hash)
     pub partition_assignments: Arc<RwLock<PartitionAssignments>>,
     /// Sequential list of activated partition hashes
     pub all_active_partitions: Vec<PartitionHash>,
     /// List of partition hashes not yet assigned to a mining address
     pub unassigned_partitions: Vec<PartitionHash>,
-    /// Reference to mpsc service channels
-    pub service_senders: ServiceSenders,
     /// Submodules config
-    pub storage_submodules_config: StorageSubmodulesConfig,
+    pub storage_submodules_config: Option<StorageSubmodulesConfig>,
     /// Current partition & ledger parameters
     pub config: Config,
-    /// Computed commitment state
-    pub(super) commitment_state: Arc<RwLock<CommitmentState>>,
-    /// Tracing span
-    pub span: Span,
-    /// Current actix system (temp hack until broadcast mining actor is a broadcast)
-    pub system: System,
+    /// Commitment state (all stakes and pledges) as computed at this epoch's start
+    pub commitment_state: Arc<RwLock<CommitmentState>>,
+    /// The epoch block that was used to compute this snapshot
+    pub epoch_block: IrysBlockHeader,
+    /// The prior epoch block
+    pub previous_epoch_block: Option<IrysBlockHeader>,
+    /// Partition hashes that expired with this snapshot
+    pub expired_partition_hashes: Vec<PartitionHash>,
+}
+
+impl Clone for EpochSnapshot {
+    fn clone(&self) -> Self {
+        Self {
+            ledgers: self.ledgers.clone(),
+            // Deep copy the partition assignments by cloning the inner data
+            partition_assignments: Arc::new(RwLock::new(
+                self.partition_assignments.read().unwrap().clone(),
+            )),
+            all_active_partitions: self.all_active_partitions.clone(),
+            unassigned_partitions: self.unassigned_partitions.clone(),
+            storage_submodules_config: self.storage_submodules_config.clone(),
+            config: self.config.clone(),
+            // Deep copy the commitment state by cloning the inner data
+            commitment_state: Arc::new(RwLock::new(self.commitment_state.read().unwrap().clone())),
+            epoch_block: self.epoch_block.clone(),
+            previous_epoch_block: self.previous_epoch_block.clone(),
+            expired_partition_hashes: self.expired_partition_hashes.clone(),
+        }
+    }
+}
+
+impl Default for EpochSnapshot {
+    fn default() -> Self {
+        let node_config = NodeConfig::testnet();
+        let config = Config::new(node_config);
+        Self {
+            ledgers: Ledgers::new(&config.consensus),
+            partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: None, // This is only ever valid for test scenarios where epochs don't matter
+            config: config.clone(),
+            commitment_state: Arc::new(RwLock::new(CommitmentState::default())),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_hashes: Vec::new(),
+        }
+    }
 }
 
 /// Reasons why the epoch service actors epoch tasks might fail
@@ -78,70 +103,69 @@ pub enum EpochServiceError {
 
 #[derive(Debug)]
 pub struct EpochService {
-    shutdown: GracefulShutdown,
-    msg_rx: UnboundedReceiver<EpochServiceMessage>,
-    reorg_rx: broadcast::Receiver<ReorgEvent>, // reorg broadcast receiver
-    inner: EpochServiceInner,
+    // shutdown: GracefulShutdown,
+    // msg_rx: UnboundedReceiver<EpochServiceMessage>,
+    // reorg_rx: broadcast::Receiver<ReorgEvent>, // reorg broadcast receiver
+    // service_senders: ServiceSenders,
+    /// Tracing span
+    pub span: Span,
+    /// Current actix system (temp hack until broadcast mining actor is a broadcast)
+    pub system: System,
+    // Reference to mpsc service channels
+    // inner: EpochSnapshot,
 }
 
-impl EpochServiceInner {
+impl EpochSnapshot {
     /// Create a new instance of the epoch service actor
     pub fn new(
-        service_senders: &ServiceSenders,
         storage_submodules_config: &StorageSubmodulesConfig,
+        genesis_block: IrysBlockHeader,
+        commitments: Vec<CommitmentTransaction>,
         config: &Config,
     ) -> Self {
-        Self {
-            last_epoch_hash: H256::zero(),
-            ledgers: Arc::new(RwLock::new(Ledgers::new(&config.consensus))),
+        let mut new_self = Self {
+            ledgers: Ledgers::new(&config.consensus),
             partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            service_senders: service_senders.clone(),
-            storage_submodules_config: storage_submodules_config.clone(),
+            storage_submodules_config: Some(storage_submodules_config.clone()),
             config: config.clone(),
             commitment_state: Default::default(),
-            span: Span::current(),
-            system: System::current(),
-        }
-    }
-    pub fn initialize(
-        &mut self,
-        genesis_block: IrysBlockHeader,
-        commitments: Vec<CommitmentTransaction>,
-    ) -> eyre::Result<Vec<StorageModuleInfo>> {
-        let span = self.span.clone();
-        let _span = span.enter();
-        Self::validate_commitments(&genesis_block, &commitments)?;
+            epoch_block: genesis_block.clone(),
+            previous_epoch_block: None,
+            expired_partition_hashes: Vec::new(),
+        };
 
-        match self.perform_epoch_tasks(&None, &genesis_block, commitments) {
-            Ok(()) => debug!("Initialized Epoch Service"),
+        if Self::validate_commitments(&genesis_block, &commitments).is_err() {
+            panic!("Cannot validate genesis block commitments");
+        }
+
+        match new_self.perform_epoch_tasks(&None, &genesis_block, commitments) {
+            Ok(_) => debug!("Initialized Epoch Snapshot"),
             Err(e) => {
-                return Err(eyre::eyre!("Error performing genesis init tasks {:?}", e));
+                panic!("Error performing init tasks {:?}", e);
             }
         }
 
-        let storage_module_info =
-            self.map_storage_modules_to_partition_assignments(&self.storage_submodules_config);
+        // While we don't return these module infos, we call this method for validating of the storage modules
+        let _storage_module_info = new_self.map_storage_modules_to_partition_assignments();
 
-        Ok(storage_module_info)
+        new_self
     }
 
     pub fn replay_epoch_data(
         &mut self,
-        epoch_replay_data: Vec<EpochReplayData>,
+        epoch_replay_data: Vec<EpochBlockData>,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
-        let span = self.span.clone();
-        let _span = span.enter();
         // Initialize as None for the first iteration
-        let mut previous_epoch_block: Option<IrysBlockHeader> = None;
+        let mut previous_epoch_block: Option<IrysBlockHeader> = self.previous_epoch_block.clone();
 
         for replay_data in epoch_replay_data {
             let block_header = replay_data.epoch_block;
             let commitments = replay_data.commitments;
 
             match self.perform_epoch_tasks(&previous_epoch_block, &block_header, commitments) {
-                Ok(()) => debug!("Processed replay epoch block"),
+                Ok(_expired_partition_hashes) => debug!("Processed replay epoch block"),
                 Err(e) => {
                     return Err(eyre::eyre!("Error performing epoch tasks {:?}", e));
                 }
@@ -151,8 +175,7 @@ impl EpochServiceInner {
             previous_epoch_block = Some(block_header);
         }
 
-        let storage_module_info =
-            self.map_storage_modules_to_partition_assignments(&self.storage_submodules_config);
+        let storage_module_info = self.map_storage_modules_to_partition_assignments();
 
         Ok(storage_module_info)
     }
@@ -202,7 +225,6 @@ impl EpochServiceInner {
         new_epoch_block: &IrysBlockHeader,
         new_epoch_commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochServiceError> {
-        let _enter = self.span.clone().entered();
         // Validate the epoch blocks
         self.is_epoch_block(new_epoch_block)?;
 
@@ -233,6 +255,9 @@ impl EpochServiceInner {
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
+        self.epoch_block = new_epoch_block.clone();
+        self.previous_epoch_block = previous_epoch_block.clone();
+
         self.compute_commitment_state(new_epoch_commitments);
 
         self.try_genesis_init(new_epoch_block);
@@ -246,8 +271,6 @@ impl EpochServiceInner {
         self.allocate_additional_capacity();
 
         self.assign_partition_hashes_to_pledges();
-
-        self.notify_storage_module_service();
 
         Ok(())
     }
@@ -269,18 +292,14 @@ impl EpochServiceInner {
     fn try_genesis_init(&mut self, new_epoch_block: &IrysBlockHeader) {
         if self.all_active_partitions.is_empty() && new_epoch_block.is_genesis() {
             debug!("Performing genesis init");
-            // Store the genesis epoch hash
-            self.last_epoch_hash = new_epoch_block.last_epoch_hash;
-
             // Allocate 1 slot to each ledger and calculate the number of partitions
             let mut num_data_partitions = 0;
             {
                 // Create a scope for the write lock to expire with
-                let mut ledgers = self.ledgers.write().unwrap();
                 for ledger in DataLedger::iter() {
                     debug!("Allocating 1 slot for {:?}", &ledger);
                     num_data_partitions +=
-                        ledgers[ledger].allocate_slots(1, new_epoch_block.height);
+                        self.ledgers[ledger].allocate_slots(1, new_epoch_block.height);
                 }
             }
 
@@ -318,48 +337,42 @@ impl EpochServiceInner {
 
     /// Loops though all of the term ledgers and looks for slots that are older
     /// than the `epoch_length` (term length) of the ledger.
-    fn expire_term_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
+    /// Stores a vec of expired partition hashes in the epoch snapshot
+    fn expire_term_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
-
-        let mut ledgers = self.ledgers.write().unwrap();
-        let expired_hashes: Vec<H256> = ledgers.get_expired_partition_hashes(epoch_height);
-        drop(ledgers);
+        let expired_hashes: Vec<H256> = self.ledgers.get_expired_partition_hashes(epoch_height);
 
         // Return early if there's no more work to do
         if expired_hashes.is_empty() {
             return;
         }
 
-        debug!("Expiring Hashes: {:?}", expired_hashes);
-
-        // HACK to get from_registry to work outside of actix
-        System::set_current(self.system.clone());
-
-        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-            expired_hashes.clone(),
-        )));
+        // NOTE: We used to do a broadcast here
+        // let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+        // mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+        //     expired_hashes.clone(),
+        // )));
 
         // Update expired data partitions assignments marking them as capacity partitions
-        for partition_hash in expired_hashes {
-            self.return_expired_partition_to_capacity(partition_hash);
+        for partition_hash in expired_hashes.iter() {
+            self.return_expired_partition_to_capacity(*partition_hash);
         }
+
+        self.expired_partition_hashes = expired_hashes;
     }
 
     /// Loops though all the ledgers both perm and term, checking to see if any
     /// require additional ledger slots added to accommodate data ingress.
     fn allocate_additional_ledger_slots(
-        &self,
+        &mut self,
         previous_epoch_block: &Option<IrysBlockHeader>,
         new_epoch_block: &IrysBlockHeader,
     ) {
         for ledger in DataLedger::iter() {
             let part_slots =
                 self.calculate_additional_slots(previous_epoch_block, new_epoch_block, ledger);
-            let mut ledgers = self.ledgers.write().unwrap();
             debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
-            ledgers[ledger].allocate_slots(part_slots, new_epoch_block.height);
-            drop(ledgers);
+            self.ledgers[ledger].allocate_slots(part_slots, new_epoch_block.height);
         }
     }
 
@@ -401,7 +414,8 @@ impl EpochServiceInner {
         capacity_partitions.sort_unstable();
 
         // Use the previous epoch hash as a seed/entropy to the prng
-        let seed = self.last_epoch_hash.to_u32();
+        let seed = self.epoch_block.last_epoch_hash.to_u32();
+        debug!("RNG seed: {}", self.epoch_block.last_epoch_hash);
         let mut rng = SimpleRNG::new(seed);
 
         // Loop though all of the ledgers processing their slot needs
@@ -420,11 +434,8 @@ impl EpochServiceInner {
     ) {
         debug!("Processing slot needs for ledger {:?}", &ledger);
         // Get slot needs for the specified ledger
-        let slot_needs: Vec<(usize, usize)>;
-        {
-            let ledgers = self.ledgers.read().unwrap();
-            slot_needs = ledgers.get_slot_needs(ledger);
-        }
+        let slot_needs = self.ledgers.get_slot_needs(ledger);
+
         let mut capacity_count: u32 = capacity_partitions
             .len()
             .try_into()
@@ -451,15 +462,13 @@ impl EpochServiceInner {
 
                 // Push the newly assigned partition hash to the appropriate slot
                 // in the ledger
-                {
-                    let mut ledgers = self.ledgers.write().unwrap();
-                    debug!(
-                        "Assigning partition hash {} to slot {} for  {:?}",
-                        &partition_hash, &slot_index, &ledger
-                    );
+                debug!(
+                    "Assigning partition hash {} to slot {} for  {:?}",
+                    &partition_hash, &slot_index, &ledger
+                );
 
-                    ledgers.push_partition_to_slot(ledger, slot_index, partition_hash);
-                }
+                self.ledgers
+                    .push_partition_to_slot(ledger, slot_index, partition_hash);
             }
         }
     }
@@ -481,9 +490,9 @@ impl EpochServiceInner {
     /// follows the process of sequentially hashing the previous partitions
     /// hash to compute the next partitions hash.
     fn add_capacity_partitions(&mut self, parts_to_add: u64) {
-        let mut prev_partition_hash = *match self.all_active_partitions.last() {
-            Some(last_hash) => last_hash,
-            None => &self.last_epoch_hash,
+        let mut prev_partition_hash = match self.all_active_partitions.last() {
+            Some(last_hash) => *last_hash,
+            None => self.epoch_block.last_epoch_hash,
         };
 
         debug!("Adding {} capacity partitions", &parts_to_add);
@@ -504,7 +513,7 @@ impl EpochServiceInner {
 
     // Updates PartitionAssignment information about a partition hash, marking
     // it as expired (or unassigned to a slot in a data ledger)
-    fn return_expired_partition_to_capacity(&self, partition_hash: H256) {
+    fn return_expired_partition_to_capacity(&mut self, partition_hash: H256) {
         let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
@@ -512,9 +521,8 @@ impl EpochServiceInner {
             let ledger: DataLedger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
             let partition_hash = assignment.partition_hash;
             let slot_index = assignment.slot_index.unwrap();
-            let mut write = self.ledgers.write().unwrap();
-            write.remove_partition_from_slot(ledger, slot_index, &partition_hash);
-            drop(write);
+            self.ledgers
+                .remove_partition_from_slot(ledger, slot_index, &partition_hash);
 
             // Clear ledger assignment
             assignment.ledger_id = None;
@@ -564,10 +572,8 @@ impl EpochServiceInner {
         ledger: DataLedger,
     ) -> u64 {
         // Get current ledger state
-        let ledgers = self.ledgers.read().unwrap();
-        let data_ledger = &ledgers[ledger];
+        let data_ledger = &self.ledgers[ledger];
         let num_slots = data_ledger.slot_count() as u64;
-        drop(ledgers);
 
         let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
         let max_ledger_capacity = num_slots * num_chunks_in_partition;
@@ -773,30 +779,6 @@ impl EpochServiceInner {
         }
     }
 
-    /// Notifies the StorageModuleService about partition assignment changes.
-    ///
-    /// Maps current storage modules to their partition assignments and sends
-    /// this information to the StorageModuleService for processing.
-    ///
-    /// NOTE: Currently sends updates on every epoch block. Future optimization:
-    /// only send when assignments actually change.
-    ///
-    /// # Returns
-    /// Result indicating success or failure of the message send operation.
-    pub fn notify_storage_module_service(&self) {
-        let storage_module_infos =
-            self.map_storage_modules_to_partition_assignments(&self.storage_submodules_config);
-        // Create the message
-        let message = StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-            storage_module_infos: storage_module_infos.into(),
-        };
-
-        // Send the message
-        if let Err(e) = self.service_senders.storage_modules.send(message) {
-            error!("Failed to send partition assignments update: {}", e);
-        }
-    }
-
     /// Returns a vector of all partition assignments associated with the provided miner address.
     ///
     /// This function extracts assignments from both data and capacity partitions where
@@ -859,14 +841,15 @@ impl EpochServiceInner {
     ///
     /// # Returns
     /// * `Vec<StorageModuleInfo>` - Vector of storage module information with assigned partitions
-    pub fn map_storage_modules_to_partition_assignments(
-        &self,
-        cfg: &StorageSubmodulesConfig,
-    ) -> Vec<StorageModuleInfo> {
+    pub fn map_storage_modules_to_partition_assignments(&self) -> Vec<StorageModuleInfo> {
         let miner = self.config.node_config.miner_address();
         let assignments = self.get_partition_assignments(miner);
         let num_chunks = self.config.consensus.num_chunks_in_partition as u32;
-        let paths = &cfg.submodule_paths;
+        let paths = &self
+            .storage_submodules_config
+            .as_ref()
+            .unwrap()
+            .submodule_paths;
 
         let mut module_infos = Vec::new();
 
@@ -945,16 +928,13 @@ impl EpochServiceInner {
         module_infos
     }
 
-    fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
-        tracing::debug!(
-            "Processing reorg: {} orphaned blocks from height {}",
-            event.old_fork.len(),
-            event.fork_parent.height
-        );
-
-        tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
-
-        Ok(())
+    /// Gets a partitions assignment to a data partition by partition hash
+    pub fn get_data_partition_assignment(
+        &self,
+        partition_hash: PartitionHash,
+    ) -> Option<PartitionAssignment> {
+        let pa = self.partition_assignments.read().unwrap();
+        pa.get_assignment(partition_hash)
     }
 }
 
@@ -972,119 +952,85 @@ fn truncate_to_3_decimals(value: f64) -> f64 {
 
 /// mpsc style service wrapper for the Epoch Service
 impl EpochService {
-    /// Spawn a new Epoch sService
-    pub fn spawn_service(
-        exec: &TaskExecutor,
-        genesis_block: IrysBlockHeader,
-        commitments: Vec<CommitmentTransaction>,
-        rx: UnboundedReceiver<EpochServiceMessage>,
-        service_senders: &ServiceSenders,
-        storage_submodules_config: &StorageSubmodulesConfig,
-        config: &Config,
-    ) -> JoinHandle<()> {
-        let config = config.clone();
-        let reorg_rx = service_senders.subscribe_reorgs();
-        let ledgers = Arc::new(RwLock::new(Ledgers::new(&config.consensus)));
-        let service_senders = service_senders.clone();
-        let storage_submodules_config = storage_submodules_config.clone();
-        let system = System::current();
-
-        exec.spawn_critical_with_graceful_shutdown_signal("Epoch Service", |shutdown| async move {
-            let mut pending_epoch_service = Self {
-                shutdown,
-                msg_rx: rx,
-                reorg_rx,
-                inner: EpochServiceInner {
-                    last_epoch_hash: H256::zero(),
-                    ledgers,
-                    partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
-                    all_active_partitions: Vec::new(),
-                    unassigned_partitions: Vec::new(),
-                    service_senders,
-                    storage_submodules_config: storage_submodules_config.clone(),
-                    config: config.clone(),
-                    commitment_state: Default::default(),
-                    span: Span::current(),
-                    system,
-                },
-            };
-
-            match pending_epoch_service
-                .inner
-                .initialize(genesis_block, commitments)
-            {
-                Ok(_) => {}
-                Err(e) => panic!("{}", e),
-            }
-
-            pending_epoch_service
-                .start()
-                .await
-                .expect("Epoch Service encountered an irrecoverable error")
-        })
-    }
-
-    async fn start(mut self) -> eyre::Result<()> {
-        tracing::info!("starting Epoch service");
-
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            tokio::select! {
-                // Handle regular epoch service messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => self.inner.handle_message(msg)?,
-                        None => {
-                            tracing::warn!("receiver channel closed");
-                            break None;
-                        }
-                    }
-                }
-
-                // Handle reorg events
-                reorg_result = self.reorg_rx.recv() => {
-                    if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
-                        self.inner.handle_reorg(event)?;
-                    }
-                }
-
-                // Handle shutdown signal
-                shutdown = &mut shutdown_future => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
-                }
-            }
-        };
-
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg)?;
-        }
-
-        // explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
-
-        tracing::info!("shutting down epoch service");
-        Ok(())
-    }
+    // fn handle_message(
+    //     inner: &mut EpochSnapshot,
+    //     service_senders: &ServiceSenders,
+    //     system: &System,
+    //     msg: EpochServiceMessage,
+    // ) -> eyre::Result<()> {
+    //     match msg {
+    //         EpochServiceMessage::NewEpoch {
+    //             new_epoch_block,
+    //             previous_epoch_block,
+    //             commitments,
+    //             sender,
+    //         } => {
+    //             handle_new_epoch(
+    //                 inner,
+    //                 new_epoch_block,
+    //                 previous_epoch_block,
+    //                 commitments,
+    //                 service_senders,
+    //                 system,
+    //                 sender,
+    //             )?;
+    //         }
+    //         _ => {
+    //             inner.handle_message(msg)?;
+    //         }
+    //     }
+    //     Ok(())
+    // }
 }
 
-fn handle_broadcast_recv<T>(
-    result: Result<T, broadcast::error::RecvError>,
-    channel_name: &str,
-) -> Option<T> {
-    match result {
-        Ok(event) => Some(event),
-        Err(broadcast::error::RecvError::Closed) => {
-            tracing::debug!("{} channel closed", channel_name);
-            None
-        }
-        Err(broadcast::error::RecvError::Lagged(n)) => {
-            tracing::warn!("{} lagged by {} events", channel_name, n);
-            if n > 5 {
-                tracing::error!("{} significantly lagged", channel_name);
-            }
-            None
-        }
-    }
-}
+// // FIXME: this broadcast work still hs to be done somewhere
+// fn handle_new_epoch(
+//     inner: &mut EpochSnapshot,
+//     new_epoch_block: Arc<IrysBlockHeader>,
+//     previous_epoch_block: Option<IrysBlockHeader>,
+//     commitments: Arc<Vec<CommitmentTransaction>>,
+//     service_senders: &ServiceSenders,
+//     system: &System,
+//     response: oneshot::Sender<Result<(), EpochServiceError>>,
+// ) -> eyre::Result<()> {
+//     let mut new_snapshot = inner.clone();
+
+//     let result = new_snapshot.perform_epoch_tasks(
+//         &previous_epoch_block,
+//         &new_epoch_block,
+//         (*commitments).clone(),
+//     );
+
+//     let epoch_task_result = match result {
+//         Ok(_) => {
+//             let storage_module_infos = inner.map_storage_modules_to_partition_assignments();
+//             if let Err(e) = service_senders.storage_modules.send(
+//                 StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+//                     storage_module_infos: storage_module_infos.into(),
+//                 },
+//             ) {
+//                 error!("Failed to send partition assignments update: {}", e);
+//             }
+
+//             // HACK to get from_registry to work outside of actix
+//             System::set_current(system.clone());
+
+//             let expired_partition_hashes = &new_snapshot.expired_partition_hashes;
+//             let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+//             mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+//                 expired_partition_hashes.clone(),
+//             )));
+
+//             Ok(())
+//         }
+//         Err(err) => Err(err),
+//     };
+
+//     response
+//         .send(epoch_task_result)
+//         .expect("send on response channel should succeed");
+
+//     *inner = new_snapshot;
+
+//     Ok(())
+// }

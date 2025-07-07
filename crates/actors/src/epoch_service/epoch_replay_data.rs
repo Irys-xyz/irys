@@ -6,20 +6,28 @@ use irys_storage::RecoveredMempoolState;
 use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
 use reth_db::Database as _;
 
-#[derive(Debug)]
-/// Represents the epoch block and its associated commitment transactions
-/// Used for initializing the epoch service from historical data
-pub struct EpochReplayData {
+#[derive(Debug, Clone)]
+/// Represents an epoch block and its associated commitment transactions
+pub struct EpochBlockData {
     pub epoch_block: IrysBlockHeader,
     pub commitments: Vec<CommitmentTransaction>,
+}
+
+#[derive(Debug, Clone)]
+/// Represents the complete historical epoch data needed for replay
+/// Contains the genesis block, genesis commitments, and all subsequent epoch blocks
+pub struct EpochReplayData {
+    pub genesis_block_header: IrysBlockHeader,
+    pub genesis_commitments: Vec<CommitmentTransaction>,
+    pub epoch_blocks: Vec<EpochBlockData>,
 }
 
 impl EpochReplayData {
     /// Retrieves historical epoch data from the blockchain
     ///
     /// Queries all epoch blocks and their commitments from the database,
-    /// returning the genesis block, its commitments, and a vector of
-    /// subsequent epoch blocks for replaying the chain state.
+    /// returning a complete structure containing the genesis block, its commitments,
+    /// and all subsequent epoch blocks for replaying the chain state.
     ///
     /// # Arguments
     /// * `db` - Database access provider
@@ -27,12 +35,12 @@ impl EpochReplayData {
     /// * `config` - Configuration for epoch parameters
     ///
     /// # Returns
-    /// * Tuple containing the genesis block, genesis commitments, and vector of subsequent epoch data
+    /// * EpochReplayData containing all historical epoch information
     pub async fn query_replay_data(
         db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
         config: &Config,
-    ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Vec<Self>)> {
+    ) -> eyre::Result<Self> {
         // Recover any mempool commitment transactions that were persisted
         let recovered =
             RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir(), false).await;
@@ -43,7 +51,7 @@ impl EpochReplayData {
         let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
         let num_blocks = block_index.num_blocks();
         let num_epoch_blocks = (num_blocks / num_blocks_in_epoch).max(1);
-        let mut replay_data: VecDeque<Self> = VecDeque::new();
+        let mut epoch_block_data: VecDeque<EpochBlockData> = VecDeque::new();
 
         // Process each epoch block from genesis to the latest
         for i in 0..num_epoch_blocks {
@@ -85,7 +93,7 @@ impl EpochReplayData {
                 Some(v) => v,
                 None => {
                     // skip the commitment specific logic
-                    replay_data.push_back(Self {
+                    epoch_block_data.push_back(EpochBlockData {
                         epoch_block: block,
                         commitments: vec![],
                     });
@@ -115,21 +123,22 @@ impl EpochReplayData {
                 );
 
             // Store the epoch block and its commitments
-            replay_data.push_back(Self {
+            epoch_block_data.push_back(EpochBlockData {
                 epoch_block: block,
                 commitments: commitments_tx,
             });
         }
 
         // Separate genesis data from subsequent epoch blocks
-        let genesis_replay_data = replay_data
+        let genesis_data = epoch_block_data
             .pop_front()
             .expect("Expected at least one epoch block (genesis) in the replay data");
 
-        let genesis_block = genesis_replay_data.epoch_block;
-        let commitments = genesis_replay_data.commitments;
-
-        // Convert remaining VecDeque to Vec for return
-        Ok((genesis_block, commitments, replay_data.into()))
+        // Convert remaining VecDeque to Vec for subsequent epoch blocks
+        Ok(Self {
+            genesis_block_header: genesis_data.epoch_block,
+            genesis_commitments: genesis_data.commitments,
+            epoch_blocks: epoch_block_data.into(),
+        })
     }
 }

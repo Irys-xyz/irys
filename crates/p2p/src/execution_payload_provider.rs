@@ -7,7 +7,6 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
 use reth::builder::Block as _;
 use reth::core::primitives::SealedBlock;
-use reth::network::types::HashOrNumber;
 use reth::primitives::Block;
 use reth::providers::BlockReader as _;
 use reth::revm::primitives::B256;
@@ -58,8 +57,8 @@ impl RethBlockProvider {
 
         let evm_block = ctx
             .inner
-            .provider
-            .block(HashOrNumber::Hash(evm_block_hash))
+            .provider()
+            .find_block_by_hash(evm_block_hash, reth::providers::BlockSource::Any)
             .inspect_err(|err| tracing::error!(?err))
             .ok()??;
 

@@ -281,6 +281,7 @@ impl Ledgers {
         }
     }
 
+    /// Get the slot needs for the ledger, returning a vector of (slot index, number of partitions needed)
     pub fn get_slot_needs(&self, ledger: DataLedger) -> Vec<(usize, usize)> {
         match ledger {
             DataLedger::Publish => self.perm.get_slot_needs(),
