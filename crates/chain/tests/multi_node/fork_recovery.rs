@@ -4,7 +4,7 @@ use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
-use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
+use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256, U256};
 use tracing::debug;
 
 #[actix_web::test]
@@ -1000,6 +1000,24 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         assert_eq!(
             sorted_data_txs_at(&node_c, 4, DataLedger::Submit).await?,
             peer_c_submit_txs
+        );
+
+        // assert balances
+        assert_eq!(
+            node_a.get_balance(b_signer.address(), c_block1.evm_block_hash.into()),
+            U256::from(690000000000000000_u64)
+        );
+        assert_eq!(
+            node_a.get_balance(c_signer.address(), c_block1.evm_block_hash.into()),
+            U256::from(690000000000000000_u64)
+        );
+        assert_eq!(
+            node_a.get_balance(b_signer.address(), c_block4.evm_block_hash.into()),
+            U256::from(690108725499999998_u64)
+        );
+        assert_eq!(
+            node_a.get_balance(c_signer.address(), c_block4.evm_block_hash.into()),
+            U256::from(690108725499999998_u64)
         );
     }
 
