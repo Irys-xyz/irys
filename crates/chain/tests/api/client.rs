@@ -73,15 +73,9 @@ async fn check_transaction_endpoints(
     ctx: &IrysNodeTest<IrysNodeCtx>,
 ) {
     // advance one block
-    let _previous_header = ctx
-        .mine_block()
-        .await
-        .expect("expected mined block");
+    let _previous_header = ctx.mine_block().await.expect("expected mined block");
     // advance one block, finalizing the previous block
-    let _header = ctx
-        .mine_block()
-        .await
-        .expect("expected mined block");
+    let _header = ctx.mine_block().await.expect("expected mined block");
 
     let tx = ctx
         .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
@@ -103,10 +97,7 @@ async fn check_transaction_endpoints(
         .expect("valid post transaction response");
 
     // advance one block to add the transaction to the block
-    let _header = ctx
-        .mine_block()
-        .await
-        .expect("expected mined block");
+    let _header = ctx.mine_block().await.expect("expected mined block");
 
     let retrieved_tx = api_client
         .get_transaction(api_address, tx_id)
@@ -134,15 +125,9 @@ async fn check_get_block_endpoint(
     ctx: &IrysNodeTest<IrysNodeCtx>,
 ) {
     // advance one block
-    let previous_header = ctx
-        .mine_block()
-        .await
-        .expect("expected mined block");
+    let previous_header = ctx.mine_block().await.expect("expected mined block");
     // advance one block, finalizing the previous block
-    let _header = ctx
-        .mine_block()
-        .await
-        .expect("expected mined block");
+    let _header = ctx.mine_block().await.expect("expected mined block");
 
     let previous_block_hash = previous_header.block_hash;
     let block = api_client
