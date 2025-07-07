@@ -934,12 +934,25 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             sorted_data_txs_at(&node_a, 1, DataLedger::Submit).await?,
             vec![]
         );
+
+        assert_eq!(
+            sorted_data_txs_at(&node_a, 1, DataLedger::Publish).await?,
+            vec![]
+        );
         assert_eq!(
             sorted_data_txs_at(&node_a, 2, DataLedger::Submit).await?,
             peer_b_submit_txs
         ); // expect only the two txs included in Peer B B2
         assert_eq!(
+            sorted_data_txs_at(&node_a, 2, DataLedger::Publish).await?,
+            vec![]
+        );
+        assert_eq!(
             sorted_data_txs_at(&node_a, 3, DataLedger::Submit).await?,
+            vec![]
+        );
+        assert_eq!(
+            sorted_data_txs_at(&node_a, 3, DataLedger::Publish).await?,
             vec![]
         );
         // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
@@ -948,6 +961,11 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         assert_eq!(
             sorted_data_txs_at(&node_a, 4, DataLedger::Submit).await?,
             peer_c_submit_txs
+        );
+
+        assert_eq!(
+            sorted_data_txs_at(&node_a, 4, DataLedger::Publish).await?,
+            vec![]
         );
 
         assert_eq!(
