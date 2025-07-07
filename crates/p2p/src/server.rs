@@ -295,7 +295,9 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        if !server.data_handler.sync_state.is_gossip_reception_enabled() || !server.data_handler.sync_state.is_gossip_broadcast_enabled() {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled()
+            || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
+        {
             warn!("Gossip reception/broadcast is disabled, ignoring the get data request");
             return HttpResponse::Forbidden().finish();
         }
