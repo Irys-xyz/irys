@@ -12,8 +12,8 @@ use irys_reth_node_bridge::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, IngressProofsList, IrysBlockHeader,
-    IrysTransaction, NodeConfig, TxIngressProof, H256,
+    irys::IrysSigner, CommitmentTransaction, DataLedger, IngressProofsList, IrysTransaction,
+    NodeConfig, TxIngressProof, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -226,7 +226,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
         "RUST_LOG",
@@ -334,125 +334,111 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     peer1_node.wait_for_packing(seconds_to_wait).await;
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
-    struct ForkFnReturn {
-        peer1_tx: IrysTransaction,
-        peer2_tx: IrysTransaction,
-        peer1_block: IrysBlockHeader,
-        peer2_block: IrysBlockHeader,
-    }
+    let mut rng = rand::thread_rng();
+    let chunks1: [[u8; 32]; 3] = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let data1: Vec<u8> = chunks1.concat();
 
-    let fork_fn = async |expected_height: &mut u64| -> eyre::Result<ForkFnReturn> {
-        let mut rng = rand::thread_rng();
-        let chunks1: [[u8; 32]; 3] = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
-        let data1: Vec<u8> = chunks1.concat();
+    let chunks2 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let data2: Vec<u8> = chunks2.concat();
 
-        let chunks2 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
-        let data2: Vec<u8> = chunks2.concat();
+    let chunks3 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let data3: Vec<u8> = chunks3.concat();
 
-        let chunks3 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
-        let data3: Vec<u8> = chunks3.concat();
+    // Post a transaction that should be gossiped to all peers
+    let shared_tx = genesis_node
+        .post_data_tx(
+            H256::zero(),
+            data3,
+            &genesis_node.node_ctx.config.irys_signer(),
+        )
+        .await;
 
-        // Post a transaction that should be gossiped to all peers
-        let shared_tx = genesis_node
-            .post_data_tx(
-                H256::zero(),
-                data3,
-                &genesis_node.node_ctx.config.irys_signer(),
-            )
-            .await;
+    // Wait for the transaction to gossip
 
-        // Wait for the transaction to gossip
+    let txid = shared_tx.header.id;
 
-        let txid = shared_tx.header.id;
+    peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
+    peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
 
-        peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
-        peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
+    // Post a unique storage transaction to each peer
+    let peer1_tx = peer1_node
+        .post_data_tx_without_gossip(H256::zero(), data1, &peer1_signer)
+        .await;
+    let peer2_tx = peer2_node
+        .post_data_tx_without_gossip(H256::zero(), data2, &peer2_signer)
+        .await;
 
-        // Post a unique storage transaction to each peer
-        let peer1_tx = peer1_node
-            .post_data_tx_without_gossip(H256::zero(), data1, &peer1_signer)
-            .await;
-        let peer2_tx = peer2_node
-            .post_data_tx_without_gossip(H256::zero(), data2, &peer2_signer)
-            .await;
+    // Mine mine blocks on both peers in parallel
+    let (result1, result2) = tokio::join!(
+        peer1_node.mine_blocks_without_gossip(1),
+        peer2_node.mine_blocks_without_gossip(1)
+    );
 
-        // Mine mine blocks on both peers in parallel
-        let (result1, result2) = tokio::join!(
-            peer1_node.mine_blocks_without_gossip(1),
-            peer2_node.mine_blocks_without_gossip(1)
-        );
+    // Fail the test on any error results
+    result1?;
+    result2?;
 
-        // Fail the test on any error results
-        result1?;
-        result2?;
+    expected_height += 1;
 
-        *expected_height += 1;
+    // wait for block mining to reach tree height
+    peer1_node
+        .wait_until_height(expected_height, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_height(expected_height, seconds_to_wait)
+        .await?;
+    // wait for migration to reach index height
+    peer1_node
+        .wait_until_block_index_height(expected_height - block_migration_depth, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_block_index_height(expected_height - block_migration_depth, seconds_to_wait)
+        .await?;
 
-        // wait for block mining to reach tree height
-        peer1_node
-            .wait_until_height(*expected_height, seconds_to_wait)
-            .await?;
-        peer2_node
-            .wait_until_height(*expected_height, seconds_to_wait)
-            .await?;
-        // wait for migration to reach index height
-        peer1_node
-            .wait_until_block_index_height(
-                *expected_height - block_migration_depth,
-                seconds_to_wait,
-            )
-            .await?;
-        peer2_node
-            .wait_until_block_index_height(
-                *expected_height - block_migration_depth,
-                seconds_to_wait,
-            )
-            .await?;
+    // Validate the peer blocks create forks with different transactions
+    let peer1_block = peer1_node.get_block_by_height(expected_height).await?;
+    let peer2_block = peer2_node.get_block_by_height(expected_height).await?;
 
-        // Validate the peer blocks create forks with different transactions
-        let peer1_block = peer1_node.get_block_by_height(*expected_height).await?;
-        let peer2_block = peer2_node.get_block_by_height(*expected_height).await?;
+    let peer1_block_txids = &peer1_block.data_ledgers[DataLedger::Submit].tx_ids.0;
+    assert!(
+        peer1_block_txids.contains(&txid),
+        "block {} {} should include submit tx {}",
+        &peer1_block.block_hash,
+        &peer1_block.height,
+        &txid
+    );
+    assert!(peer1_block_txids.contains(&peer1_tx.header.id));
 
-        let peer1_block_txids = &peer1_block.data_ledgers[DataLedger::Submit].tx_ids.0;
-        assert!(
-            peer1_block_txids.contains(&txid),
-            "block {} {} should include submit tx {}",
-            &peer1_block.block_hash,
-            &peer1_block.height,
-            &txid
-        );
-        assert!(peer1_block_txids.contains(&peer1_tx.header.id));
+    let peer2_block_txids = &peer2_block.data_ledgers[DataLedger::Submit].tx_ids.0;
+    assert!(peer2_block_txids.contains(&txid));
+    assert!(peer2_block_txids.contains(&peer2_tx.header.id));
 
-        let peer2_block_txids = &peer2_block.data_ledgers[DataLedger::Submit].tx_ids.0;
-        assert!(peer2_block_txids.contains(&txid));
-        assert!(peer2_block_txids.contains(&peer2_tx.header.id));
+    // Assert both blocks have the same cumulative difficulty this will ensure
+    // that the peers prefer the first block they saw with this cumulative difficulty,
+    // their own.
+    assert_eq!(peer1_block.cumulative_diff, peer2_block.cumulative_diff);
 
-        // Assert both blocks have the same cumulative difficulty this will ensure
-        // that the peers prefer the first block they saw with this cumulative difficulty,
-        // their own.
-        assert_eq!(peer1_block.cumulative_diff, peer2_block.cumulative_diff);
+    peer2_node.gossip_block(&peer2_block)?;
+    peer1_node.gossip_block(&peer1_block)?;
 
-        peer2_node.gossip_block(&peer2_block)?;
-        peer1_node.gossip_block(&peer1_block)?;
+    // Wait for gossip, to send blocks to opposite peers
+    peer1_node
+        .wait_for_block(&peer2_block.block_hash, 10)
+        .await?;
+    peer2_node
+        .wait_for_block(&peer1_block.block_hash, 10)
+        .await?;
+    peer1_node.get_block_by_hash(&peer2_block.block_hash)?;
+    peer2_node.get_block_by_hash(&peer1_block.block_hash)?;
 
-        // Wait for gossip, to send blocks to opposite peers
-        peer1_node
-            .wait_for_block(&peer2_block.block_hash, 10)
-            .await?;
-        peer2_node
-            .wait_for_block(&peer1_block.block_hash, 10)
-            .await?;
-        peer1_node.get_block_by_hash(&peer2_block.block_hash)?;
-        peer2_node.get_block_by_hash(&peer1_block.block_hash)?;
+    let peer1_block_after = peer1_node.get_block_by_height(expected_height).await?;
+    let peer2_block_after = peer2_node.get_block_by_height(expected_height).await?;
 
-        let peer1_block_after = peer1_node.get_block_by_height(*expected_height).await?;
-        let peer2_block_after = peer2_node.get_block_by_height(*expected_height).await?;
-
-        // Verify neither peer changed their blocks after receiving the other peers block
-        // for the same height.
-        assert_eq!(peer1_block_after.block_hash, peer1_block.block_hash);
-        assert_eq!(peer2_block_after.block_hash, peer2_block.block_hash);
-        debug!(
+    // Verify neither peer changed their blocks after receiving the other peers block
+    // for the same height.
+    assert_eq!(peer1_block_after.block_hash, peer1_block.block_hash);
+    assert_eq!(peer2_block_after.block_hash, peer2_block.block_hash);
+    debug!(
         "\nPEER1\n    before: {} c_diff: {}\n    after:  {} c_diff: {}\nPEER2\n    before: {} c_diff: {}\n    after:  {} c_diff: {}",
         peer1_block.block_hash,
         peer1_block.cumulative_diff,
@@ -464,24 +450,6 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
         peer2_block_after.cumulative_diff,
     );
 
-        Ok(ForkFnReturn {
-            peer1_tx,
-            peer2_tx,
-            peer1_block,
-            peer2_block,
-        })
-    };
-
-    let fork = fork_fn(&mut expected_height).await?;
-
-    let ForkFnReturn {
-        peer1_tx,
-        peer2_tx,
-        peer1_block,
-        peer2_block,
-        ..
-    } = fork;
-
     let _block_hash = genesis_node
         .wait_until_height(expected_height, seconds_to_wait)
         .await?;
@@ -491,102 +459,6 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
         "\nGENESIS: {:?} height: {}",
         genesis_block.block_hash, genesis_block.height
     );
-
-    enum ForkWinner {
-        Peer1,
-        Peer2,
-    }
-
-    let reorg_fn = async |peer1_tx: IrysTransaction,
-                          peer2_tx: IrysTransaction,
-                          expected_height: &mut u64|
-           -> eyre::Result<(ForkWinner, IrysBlockHeader, IrysTransaction)> {
-        let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
-        let canon_before = genesis_node
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .get_canonical_chain();
-
-        // Determine which peer lost the fork race and extend the other peer's chain
-        // to trigger a reorganization. The losing peer's transaction will be evicted
-        // and returned to the mempool.
-        let reorg_tx: IrysTransaction;
-        let _reorg_block_hash: H256;
-        let mut fork_winner = ForkWinner::Peer1;
-        let reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
-            debug!(
-                "GENESIS: should ignore {} and should already be on {} height: {}",
-                peer2_block.block_hash, peer1_block.block_hash, genesis_block.height
-            );
-            reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
-            peer2_node.mine_block().await?;
-            *expected_height += 1;
-            peer2_node.get_block_by_height(*expected_height).await?
-        } else {
-            debug!(
-                "GENESIS: should ignore {} and should already be on {} height: {}",
-                peer1_block.block_hash, peer2_block.block_hash, genesis_block.height
-            );
-            fork_winner = ForkWinner::Peer2;
-            reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
-            peer1_node.mine_block().await?;
-            *expected_height += 1;
-            peer1_node.get_block_by_height(*expected_height).await?
-        };
-
-        let reorg_event = reorg_future.await?;
-        let _genesis_block = genesis_node.get_block_by_height(*expected_height).await?;
-
-        debug!("{:?}", reorg_event);
-        let canon = genesis_node
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .get_canonical_chain();
-
-        let old_fork_hashes: Vec<_> = reorg_event.old_fork.iter().map(|b| b.block_hash).collect();
-        let new_fork_hashes: Vec<_> = reorg_event.new_fork.iter().map(|b| b.block_hash).collect();
-
-        debug!(
-            "ReorgEvent:\n fork_parent: {:?}\n old_fork: {:?}\n new_fork:{:?}",
-            reorg_event.fork_parent.block_hash, old_fork_hashes, new_fork_hashes
-        );
-
-        debug!("reorg_tx: {:?}", reorg_tx.header.id);
-        debug!("canonical_before: {:?}", &canon_before.0);
-
-        debug!("canonical_after: {:?}", &canon.0);
-
-        // Validate the ReorgEvent with the canonical chains
-        let old_fork: Vec<_> = reorg_event
-            .old_fork
-            .iter()
-            .map(|bh| bh.block_hash)
-            .collect();
-
-        let new_fork: Vec<_> = reorg_event
-            .new_fork
-            .iter()
-            .map(|bh| bh.block_hash)
-            .collect();
-
-        debug!("fork_parent: {:?}", reorg_event.fork_parent.block_hash);
-        debug!("old_fork:  {:?}", old_fork);
-        debug!("new_fork:  {:?}", new_fork);
-
-        assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash]);
-        assert_eq!(
-            new_fork,
-            vec![
-                canon.0[canon.0.len() - 2].block_hash,
-                canon.0.last().unwrap().block_hash
-            ]
-        );
-
-        assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());
-        Ok((fork_winner, reorg_block, reorg_tx))
-    };
 
     // Make sure the reorg_tx is back in the mempool ready to be included in the next block
     // NOTE: It turns out the reorg_tx is actually in the block because all tx are gossiped
@@ -601,8 +473,90 @@ async fn heavy_mempool_submit_fork_recovery_test() -> eyre::Result<()> {
     // assert_eq!(tx, Some(&reorg_tx.header));
 
     // with that ^ in mind, validate that the reorg tip block has the fork submit tx included
-    let (_fork_winner, reorg_block, reorg_tx) =
-        reorg_fn(peer1_tx, peer2_tx, &mut expected_height).await?;
+
+    let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
+
+    let canon_before = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_canonical_chain();
+
+    // Determine which peer lost the fork race and extend the other peer's chain
+    // to trigger a reorganization. The losing peer's transaction will be evicted
+    // and returned to the mempool.
+    let reorg_tx: IrysTransaction;
+    let _reorg_block_hash: H256;
+    let reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
+        debug!(
+            "GENESIS: should ignore {} and should already be on {} height: {}",
+            peer2_block.block_hash, peer1_block.block_hash, genesis_block.height
+        );
+        reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
+        peer2_node.mine_block().await?;
+        expected_height += 1;
+        peer2_node.get_block_by_height(expected_height).await?
+    } else {
+        debug!(
+            "GENESIS: should ignore {} and should already be on {} height: {}",
+            peer1_block.block_hash, peer2_block.block_hash, genesis_block.height
+        );
+        reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
+        peer1_node.mine_block().await?;
+        expected_height += 1;
+        peer1_node.get_block_by_height(expected_height).await?
+    };
+
+    let reorg_event = reorg_future.await?;
+    let _genesis_block = genesis_node.get_block_by_height(expected_height).await?;
+
+    debug!("{:?}", reorg_event);
+    let canon = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_canonical_chain();
+
+    let old_fork_hashes: Vec<_> = reorg_event.old_fork.iter().map(|b| b.block_hash).collect();
+    let new_fork_hashes: Vec<_> = reorg_event.new_fork.iter().map(|b| b.block_hash).collect();
+
+    debug!(
+        "ReorgEvent:\n fork_parent: {:?}\n old_fork: {:?}\n new_fork:{:?}",
+        reorg_event.fork_parent.block_hash, old_fork_hashes, new_fork_hashes
+    );
+
+    debug!("reorg_tx: {:?}", reorg_tx.header.id);
+    debug!("canonical_before: {:?}", &canon_before.0);
+
+    debug!("canonical_after: {:?}", &canon.0);
+
+    // Validate the ReorgEvent with the canonical chains
+    let old_fork: Vec<_> = reorg_event
+        .old_fork
+        .iter()
+        .map(|bh| bh.block_hash)
+        .collect();
+
+    let new_fork: Vec<_> = reorg_event
+        .new_fork
+        .iter()
+        .map(|bh| bh.block_hash)
+        .collect();
+
+    debug!("fork_parent: {:?}", reorg_event.fork_parent.block_hash);
+    debug!("old_fork:  {:?}", old_fork);
+    debug!("new_fork:  {:?}", new_fork);
+
+    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash]);
+    assert_eq!(
+        new_fork,
+        vec![
+            canon.0[canon.0.len() - 2].block_hash,
+            canon.0.last().unwrap().block_hash
+        ]
+    );
+
+    assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());
 
     assert!(reorg_block.data_ledgers[DataLedger::Submit]
         .tx_ids
@@ -661,14 +615,17 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     a_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
     // signers
     // Create a signer (keypair) for the peer and fund it
-    let mut b_signer = a_config.new_random_signer();
-    b_signer.signer = SigningKey::from_slice(
-        hex::decode("b360d276e1a5a26c59d46e5b12e0cec0f5166cb69552b5ba282a661bf2f8fe3e")?.as_slice(),
-    )?;
-    let mut c_signer = a_config.new_random_signer();
-    c_signer.signer = SigningKey::from_slice(
-        hex::decode("ff235e7114eb975ca3bef4210db9aab2443c422497021e452f9dd4a327c562dc")?.as_slice(),
-    )?;
+    let b_signer = a_config.new_random_signer();
+    let c_signer = a_config.new_random_signer();
+
+    // uncomment for deterministic txs (and make b/c_signer mut)
+
+    // b_signer.signer = SigningKey::from_slice(
+    //     hex::decode("b360d276e1a5a26c59d46e5b12e0cec0f5166cb69552b5ba282a661bf2f8fe3e")?.as_slice(),
+    // )?;
+    // c_signer.signer = SigningKey::from_slice(
+    //     hex::decode("ff235e7114eb975ca3bef4210db9aab2443c422497021e452f9dd4a327c562dc")?.as_slice(),
+    // )?;
 
     a_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
 
@@ -719,10 +676,6 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
             .mine_blocks(num_blocks_in_epoch.try_into().unwrap())
             .await?;
         network_height += num_blocks_in_epoch;
-        // wait for block mining to reach tree height
-        a_node
-            .wait_until_height(network_height, seconds_to_wait)
-            .await?;
 
         // wait for migration to reach index height
         a_node
@@ -761,11 +714,9 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // disable P2P/gossip
-    {
-        a_node.gossip_disable();
-        b_node.gossip_disable();
-        c_node.gossip_disable();
-    }
+    a_node.gossip_disable();
+    b_node.gossip_disable();
+    c_node.gossip_disable();
 
     // A: create tx & mine block 1 (relative)
 
@@ -784,9 +735,6 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     a_node.mine_block().await?;
     network_height += 1;
-    a_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
 
     let a_blk1 = a_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in both publish and submit ledgers
@@ -820,10 +768,6 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     b_node.mine_block().await?;
 
-    b_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
-
     let b_blk1 = b_node.get_block_by_height(network_height).await?;
 
     assert_eq!(
@@ -849,10 +793,6 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     b_node.mine_block().await?;
     network_height += 1;
-
-    b_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
 
     let b_blk2 = b_node.get_block_by_height(network_height).await?;
     assert_eq!(
@@ -959,10 +899,6 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     b_node.mine_block().await?;
     network_height += 1;
-
-    b_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
 
     let b_blk3 = b_node.get_block_by_height(network_height).await?;
 
@@ -1076,14 +1012,17 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     a_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
     // signers
     // Create a signer (keypair) for the peer and fund it
-    let mut b_signer = a_config.new_random_signer();
-    b_signer.signer = SigningKey::from_slice(
-        hex::decode("b360d276e1a5a26c59d46e5b12e0cec0f5166cb69552b5ba282a661bf2f8fe3e")?.as_slice(),
-    )?;
-    let mut c_signer = a_config.new_random_signer();
-    c_signer.signer = SigningKey::from_slice(
-        hex::decode("ff235e7114eb975ca3bef4210db9aab2443c422497021e452f9dd4a327c562dc")?.as_slice(),
-    )?;
+    let b_signer = a_config.new_random_signer();
+    let c_signer = a_config.new_random_signer();
+
+    // uncomment for deterministic txs (and make b/c_signer mut)
+
+    // b_signer.signer = SigningKey::from_slice(
+    // hex::decode("b360d276e1a5a26c59d46e5b12e0cec0f5166cb69552b5ba282a661bf2f8fe3e")?.as_slice(),
+    // )?;
+    // c_signer.signer = SigningKey::from_slice(
+    // hex::decode("ff235e7114eb975ca3bef4210db9aab2443c422497021e452f9dd4a327c562dc")?.as_slice(),
+    // )?;
 
     a_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
 
@@ -1134,10 +1073,6 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
             .mine_blocks(num_blocks_in_epoch.try_into().unwrap())
             .await?;
         network_height += num_blocks_in_epoch;
-        // wait for block mining to reach tree height
-        a_node
-            .wait_until_height(network_height, seconds_to_wait)
-            .await?;
 
         // wait for migration to reach index height
         a_node
@@ -1192,9 +1127,6 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     a_node.mine_block().await?;
     network_height += 1;
-    a_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
 
     let a_blk1 = a_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
@@ -1212,9 +1144,6 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     b_node.mine_block().await?;
     // network_height += 1;
-    b_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
 
     let b_blk1 = b_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
@@ -1232,9 +1161,6 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     b_node.mine_block().await?;
     network_height += 1;
-    b_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
 
     let b_blk2 = b_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
@@ -1293,10 +1219,6 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     b_node.mine_block().await?;
     network_height += 1;
-
-    b_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
 
     let b_blk3 = b_node.get_block_by_height(network_height).await?;
 
@@ -1514,7 +1436,6 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .expect("shared tx should be accepted");
 
     // mine a block
-    // genesis.mine_block().await?;
     let (_block, reth_exec_env) = mine_block(&genesis.node_ctx).await?.unwrap();
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward

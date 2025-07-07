@@ -90,12 +90,23 @@ impl Inner {
 
         // TODO: re-org support for migrated blocks
 
-        self.handle_confirmed_data_tx_reorg(event.clone()).await?;
+        self.handle_confirmed_data_tx_reorg(&event).await?;
 
-        self.handle_confirmed_commitment_tx_reorg(event).await?;
+        self.handle_confirmed_commitment_tx_reorg(&event).await?;
 
         tracing::info!("Reorg handled, new tip: {}", &new_tip);
         Ok(())
+    }
+
+    fn get_confirmed_range(
+        &self,
+        fork: &[Arc<IrysBlockHeader>],
+    ) -> eyre::Result<Vec<Arc<IrysBlockHeader>>> {
+        let migration_depth = self.config.consensus.block_migration_depth;
+        let fork_len: u32 = fork.len().try_into()?;
+        let end_index: usize = migration_depth.min(fork_len).try_into()?;
+
+        Ok(fork[0..end_index].to_vec())
     }
 
     /// Handles reorging confirmed commitments (system ledger txs)
@@ -108,29 +119,14 @@ impl Inner {
     /// 4) resubmit these orphaned commitment transactions to the mempool
     pub async fn handle_confirmed_commitment_tx_reorg(
         &mut self,
-        event: ReorgEvent,
+        event: &ReorgEvent,
     ) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
 
-        let old_fork_confirmed = old_fork[0_usize
-            ..(self
-                .config
-                .consensus
-                .block_migration_depth
-                .min(old_fork.len().try_into()?))
-            .try_into()?]
-            .to_vec();
-
-        let new_fork_confirmed = new_fork[0_usize
-            ..(self
-                .config
-                .consensus
-                .block_migration_depth
-                .min(new_fork.len().try_into()?))
-            .try_into()?]
-            .to_vec();
+        let old_fork_confirmed = self.get_confirmed_range(old_fork)?;
+        let new_fork_confirmed = self.get_confirmed_range(new_fork)?;
 
         // reduce down the system tx ledgers (or well, ledger)
 
@@ -206,9 +202,10 @@ impl Inner {
                 };
             }
         }
-        assert_eq!(
-            orphaned_full_commitment_txs.iter().len(),
-            orphaned_commitment_tx_ids.iter().len()
+
+        eyre::ensure!(
+            orphaned_full_commitment_txs.iter().len() == orphaned_commitment_tx_ids.iter().len(),
+            "Should always be able to get all orphaned commitment transactions"
         );
 
         // resubmit each commitment tx
@@ -232,8 +229,10 @@ impl Inner {
     /// - resubmit orphaned submit txs to the mempool
     /// - handle orphaned promotions
     ///     - ensure that the mempool's state doesn't have an associated ingress proof for these txs
+    ///         this is so when get_best_mempool_txs is called, the txs are eligible for promotion again.
     /// - handle double-promotions (promoted in both forks)
     ///     - ensure the transaction is associated only with the ingress proofs from the new fork
+    ///         this is so transactions are only associated with the canonical ingress proofs responsible for their promotion
     /// Steps:
     /// 1) slice just the confirmed block ranges for each fork (old and new)
     /// 2) reduce down both forks to a `HashMap<DataLedger, HashSet<IrysTransactionId>>`
@@ -243,11 +242,10 @@ impl Inner {
     ///     4.1) re-submit them back to the mempool
     /// 5) handle orphaned Publish txs
     ///     5.1) remove the orphaned ingress proofs from the mempool state
-    ///          this is so when get_best_mempool_txs is called, the txs are eligible for promotion again.
     /// 6) handle double promotions (when a publish tx is promoted in both forks)
     ///     6.1) get the associated proof from the new fork
     ///     6.2) update mempool state valid_submit_ledger_tx to store the correct ingress proof
-    pub async fn handle_confirmed_data_tx_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
+    pub async fn handle_confirmed_data_tx_reorg(&mut self, event: &ReorgEvent) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
@@ -255,23 +253,9 @@ impl Inner {
         // get the range of confirmed blocks from the old fork
         // we will then reduce these down into a list of txids, which we will check against the *entire* new fork block range
         // this is because a tx that is in the tip block of the old fork could be included in the base block of the new fork
-        let old_fork_confirmed = old_fork[0_usize
-            ..(self
-                .config
-                .consensus
-                .block_migration_depth
-                .min(old_fork.len().try_into()?))
-            .try_into()?]
-            .to_vec();
 
-        let new_fork_confirmed = new_fork[0_usize
-            ..(self
-                .config
-                .consensus
-                .block_migration_depth
-                .min(new_fork.len().try_into()?))
-            .try_into()?]
-            .to_vec();
+        let old_fork_confirmed = self.get_confirmed_range(old_fork)?;
+        let new_fork_confirmed = self.get_confirmed_range(new_fork)?;
 
         // reduce the old fork and new fork into a list of ledger-specific txids
         let reduce_data_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<(
@@ -306,7 +290,7 @@ impl Inner {
 
         let (old_fork_confirmed_reduction, _) = reduce_data_ledgers(&old_fork_confirmed.into())?;
 
-        let (new_fork_confirmed_reduction, new_fork_tx_blk_map) =
+        let (new_fork_confirmed_reduction, new_fork_tx_block_map) =
             reduce_data_ledgers(&new_fork_confirmed.into())?;
 
         // diff the two
@@ -400,13 +384,13 @@ impl Inner {
             .handle_get_data_tx_message(published_in_both.clone())
             .await;
 
-        let publish_tx_blk_map = new_fork_tx_blk_map.get(&DataLedger::Publish).unwrap();
+        let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
                 let id = tx.id;
-                let promoted_in_block = publish_tx_blk_map
-                    .get(&tx.id)
-                    .unwrap_or_else(|| panic!("new fork tx blk map to contain tx {}", &tx.id));
+                let promoted_in_block = publish_tx_block_map.get(&tx.id).unwrap_or_else(|| {
+                    panic!("new fork publish_tx_block_map missing tx {}", &tx.id)
+                });
 
                 let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
                 // get publish tx pos
