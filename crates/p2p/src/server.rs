@@ -72,6 +72,10 @@ where
         unpacked_chunk_json: web::Json<GossipRequest<UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            warn!("Gossip reception is disabled, ignoring chunk");
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = unpacked_chunk_json.0;
         let source_miner_address = gossip_request.miner_address;
 
@@ -129,6 +133,10 @@ where
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            warn!("Gossip reception is disabled, ignoring block header");
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = irys_block_header_json.0;
         let source_miner_address = gossip_request.miner_address;
         let peer =
@@ -172,6 +180,10 @@ where
         irys_execution_payload_json: web::Json<GossipRequest<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            warn!("Gossip reception is disabled, ignoring the execution payload");
+            return HttpResponse::Forbidden().finish();
+        }
         let evm_block_request = irys_execution_payload_json.0;
         let source_miner_address = evm_block_request.miner_address;
 
@@ -200,6 +212,10 @@ where
         irys_transaction_header_json: web::Json<GossipRequest<IrysTransactionHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            warn!("Gossip reception is disabled, ignoring transaction");
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = irys_transaction_header_json.0;
         let source_miner_address = gossip_request.miner_address;
 
@@ -223,6 +239,10 @@ where
         commitment_tx_json: web::Json<GossipRequest<CommitmentTransaction>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            warn!("Gossip reception is disabled, ignoring the commitment transaction");
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = commitment_tx_json.0;
         let source_miner_address = gossip_request.miner_address;
 
@@ -275,6 +295,10 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() || !server.data_handler.sync_state.is_gossip_broadcast_enabled() {
+            warn!("Gossip reception/broadcast is disabled, ignoring the get data request");
+            return HttpResponse::Forbidden().finish();
+        }
         let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address).await
         {
             Ok(peer_address) => peer_address,
