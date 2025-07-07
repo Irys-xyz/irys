@@ -305,10 +305,10 @@ pub enum OracleConfig {
 
         /// How much the price can change between updates
         #[serde(
-            deserialize_with = "serde_utils::percentage_amount",
-            serialize_with = "serde_utils::serializes_percentage_amount"
+            deserialize_with = "serde_utils::token_amount",
+            serialize_with = "serde_utils::serializes_token_amount"
         )]
-        percent_change: Amount<Percentage>,
+        incremental_change: Amount<(IrysPrice, Usd)>,
 
         /// Number of blocks between price updates
         smoothing_interval: u64,
@@ -671,7 +671,7 @@ impl NodeConfig {
 
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
-                percent_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+                incremental_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
                 smoothing_interval: 15,
             },
             mining_key,
@@ -1007,7 +1007,7 @@ mod tests {
         [oracle]
         type = "mock"
         initial_price = 1.0
-        percent_change = 0.01
+        incremental_change = 0.00000000000001
         smoothing_interval = 15
 
         [storage]

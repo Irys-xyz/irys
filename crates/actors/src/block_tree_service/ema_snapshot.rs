@@ -85,10 +85,17 @@ pub struct EmaSnapshot {
 
 /// Result of EMA calculation for a new block.
 #[derive(Debug)]
-pub struct EmaBlock {
+pub struct ExponentialMarketAvgCalculation {
+    /// The oracle price that was used for EMA calculations.
+    /// After the first 2 pricing intervals, this value will
+    /// point to the oracle price of the preceding EMA recalculation block.
+    ///
+    /// eg. On block 25, this will blocks 18 oracle price (19 being the preceding EMA recalculation block)
+    pub oracle_price_for_calculation: IrysTokenPrice,
+
     /// Oracle price after applying safe range bounds.
     /// If the original oracle price was outside the safe range, this will be capped.
-    pub range_adjusted_oracle_price: IrysTokenPrice,
+    pub oracle_price_for_block_inclusion: IrysTokenPrice,
 
     /// The newly calculated EMA value for the new block.
     pub ema: IrysTokenPrice,
@@ -154,7 +161,6 @@ impl EmaSnapshot {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
                 ema_price_current_interval: self.ema_price_current_interval,
-                // oracle_price_parent_block: parent_block.oracle_irys_price,
                 oracle_price_for_current_ema_predecessor: self
                     .oracle_price_for_current_ema_predecessor,
             }))
@@ -187,7 +193,7 @@ impl EmaSnapshot {
         oracle_price: IrysTokenPrice,
         safe_range: Amount<Percentage>,
         blocks_in_interval: u64,
-    ) -> EmaBlock {
+    ) -> ExponentialMarketAvgCalculation {
         let parent_snapshot = self;
 
         // Special handling for first 2 adjustment intervals.
@@ -202,19 +208,19 @@ impl EmaSnapshot {
         //    the *n* (number of block prices) would be 10 (E29.height - E19.height).
         // 3. this is the price that will be used in the interval 39->49,
         //    which will be reported to other systems querying for EMA prices.
-        let oracle_price_to_use = if parent_block.height < (blocks_in_interval * 2) {
+        let oracle_price_for_calculation = if parent_block.height < (blocks_in_interval * 2) {
             oracle_price
         } else {
             // Use oracle price from the predecessor of the latest EMA block
             parent_snapshot.oracle_price_for_current_ema_predecessor
         };
-        let oracle_price_to_use = bound_in_min_max_range(
-            oracle_price_to_use,
+        let oracle_price_for_calculation = bound_in_min_max_range(
+            oracle_price_for_calculation,
             safe_range,
             parent_block.oracle_irys_price,
         );
 
-        let ema = oracle_price_to_use
+        let ema = oracle_price_for_calculation
             .calculate_ema(
                 blocks_in_interval,
                 parent_snapshot.ema_price_current_interval,
@@ -223,9 +229,14 @@ impl EmaSnapshot {
                 tracing::warn!(?err, "price overflow, using previous EMA price");
                 parent_snapshot.ema_price_current_interval
             });
-        EmaBlock {
-            range_adjusted_oracle_price: oracle_price_to_use,
+        ExponentialMarketAvgCalculation {
+            oracle_price_for_calculation,
             ema,
+            oracle_price_for_block_inclusion: bound_in_min_max_range(
+                oracle_price,
+                safe_range,
+                parent_block.oracle_irys_price,
+            ),
         }
     }
 
@@ -394,44 +405,51 @@ mod test {
         )
     }
 
-    /// Helper function to calculate EMA price for a given block height
-    fn ema_price_for_height(height: u64) -> IrysTokenPrice {
-        deterministic_price(height)
-    }
-
     /// Utility function to build blocks with their corresponding snapshots
     fn build_blocks_with_snapshots(
         max_height: u64,
         config: &ConsensusConfig,
     ) -> Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        let mut current_snapshot: Arc<EmaSnapshot> = Arc::new(EmaSnapshot::default());
         let mut results: Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> = Vec::new();
 
         for height in 0..=max_height {
             let mut block = IrysBlockHeader::new_mock_header();
             block.height = height;
-            // Special handling for genesis block to use config.genesis_price
-            if height == 0 {
-                block.oracle_irys_price = config.genesis_price;
+
+            // Set oracle price for all blocks
+            block.oracle_irys_price = if height == 0 {
+                config.genesis_price
+            } else {
+                oracle_price_for_height(height)
+            };
+
+            // Calculate snapshot and EMA price based on block height
+            let snapshot = if height == 0 {
+                // Genesis block: use genesis price for EMA and create genesis snapshot
                 block.ema_irys_price = config.genesis_price;
+                EmaSnapshot::genesis(&block)
             } else {
-                block.oracle_irys_price = oracle_price_for_height(height);
-                block.ema_irys_price = ema_price_for_height(height);
-            }
+                // Non-genesis blocks: calculate EMA and create next snapshot
+                let (parent_block, parent_snapshot) = &results[height as usize - 1];
 
-            // Create snapshot for this block
-            if height == 0 {
-                // Genesis block
-                current_snapshot = EmaSnapshot::genesis(&block);
-            } else {
-                // Non-genesis blocks
-                let parent_block = &results.last().unwrap().0;
-                current_snapshot = current_snapshot
+                // Calculate and set EMA price before creating snapshot
+                block.ema_irys_price = parent_snapshot
+                    .calculate_ema_for_new_block(
+                        parent_block,
+                        block.oracle_irys_price,
+                        config.token_price_safe_range,
+                        config.ema.price_adjustment_interval,
+                    )
+                    .ema;
+
+                // Create next snapshot with the block that now has the correct EMA price
+                parent_snapshot
                     .next_snapshot(&block, parent_block, config)
-                    .unwrap();
-            }
+                    .unwrap()
+            };
 
-            results.push((block, current_snapshot.clone()));
+            // Store block and snapshot
+            results.push((block, snapshot));
         }
 
         results
@@ -696,14 +714,14 @@ mod test {
 
             // Verify price was capped
             assert_ne!(
-                ema_block.range_adjusted_oracle_price, oracle_price,
+                ema_block.oracle_price_for_calculation, oracle_price,
                 "Oracle price outside safe range should be capped"
             );
 
             // Verify the capped price is valid (within safe range)
             assert!(
                 EmaSnapshot::oracle_price_is_valid(
-                    ema_block.range_adjusted_oracle_price,
+                    ema_block.oracle_price_for_calculation,
                     parent_block.oracle_irys_price,
                     config.token_price_safe_range,
                 ),
@@ -767,8 +785,11 @@ mod test {
 
         // Calculate expected EMA using the formula:
         // oracle_price[prev_ema_predecessor_height].calculate_ema(interval, ema_price[prev_ema_height])
+        // We need to get the actual EMA from the built blocks, not the deterministic function
         let expected_oracle_price = oracle_price_for_height(prev_ema_predecessor_height);
-        let expected_prev_ema = ema_price_for_height(prev_ema_height);
+        let expected_prev_ema = blocks_and_snapshots[prev_ema_height as usize]
+            .0
+            .ema_irys_price;
         let expected_ema = expected_oracle_price
             .calculate_ema(config.ema.price_adjustment_interval, expected_prev_ema)
             .unwrap();

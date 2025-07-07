@@ -132,7 +132,7 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
 
     config.oracle = OracleConfig::Mock {
         initial_price: Amount::token(dec!(1.0)).unwrap(),
-        percent_change: Amount::percentage(dec!(0.2)).unwrap(), // every block will increase price by 20%
+        incremental_change: Amount::token(dec!(1.0)).unwrap(),
         // only change direction after 10 blocks
         smoothing_interval: 10,
     };
