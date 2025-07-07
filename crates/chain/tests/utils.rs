@@ -7,6 +7,7 @@ use actix_web::{
     dev::{Service, ServiceResponse},
     Error,
 };
+use alloy_core::primitives::FixedBytes;
 use alloy_eips::BlockId;
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
@@ -35,12 +36,14 @@ use irys_database::{
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_primitives::CommitmentType;
+use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List, H256,
+    U256,
 };
 use irys_types::{
     Base64, CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, IrysTransaction,
@@ -49,8 +52,11 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
-use reth::network::{PeerInfo, Peers as _};
-use reth::payload::EthBuiltPayload;
+use reth::{
+    network::{PeerInfo, Peers as _},
+    payload::EthBuiltPayload,
+    rpc::types::RpcBlockHash,
+};
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
@@ -968,6 +974,18 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         }
+    }
+
+    // get account reth balance at specific block
+    pub fn get_balance(&self, address: Address, evm_block_hash: FixedBytes<32>) -> U256 {
+        let block = Some(BlockId::Hash(RpcBlockHash {
+            block_hash: evm_block_hash,
+            require_canonical: Some(false),
+        }));
+        self.node_ctx
+            .reth_node_adapter
+            .rpc
+            .get_balance_irys(address, block)
     }
 
     pub async fn create_submit_data_tx(
