@@ -419,8 +419,7 @@ impl Inner {
                 let has_ingress_proof = tx_header.ingress_proofs.is_some();
                 debug!(
                     "Publish candidate {} has ingress proof? {}",
-                    &tx_header.id,
-                    &has_ingress_proof
+                    &tx_header.id, &has_ingress_proof
                 );
                 // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
                 if !has_ingress_proof {
