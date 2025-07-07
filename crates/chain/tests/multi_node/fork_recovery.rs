@@ -381,7 +381,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     //
 
     // check peer heights match genesis - i.e. that we are all in sync
-    let current_height = node_a.get_height().await;
+    let current_height = node_a.get_canonical_chain_height().await;
     assert_eq!(current_height, 0);
     node_b
         .wait_until_height(current_height, seconds_to_wait)
@@ -547,9 +547,9 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
             .await?;
 
         // confirm chain has identical and expected height on all three nodes
-        let a_latest_height = node_a.get_height().await;
-        let b_latest_height = node_b.get_height().await;
-        let c_latest_height = node_c.get_height().await;
+        let a_latest_height = node_a.get_canonical_chain_height().await;
+        let b_latest_height = node_b.get_canonical_chain_height().await;
+        let c_latest_height = node_c.get_canonical_chain_height().await;
         assert_eq!(a_latest_height, c_block4.height);
         assert_eq!(a_latest_height, b_latest_height);
         assert_eq!(a_latest_height, c_latest_height);

@@ -1344,11 +1344,11 @@ impl IrysNode {
         let price_oracle = match config.node_config.oracle {
             OracleConfig::Mock {
                 initial_price,
-                percent_change,
+                incremental_change,
                 smoothing_interval,
             } => IrysPriceOracle::MockOracle(MockOracle::new(
                 initial_price,
-                percent_change,
+                incremental_change,
                 smoothing_interval,
             )),
             // note: depending on the oracle, it may require spawning an async background service.

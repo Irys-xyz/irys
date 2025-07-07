@@ -8,7 +8,7 @@ use crate::utils::IrysNodeTest;
 #[test_log::test(actix::test)]
 async fn heavy_test_wait_until_height() {
     let irys_node = IrysNodeTest::default_async().start().await;
-    let height = irys_node.get_height().await;
+    let height = irys_node.get_canonical_chain_height().await;
     info!("height: {}", height);
     let steps = 2;
     let seconds = 60;
@@ -17,7 +17,7 @@ async fn heavy_test_wait_until_height() {
         .wait_until_height(height + steps, seconds)
         .await
         .unwrap();
-    let height5 = irys_node.get_height().await;
+    let height5 = irys_node.get_canonical_chain_height().await;
     assert!(height5 >= height + steps);
     irys_node.stop().await;
 }
@@ -25,11 +25,11 @@ async fn heavy_test_wait_until_height() {
 #[test_log::test(actix::test)]
 async fn heavy_test_mine() {
     let irys_node = IrysNodeTest::default_async().start().await;
-    let height = irys_node.get_height().await;
+    let height = irys_node.get_canonical_chain_height().await;
     info!("height: {}", height);
     let blocks = 4;
     irys_node.mine_blocks(blocks).await.unwrap();
-    let next_height = irys_node.get_height().await;
+    let next_height = irys_node.get_canonical_chain_height().await;
     assert_eq!(next_height, height + blocks as u64);
     let block = irys_node.get_block_by_height(next_height).await.unwrap();
     assert_eq!(block.height, next_height);
@@ -50,7 +50,7 @@ async fn heavy_test_mine_tx() {
     )]);
     let irys_node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    let height = irys_node.get_height().await;
+    let height = irys_node.get_canonical_chain_height().await;
     let data = "Hello, world!".as_bytes().to_vec();
     info!("height: {}", height);
     let tx = irys_node
@@ -58,7 +58,7 @@ async fn heavy_test_mine_tx() {
         .await
         .unwrap();
     irys_node.mine_block().await.unwrap();
-    let next_height = irys_node.get_height().await;
+    let next_height = irys_node.get_canonical_chain_height().await;
     assert_eq!(next_height, height + 1_u64);
     let tx_header = irys_node
         .get_storage_tx_header_from_mempool(&tx.header.id)
