@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::utils::{mine_block, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use irys_actors::block_tree_service::{get_canonical_chain, BlockTreeReadGuard};
 use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
 use rust_decimal_macros::dec;
@@ -140,11 +140,11 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 
     // mine 3 blocks
-    let (header_1, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    let header_1 = ctx.mine_block().await?;
     ctx.wait_until_height(header_1.height, 10).await?;
-    let (header_2, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    let header_2 = ctx.mine_block().await?;
     ctx.wait_until_height(header_2.height, 10).await?;
-    let (header_3, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
+    let header_3 = ctx.mine_block().await?;
     ctx.wait_until_height(header_3.height, 10).await?;
 
     // assert that all of the prices are the max allowed ones (guaranteed by the mock oracle reporting inflated values)
