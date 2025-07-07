@@ -12,7 +12,7 @@ use rust_decimal_macros::dec;
 // Assert: EMA snapshots differ after the price adjustment interval during the fork.
 // Assert: After convergence, both nodes have identical chains with matching EMA snapshots.
 #[test_log::test(actix_web::test)]
-async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
+async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     // setup
     const PRICE_ADJUSTMENT_INTERVAL: u64 = 2;
     let num_blocks_in_epoch = 13;
@@ -46,8 +46,8 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
 
     let common_height = node_1.get_max_difficulty_block();
     assert_eq!(common_height, node_2.get_max_difficulty_block());
-    const BLOCKS_TO_MINE_NODE_1: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 3;
-    const BLOCKS_TO_MINE_NODE_2: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 5;
+    const BLOCKS_TO_MINE_NODE_1: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 6;
+    const BLOCKS_TO_MINE_NODE_2: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 8;
     // Mine blocks in parallel on both nodes to create fork
     tokio::try_join!(
         node_1.mine_blocks_without_gossip(BLOCKS_TO_MINE_NODE_1),
