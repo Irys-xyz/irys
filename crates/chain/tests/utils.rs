@@ -286,22 +286,23 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
-        self.testnet_peer_with_assignments_and_name(peer_signer, "PEER")
+        // Create a new peer config using the provided signer
+        let peer_config = self.testnet_peer_with_signer(peer_signer);
+
+        self.testnet_peer_with_assignments_and_name(peer_config, "PEER")
             .await
     }
 
     pub async fn testnet_peer_with_assignments_and_name(
         &self,
-        peer_signer: &IrysSigner,
+        config: NodeConfig,
         name: &'static str,
     ) -> Self {
         let seconds_to_wait = 20;
-
-        // Create a new peer config using the provided signer
-        let peer_config = self.testnet_peer_with_signer(peer_signer);
+        let address = config.miner_address();
 
         // Start the peer node
-        let peer_node = IrysNodeTest::new(peer_config).start_with_name(name).await;
+        let peer_node = IrysNodeTest::new(config).start_with_name(name).await;
 
         // Get the latest block hash to use as anchor
         let current_height = self.get_height().await;
@@ -323,10 +324,19 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
             .expect("pledge tx to be in mempool");
 
+        // Get height before mining the commitment block
+        let height_before_commitment = self.get_height().await;
+
         // Mine a block to get the commitments included
         self.mine_block()
             .await
             .expect("to mine block with commitments");
+
+        // Wait for peer to sync the commitment block
+        peer_node
+            .wait_until_height(height_before_commitment + 1, seconds_to_wait)
+            .await
+            .expect("peer to sync commitment block");
 
         // Get epoch configuration to calculate when next epoch round occurs
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
@@ -337,10 +347,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             num_blocks_in_epoch - (current_height_after_commitment % num_blocks_in_epoch);
 
         // Mine blocks until we reach the next epoch round
-        for _ in 0..blocks_until_next_epoch {
+        for i in 0..blocks_until_next_epoch {
+            let height_before_mining = self.get_height().await;
+
             self.mine_block()
                 .await
                 .expect("to mine block towards next epoch");
+
+            // Wait for peer to sync after each block to prevent race conditions
+            peer_node
+                .wait_until_height(height_before_mining + 1, seconds_to_wait)
+                .await
+                .expect("peer to sync to current height");
         }
 
         let final_height = self.get_height().await;
@@ -350,14 +368,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             .wait_until_height(final_height, seconds_to_wait)
             .await
             .expect("peer to sync to epoch height");
+        self.wait_until_height(final_height, seconds_to_wait)
+            .await
+            .unwrap();
 
         // Wait for packing to complete on the peer (this indicates partition assignments are active)
         peer_node.wait_for_packing(seconds_to_wait).await;
 
         // Verify that partition assignments were created
-        let peer_assignments = peer_node
-            .get_partition_assignments(peer_signer.address())
-            .await;
+        let peer_assignments = peer_node.get_partition_assignments(address).await;
 
         // Ensure at least one partition has been assigned
         assert!(

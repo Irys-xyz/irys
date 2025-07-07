@@ -1,7 +1,7 @@
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
-        ema_snapshot::{EmaBlock, EmaSnapshot},
+        ema_snapshot::{EmaSnapshot, ExponentialMarketAvgCalculation},
         BlockState, BlockTreeReadGuard, ChainState,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
@@ -28,11 +28,16 @@ use irys_reth::compose_shadow_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, Base64, CommitmentTransaction, Config,
-    DataLedger, DataTransactionLedger, GossipBroadcastMessage, H256List, IngressProofsList,
-    IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, SystemTransactionLedger,
-    TxIngressProof, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider,
+    block_production::SolutionContext,
+    calculate_difficulty, next_cumulative_diff,
+    storage_pricing::{
+        phantoms::{IrysPrice, Usd},
+        Amount,
+    },
+    Base64, CommitmentTransaction, Config, DataLedger, DataTransactionLedger,
+    GossipBroadcastMessage, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader,
+    PoaData, Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -457,7 +462,7 @@ pub trait BlockProdStrategy {
         };
         steps.push(solution.seed.0);
 
-        let ema_irys_price = self
+        let ema_calculation = self
             .get_ema_price(prev_block_header, perv_block_ema_snapshot)
             .await?;
 
@@ -534,8 +539,8 @@ pub trait BlockProdStrategy {
                 steps,
                 ..Default::default()
             },
-            oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
-            ema_irys_price: ema_irys_price.ema,
+            oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
+            ema_irys_price: ema_calculation.ema,
         };
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
@@ -634,16 +639,17 @@ pub trait BlockProdStrategy {
         &self,
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
-    ) -> eyre::Result<EmaBlock> {
+    ) -> eyre::Result<ExponentialMarketAvgCalculation> {
         let oracle_irys_price = self.inner().price_oracle.current_price().await?;
-        let ema_irys_price = parent_block_ema_snapshot.calculate_ema_for_new_block(
+        dbg!(&oracle_irys_price);
+        let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
             self.inner().config.consensus.token_price_safe_range,
             self.inner().config.consensus.ema.price_adjustment_interval,
         );
 
-        Ok(ema_irys_price)
+        Ok(ema_calculation)
     }
 
     async fn get_mempool_txs(

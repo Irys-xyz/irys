@@ -85,10 +85,17 @@ pub struct EmaSnapshot {
 
 /// Result of EMA calculation for a new block.
 #[derive(Debug)]
-pub struct EmaBlock {
+pub struct ExponentialMarketAvgCalculation {
+    /// The oracle price that was used for EMA calculations.
+    /// After the first 2 pricing intervals, this value will
+    /// point to the oracle price of the preceding EMA recalculation block.
+    ///
+    /// eg. On block 25, this will blocks 18 oracle price (19 being the preceding EMA recalculation block)
+    pub oracle_price_for_calculation: IrysTokenPrice,
+
     /// Oracle price after applying safe range bounds.
     /// If the original oracle price was outside the safe range, this will be capped.
-    pub range_adjusted_oracle_price: IrysTokenPrice,
+    pub oracle_price_for_block_inclusion: IrysTokenPrice,
 
     /// The newly calculated EMA value for the new block.
     pub ema: IrysTokenPrice,
@@ -154,7 +161,6 @@ impl EmaSnapshot {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
                 ema_price_current_interval: self.ema_price_current_interval,
-                // oracle_price_parent_block: parent_block.oracle_irys_price,
                 oracle_price_for_current_ema_predecessor: self
                     .oracle_price_for_current_ema_predecessor,
             }))
@@ -187,7 +193,7 @@ impl EmaSnapshot {
         oracle_price: IrysTokenPrice,
         safe_range: Amount<Percentage>,
         blocks_in_interval: u64,
-    ) -> EmaBlock {
+    ) -> ExponentialMarketAvgCalculation {
         let parent_snapshot = self;
 
         // Special handling for first 2 adjustment intervals.
@@ -202,19 +208,21 @@ impl EmaSnapshot {
         //    the *n* (number of block prices) would be 10 (E29.height - E19.height).
         // 3. this is the price that will be used in the interval 39->49,
         //    which will be reported to other systems querying for EMA prices.
-        let oracle_price_to_use = if parent_block.height < (blocks_in_interval * 2) {
+        let oracle_price_for_calculation = if parent_block.height < (blocks_in_interval * 2) {
             oracle_price
         } else {
             // Use oracle price from the predecessor of the latest EMA block
             parent_snapshot.oracle_price_for_current_ema_predecessor
         };
-        let oracle_price_to_use = bound_in_min_max_range(
-            oracle_price_to_use,
+        let oracle_price_for_calculation = bound_in_min_max_range(
+            oracle_price_for_calculation,
             safe_range,
             parent_block.oracle_irys_price,
         );
+        dbg!(&parent_block.height + 1);
+        dbg!(&oracle_price_for_calculation);
 
-        let ema = oracle_price_to_use
+        let ema = oracle_price_for_calculation
             .calculate_ema(
                 blocks_in_interval,
                 parent_snapshot.ema_price_current_interval,
@@ -223,9 +231,14 @@ impl EmaSnapshot {
                 tracing::warn!(?err, "price overflow, using previous EMA price");
                 parent_snapshot.ema_price_current_interval
             });
-        EmaBlock {
-            range_adjusted_oracle_price: oracle_price_to_use,
+        ExponentialMarketAvgCalculation {
+            oracle_price_for_calculation,
             ema,
+            oracle_price_for_block_inclusion: bound_in_min_max_range(
+                oracle_price,
+                safe_range,
+                parent_block.oracle_irys_price,
+            ),
         }
     }
 
@@ -697,14 +710,14 @@ mod test {
 
             // Verify price was capped
             assert_ne!(
-                ema_block.range_adjusted_oracle_price, oracle_price,
+                ema_block.oracle_price_for_calculation, oracle_price,
                 "Oracle price outside safe range should be capped"
             );
 
             // Verify the capped price is valid (within safe range)
             assert!(
                 EmaSnapshot::oracle_price_is_valid(
-                    ema_block.range_adjusted_oracle_price,
+                    ema_block.oracle_price_for_calculation,
                     parent_block.oracle_irys_price,
                     config.token_price_safe_range,
                 ),
