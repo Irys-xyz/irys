@@ -85,7 +85,7 @@ pub enum BlockTreeServiceMessage {
         response: oneshot::Sender<eyre::Result<Option<Addr<RethServiceActor>>>>,
     },
     ReloadCacheFromDb {
-        response: oneshot::Sender<()>,
+        response: oneshot::Sender<eyre::Result<()>>,
     },
 }
 
@@ -107,7 +107,9 @@ pub struct BlockTreeServiceInner {
     /// Read view of the `block_index`
     pub block_index_guard: BlockIndexReadGuard,
     /// Global storage config
-    pub consensus_config: ConsensusConfig,
+    pub config: Config,
+    /// Storage submodules configuration
+    pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
     /// Reth service actor sender
@@ -156,7 +158,6 @@ impl BlockTreeService {
     ) -> JoinHandle<()> {
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
-        let consensus_config = config.node_config.consensus_config();
         let service_senders = service_senders.clone();
         let system = System::current();
         let bi_guard = block_index_guard;
@@ -174,7 +175,7 @@ impl BlockTreeService {
                     reth_service_actor.clone(),
                     db.clone(),
                     &storage_submodules_config,
-                    config,
+                    config.clone(),
                 );
 
                 let block_tree_service = Self {
@@ -185,11 +186,12 @@ impl BlockTreeService {
                         cache: Arc::new(RwLock::new(cache)),
                         miner_address,
                         block_index_guard: bi_guard,
-                        consensus_config,
+                        config,
                         service_senders,
                         reth_service_actor,
                         system,
                         span,
+                        storage_submodules_config: storage_submodules_config.clone(),
                     },
                 };
                 block_tree_service
@@ -268,23 +270,28 @@ impl BlockTreeServiceInner {
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
-                self.reload_cache_from_db();
-                let _ = response.send(());
+                let res = self.reload_cache_from_db().await;
+                let _ = response.send(res);
             }
         }
         Ok(())
     }
 
-    fn reload_cache_from_db(&self) {
+    async fn reload_cache_from_db(&self) -> eyre::Result<()> {
+        let replay_data =
+            EpochReplayData::query_replay_data(&self.db, &self.block_index_guard, &self.config)
+                .await?;
         debug!("Reloading block tree cache from database");
         let new_block_tree_cache = BlockTreeCache::restore_from_db(
             self.block_index_guard.clone(),
-            self.commitment_state_guard.clone(),
+            replay_data,
             self.reth_service_actor.clone(),
             self.db.clone(),
-            self.consensus_config.clone(),
+            &self.storage_submodules_config,
+            self.config.clone(),
         );
         *self.cache.write().unwrap() = new_block_tree_cache;
+        Ok(())
     }
 
     /// Fast tracks the storage finalization of a block by retrieving transaction headers. Do
@@ -410,7 +417,7 @@ impl BlockTreeServiceInner {
         let finalized_hash = {
             let binding = self.cache.clone();
             let cache = binding.write().unwrap();
-            let migration_depth = self.consensus_config.block_migration_depth as usize;
+            let migration_depth = self.config.consensus.block_migration_depth as usize;
 
             // Skip if block isn't deep enough for finalization
             if arc_block.height <= migration_depth as u64 {
@@ -516,7 +523,7 @@ impl BlockTreeServiceInner {
 
         // Create epoch snapshot for this block
         let arc_epoch_snapshot =
-            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.consensus_config);
+            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus);
 
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
@@ -524,14 +531,14 @@ impl BlockTreeServiceInner {
             &commitment_txs,
             &prev_commitment_snapshot,
             arc_epoch_snapshot.clone(),
-            &self.consensus_config,
+            &self.config.consensus,
         );
 
         // Create ema snapshot for this block
         let ema_snapshot = parent_block_entry.ema_snapshot.next_snapshot(
             &block,
             &parent_block_entry.block,
-            &self.consensus_config,
+            &self.config.consensus,
         )?;
 
         let add_result = cache.add_block(
@@ -834,7 +841,7 @@ impl BlockTreeServiceInner {
     }
 
     fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
-        block_header.height % self.consensus_config.epoch.num_blocks_in_epoch == 0
+        block_header.height % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
     fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) {
@@ -1904,10 +1911,10 @@ impl BlockTreeCache {
         while prev_block.height > 0 && depth_count < self.consensus_config.block_tree_depth {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
-            // debug!(
-            //     "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
-            //     prev_entry.chain_state, prev_hash, prev_entry.block.height
-            // );
+            debug!(
+                "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
+                prev_entry.chain_state, prev_hash, prev_entry.block.height
+            );
             match prev_entry.chain_state {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
                     return Some((

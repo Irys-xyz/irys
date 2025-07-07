@@ -1,6 +1,7 @@
 use crate::utils::IrysNodeTest;
 use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 // Test verifies that EMA (Exponential Moving Average) price snapshots diverge correctly across chain forks.
 // Setup:
@@ -146,7 +147,7 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         tip_block.height,
         common_height.height + BLOCKS_TO_MINE_NODE_2 as u64
     );
-    node_2.gossip_block(&tip_block)?;
+    node_2.gossip_block(&Arc::new(tip_block.clone()))?;
 
     node_1
         .wait_until_height_confirmed(tip_block.height, 200)

@@ -427,16 +427,23 @@ where
                     err
                 ))
             })?;
-        rx.await.map_err(|err| {
-            error!(
-                "Failed to receive response for ReloadCacheFromDb: {:?}",
-                err
-            );
-            BlockPoolError::OtherInternal(format!(
-                "Failed to receive response for ReloadCacheFromDb: {:?}",
-                err
-            ))
-        })?;
+        rx.await
+            .map_err(|err| {
+                error!(
+                    "Failed to receive response for ReloadCacheFromDb: {:?}",
+                    err
+                );
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to receive response for ReloadCacheFromDb: {:?}",
+                    err
+                ))
+            })?
+            .map_err(|err| {
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to reload block tree cache: {:?}",
+                    err
+                ))
+            })?;
         debug!("Block pool: Reloaded block tree cache");
         Ok(())
     }
