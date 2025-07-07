@@ -168,11 +168,12 @@ pub mod mock_oracle {
                 smoothing_interval,
             );
 
-            // First call -> should go up by 10%
+            // First call -> should go up by 0.10 to 1.10
             let _unused_price = oracle.current_price().unwrap();
+            // Second call -> should go up by another 0.10 to 1.20
             let price_after_first = oracle.current_price().unwrap();
 
-            assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.21));
+            assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.20));
         }
 
         /// Test that after the smoothing interval is reached, the direction toggles (up to down).
@@ -185,15 +186,15 @@ pub mod mock_oracle {
                 smoothing_interval,
             );
 
-            // Call #1 -> going_up = true => 1.0 -> 1.1
+            // Call #1 -> going_up = true => 1.0 + 0.10 = 1.10
             let price_after_first = oracle.current_price().unwrap();
-            assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.1));
+            assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.10));
 
             // Call #2 -> we've now hit the smoothing interval (2),
             //            so it toggles going_up to false before applying the change
-            //            => 1.1 -> 1.1 * (1 - 0.10) = 0.99
+            //            => 1.10 - 0.10 = 1.00
             let price_after_second = oracle.current_price().unwrap();
-            assert_eq!(price_after_second.token_to_decimal().unwrap(), dec!(0.99));
+            assert_eq!(price_after_second.token_to_decimal().unwrap(), dec!(1.00));
         }
     }
 }
