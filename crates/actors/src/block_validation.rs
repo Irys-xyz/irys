@@ -4,11 +4,11 @@ use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_index_service::BlockIndexReadGuard,
     block_tree_service::ema_snapshot::EmaSnapshot,
-    epoch_service::PartitionAssignmentsReadGuard,
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
+    EpochSnapshot,
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
@@ -50,7 +50,7 @@ pub trait PayloadProvider: Clone + Send + Sync + 'static {
 pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
-    partitions_guard: PartitionAssignmentsReadGuard,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
@@ -101,7 +101,7 @@ pub async fn prevalidate_block(
         "cumulative_difficulty_is_valid",
     );
 
-    check_poa_data_expiration(&block.poa, &partitions_guard)?;
+    check_poa_data_expiration(&block.poa, parent_epoch_snapshot.clone())?;
     debug!("poa data not expired");
 
     // Check the solution_hash
@@ -209,16 +209,20 @@ pub fn difficulty_is_valid(
 /// Checks PoA data chunk data solution partitions has not expired
 pub fn check_poa_data_expiration(
     poa: &PoaData,
-    partitions_guard: &PartitionAssignmentsReadGuard,
+    epoch_snapshot: Arc<EpochSnapshot>,
 ) -> eyre::Result<()> {
+    let is_data_partition_assigned = epoch_snapshot
+        .partition_assignments
+        .read()
+        .unwrap()
+        .data_partitions
+        .contains_key(&poa.partition_hash);
+
     // if is a data chunk
     if poa.data_path.is_some()
         && poa.tx_path.is_some()
         && poa.ledger_id.is_some()
-        && !partitions_guard
-            .read()
-            .data_partitions
-            .contains_key(&poa.partition_hash)
+        && !is_data_partition_assigned
     {
         return Err(eyre::eyre!(
             "Invalid data PoA, partition hash is not a data partition, it may have expired"
@@ -328,10 +332,11 @@ pub fn get_recall_range(
     entropy_packing_iterations = ?config.entropy_packing_iterations,
     chunk_size = ?config.chunk_size
 ), err)]
+
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
-    partitions_guard: &PartitionAssignmentsReadGuard,
+    epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
@@ -345,9 +350,8 @@ pub fn poa_is_valid(
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_id)
     {
         // partition data -> ledger data
-        let partition_assignment = partitions_guard
-            .read()
-            .get_assignment(poa.partition_hash)
+        let partition_assignment = epoch_snapshot
+            .get_data_partition_assignment(poa.partition_hash)
             .unwrap();
 
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
@@ -688,9 +692,8 @@ fn validate_shadow_transactions_match(
 mod tests {
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        epoch_service::EpochServiceInner,
-        services::ServiceSenders,
-        BlockFinalizedMessage, EpochServiceMessage,
+        epoch_service::EpochSnapshot,
+        BlockFinalizedMessage,
     };
     use actix::{prelude::*, SystemRegistry};
 
@@ -710,8 +713,8 @@ mod tests {
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
         pub block_index_actor: Addr<BlockIndexService>,
-        pub partitions_guard: PartitionAssignmentsReadGuard,
         pub miner_address: Address,
+        pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
         pub consensus_config: ConsensusConfig,
@@ -750,7 +753,7 @@ mod tests {
 
         let commitments = add_genesis_commitments(&mut genesis_block, &config);
 
-        let arc_genesis = Arc::new(genesis_block);
+        let arc_genesis = Arc::new(genesis_block.clone());
         let signer = config.irys_signer();
         let miner_address = signer.address();
 
@@ -763,40 +766,17 @@ mod tests {
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
-        let service_senders = ServiceSenders::new().0;
-        let mut epoch_service =
-            EpochServiceInner::new(&service_senders, &storage_submodules_config, &config);
 
-        // Tell the epoch service to initialize the ledgers
-        let (sender, _rx) = tokio::sync::oneshot::channel();
-        match epoch_service.handle_message(EpochServiceMessage::NewEpoch {
-            new_epoch_block: arc_genesis.clone(),
-            previous_epoch_block: None,
-            commitments: Arc::new(commitments),
-            sender,
-        }) {
-            Ok(_) => info!("Genesis Epoch tasks complete."),
-            Err(_) => panic!("Failed to perform genesis epoch tasks"),
-        }
+        // Create an epoch snapshot for the genesis block
+        let epoch_snapshot = EpochSnapshot::new(
+            &storage_submodules_config,
+            genesis_block,
+            commitments.clone(),
+            &config,
+        );
+        info!("Genesis Epoch tasks complete.");
 
-        let (sender, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .handle_message(EpochServiceMessage::GetLedgersGuard(sender))
-            .unwrap();
-        let ledgers_guard = rx.await.unwrap();
-
-        let (sender, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .handle_message(EpochServiceMessage::GetPartitionAssignmentsGuard(sender))
-            .unwrap();
-        let partitions_guard = rx.await.unwrap();
-
-        let partition_hash = {
-            let ledgers = ledgers_guard.read();
-            debug!("ledgers: {:?}", ledgers);
-            let sub_slots = ledgers.get_slots(DataLedger::Submit);
-            sub_slots[0].partitions[0]
-        };
+        let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),
@@ -809,9 +789,8 @@ mod tests {
             Err(_) => panic!("Failed to index genesis block"),
         }
 
-        let partition_assignment = partitions_guard
-            .read()
-            .get_assignment(partition_hash)
+        let partition_assignment = epoch_snapshot
+            .get_data_partition_assignment(partition_hash)
             .unwrap();
 
         debug!("Partition assignment {:?}", partition_assignment);
@@ -821,8 +800,8 @@ mod tests {
             TestContext {
                 block_index,
                 block_index_actor,
-                partitions_guard,
                 miner_address,
+                epoch_snapshot,
                 partition_hash,
                 partition_assignment,
                 consensus_config,
@@ -1040,7 +1019,7 @@ mod tests {
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
-            &context.partitions_guard,
+            &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
         );

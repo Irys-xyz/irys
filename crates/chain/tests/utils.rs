@@ -19,7 +19,7 @@ use irys_actors::{
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
-    EpochServiceMessage, SetTestBlocksRemainingMessage,
+    SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
@@ -355,9 +355,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_node.wait_for_packing(seconds_to_wait).await;
 
         // Verify that partition assignments were created
-        let peer_assignments = peer_node
-            .get_partition_assignments(peer_signer.address())
-            .await;
+        let peer_assignments = peer_node.get_partition_assignments(peer_signer.address());
 
         // Ensure at least one partition has been assigned
         assert!(
@@ -724,8 +722,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn mine_block(&self) -> eyre::Result<()> {
-        self.mine_blocks(1).await
+    pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
+        let height = self.get_height().await;
+        self.mine_blocks(1).await?;
+        let hash = self.wait_until_height(height + 1, 10).await?;
+        self.get_block_by_hash(&hash)
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -775,7 +776,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let is_staked = self
             .node_ctx
-            .commitment_state_guard
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .commitment_state
+            .read()
+            .unwrap()
             .is_staked(commitment_tx.signer);
         commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
     }
@@ -1274,6 +1280,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await;
     }
 
+    pub async fn post_commitment_tx_raw_without_gossip(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) {
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        self.node_ctx.sync_state.set_is_syncing(true);
+        self.post_commitment_tx_request(&api_uri, commitment_tx)
+            .await;
+        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+    }
+
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let pledge_tx = CommitmentTransaction {
             commitment_type: CommitmentType::Pledge,
@@ -1338,20 +1356,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         stake_tx
     }
 
-    pub async fn get_partition_assignments(
-        &self,
-        mining_address: Address,
-    ) -> Vec<PartitionAssignment> {
-        let epoch_service = self.node_ctx.service_senders.epoch_service.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .send(EpochServiceMessage::GetMinerPartitionAssignments(
-                mining_address,
-                tx,
-            ))
-            .expect("message should be delivered to epoch service");
-        rx.await
-            .expect("to retrieve partition assignments for miner")
+    pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
+        let epoch_snapshot = self
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot();
+
+        epoch_snapshot.get_partition_assignments(miner_address)
     }
 
     async fn post_commitment_tx_request(
@@ -1363,11 +1375,18 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
-        let mut response = client
+        let result = client
             .post(url)
             .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
-            .await
-            .expect("client post failed");
+            .await;
+
+        let mut response = match result {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to post commitment transaction: {e}");
+                return;
+            }
+        };
 
         if response.status() != StatusCode::OK {
             // Read the response body

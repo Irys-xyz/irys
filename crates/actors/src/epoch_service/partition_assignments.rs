@@ -8,7 +8,7 @@ use irys_types::{
 use tracing::debug;
 
 /// A state struct that can be wrapped with Arc<`RwLock`<>> to provide parallel read access
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PartitionAssignments {
     /// Active data partition state mapped by partition hash
     pub data_partitions: BTreeMap<PartitionHash, PartitionAssignment>,
@@ -32,7 +32,7 @@ impl PartitionAssignments {
         }
     }
 
-    /// Retrieves a `PartitionAssignment` by partition hash if it exists
+    /// Retrieves a `PartitionAssignment` to a data partition by partition hash if it exists
     pub fn get_assignment(&self, partition_hash: H256) -> Option<PartitionAssignment> {
         self.data_partitions
             .get(&partition_hash)

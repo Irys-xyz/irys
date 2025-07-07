@@ -2,14 +2,13 @@ use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
         ema_snapshot::{EmaBlock, EmaSnapshot},
-        BlockState, BlockTreeReadGuard, ChainState,
+        BlockTreeReadGuard,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
-    EpochServiceMessage,
 };
 use actix::prelude::*;
 use actors::mocker::Mocker;
@@ -48,6 +47,9 @@ use std::{
 };
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn, Instrument as _, Span};
+
+mod block_validation_tracker;
+pub use block_validation_tracker::BlockValidationTracker;
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -188,55 +190,78 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
-    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        loop {
-            // hold guard briefly to get latest canonical chain state
-            let (parent_block, status, ema_snapshot) = {
-                let read = self.inner().block_tree_guard.read();
-                let parent_entry = read.get_latest_canonical_entry();
-                let (parent_block, status) = read
-                    .get_block_and_status(&parent_entry.block_hash)
-                    .ok_or_else(|| eyre!("Parent block not found in block tree"))?;
-                let ema_snapshot = read
-                    .get_ema_snapshot(&parent_block.block_hash)
-                    .ok_or_else(|| eyre!("EMA snapshot not found for parent block"))?;
+    /// Creates PoA data from the solution context
+    /// Returns (PoaData, chunk_hash)
+    fn create_poa_data(
+        &self,
+        solution: &SolutionContext,
+        ledger_id: Option<u32>,
+    ) -> eyre::Result<(PoaData, H256)> {
+        let poa_chunk = Base64(solution.chunk.clone());
+        let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
+        let poa = PoaData {
+            tx_path: solution.tx_path.clone().map(Base64),
+            data_path: solution.data_path.clone().map(Base64),
+            chunk: Some(poa_chunk),
+            recall_chunk_index: solution.recall_chunk_index,
+            ledger_id,
+            partition_chunk_offset: solution.chunk_offset,
+            partition_hash: solution.partition_hash,
+        };
+        Ok((poa, poa_chunk_hash))
+    }
 
-                (parent_block.clone(), *status, ema_snapshot)
-            };
+    /// Fetches a block header from mempool or database
+    async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
+        // Try mempool first
+        let (tx, rx) = oneshot::channel();
+        self.inner()
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
 
-            // Closure to fetch full block header from mempool or database
-            let fetch_block_header = async move |block_hash: H256| {
-                let (tx_prev, rx_prev) = oneshot::channel();
-                self.inner().service_senders.mempool.send(
-                    MempoolServiceMessage::GetBlockHeader(block_hash, false, tx_prev),
-                )?;
-                let header = match rx_prev.await? {
-                    Some(header) => header,
-                    None => self
-                        .inner()
-                        .db
-                        .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-                        .ok_or_else(|| eyre!("No block header found for hash {}", block_hash,))?,
-                };
-                Ok::<_, eyre::Error>(header)
-            };
-
-            match status {
-                ChainState::Onchain
-                | ChainState::Validated(BlockState::ValidBlock)
-                | ChainState::NotOnchain(BlockState::ValidBlock) => {
-                    // Block is ready to use as parent
-                    info!(?parent_block.block_hash, ?parent_block.height, "Starting block production, previous block");
-
-                    let header = fetch_block_header(parent_block.block_hash).await?;
-                    return Ok((header, ema_snapshot));
-                }
-                _ => {
-                    // Block is not yet marked as ValidBlock, wait briefly
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+        match rx.await? {
+            Some(header) => Ok(header),
+            None => {
+                // Fall back to database
+                self.inner()
+                    .db
+                    .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+                    .ok_or_else(|| eyre!("No block header found for hash {}", block_hash))
             }
         }
+    }
+
+    /// Gets the EMA snapshot for a given block
+    fn get_block_ema_snapshot(&self, block_hash: &H256) -> eyre::Result<Arc<EmaSnapshot>> {
+        let read = self.inner().block_tree_guard.read();
+        read.get_ema_snapshot(block_hash)
+            .ok_or_else(|| eyre!("EMA snapshot not found for block {}", block_hash))
+    }
+
+    /// Selects the parent block for new block production.
+    ///
+    /// Targets the block with highest cumulative difficulty, but only if fully validated.
+    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
+    /// the latest validated block on timeout to ensure production continues.
+    ///
+    /// Returns the selected parent block header and its EMA snapshot.
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+
+        // Use BlockValidationTracker to select the parent block
+        let parent_block_hash = BlockValidationTracker::new(self.inner(), MAX_WAIT_TIME)
+            .wait_for_validation()
+            .await?;
+
+        // Fetch the parent block header
+        let header = self.fetch_block_header(parent_block_hash).await?;
+
+        // Get the EMA snapshot
+        let ema_snapshot = self.get_block_ema_snapshot(&header.block_hash)?;
+
+        Ok((header, ema_snapshot))
     }
 
     async fn fully_produce_new_block(
@@ -347,18 +372,6 @@ pub trait BlockProdStrategy {
             .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
             .await?;
 
-        // trigger forkchoice update via engine api to commit the block to the blockchain
-        self.inner()
-            .reth_node_adapter
-            .update_forkchoice_full(
-                payload.block().hash(),
-                // we mark this block as confirmed because we produced it
-                Some(payload.block().hash()),
-                // marking a block as finalized is handled by a different service
-                None,
-            )
-            .await?;
-
         Ok(payload)
     }
 
@@ -377,7 +390,6 @@ pub trait BlockProdStrategy {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
-        let epoch_service = self.inner().service_senders.epoch_service.clone();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
             warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58());
@@ -426,26 +438,19 @@ pub trait BlockProdStrategy {
         let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
 
         // Use the partition hash to figure out what ledger it belongs to
-        let (sender, rx) = tokio::sync::oneshot::channel();
-        epoch_service
-            .send(EpochServiceMessage::GetPartitionAssignment(
-                solution.partition_hash,
-                sender,
-            ))
-            .unwrap();
-        let ledger_id = rx.await?.and_then(|pa| pa.ledger_id);
+        let epoch_snapshot = self
+            .inner()
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&prev_block_hash)
+            .expect("parent epoch snapshot to be retrievable");
 
-        let poa_chunk = Base64(solution.chunk);
-        let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
-        let poa = PoaData {
-            tx_path: solution.tx_path.map(Base64),
-            data_path: solution.data_path.map(Base64),
-            chunk: Some(poa_chunk),
-            recall_chunk_index: solution.recall_chunk_index,
-            ledger_id,
-            partition_chunk_offset: solution.chunk_offset,
-            partition_hash: solution.partition_hash,
-        };
+        let ledger_id = epoch_snapshot
+            .get_data_partition_assignment(solution.partition_hash)
+            .and_then(|pa| pa.ledger_id);
+
+        // Create PoA data using the trait method
+        let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
 
         let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1
             > solution.vdf_step - 1
@@ -541,6 +546,15 @@ pub trait BlockProdStrategy {
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
+        let _res = self
+            .inner()
+            .reth_service
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Evm(irys_block.evm_block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            })
+            .await??;
 
         let block = Arc::new(irys_block);
         match self
@@ -577,16 +591,6 @@ pub trait BlockProdStrategy {
                 ))
             }
         }?;
-
-        // we set the canon head here, as we produced this block, and this lets us build off of it
-        self.inner()
-            .reth_service
-            .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(evm_block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .await??;
 
         if is_difficulty_updated {
             self.inner()
