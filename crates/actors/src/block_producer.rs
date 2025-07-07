@@ -2,7 +2,7 @@ use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::{
         ema_snapshot::{EmaSnapshot, ExponentialMarketAvgCalculation},
-        BlockState, BlockTreeReadGuard, ChainState,
+        BlockTreeReadGuard,
     },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,

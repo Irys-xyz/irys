@@ -15,7 +15,10 @@ use futures::future::select;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     block_producer::SolutionFoundMessage,
-    block_tree_service::{ema_snapshot::EmaSnapshot, get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ReorgEvent},
+    block_tree_service::{
+        ema_snapshot::EmaSnapshot, get_canonical_chain, BlockState, BlockTreeEntry, ChainState,
+        ReorgEvent,
+    },
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
@@ -55,10 +58,7 @@ use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
-use tokio::{
-    sync::oneshot::error::RecvError,
-    time::{sleep, Instant},
-};
+use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, debug_span, error, info};
 
 pub async fn capacity_chunk_solution(
@@ -701,21 +701,19 @@ impl IrysNodeTest<IrysNodeCtx> {
             .height
     }
 
-    pub async fn get_max_difficulty_block(&self) -> IrysBlockHeader {
+    pub fn get_max_difficulty_block(&self) -> IrysBlockHeader {
         let block = self
             .node_ctx
             .block_tree_guard
             .read()
             .get_max_cumulative_difficulty_block()
             .1;
-        let block = self
-            .node_ctx
+        self.node_ctx
             .block_tree_guard
             .read()
             .get_block(&block)
             .unwrap()
-            .clone();
-        block
+            .clone()
     }
 
     /// Returns a future that resolves when a reorg is detected.

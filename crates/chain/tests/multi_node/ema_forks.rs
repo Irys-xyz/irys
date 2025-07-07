@@ -1,9 +1,16 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{
-    storage_pricing::Amount, NodeConfig, OracleConfig,
-};
+use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 
+// Test verifies that EMA (Exponential Moving Average) price snapshots diverge correctly across chain forks.
+// Setup:
+//  - Create two nodes with different mock oracle configurations.
+//  - Both nodes have a common tree.
+//  - Both nodes can mine.
+//
+// Action: Both nodes mine blocks independently creating a fork, then node_2's longer chain is gossiped.
+// Assert: EMA snapshots differ after the price adjustment interval during the fork.
+// Assert: After convergence, both nodes have identical chains with matching EMA snapshots.
 #[test_log::test(actix_web::test)]
 async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
     // setup
@@ -37,8 +44,8 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
         .testnet_peer_with_assignments_and_name(peer_config, "PEER")
         .await;
 
-    let common_height = node_1.get_max_difficulty_block().await;
-    assert_eq!(common_height, node_2.get_max_difficulty_block().await);
+    let common_height = node_1.get_max_difficulty_block();
+    assert_eq!(common_height, node_2.get_max_difficulty_block());
     const BLOCKS_TO_MINE_NODE_1: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 3;
     const BLOCKS_TO_MINE_NODE_2: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 5;
     // Mine blocks in parallel on both nodes to create fork
@@ -116,7 +123,7 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
     let last_mined_height = fork_height + BLOCKS_TO_MINE_NODE_1 as u64;
     let expected_blocks_with_ema_diff = (last_mined_height - min_height_for_ema_diff + 1) as usize;
 
-    assert!(blocks_with_ema_diff.len() > 0);
+    assert!(!blocks_with_ema_diff.is_empty());
     assert_eq!(
         blocks_with_ema_diff.len(),
         expected_blocks_with_ema_diff,
@@ -134,7 +141,7 @@ async fn heavy_ema_states_valid_across_forks() -> eyre::Result<()> {
     node_1.gossip_enable();
 
     // converge to the longest chain
-    let tip_block = node_2.get_max_difficulty_block().await;
+    let tip_block = node_2.get_max_difficulty_block();
     assert_eq!(
         tip_block.height,
         common_height.height + BLOCKS_TO_MINE_NODE_2 as u64

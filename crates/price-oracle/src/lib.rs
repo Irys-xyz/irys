@@ -35,8 +35,7 @@ impl IrysPriceOracle {
 
 /// Self-contained module for the `MockOracle` implementation
 pub mod mock_oracle {
-    use irys_types::storage_pricing::phantoms::Percentage;
-    use rust_decimal_macros::dec;
+
     use std::sync::Mutex;
 
     use super::*;
