@@ -13,7 +13,6 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 use k256::ecdsa::SigningKey;
 use reth::{
-    network::{PeerInfo, Peers as _},
     primitives::{Receipt, Transaction},
     rpc::{
         api::EthApiClient,
@@ -496,18 +495,9 @@ async fn heavy_mempool_fork_recovery_test() -> eyre::Result<()> {
     assert_ne!(peer2_recipient1_balance, expected_recipient1_balance);
 
     // reconnect the peers
-
-    let reconnect_all = async |ctx: &IrysRethNodeAdapter, peers: &Vec<PeerInfo>| {
-        for peer in peers {
-            ctx.inner
-                .network
-                .connect_peer(peer.remote_id, peer.remote_addr);
-        }
-    };
-
-    reconnect_all(&genesis_reth_context, &genesis_peers).await;
-    reconnect_all(&peer1_reth_context, &peer1_peers).await;
-    reconnect_all(&peer2_reth_context, &peer2_peers).await;
+    genesis.reconnect_all_reth_peers(&genesis_peers);
+    peer1.reconnect_all_reth_peers(&peer1_peers);
+    peer2.reconnect_all_reth_peers(&peer2_peers);
 
     // try to insert a storage tx that is only valid on peer2's fork
     // then try to fetch best txs from peer2 once it reorgs to peer1's fork
