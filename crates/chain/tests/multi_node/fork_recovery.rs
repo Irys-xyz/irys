@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::utils::IrysNodeTest;
 use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
@@ -913,13 +915,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             height: u64,
             ledger: DataLedger,
         ) -> eyre::Result<Vec<H256>> {
-            let txs_map = node
+            let txs_map: HashSet<H256> = node
                 .get_block_by_height(height)
                 .await?
                 .get_data_ledger_tx_ids()
                 .get(&ledger)
                 .cloned()
-                .unwrap_or_default(); // HashSet<H256>
+                .unwrap_or_default();
 
             let mut txs: Vec<H256> = txs_map.into_iter().collect();
             txs.sort();
