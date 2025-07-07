@@ -193,18 +193,3 @@ pub async fn get_tx_local_start_offset(
         }
     }
 }
-
-// TODO: REMOVE ME ONCE WE HAVE A GATEWAY
-/// Returns whether or not a transaction has been promoted
-/// by checking if the ingress_proofs field of the tx's header is `Some`,
-///  which only occurs when it's been promoted.
-pub async fn get_tx_is_promoted(
-    state: web::Data<ApiState>,
-    path: web::Path<H256>,
-) -> Result<Json<bool>, ApiError> {
-    let tx_id: H256 = path.into_inner();
-    info!("Get tx_is_promoted by tx_id: {}", tx_id);
-    let tx_header = get_storage_transaction(&state, tx_id)?;
-
-    Ok(web::Json(tx_header.ingress_proofs.is_some()))
-}
