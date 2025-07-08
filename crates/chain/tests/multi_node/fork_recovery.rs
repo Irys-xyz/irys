@@ -662,7 +662,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
-    // test data
+    // create test data
     let data = vec![0_u8; genesis_config.consensus.get_mut().chunk_size as usize];
 
     // signers
