@@ -6,22 +6,7 @@ use actix_web::{
 };
 use irys_actors::block_tree_service::get_canonical_chain;
 use irys_p2p::PeerList as _;
-use irys_types::H256;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NodeInfo {
-    pub version: String,
-    pub peer_count: usize,
-    pub chain_id: u64,
-    pub height: u64,
-    pub block_hash: H256,
-    pub block_index_height: u64,
-    pub blocks: u64,
-    pub is_syncing: bool,
-    current_sync_height: usize,
-}
+use irys_types::NodeInfo;
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
     let block_index_height = state.block_index.read().latest_height();

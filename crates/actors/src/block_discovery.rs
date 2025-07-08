@@ -90,7 +90,7 @@ pub enum BlockDiscoveryInternalError {
 
 #[async_trait::async_trait]
 pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
-    async fn handle_block(&self, block: IrysBlockHeader) -> Result<(), BlockDiscoveryError>;
+    async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError>;
 }
 
 #[derive(Debug, Clone)]
@@ -106,9 +106,9 @@ impl BlockDiscoveryFacadeImpl {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
-    async fn handle_block(&self, block: IrysBlockHeader) -> Result<(), BlockDiscoveryError> {
+    async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError> {
         self.addr
-            .send(BlockDiscoveredMessage(Arc::new(block)))
+            .send(BlockDiscoveredMessage(block))
             .await
             .map_err(BlockDiscoveryInternalError::MailboxError)?
     }
@@ -565,9 +565,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         "sending block to bus: block height {:?}",
                         &new_block_header.height
                     );
-                    if let Err(error) = gossip_sender.send(GossipBroadcastMessage::from(
-                        new_block_header.as_ref().clone(),
-                    )) {
+                    if let Err(error) =
+                        gossip_sender.send(GossipBroadcastMessage::from(new_block_header))
+                    {
                         tracing::error!("Failed to send gossip message: {}", error);
                     }
 
