@@ -807,11 +807,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     //
     // Stage 3: DISABLE ANY/ALL GOSSIP
     //
-    {
-        node_a.gossip_disable();
-        node_b.gossip_disable();
-        node_c.gossip_disable();
-    }
+    node_a.gossip_disable();
+    node_b.gossip_disable();
+    node_c.gossip_disable();
 
     //
     // Stage 4: GENERATE ISOLATED txs
