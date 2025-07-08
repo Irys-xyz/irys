@@ -570,6 +570,14 @@ impl BlockTreeServiceInner {
             );
         }
 
+        // Drop the cache lock before pruning
+        drop(cache);
+
+        // Prune the cache after adding a new block
+        if add_result.is_ok() {
+            self.prune_cache();
+        }
+
         Ok(())
     }
 
@@ -809,6 +817,9 @@ impl BlockTreeServiceInner {
             mark_tip_result
         }; // RwLockWriteGuard is dropped here, before the await
 
+        // Prune the cache after tip changes
+        self.prune_cache();
+
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
             // Send the epoch events
@@ -918,6 +929,15 @@ impl BlockTreeServiceInner {
         }
 
         Ok(received)
+    }
+
+    /// Prunes the block tree cache to maintain the configured depth.
+    /// This removes blocks that are older than `block_tree_depth` from the tip.
+    fn prune_cache(&mut self) {
+        let depth = self.config.consensus.block_tree_depth;
+        let mut cache = self.cache.write().unwrap();
+
+        cache.prune(depth)
     }
 }
 
@@ -1356,6 +1376,9 @@ impl BlockTreeCache {
                 finalized_hash: None,
             })
             .expect("could not send message to `RethServiceActor`");
+
+        // Prune the cache after restoration to ensure correct depth
+        block_tree_cache.prune(consensus_config.block_tree_depth);
 
         block_tree_cache
     }
@@ -2048,22 +2071,22 @@ impl BlockTreeCache {
 
     /// Prunes blocks below specified depth from tip. When pruning an on-chain block,
     /// removes all its non-on-chain children regardless of their height.
-    pub fn prune(&mut self, depth: u64) -> eyre::Result<()> {
+    pub fn prune(&mut self, depth: u64) {
         if self.blocks.is_empty() {
-            return Ok(());
+            return;
         }
 
         let tip_height = self
             .blocks
             .get(&self.tip)
-            .ok_or_else(|| eyre::eyre!("Tip block not found"))?
+            .expect("Tip block not found")
             .block
             .height;
         let min_keep_height = tip_height.saturating_sub(depth);
 
         let min_height = match self.height_index.keys().min() {
             Some(&h) => h,
-            None => return Ok(()),
+            None => return,
         };
 
         let mut current_height = min_height;
@@ -2084,21 +2107,23 @@ impl BlockTreeCache {
                         for child in children {
                             if let Some(child_entry) = self.blocks.get(&child) {
                                 if !matches!(child_entry.chain_state, ChainState::Onchain) {
-                                    self.remove_block(&child)?;
+                                    let _ = self
+                                        .remove_block(&child)
+                                        .inspect_err(|err| tracing::error!(?err));
                                 }
                             }
                         }
 
                         // Now remove just this block
-                        self.delete_block(&hash)?;
+                        let _ = self
+                            .delete_block(&hash)
+                            .inspect_err(|err| tracing::error!(?err));
                     }
                 }
             }
 
             current_height += 1;
         }
-
-        Ok(())
     }
 
     /// Returns true if solution hash exists in cache
@@ -2605,7 +2630,7 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(()));
 
         // Prune to a depth of 1 behind the tip
-        assert_matches!(cache.prune(1), Ok(()));
+        cache.prune(1);
         assert_eq!(Some(&b1), cache.get_block(&b1.block_hash));
         assert_eq!(
             cache
@@ -2622,7 +2647,7 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(()));
 
         // Prune at the tip, removing all ancestors (verify b1 is pruned)
-        assert_matches!(cache.prune(0), Ok(()));
+        cache.prune(0);
         assert_eq!(None, cache.get_block(&b1.block_hash));
         assert_eq!(
             None,
@@ -2636,7 +2661,7 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2], 0, &cache), Ok(()));
 
         // Again, this time to make sure b1_2 is really gone
-        assert_matches!(cache.prune(0), Ok(()));
+        cache.prune(0);
         assert_eq!(None, cache.get_block(&b1_2.block_hash));
         assert_eq!(
             None,
@@ -2820,7 +2845,7 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(()));
 
         // Prune to a depth of 1 past the tip and verify b1 and the b1_2 branch are pruned
-        assert_matches!(cache.prune(1), Ok(()));
+        cache.prune(1);
         assert_eq!(None, cache.get_block(&b1.block_hash));
         assert_eq!(
             None,
@@ -2835,7 +2860,7 @@ mod tests {
 
         // Mark a new tip for the longest chain, validating b2_3, and pruning again
         assert_matches!(cache.mark_tip(&b2_3.block_hash), Ok(_));
-        assert_matches!(cache.prune(1), Ok(()));
+        cache.prune(1);
         assert_eq!(None, cache.get_block(&b2.block_hash));
         assert_eq!(
             None,
@@ -2849,7 +2874,7 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
         // Also make sure b3 (the old tip) got pruned
-        assert_matches!(cache.prune(1), Ok(()));
+        cache.prune(1);
         assert_eq!(None, cache.get_block(&b3.block_hash));
         assert_eq!(
             None,
@@ -2863,7 +2888,7 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
         // and that the not yet validated b4 was also pruned
-        assert_matches!(cache.prune(1), Ok(()));
+        cache.prune(1);
         assert_eq!(None, cache.get_block(&b4.block_hash));
         assert_eq!(
             None,
@@ -2877,7 +2902,7 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
         // Now make sure b2_2 and b2_3 are still in the cache/state
-        assert_matches!(cache.prune(1), Ok(()));
+        cache.prune(1);
         assert_eq!(Some(&b2_2), cache.get_block(&b2_2.block_hash));
         assert_eq!(
             cache
@@ -2893,7 +2918,7 @@ mod tests {
         );
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
-        assert_matches!(cache.prune(1), Ok(()));
+        cache.prune(1);
         assert_eq!(Some(&b2_3), cache.get_block(&b2_3.block_hash));
         assert_eq!(
             cache
