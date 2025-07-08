@@ -699,7 +699,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
             drop(ro_tx);
             if mine_blocks {
-              self.mine_block().await?;
+                self.mine_block().await?;
             }
             sleep(Duration::from_secs(1)).await;
         }
