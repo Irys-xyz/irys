@@ -59,7 +59,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
-use tracing::{debug, debug_span, error, info};
+use tracing::{debug, debug_span, error, info, instrument};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
@@ -636,8 +636,29 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// wait for data tx to be in mempool and it's IngressProofs to be in database
     pub async fn wait_for_ingress_proofs(
         &self,
+        unconfirmed_promotions: Vec<H256>,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true)
+            .await
+    }
+
+    /// wait for data tx to be in mempool and it's IngressProofs to be in database. does this without mining new blocks.
+    pub async fn wait_for_ingress_proofs_no_mining(
+        &self,
+        unconfirmed_promotions: Vec<H256>,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false)
+            .await
+    }
+
+    /// wait for data tx to be in mempool and it's IngressProofs to be in database
+    async fn wait_for_ingress_proofs_inner(
+        &self,
         mut unconfirmed_promotions: Vec<H256>,
         seconds: usize,
+        mine_blocks: bool,
     ) -> eyre::Result<()> {
         tracing::info!(
             "waiting up to {} seconds for unconfirmed_promotions: {:?}",
@@ -677,7 +698,9 @@ impl IrysNodeTest<IrysNodeCtx> {
                 };
             }
             drop(ro_tx);
-            self.mine_block().await?;
+            if mine_blocks {
+              self.mine_block().await?;
+            }
             sleep(Duration::from_secs(1)).await;
         }
 
@@ -731,6 +754,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// peer.mine_competing_block().await?;
     /// let reorg = reorg_future.await?;
     /// ```
+    #[instrument(skip_all, err)]
     pub fn wait_for_reorg(
         &self,
         seconds_to_wait: usize,
@@ -1311,6 +1335,33 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         debug!("chunk_index: {:?}", chunk_index);
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    pub async fn upload_chunks(&self, tx: &IrysTransaction) -> eyre::Result<()> {
+        let data = tx.data.clone().unwrap().0;
+
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/chunk", api_uri);
+
+        for (idx, chunk) in tx.chunks.iter().enumerate() {
+            let unpacked_chunk = UnpackedChunk {
+                data_root: tx.header.data_root,
+                data_size: tx.header.data_size,
+                data_path: Base64(tx.proofs[idx].proof.clone()),
+                bytes: Base64(data[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
+                tx_offset: TxChunkOffset::from(idx as u32),
+            };
+            let response = client
+                .post(&url)
+                .send_json(&unpacked_chunk) // Send the tx as JSON in the request body
+                .await
+                .expect("client post failed");
+
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        Ok(())
     }
 
     pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {
