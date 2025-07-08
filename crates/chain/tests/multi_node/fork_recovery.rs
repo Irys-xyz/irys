@@ -821,10 +821,16 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let peer_b_b2_submit_tx = node_b
         .post_data_tx(b_block1.block_hash, data.clone(), &b_signer)
         .await;
+    node_b
+        .post_chunk_32b(&peer_b_b2_submit_tx, 0, &data_chunks)
+        .await;
 
     // node_c generates txs in isolation for inclusion block 2
     let peer_c_b2_submit_tx = node_c
         .post_data_tx(c_block1.block_hash, data, &c_signer)
+        .await;
+    node_c
+        .post_chunk_32b(&peer_c_b2_submit_tx, 0, &data_chunks)
         .await;
 
     //
