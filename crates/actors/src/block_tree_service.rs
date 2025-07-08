@@ -937,7 +937,10 @@ impl BlockTreeServiceInner {
         let depth = self.config.consensus.block_tree_depth;
         let mut cache = self.cache.write().unwrap();
 
-        cache.prune(depth)
+        // Subtract 1 to ensure we keep exactly `depth` blocks.
+        // The cache.prune() implementation does not count `tip` into the depth
+        // equation, so it's always tip + `depth` that's kept around
+        cache.prune(depth.saturating_sub(1))
     }
 }
 
@@ -1378,7 +1381,10 @@ impl BlockTreeCache {
             .expect("could not send message to `RethServiceActor`");
 
         // Prune the cache after restoration to ensure correct depth
-        block_tree_cache.prune(consensus_config.block_tree_depth);
+        // Subtract 1 to ensure we keep exactly `depth` blocks.
+        // The cache.prune() implementation does not count `tip` into the depth
+        // equation, so it's always tip + `depth` that's kept around
+        block_tree_cache.prune(consensus_config.block_tree_depth.saturating_sub(1));
 
         block_tree_cache
     }
@@ -2072,10 +2078,6 @@ impl BlockTreeCache {
     /// Prunes blocks below specified depth from tip. When pruning an on-chain block,
     /// removes all its non-on-chain children regardless of their height.
     pub fn prune(&mut self, depth: u64) {
-        if self.blocks.is_empty() {
-            return;
-        }
-
         let tip_height = self
             .blocks
             .get(&self.tip)
