@@ -810,6 +810,49 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         a_block2.data_ledgers[DataLedger::Publish].tx_ids
     );
 
+    // check balances in block a2
+    assert_eq!(
+        node_a.get_balance(b_signer.address(), a_block2.evm_block_hash.into()),
+        U256::from(690000000000000000_u64),
+        "Address: {:?}",
+        b_signer.address()
+    );
+    assert_eq!(
+        node_a.get_balance(c_signer.address(), a_block2.evm_block_hash.into()),
+        U256::from(690000000000000000_u64),
+        "Address: {:?}",
+        c_signer.address()
+    );
+
+    // check balances in block b2
+    assert_eq!(
+        node_b.get_balance(b_signer.address(), b_block2.evm_block_hash.into()),
+        U256::from(689999999999999998_u64),
+        "Address: {:?}",
+        b_signer.address()
+    );
+    assert_eq!(
+        node_b.get_balance(c_signer.address(), b_block2.evm_block_hash.into()),
+        U256::from(690108687900000000_u64),
+        //         690108688400000000
+        "Address: {:?}",
+        c_signer.address()
+    );
+
+    // check balances in block b3
+    assert_eq!(
+        node_b.get_balance(b_signer.address(), b_block3.evm_block_hash.into()),
+        U256::from(690000000000000000_u64),
+        "Address: {:?}",
+        b_signer.address()
+    );
+    assert_eq!(
+        node_b.get_balance(c_signer.address(), b_block3.evm_block_hash.into()),
+        U256::from(690000000000000000_u64),
+        "Address: {:?}",
+        c_signer.address()
+    );
+
     // NODE B -> Node C
     // post commitment txs and then the blocks to node c
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
