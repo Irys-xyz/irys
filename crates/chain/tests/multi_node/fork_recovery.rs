@@ -856,28 +856,30 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // check balances in block a2
     assert_eq!(
         node_a.get_balance(b_signer.address(), a_block2.evm_block_hash.into()),
-        U256::from(690000000000000000_u64),
+        signer_b_genesis_balance,
         "Address: {:?}",
         b_signer.address()
     );
     assert_eq!(
         node_a.get_balance(c_signer.address(), a_block2.evm_block_hash.into()),
-        U256::from(690000000000000000_u64),
+        signer_c_genesis_balance,
         "Address: {:?}",
         c_signer.address()
     );
 
     // check balances in block b2
+    // tx fee is 1, and there should be two txs that we got into block b2 ∴ subtract 2 in the assert
+    // including the block reward is required for a valid assertion.
+    // The block reward varies with time and therefore is not constant
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash.into()),
-        U256::from(689999999999999998_u64),
+        signer_b_genesis_balance + b_block2.reward_amount - U256::from(2_u128),
         "Address: {:?}",
         b_signer.address()
     );
     assert_eq!(
         node_b.get_balance(c_signer.address(), b_block2.evm_block_hash.into()),
-        U256::from(690108687900000000_u64),
-        //         690108688400000000
+        signer_c_genesis_balance,
         "Address: {:?}",
         c_signer.address()
     );
@@ -885,13 +887,14 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // check balances in block b3
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block3.evm_block_hash.into()),
-        U256::from(690000000000000000_u64),
+        signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
+            - U256::from(2_u128),
         "Address: {:?}",
         b_signer.address()
     );
     assert_eq!(
         node_b.get_balance(c_signer.address(), b_block3.evm_block_hash.into()),
-        U256::from(690000000000000000_u64),
+        signer_c_genesis_balance,
         "Address: {:?}",
         c_signer.address()
     );
@@ -1111,22 +1114,23 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             peer_c_submit_txs
         );
 
-        // assert balances
+        // assert final balances
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block1.evm_block_hash.into()),
-            U256::from(690000000000000000_u64)
+            signer_b_genesis_balance,
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block1.evm_block_hash.into()),
-            U256::from(690000000000000000_u64)
+            signer_c_genesis_balance,
         );
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash.into()),
-            U256::from(690108725499999998_u64)
+            signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
+                - U256::from(2_u128),
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block4.evm_block_hash.into()),
-            U256::from(690108725499999998_u64)
+            signer_c_genesis_balance + c_block4.reward_amount - U256::from(2_u128),
         );
     }
 
