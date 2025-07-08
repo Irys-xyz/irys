@@ -12,8 +12,8 @@ use irys_reth_node_bridge::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, IngressProofsList, IrysTransaction,
-    NodeConfig, TxIngressProof, H256,
+    irys::IrysSigner, CommitmentTransaction, DataLedger, IngressProofsList, IrysBlockHeader,
+    IrysTransaction, NodeConfig, TxIngressProof, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -27,7 +27,7 @@ use reth::{
 };
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
 use tracing::debug;
 
@@ -396,8 +396,14 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // Validate the peer blocks create forks with different transactions
-    let peer1_block = peer1_node.get_block_by_height(expected_height).await?;
-    let peer2_block = peer2_node.get_block_by_height(expected_height).await?;
+    let peer1_block: Arc<IrysBlockHeader> = peer1_node
+        .get_block_by_height(expected_height)
+        .await?
+        .into();
+    let peer2_block: Arc<IrysBlockHeader> = peer2_node
+        .get_block_by_height(expected_height)
+        .await?
+        .into();
 
     let peer1_block_txids = &peer1_block.data_ledgers[DataLedger::Submit].tx_ids.0;
     assert!(
@@ -704,7 +710,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     }
 
     // check peer heights match a - i.e. that we are all in sync
-    network_height = a_node.get_height().await;
+    network_height = a_node.get_canonical_chain_height().await;
 
     b_node
         .wait_until_height(network_height, seconds_to_wait)
@@ -1101,7 +1107,7 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     }
 
     // check peer heights match a - i.e. that we are all in sync
-    network_height = a_node.get_height().await;
+    network_height = a_node.get_canonical_chain_height().await;
 
     b_node
         .wait_until_height(network_height, seconds_to_wait)
