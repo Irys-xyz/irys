@@ -744,6 +744,16 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         a_block1.data_ledgers[DataLedger::Submit].tx_ids
     );
 
+    // check balances in block 1
+    assert_eq!(
+        node_a.get_balance(b_signer.address(), a_block1.evm_block_hash.into()),
+        U256::from(690000000000000000_u64)
+    );
+    assert_eq!(
+        node_a.get_balance(c_signer.address(), a_block1.evm_block_hash.into()),
+        U256::from(690000000000000000_u64)
+    );
+
     //
     // Stage 3: DISABLE ANY/ALL GOSSIP
     //
