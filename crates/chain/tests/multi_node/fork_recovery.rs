@@ -701,6 +701,19 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         .wait_until_height(current_height, seconds_to_wait)
         .await?;
 
+    // get genesis block
+    let genesis_block = node_a.get_block_by_height(0).await?;
+
+    // check balances match genesis account balances
+    assert_eq!(
+        node_a.get_balance(b_signer.address(), genesis_block.evm_block_hash.into()),
+        U256::from(690000000000000000_u64)
+    );
+    assert_eq!(
+        node_a.get_balance(c_signer.address(), genesis_block.evm_block_hash.into()),
+        U256::from(690000000000000000_u64)
+    );
+
     //
     // Stage 2: MINE BLOCK
     //
