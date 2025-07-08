@@ -3,6 +3,7 @@ use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, IrysTransaction, NodeConfig, H256};
+use std::sync::Arc;
 use tracing::debug;
 
 #[actix_web::test]
@@ -178,6 +179,9 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // that the peers prefer the first block they saw with this cumulative difficulty,
     // their own.
     assert_eq!(peer1_block.cumulative_diff, peer2_block.cumulative_diff);
+
+    let peer2_block = Arc::new(peer2_block);
+    let peer1_block = Arc::new(peer1_block);
 
     peer2_node.gossip_block(&peer2_block)?;
     peer1_node.gossip_block(&peer1_block)?;
@@ -381,7 +385,7 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
     //
 
     // check peer heights match genesis - i.e. that we are all in sync
-    let current_height = node_a.get_height().await;
+    let current_height = node_a.get_canonical_chain_height().await;
     assert_eq!(current_height, 0);
     node_b
         .wait_until_height(current_height, seconds_to_wait)
@@ -551,9 +555,9 @@ async fn heavy_reorg_tip_moves_across_nodes() -> eyre::Result<()> {
             .await?;
 
         // confirm chain has identical and expected height on all three nodes
-        let a_latest_height = node_a.get_height().await;
-        let b_latest_height = node_b.get_height().await;
-        let c_latest_height = node_c.get_height().await;
+        let a_latest_height = node_a.get_canonical_chain_height().await;
+        let b_latest_height = node_b.get_canonical_chain_height().await;
+        let c_latest_height = node_c.get_canonical_chain_height().await;
         assert_eq!(a_latest_height, c_block4.height);
         assert_eq!(a_latest_height, b_latest_height);
         assert_eq!(a_latest_height, c_latest_height);

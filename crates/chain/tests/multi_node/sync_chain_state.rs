@@ -1,6 +1,5 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
-use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{
     peer_utilities::{
         block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
@@ -9,8 +8,8 @@ use irys_chain::{
 };
 use irys_database::block_header_by_hash;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, PeerAddress,
-    H256,
+    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, NodeInfo,
+    NodeMode, PeerAddress, H256,
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
@@ -221,7 +220,8 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await;
     ctx_peer1_node.start_public_api().await;
 
-    let ctx_peer2_node = ctx_genesis_node.testnet_peer();
+    let mut ctx_peer2_node = ctx_genesis_node.testnet_peer();
+    ctx_peer2_node.mode = NodeMode::TrustedPeerSync;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
         .await;
@@ -371,7 +371,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
                 .await?;
         }
 
-        let genesis_index_height = ctx_genesis_node.get_height_on_chain();
+        let genesis_index_height = ctx_genesis_node.get_block_index_height();
         // mine block on genesis
         ctx_genesis_node
             .mine_blocks(1)
@@ -419,7 +419,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     //
     {
         let additional_blocks_for_gossip_test: usize = 2;
-        let genesis_starting_index_height = ctx_genesis_node.get_height_on_chain();
+        let genesis_starting_index_height = ctx_genesis_node.get_block_index_height();
         mine_blocks(
             &ctx_genesis_node.node_ctx,
             additional_blocks_for_gossip_test,
