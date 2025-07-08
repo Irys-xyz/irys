@@ -1,13 +1,14 @@
 use irys_actors::block_index_service::BlockIndexReadGuard;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_types::{BlockHash, H256};
+use irys_types::{BlockHash, BlockIndexItem, H256};
+use tracing::debug;
 #[cfg(test)]
 use {
     irys_actors::block_tree_service::BlockTreeCache,
     irys_database::BlockIndex,
-    irys_types::{BlockIndexItem, IrysBlockHeader, NodeConfig},
+    irys_types::{IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
-    tracing::{debug, warn},
+    tracing::warn,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -97,6 +98,67 @@ impl BlockStatusProvider {
             // No information about the block in the index or tree
             BlockStatus::NotProcessed
         }
+    }
+
+    pub async fn wait_for_block_to_appear_in_index(&self, block_height: u64) {
+        const ATTEMPTS_PER_SECOND: u64 = 5;
+
+        loop {
+            {
+                let binding = self.block_index_read_guard.read();
+                let index_item = binding.get_item(block_height);
+                if index_item.is_some() {
+                    return;
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                1000 / ATTEMPTS_PER_SECOND,
+            ))
+            .await;
+        }
+    }
+
+    pub async fn wait_for_block_tree_to_catch_up(&self, block_height: u64) {
+        const ATTEMPTS_PER_SECOND: u64 = 5;
+        let mut attempts = 0;
+
+        loop {
+            attempts += 1;
+
+            if attempts % ATTEMPTS_PER_SECOND == 0 {
+                debug!(
+                    "Block tree did not catch up to height {} after {} seconds, waiting...",
+                    block_height,
+                    attempts / ATTEMPTS_PER_SECOND
+                );
+            }
+
+            let can_process_height = {
+                let binding = self.block_tree_read_guard.read();
+                binding.can_process_height(block_height)
+            };
+
+            if can_process_height {
+                return;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                1000 / ATTEMPTS_PER_SECOND,
+            ))
+            .await;
+        }
+    }
+
+    pub fn is_height_in_the_index(&self, block_height: u64) -> bool {
+        let binding = self.block_index_read_guard.read();
+        let index_item = binding.get_item(block_height);
+        index_item.is_some()
+    }
+
+    pub fn latest_block_in_index(&self) -> Option<BlockIndexItem> {
+        let binding = self.block_index_read_guard.read();
+        binding.get_latest_item().cloned()
     }
 }
 

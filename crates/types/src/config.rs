@@ -239,6 +239,9 @@ pub enum NodeMode {
 
     /// Join an existing network by connecting to trusted peers
     PeerSync,
+
+    /// Trusted peer mode, where the node only connects to trusted peers
+    TrustedPeerSync,
 }
 
 /// # Consensus Configuration Source

@@ -1,6 +1,7 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::*;
 use irys_types::{NodeConfig, H256};
+use std::sync::Arc;
 use tracing::debug;
 
 #[actix_web::test]
@@ -136,7 +137,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
 
     // Validate that the genesis node reorgs the epoch/commitment state correctly
     genesis_node.gossip_block(&peer2_epoch)?;
-    genesis_node.gossip_block(&peer2_head)?;
+    genesis_node.gossip_block(&Arc::new(peer2_head.clone()))?;
 
     let genesis_hash = genesis_node.wait_until_height(5, seconds_to_wait).await?;
     let _genesis_head = genesis_node.get_block_by_hash(&genesis_hash)?;
