@@ -698,8 +698,8 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         .await;
 
     // additional configs for peers
-    let config_b = node_a.testnet_peer_with_signer(&c_signer);
-    let config_c = node_a.testnet_peer_with_signer(&b_signer);
+    let config_b = node_a.testnet_peer_with_signer(&b_signer);
+    let config_c = node_a.testnet_peer_with_signer(&c_signer);
 
     // start peer nodes
     let node_b = IrysNodeTest::new(config_b)
