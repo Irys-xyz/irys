@@ -670,6 +670,28 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let c_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
 
+    // starting balances from config
+    let signer_b_genesis_balance: U256 = genesis_config
+        .consensus
+        .get_mut()
+        .reth
+        .genesis
+        .alloc
+        .get(&b_signer.address())
+        .expect("Expected signer b to have genesis entry")
+        .balance
+        .into();
+    let signer_c_genesis_balance: U256 = genesis_config
+        .consensus
+        .get_mut()
+        .reth
+        .genesis
+        .alloc
+        .get(&c_signer.address())
+        .expect("Expected signer c to have genesis entry")
+        .balance
+        .into();
+
     // genesis node / node_a
     let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("NODE_A", seconds_to_wait)
@@ -707,11 +729,11 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // check balances match genesis account balances
     assert_eq!(
         node_a.get_balance(b_signer.address(), genesis_block.evm_block_hash.into()),
-        U256::from(690000000000000000_u64)
+        signer_b_genesis_balance
     );
     assert_eq!(
         node_a.get_balance(c_signer.address(), genesis_block.evm_block_hash.into()),
-        U256::from(690000000000000000_u64)
+        signer_c_genesis_balance
     );
 
     //
@@ -747,11 +769,11 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // check balances in block 1
     assert_eq!(
         node_a.get_balance(b_signer.address(), a_block1.evm_block_hash.into()),
-        U256::from(690000000000000000_u64)
+        signer_b_genesis_balance
     );
     assert_eq!(
         node_a.get_balance(c_signer.address(), a_block1.evm_block_hash.into()),
-        U256::from(690000000000000000_u64)
+        signer_c_genesis_balance
     );
 
     //
