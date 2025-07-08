@@ -821,17 +821,19 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let peer_b_b2_submit_tx = node_b
         .post_data_tx(b_block1.block_hash, data.clone(), &b_signer)
         .await;
-    node_b
-        .post_chunk_32b(&peer_b_b2_submit_tx, 0, &data_chunks)
-        .await;
 
     // node_c generates txs in isolation for inclusion block 2
     let peer_c_b2_submit_tx = node_c
         .post_data_tx(c_block1.block_hash, data, &c_signer)
         .await;
+
+    // wait for txs to be in mempools
+    node_b
+        .wait_for_mempool(peer_b_b2_submit_tx.header.id, seconds_to_wait)
+        .await?;
     node_c
-        .post_chunk_32b(&peer_c_b2_submit_tx, 0, &data_chunks)
-        .await;
+        .wait_for_mempool(peer_c_b2_submit_tx.header.id, seconds_to_wait)
+        .await?;
 
     //
     // Stage 5: MINE FORK A and B TO HEIGHT 2 and 3
@@ -840,6 +842,16 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+
+    // post chunks so txs go from submit ledger to publish ledger in block 3
+    node_b
+        .post_chunk_32b(&peer_b_b2_submit_tx, 0, &data_chunks)
+        .await;
+    node_c
+        .post_chunk_32b(&peer_c_b2_submit_tx, 0, &data_chunks)
+        .await;
+
+    // Mine the heightest block on any node so far, on Node B
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
 
     // check how many txs made it into each block, we expect no more than 1
