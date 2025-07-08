@@ -1064,39 +1064,39 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         // check correct txs made it into specific canon blocks, that are now synced across every node
         for node in [&node_a, &node_b, &node_c] {
             assert_eq!(
-                sorted_data_txs_at(&node, 1, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, 1, DataLedger::Submit).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(&node, 1, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, 1, DataLedger::Publish).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(&node, 2, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, 2, DataLedger::Submit).await?,
                 peer_b_submit_txs
             );
             assert_eq!(
-                sorted_data_txs_at(&node, 2, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, 2, DataLedger::Publish).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(&node, 3, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, 3, DataLedger::Submit).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(&node, 3, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, 3, DataLedger::Publish).await?,
                 peer_b_submit_txs // promoted from previous block
             );
             // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
             // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as eligible txs
             // To reiterate. These were previously mined in non canon block C2. They were then mined again in canon block C4
             assert_eq!(
-                sorted_data_txs_at(&node, 4, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, 4, DataLedger::Submit).await?,
                 peer_c_submit_txs
             );
 
             assert_eq!(
-                sorted_data_txs_at(&node, 4, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, 4, DataLedger::Publish).await?,
                 vec![]
             );
         }
