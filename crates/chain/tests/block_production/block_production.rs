@@ -1170,7 +1170,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
 }
 
 // Setup: Configure a node with block_tree_depth=3 to test pruning behavior
-// Action: Mine 10 blocks, checking after block 5 that old blocks are being pruned
+// Action: Mine 10 blocks, checking that blocks get pruned while mining.
 // Assert: Verify blocks 1-7 are pruned and blocks 8, 9, 10 still exist in the tree
 #[test_log::test(tokio::test)]
 async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
