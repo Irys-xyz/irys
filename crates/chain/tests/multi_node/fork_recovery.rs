@@ -646,9 +646,9 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 ///   We need to verify that
 ///    - publish txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
 ///    - publish txs do not appear twice, or are missing from canonical chain
-///    - all canonical blocks move to all peers
-///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
-///    - TODO: new balance changes are applied based on the new canonical branch
+///    - tests all canonical blocks move to all peers
+///    - tests all the balance changes that were applied in one fork are reverted during the Reorg
+///    - tests new balance changes are applied based on the new canonical branch
 #[test_log::test(actix_web::test)]
 async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     initialize_tracing();
