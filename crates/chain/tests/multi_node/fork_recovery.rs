@@ -792,6 +792,11 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         signer_c_genesis_balance
     );
 
+    // check block 1 mining reward is not 0
+    assert_ne!(a_block1.reward_amount, U256::from(0_u128));
+    assert_ne!(b_block1.reward_amount, U256::from(0_u128));
+    assert_ne!(c_block1.reward_amount, U256::from(0_u128));
+
     //
     // Stage 3: DISABLE ANY/ALL GOSSIP
     //
