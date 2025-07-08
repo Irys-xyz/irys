@@ -1103,7 +1103,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             );
         }
 
-        // assert final balances
+        // re-assert start balances
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block1.evm_block_hash),
             signer_b_genesis_balance,
@@ -1112,6 +1112,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             node_a.get_balance(c_signer.address(), c_block1.evm_block_hash),
             signer_c_genesis_balance,
         );
+        // assert final balances
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),
             signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - tx_fee * 2,
