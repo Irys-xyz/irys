@@ -817,9 +817,6 @@ impl BlockTreeServiceInner {
             mark_tip_result
         }; // RwLockWriteGuard is dropped here, before the await
 
-        // Prune the cache after tip changes
-        self.prune_cache();
-
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
             // Send the epoch events
@@ -828,6 +825,9 @@ impl BlockTreeServiceInner {
 
         // Now that the epoch events are sent, let the node know about the reorg
         if let Some(reorg_event) = reorg_event {
+            // Prune the cache after tip changes. Reorg happens after tip changes.
+            self.prune_cache();
+
             // Broadcast reorg event using the shared sender
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 debug!("No reorg subscribers: {:?}", e);
