@@ -660,15 +660,17 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
     let tx_fee = U256::from(1_u128); // todo: this is hard coded in various places test utils and should be corrected in future
+    const DATA_CHUNK_SIZE: usize = 32;
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
-    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().chunk_size = DATA_CHUNK_SIZE as u64;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
     // create test data
-    let data = vec![0_u8; genesis_config.consensus.get_mut().chunk_size as usize];
+    let data = vec![0_u8; DATA_CHUNK_SIZE];
+    let data_chunks = vec![[0_u8; DATA_CHUNK_SIZE]];
 
     // signers
     let b_signer = genesis_config.new_random_signer();
