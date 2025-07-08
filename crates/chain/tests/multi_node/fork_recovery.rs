@@ -655,6 +655,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
+    let tx_fee = U256::from(1_u128); // todo: this is hard coded in various places test utils and should be corrected in future
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
@@ -873,7 +874,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // The block reward varies with time and therefore is not constant
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash.into()),
-        signer_b_genesis_balance + b_block2.reward_amount - U256::from(2_u128),
+        signer_b_genesis_balance + b_block2.reward_amount - tx_fee * 2,
         "Address: {:?}",
         b_signer.address()
     );
@@ -887,8 +888,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // check balances in block b3
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block3.evm_block_hash.into()),
-        signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
-            - U256::from(2_u128),
+        signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - tx_fee * 2,
         "Address: {:?}",
         b_signer.address()
     );
@@ -1125,12 +1125,11 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         );
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash.into()),
-            signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
-                - U256::from(2_u128),
+            signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - tx_fee * 2,
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block4.evm_block_hash.into()),
-            signer_c_genesis_balance + c_block4.reward_amount - U256::from(2_u128),
+            signer_c_genesis_balance + c_block4.reward_amount - tx_fee * 2,
         );
     }
 
