@@ -570,14 +570,6 @@ impl BlockTreeServiceInner {
             );
         }
 
-        // Drop the cache lock before pruning
-        drop(cache);
-
-        // Prune the cache after adding a new block
-        if add_result.is_ok() {
-            self.prune_cache();
-        }
-
         Ok(())
     }
 
@@ -703,6 +695,13 @@ impl BlockTreeServiceInner {
 
             // Now do mutable operations
             let mark_tip_result = if cache.mark_tip(&block_hash).is_ok() {
+                // Prune the cache after tip changes.
+                //
+                // Subtract 1 to ensure we keep exactly `depth` blocks.
+                // The cache.prune() implementation does not count `tip` into the depth
+                // equation, so it's always tip + `depth` that's kept around
+                cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
+
                 if is_reorg {
                     // =====================================
                     // BLOCKCHAIN REORGANIZATION HANDLING
@@ -825,9 +824,6 @@ impl BlockTreeServiceInner {
 
         // Now that the epoch events are sent, let the node know about the reorg
         if let Some(reorg_event) = reorg_event {
-            // Prune the cache after tip changes. Reorg happens after tip changes.
-            self.prune_cache();
-
             // Broadcast reorg event using the shared sender
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 debug!("No reorg subscribers: {:?}", e);
@@ -929,18 +925,6 @@ impl BlockTreeServiceInner {
         }
 
         Ok(received)
-    }
-
-    /// Prunes the block tree cache to maintain the configured depth.
-    /// This removes blocks that are older than `block_tree_depth` from the tip.
-    fn prune_cache(&mut self) {
-        let depth = self.config.consensus.block_tree_depth;
-        let mut cache = self.cache.write().unwrap();
-
-        // Subtract 1 to ensure we keep exactly `depth` blocks.
-        // The cache.prune() implementation does not count `tip` into the depth
-        // equation, so it's always tip + `depth` that's kept around
-        cache.prune(depth.saturating_sub(1))
     }
 }
 
