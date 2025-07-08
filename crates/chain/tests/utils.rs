@@ -36,7 +36,7 @@ use irys_database::{
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_primitives::CommitmentType;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt;
+use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
