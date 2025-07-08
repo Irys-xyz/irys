@@ -766,13 +766,29 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         a_block1.data_ledgers[DataLedger::Submit].tx_ids
     );
 
-    // check balances in block 1
+    // check balances in block 1 are unchanged from genesis
     assert_eq!(
         node_a.get_balance(b_signer.address(), a_block1.evm_block_hash.into()),
         signer_b_genesis_balance
     );
     assert_eq!(
         node_a.get_balance(c_signer.address(), a_block1.evm_block_hash.into()),
+        signer_c_genesis_balance
+    );
+    assert_eq!(
+        node_b.get_balance(b_signer.address(), b_block1.evm_block_hash.into()),
+        signer_b_genesis_balance
+    );
+    assert_eq!(
+        node_b.get_balance(c_signer.address(), b_block1.evm_block_hash.into()),
+        signer_c_genesis_balance
+    );
+    assert_eq!(
+        node_c.get_balance(b_signer.address(), c_block1.evm_block_hash.into()),
+        signer_b_genesis_balance
+    );
+    assert_eq!(
+        node_c.get_balance(c_signer.address(), c_block1.evm_block_hash.into()),
         signer_c_genesis_balance
     );
 
