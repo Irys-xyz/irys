@@ -842,16 +842,26 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
 
-    // check how many txs made it into each block, we expect no more than 2
+    // check how many txs made it into each block, we expect no more than 1
     assert_eq!(
         b_block2.data_ledgers[DataLedger::Publish].tx_ids.len(),
         0,
-        "Expect 0 of the Publish txs on peer B to be in this block."
+        "Expect 0 Publish tx on peer B to be in this block."
     );
     assert_eq!(
         b_block2.data_ledgers[DataLedger::Submit].tx_ids.len(),
         1,
-        "Expect 1 Submit txs on peer B to be in this block."
+        "Expect 1 Submit txs should be in this block."
+    );
+    assert_eq!(
+        b_block3.data_ledgers[DataLedger::Publish].tx_ids.len(),
+        1,
+        "Expect 1 Publish tx on peer B to be in this block."
+    );
+    assert_eq!(
+        b_block3.data_ledgers[DataLedger::Submit].tx_ids.len(),
+        0,
+        "No Submit txs should be in this block."
     );
     assert_eq!(
         a_block2.data_ledgers[DataLedger::Submit].tx_ids.len(),
@@ -1066,7 +1076,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         assert_eq!(
             sorted_data_txs_at(&node_a, 2, DataLedger::Submit).await?,
             peer_b_submit_txs
-        ); // expect only the two txs included in Peer B B2
+        );
         assert_eq!(
             sorted_data_txs_at(&node_a, 2, DataLedger::Publish).await?,
             vec![]
@@ -1077,7 +1087,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         );
         assert_eq!(
             sorted_data_txs_at(&node_a, 3, DataLedger::Publish).await?,
-            vec![]
+            peer_b_submit_txs // promoted from previous block
         );
         // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
         // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as eligible txs
@@ -1101,12 +1111,24 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             peer_b_submit_txs
         );
         assert_eq!(
+            sorted_data_txs_at(&node_b, 2, DataLedger::Publish).await?,
+            vec![]
+        );
+        assert_eq!(
+            sorted_data_txs_at(&node_b, 3, DataLedger::Publish).await?,
+            peer_b_submit_txs
+        );
+        assert_eq!(
             sorted_data_txs_at(&node_b, 3, DataLedger::Submit).await?,
             vec![]
         );
         assert_eq!(
             sorted_data_txs_at(&node_b, 4, DataLedger::Submit).await?,
             peer_c_submit_txs
+        );
+        assert_eq!(
+            sorted_data_txs_at(&node_b, 4, DataLedger::Publish).await?,
+            vec![]
         );
 
         assert_eq!(
@@ -1118,12 +1140,24 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             peer_b_submit_txs
         );
         assert_eq!(
+            sorted_data_txs_at(&node_c, 2, DataLedger::Publish).await?,
+            vec![]
+        );
+        assert_eq!(
+            sorted_data_txs_at(&node_c, 3, DataLedger::Publish).await?,
+            peer_b_submit_txs
+        );
+        assert_eq!(
             sorted_data_txs_at(&node_c, 3, DataLedger::Submit).await?,
             vec![]
         );
         assert_eq!(
             sorted_data_txs_at(&node_c, 4, DataLedger::Submit).await?,
             peer_c_submit_txs
+        );
+        assert_eq!(
+            sorted_data_txs_at(&node_c, 4, DataLedger::Publish).await?,
+            vec![]
         );
 
         // assert final balances
