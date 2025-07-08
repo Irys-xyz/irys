@@ -1090,6 +1090,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
             // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as eligible txs
             // To reiterate. These were previously mined in non canon block C2. They were then mined again in canon block C4
+            // As they arrive with proofs in block 4, they appear in both the submit and publish ledgers.
             assert_eq!(
                 sorted_data_txs_at(node, 4, DataLedger::Submit).await?,
                 peer_c_submit_txs
@@ -1097,7 +1098,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
             assert_eq!(
                 sorted_data_txs_at(node, 4, DataLedger::Publish).await?,
-                vec![]
+                peer_c_submit_txs
             );
         }
 
