@@ -817,10 +817,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // Gossip B1&2 to A, causing a reorg
     let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
 
-    a_node.post_data_tx_raw(&b_blk1_tx1.header).await;
     b_node.send_full_block(&a_node, &b_blk1).await?;
-
-    a_node.post_data_tx_raw(&b_blk2_tx1.header).await;
     b_node.send_full_block(&a_node, &b_blk2).await?;
 
     a_node
