@@ -1129,7 +1129,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     // Now mine a new block using the normal mining method
     // This should wait for validation and build on the last optimistic block
     info!("Mining normal block after optimistic chain");
-    let (normal_block, _) = mine_block(&node.node_ctx).await?.unwrap();
+    let normal_block = node.mine_block().await?;
 
     // Wait for the normal block to be fully processed
     node.wait_until_height(normal_block.height, 10).await?;
