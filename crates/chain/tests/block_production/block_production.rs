@@ -1123,13 +1123,10 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     // re-enable validation
     node.node_ctx.set_validation_enabled(true);
 
-    // the following wait stabilises the mining to block 6 that occurs directly after this wait.
-    node.wait_until_height(5, 9).await?;
-
     // Now mine a new block using the normal mining method
     // This should wait for validation and build on the last optimistic block
     info!("Mining normal block after optimistic chain");
-    let normal_block = node.mine_block().await?;
+    let (normal_block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
     // Wait for the normal block to be fully processed
     node.wait_until_height(normal_block.height, 10).await?;
