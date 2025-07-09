@@ -881,7 +881,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     );
 
     // check balances in block b2
-    // tx fee is 1, and there should be two txs that we got into block b2 ∴ subtract 2 in the assert
+    // tx fee is 1, and there should be two txs that we got into block b2 therefore subtract 2 in the assert
     // including the block reward is required for a valid assertion.
     // The block reward varies with time and therefore is not constant
     assert_eq!(
