@@ -170,7 +170,11 @@ impl fixed_hash::core_::fmt::Debug for H256 {
 }
 impl fixed_hash::core_::fmt::Display for H256 {
     fn fmt(&self, f: &mut fixed_hash::core_::fmt::Formatter) -> fixed_hash::core_::fmt::Result {
-        write!(f, "{}", &&self.0.to_base58())
+        let s = self.0.to_base58();
+        write!(f, "{}", &s[0..4])?;
+        f.write_fmt(core::format_args!("…"))?;
+        write!(f, "{}", &s[s.len() - 4..])?;
+        Ok(())
     }
 }
 impl fixed_hash::core_::fmt::LowerHex for H256 {
