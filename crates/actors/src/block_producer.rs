@@ -392,20 +392,19 @@ pub trait BlockProdStrategy: Send + Sync {
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
     ) -> eyre::Result<EthBuiltPayload> {
-        // generate payload attributes
-        let payload_attrs = PayloadAttributes {
-            timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
-            prev_randao: parent_mix_hash,
-            suggested_fee_recipient: self.inner().config.node_config.reward_address,
-            withdrawals: None, // these should ALWAYS be none
-            parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
-        };
+        // // generate payload attributes
+        // let payload_attrs = PayloadAttributes {
+        //     timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
+        //     prev_randao: parent_mix_hash,
+        //     suggested_fee_recipient: self.inner().config.node_config.reward_address,
+        //     withdrawals: None, // these should ALWAYS be none
+        //     parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+        // };
 
-        let payload = self
-            .inner()
-            .reth_node_adapter
-            .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
-            .await?;
+        // let reth_node_adapter = self.inner().reth_node_adapter.clone();
+        // let payload = reth_node_adapter
+        //     .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
+        //     .await?;
 
         // Ok(payload)
         todo!()

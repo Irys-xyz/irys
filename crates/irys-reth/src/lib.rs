@@ -1784,13 +1784,16 @@ pub mod test_utils {
 
             let block_producer_addresses =
                 vec![block_producer_a.address(), block_producer_b.address()];
-            let (nodes, tasks, ..) = setup_irys_reth(
+            let (mut nodes, tasks, ..) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,
                 payload_attributes,
             )
             .await?;
+
+            let first_node = nodes.pop();
+            tokio::spawn(async move { first_node });
 
             let genesis_blockhash = nodes
                 .first()
@@ -2489,7 +2492,7 @@ pub mod test_utils {
                 node,
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
-                // .testing_node(exec.clone())
+                .testing_node(exec.clone())
                 .node(IrysEthereumNode {
                     shadow_tx_store: shadow_tx_store.clone(),
                 })
