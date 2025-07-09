@@ -799,7 +799,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // Expected state at end of stage 2:
     //  Nodes A, B, C at block height 1
     //  Signer B, C balance remains at genesis balance
-    //  Node A signer has recieved a block reward but we don't use Node A signer in this test
+    //  Node A signer has received a block reward but we don't use Node A signer in this test
 
     //
     // Stage 3: DISABLE ANY/ALL GOSSIP
