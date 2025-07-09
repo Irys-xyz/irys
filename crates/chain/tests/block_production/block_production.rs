@@ -2,7 +2,6 @@ use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
-use eyre::OptionExt as _;
 use irys_actors::block_tree_service::{ema_snapshot::EmaSnapshot, BlockState, ChainState};
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
@@ -14,10 +13,13 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
-use reth::providers::{AccountReader as _, ReceiptProvider as _, TransactionsProvider as _};
-use reth::{providers::BlockReader as _, rpc::types::TransactionRequest};
-use std::sync::Arc;
-use std::time::Duration;
+use reth::{
+    providers::{
+        AccountReader as _, BlockReader as _, ReceiptProvider as _, TransactionsProvider as _,
+    },
+    rpc::types::TransactionRequest,
+};
+use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tracing::info;
 
@@ -64,7 +66,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let reth_receipts = context
         .inner
         .provider
-        .receipts_by_block(HashOrNumber::Hash(reth_exec_env.block().hash()))?
+        .receipts_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
         .unwrap();
 
     // block reward
@@ -134,7 +136,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let db_irys_block = node.get_block_by_hash(&irys_block.block_hash).unwrap();
     assert_eq!(
         db_irys_block.evm_block_hash,
-        reth_block.into_header().hash_slow()
+        reth_block.clone().into_header().hash_slow()
     );
 
     node.stop().await;
@@ -393,9 +395,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     for _ in 0..3 {
         // mine a single block
-        let (block, _reth_exec_env) = mine_block(&node.node_ctx)
-            .await?
-            .ok_or_eyre("block was not mined")?;
+        let block = node.mine_block().await?;
 
         // obtain the EVM timestamp for this block from Reth
         let reth_block = reth_context
@@ -460,16 +460,15 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     }
 
     // Mine a block - should only contain block reward transaction
-    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let irys_block = node.mine_block().await?;
     let context = node.node_ctx.reth_node_adapter.clone();
 
     // Verify block transactions - should only contain block reward shadow transaction
-    let block_txs = reth_exec_env
-        .block()
-        .body()
-        .transactions
-        .iter()
-        .collect::<Vec<_>>();
+    let block_txs = context
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
+        .unwrap();
 
     assert_eq!(
         block_txs.len(),
@@ -544,16 +543,15 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     }
 
     // Mine a block - should only contain block reward transaction
-    let (_irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let irys_block = node.mine_block().await?;
     let context = node.node_ctx.reth_node_adapter.clone();
 
     // Verify block transactions - should only contain block reward shadow transaction
-    let block_txs = reth_exec_env
-        .block()
-        .body()
-        .transactions
-        .iter()
-        .collect::<Vec<_>>();
+    let block_txs = context
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
+        .unwrap();
 
     assert_eq!(
         block_txs.len(),
@@ -629,13 +627,13 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     assert_eq!(tx.header.total_fee(), 2, "Total fee should be 2");
 
     // Mine a block - should contain block reward and storage fee transactions
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let irys_block = node.mine_block().await?;
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
         .inner
         .provider
-        .receipts_by_block(HashOrNumber::Hash(reth_exec_env.block().hash()))?
+        .receipts_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
         .unwrap();
 
     // Should have 2 receipts: block reward and storage fees
@@ -746,7 +744,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .await?;
 
     // Mine a block to get the stake commitment included
-    let (irys_block1, reth_exec_env1) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+    let irys_block1 = genesis_node.mine_block().await?;
     genesis_node
         .wait_until_height(irys_block1.height, 10)
         .await?;
@@ -755,7 +753,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let receipts1 = reth_context
         .inner
         .provider
-        .receipts_by_block(HashOrNumber::Hash(reth_exec_env1.block().hash()))?
+        .receipts_by_block(HashOrNumber::Hash(irys_block1.evm_block_hash))?
         .unwrap();
 
     // Verify block contains all expected shadow transactions
@@ -830,7 +828,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // Mine another block to verify the system continues to work
-    let (irys_block2, reth_exec_env2) = mine_block(&genesis_node.node_ctx).await?.unwrap();
+    let irys_block2 = genesis_node.mine_block().await?;
     genesis_node
         .wait_until_height(irys_block2.height, 10)
         .await?;
@@ -839,7 +837,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let receipts2 = reth_context
         .inner
         .provider
-        .receipts_by_block(HashOrNumber::Hash(reth_exec_env2.block().hash()))?
+        .receipts_by_block(HashOrNumber::Hash(irys_block2.evm_block_hash))?
         .unwrap();
 
     // Second block should only have block reward
@@ -861,12 +859,11 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     assert_eq!(peer_assignments.len(), 1);
 
     // Verify block transactions contain the expected shadow transactions in the correct order
-    let block_txs1 = reth_exec_env1
-        .block()
-        .body()
-        .transactions
-        .iter()
-        .collect::<Vec<_>>();
+    let block_txs1 = reth_context
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(irys_block1.evm_block_hash))?
+        .unwrap();
 
     // Block should contain exactly 3 transactions: block reward, stake, pledge (in that order)
     assert_eq!(
