@@ -13,6 +13,7 @@ use irys_actors::{
     mempool_service::MempoolServiceMessage,
 };
 use irys_p2p::{PeerList as _, PeerListServiceFacade, SyncState};
+use irys_reth_node_bridge::adapter::NodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
@@ -34,7 +35,7 @@ pub struct ApiState {
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
-    pub reth_provider: RethNodeProvider,
+    pub reth_provider: NodeProvider,
     pub reth_http_url: String,
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,

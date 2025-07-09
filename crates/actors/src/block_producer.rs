@@ -27,10 +27,7 @@ use irys_reth::{
     payload::{DeterministicShadowTxKey, ShadowTxStore},
     reth_node_ethereum::EthEngineTypes,
 };
-use irys_reth_node_bridge::{
-    adapter::{NodeHelperType, NodeProvider},
-    IrysRethNodeAdapter,
-};
+use irys_reth_node_bridge::adapter::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,

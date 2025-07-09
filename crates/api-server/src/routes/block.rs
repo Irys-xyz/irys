@@ -102,7 +102,6 @@ async fn get_block_by_hash(
 
     let reth_block = match state
         .reth_provider
-        .provider
         .block_by_hash(irys_header.evm_block_hash)
         .ok()
         .flatten()

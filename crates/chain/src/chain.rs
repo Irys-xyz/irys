@@ -1,6 +1,7 @@
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
+use alloy_eips::BlockNumberOrTag;
 use base58::ToBase58 as _;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
@@ -36,13 +37,17 @@ use irys_p2p::{
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
+use irys_reth::BlockReaderIdExt;
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
-use irys_reth_node_bridge::node::RethNode;
+use irys_reth_node_bridge::node::{
+    eth_payload_attributes, NodeTestContext, RethNode, RethNodeAdapter,
+};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::signal::{
     run_to_completion_or_panic, run_until_ctrl_c_or_channel_message,
 };
-use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_reth_node_bridge::unwind::unwind_to;
+use irys_reth_node_bridge::{adapter::NodeProvider, IrysRethNodeAdapter};
 use irys_reward_curve::HalvingCurve;
 use irys_storage::StorageModulesReadGuard;
 use irys_storage::{
@@ -116,7 +121,7 @@ impl IrysNodeCtx {
             peer_list: self.peer_list.clone(),
             db: self.db.clone(),
             config: self.config.clone(),
-            reth_provider: self.reth_handle.clone(),
+            reth_provider: self.reth_handle.provider.clone(),
             reth_http_url: self.reth_handle.rpc_server_handle().http_url().unwrap(),
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
@@ -218,16 +223,14 @@ async fn start_reth_node(
     chainspec: ChainSpec,
     config: Config,
     sender: oneshot::Sender<RethNode>,
-    irys_provider: IrysRethProvider,
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<()> {
     let random_ports = config.node_config.reth.use_random_ports;
-    let (node_handle, _reth_node_adapter) = match irys_reth_node_bridge::node::run_node(
+    let handle = match irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
         config.node_config.clone(),
-        irys_provider.clone(),
         latest_block,
         random_ports,
         shadow_tx_store.clone(),
@@ -243,10 +246,9 @@ async fn start_reth_node(
                 Arc::new(chainspec.clone()),
                 task_executor.clone(),
                 config.node_config.clone(),
-                irys_provider.clone(),
                 latest_block,
                 random_ports,
-                shadow_tx_store,
+                shadow_tx_store.clone(),
             )
             .await
             .expect("expected reth node to have started")
@@ -255,14 +257,14 @@ async fn start_reth_node(
 
     debug!("Reth node started");
 
-    sender.send(node_handle.node.clone()).map_err(|e| {
+    sender.send(handle.node.clone()).map_err(|e| {
         eyre::eyre!(
             "Failed to send reth node handle to main actor thread: {:?}",
             &e
         )
     })?;
 
-    node_handle.node_exit_future.await
+    handle.node_exit_future.await
 }
 
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
@@ -661,7 +663,6 @@ impl IrysNode {
                                 reth_handle_receiver,
                                 block_index,
                                 latest_block,
-                                irys_provider.clone(),
                                 block_index_service_actor,
                                 &task_exec,
                                 http_listener,
@@ -751,7 +752,6 @@ impl IrysNode {
                         reth_chainspec,
                         config,
                         reth_handle_sender,
-                        irys_provider.clone(),
                         latest_block_height,
                         shadow_tx_store,
                     );
@@ -798,7 +798,6 @@ impl IrysNode {
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
-        irys_provider: IrysRethProvider,
         block_index_service_actor: Addr<BlockIndexService>,
         task_exec: &TaskExecutor,
         http_listener: TcpListener,
@@ -815,8 +814,13 @@ impl IrysNode {
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
+        let reth_test_context = NodeTestContext::<RethNodeAdapter, RethNodeAddOns>::new(
+            reth_node.clone(),
+            eth_payload_attributes,
+        )
+        .await?;
         let reth_node_adapter =
-            IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
+            IrysRethNodeAdapter::new(reth_test_context, shadow_tx_store.clone()).await?;
 
         // start service senders/receivers
         let (service_senders, receivers) = ServiceSenders::new();
@@ -1012,6 +1016,8 @@ impl IrysNode {
             reth_service_actor.clone(),
             task_exec,
             receivers.block_producer,
+            reth_node.provider.clone(),
+            shadow_tx_store.clone(),
         );
 
         let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
@@ -1130,7 +1136,7 @@ impl IrysNode {
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_service,
                 db: irys_db,
-                reth_provider: reth_node.clone(),
+                reth_provider: reth_node.provider.clone(),
                 block_tree: block_tree_guard,
                 block_index: block_index_guard.clone(),
                 config: config.clone(),
@@ -1142,13 +1148,6 @@ impl IrysNode {
             },
             http_listener,
         );
-
-        // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
-        // this is "safe", as the OnceLock is always set before this start function returns
-        let mut w = irys_provider
-            .write()
-            .map_err(|_| eyre::eyre!("lock poisoned"))?;
-        *w = Some(IrysRethProviderInner { chunk_provider });
 
         Ok((
             irys_node_ctx,
@@ -1309,6 +1308,8 @@ impl IrysNode {
         reth_service_actor: actix::Addr<RethServiceActor>,
         task_executor: &TaskExecutor,
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        reth_provider: NodeProvider,
+        shadow_tx_store: ShadowTxStore,
     ) -> Arc<irys_actors::BlockProducerInner> {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
@@ -1320,7 +1321,9 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
-            reth_payload_builder: reth_node_adapter,
+            reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
+            reth_provider,
+            shadow_tx_store,
             reth_service: reth_service_actor,
         });
 
@@ -1490,7 +1493,7 @@ fn init_reth_service(
 async fn init_reth_db(
     reth_handle_receiver: oneshot::Receiver<RethNode>,
 ) -> Result<(RethNodeProvider, irys_database::db::RethDbWrapper), eyre::Error> {
-    let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
+    let reth_node = reth_handle_receiver.await?;
     let reth_db = reth_node.provider.database.db.clone();
     // TODO: fix this so we can migrate the consensus/irys DB
     // we no longer extend the reth database with our own tables/metadata

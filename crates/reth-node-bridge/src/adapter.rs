@@ -4,7 +4,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::node::eth_payload_attributes;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
@@ -23,7 +22,6 @@ use reth_node_builder::{Node, NodeAdapter, NodeComponentsBuilder};
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_payload_builder::PayloadKind;
 use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt as _};
-use tokio::sync::RwLock;
 
 type TmpNodeAdapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, RethDbWrapper>>> =
     FullNodeTypesAdapter<N, RethDbWrapper, Provider>;

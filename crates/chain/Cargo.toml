@@ -28,6 +28,7 @@ irys-p2p.workspace = true
 irys-api-client.workspace = true
 irys-reward-curve.workspace = true
 irys-primitives.workspace = true
+irys-reth.workspace = true
 base58.workspace = true
 color-eyre.workspace = true
 tracing-error.workspace = true
