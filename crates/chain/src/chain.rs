@@ -545,13 +545,14 @@ impl IrysNode {
 
         let irys_provider = irys_storage::reth_provider::create_provider();
 
-        // init the services
-        let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
+        // read the latest block info
+        let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
 
         // vdf gets started here...
+        // init the services
         let actor_main_thread_handle = Self::init_services_thread(
             self.config.clone(),
-            latest_block_height_tx,
+            latest_block,
             reth_shutdown_sender,
             main_actor_thread_shutdown_rx,
             vdf_shutdown_sender,
@@ -567,9 +568,6 @@ impl IrysNode {
             shadow_tx_store.clone(),
         )?;
 
-        // await the latest height to be reported
-        let latest_height = latest_block_height_rx.await?;
-
         // start reth
         let reth_thread = Self::init_reth_thread(
             self.config.clone(),
@@ -580,7 +578,7 @@ impl IrysNode {
             actor_main_thread_handle,
             irys_provider.clone(),
             chain_spec.clone(),
-            latest_height,
+            latest_block_height,
             task_manager,
             tokio_runtime,
         )?;
@@ -622,7 +620,7 @@ impl IrysNode {
 
     fn init_services_thread(
         config: Config,
-        latest_block_height_tx: oneshot::Sender<u64>,
+        latest_block: Arc<IrysBlockHeader>,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
         mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
         vdf_shutdown_sender: mpsc::Sender<()>,
@@ -645,12 +643,6 @@ impl IrysNode {
                 let irys_provider = Arc::clone(irys_provider);
                 move || {
                     System::new().block_on(async move {
-                        // read the latest block info
-                        let (latest_block_height, latest_block) =
-                            read_latest_block_data(&block_index, &irys_db);
-                        latest_block_height_tx
-                            .send(latest_block_height)
-                            .expect("to be able to send the latest block height");
                         let block_index = Arc::new(RwLock::new(block_index));
                         let block_index_service_actor = Self::init_block_index_service(&config, &block_index);
 

@@ -704,11 +704,9 @@ impl IrysNodeTest<IrysNodeCtx> {
                 };
             }
             drop(ro_tx);
-
             if mine_blocks {
-                mine_block(&self.node_ctx).await.unwrap();
-            };
-
+                self.mine_block().await?;
+            }
             sleep(Duration::from_secs(1)).await;
         }
 

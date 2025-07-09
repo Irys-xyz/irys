@@ -1,4 +1,4 @@
-use crate::utils::{get_block_parent, mine_block, verify_published_chunk, IrysNodeTest};
+use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
 use crate::utils::{mine_blocks, post_chunk};
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
@@ -52,7 +52,7 @@ async fn heavy_double_root_data_promotion_test() {
     .await
     .unwrap();
 
-    let block1 = mine_block(&node.node_ctx).await.unwrap().unwrap();
+    let block1 = node.mine_block().await.expect("expected mined block");
 
     let app = node.start_public_api().await;
 
@@ -205,8 +205,8 @@ async fn heavy_double_root_data_promotion_test() {
     debug!("PHASE 2");
 
     // mine 1 block
-    let blk = mine_block(&node.node_ctx).await.unwrap().unwrap();
-    debug!("P2 block {}", &blk.0.height);
+    let blk = node.mine_block().await.expect("expected mined block");
+    debug!("P2 block {}", &blk.height);
 
     // ensure the ingress proof still exists
     let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
@@ -227,9 +227,7 @@ async fn heavy_double_root_data_promotion_test() {
         }
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = &signer2;
-        let tx = s
-            .create_transaction(data, Some(block1.0.block_hash))
-            .unwrap();
+        let tx = s.create_transaction(data, Some(block1.block_hash)).unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[2] {}", tx.header.id.as_bytes().to_base58());
         txs.push(tx);
