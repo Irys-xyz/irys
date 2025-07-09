@@ -8,7 +8,6 @@ use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
-    block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::BlockTreeService,
     broadcast_mining_service::BroadcastMiningService,
@@ -23,7 +22,7 @@ use irys_actors::{
     services::ServiceSenders,
     validation_service::ValidationService,
 };
-use irys_actors::{ActorAddresses, EpochReplayData, StorageModuleService};
+use irys_actors::{ActorAddresses, BlockProducerCommand, EpochReplayData, StorageModuleService};
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -999,20 +998,21 @@ impl IrysNode {
         let price_oracle = Self::init_price_oracle(&config);
 
         // set up the block producer
-        let (block_producer_addr, block_producer_arbiter, block_producer_inner) =
-            Self::init_block_producer(
-                &config,
-                Arc::clone(&reward_curve),
-                &irys_db,
-                &service_senders,
-                &block_tree_guard,
-                &vdf_state_readonly,
-                block_discovery.clone(),
-                broadcast_mining_actor.clone(),
-                price_oracle,
-                reth_node_adapter.clone(),
-                reth_service_actor.clone(),
-            );
+        let block_producer_inner = Self::init_block_producer(
+            &config,
+            Arc::clone(&reward_curve),
+            &irys_db,
+            &service_senders,
+            &block_tree_guard,
+            &vdf_state_readonly,
+            block_discovery.clone(),
+            broadcast_mining_actor.clone(),
+            price_oracle,
+            reth_node_adapter.clone(),
+            reth_service_actor.clone(),
+            task_exec,
+            receivers.block_producer,
+        );
 
         let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
         let seed = seed.0;
@@ -1030,7 +1030,7 @@ impl IrysNode {
             &config,
             &storage_modules_guard,
             &vdf_state_readonly,
-            &block_producer_addr,
+            &service_senders,
             &atomic_global_step_number,
             &packing_actor_addr,
             latest_block.diff,
@@ -1058,7 +1058,6 @@ impl IrysNode {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
                 block_discovery_addr: block_discovery,
-                block_producer: block_producer_addr,
                 packing: packing_actor_addr,
                 block_index: block_index_service_actor,
                 reth: reth_service_actor,
@@ -1104,10 +1103,6 @@ impl IrysNode {
         {
             let mut arbiters_guard = irys_node_ctx.arbiters.write().unwrap();
 
-            arbiters_guard.push(ArbiterHandle::new(
-                block_producer_arbiter,
-                "block_producer_arbiter".to_string(),
-            ));
             arbiters_guard.push(ArbiterHandle::new(
                 broadcast_arbiter,
                 "broadcast_arbiter".to_string(),
@@ -1242,7 +1237,7 @@ impl IrysNode {
         config: &Config,
         storage_modules_guard: &StorageModulesReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
-        block_producer_addr: &actix::Addr<BlockProducerActor>,
+        service_senders: &ServiceSenders,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
         initial_difficulty: U256,
@@ -1252,7 +1247,7 @@ impl IrysNode {
         for sm in storage_modules_guard.read().iter() {
             let partition_mining_actor = PartitionMiningActor::new(
                 config,
-                block_producer_addr.clone().recipient(),
+                service_senders.block_producer.clone(),
                 packing_actor_addr.clone().recipient(),
                 sm.clone(),
                 false, // do not start mining automatically
@@ -1312,12 +1307,9 @@ impl IrysNode {
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         reth_service_actor: actix::Addr<RethServiceActor>,
-    ) -> (
-        actix::Addr<BlockProducerActor>,
-        Arbiter,
-        Arc<irys_actors::BlockProducerInner>,
-    ) {
-        let block_producer_arbiter = Arbiter::new();
+        task_executor: &TaskExecutor,
+        block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+    ) -> Arc<irys_actors::BlockProducerInner> {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),
@@ -1331,20 +1323,16 @@ impl IrysNode {
             reth_node_adapter,
             reth_service: reth_service_actor,
         });
-        let block_producer_actor = BlockProducerActor {
-            inner: block_producer_inner.clone(),
-            blocks_remaining_for_test: None,
-            span: Span::current(),
-        };
-        let block_producer_addr =
-            BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
-                block_producer_actor
-            });
-        (
-            block_producer_addr,
-            block_producer_arbiter,
-            block_producer_inner,
-        )
+
+        // Spawn the service and get the handle
+        let _join_handle = irys_actors::BlockProducerService::spawn_service(
+            task_executor,
+            block_producer_inner.clone(),
+            None, // blocks_remaining_for_test
+            block_producer_rx,
+        );
+
+        block_producer_inner
     }
 
     fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {

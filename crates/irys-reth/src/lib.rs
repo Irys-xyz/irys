@@ -2489,7 +2489,7 @@ pub mod test_utils {
                 node,
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
-                .testing_node(exec.clone())
+                // .testing_node(exec.clone())
                 .node(IrysEthereumNode {
                     shadow_tx_store: shadow_tx_store.clone(),
                 })
@@ -2497,6 +2497,7 @@ pub mod test_utils {
                 .await?;
 
             let mut node = NodeTestContext::new(node, attributes_generator.clone()).await?;
+            // let node_ = node == true;
 
             // Connect each node in a chain.
             if let Some(previous_node) = nodes.last_mut() {

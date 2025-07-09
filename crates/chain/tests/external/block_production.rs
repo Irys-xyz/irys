@@ -1,6 +1,5 @@
 use alloy_core::primitives::{TxHash, U256};
 use alloy_genesis::GenesisAccount;
-use irys_actors::block_producer::SolutionFoundMessage;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
@@ -77,13 +76,14 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     );
 
     loop {
-        let (block, _) = node
-            .node_ctx
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(SolutionContext::default()))
-            .await??
-            .unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        node.node_ctx.service_senders.block_producer.send(
+            irys_actors::block_producer::BlockProducerCommand::SolutionFound {
+                solution: SolutionContext::default(),
+                response: tx,
+            },
+        )?;
+        let (block, _) = rx.await??.unwrap();
 
         //check reth for built block
         let reth_block = reth_context

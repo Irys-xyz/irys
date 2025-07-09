@@ -10,8 +10,7 @@ use crate::{
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
 };
-use actix::prelude::*;
-use actors::mocker::Mocker;
+use actix::prelude::{Addr, Message};
 use alloy_consensus::{
     transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
 };
@@ -37,40 +36,49 @@ use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
-    core::primitives::SealedBlock, payload::EthBuiltPayload, revm::primitives::B256,
+    core::primitives::SealedBlock,
+    payload::EthBuiltPayload,
+    revm::primitives::B256,
     rpc::types::BlockId,
+    tasks::{shutdown::GracefulShutdown, TaskExecutor},
 };
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
+    pin::pin,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn, Instrument as _, Span};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, info, warn};
 
 mod block_validation_tracker;
 pub use block_validation_tracker::BlockValidationTracker;
 
-/// Used to mock up a `BlockProducerActor`
-pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
-
-/// A mocked [`BlockProducerActor`] only needs to implement [`SolutionFoundMessage`]
+/// Commands that can be sent to the block producer service
 #[derive(Debug)]
-pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
+pub enum BlockProducerCommand {
+    /// Announce to the node a mining solution has been found
+    SolutionFound {
+        solution: SolutionContext,
+        response: oneshot::Sender<
+            eyre::Result<Option<(Arc<irys_types::IrysBlockHeader>, EthBuiltPayload)>>,
+        >,
+    },
+    /// Set the test blocks remaining (for testing)
+    SetTestBlocksRemaining(Option<u64>),
+}
 
-/// `BlockProducerActor` creates blocks from mining solutions
-#[derive(Debug, Clone)]
-pub struct BlockProducerActor {
-    pub inner: Arc<BlockProducerInner>,
+/// Block producer service that creates blocks from mining solutions
+#[derive(Debug)]
+pub struct BlockProducerService {
+    /// Graceful shutdown handle
+    shutdown: GracefulShutdown,
+    /// Command receiver
+    cmd_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+    /// Inner logic
+    inner: Arc<BlockProducerInner>,
     /// Enforces block production limits during testing
-    ///
-    /// Controls the exact number of blocks produced to ensure test determinism.
-    /// Since mining is probabilistic, solutions can be found nearly simultaneously
-    /// before mining can be stopped after the first solution. This guard prevents
-    /// producing extra blocks that would cause non-deterministic test behavior.
-    pub blocks_remaining_for_test: Option<u64>,
-    /// Tracing span
-    pub span: Span,
+    blocks_remaining_for_test: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -99,95 +107,122 @@ pub struct BlockProducerInner {
     pub reth_service: Addr<RethServiceActor>,
 }
 
-/// Actors can handle this message to learn about the `block_producer` actor at startup
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-pub struct RegisterBlockProducerMessage(pub Addr<BlockProducerActor>);
-
-impl Actor for BlockProducerActor {
-    type Context = Context<Self>;
-}
-
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-pub struct SetTestBlocksRemainingMessage(pub Option<u64>);
-
-impl Handler<SetTestBlocksRemainingMessage> for BlockProducerActor {
-    type Result = ();
-
-    fn handle(
-        &mut self,
-        msg: SetTestBlocksRemainingMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
-        self.blocks_remaining_for_test = msg.0;
+impl BlockProducerService {
+    /// Spawn a new block producer service
+    pub fn spawn_service(
+        exec: &TaskExecutor,
+        inner: Arc<BlockProducerInner>,
+        blocks_remaining_for_test: Option<u64>,
+        rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+    ) -> tokio::task::JoinHandle<()> {
+        exec.spawn_critical_with_graceful_shutdown_signal(
+            "BlockProducer Service",
+            move |shutdown| async move {
+                let service = Self {
+                    shutdown,
+                    cmd_rx: rx,
+                    inner,
+                    blocks_remaining_for_test,
+                };
+                service
+                    .start()
+                    .await
+                    .expect("Block producer service encountered an irrecoverable error")
+            },
+        )
     }
-}
 
-#[derive(Message, Debug)]
-#[rtype(result = "eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>")]
-/// Announce to the node a mining solution has been found.
-pub struct SolutionFoundMessage(pub SolutionContext);
+    #[tracing::instrument(skip_all)]
+    async fn start(mut self) -> eyre::Result<()> {
+        info!("starting block producer service");
 
-impl Handler<SolutionFoundMessage> for BlockProducerActor {
-    type Result =
-        AtomicResponse<Self, eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>>;
-    #[tracing::instrument(skip_all, fields(
-        minting_address = ?msg.0.mining_address,
-        partition_hash = ?msg.0.partition_hash,
-        chunk_offset = ?msg.0.chunk_offset,
-        tx_path = ?msg.0.tx_path.is_none(),
-        chunk = ?msg.0.chunk.len(),
-    ))]
-    fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
-        let span = self.span.clone();
-        let span2 = span.clone();
-        let _span = span.enter();
-        let solution = msg.0;
-        info!(
-            "BlockProducerActor solution received: solution_hash={}",
-            solution.solution_hash.0.to_base58()
-        );
+        let shutdown = self.shutdown.clone();
+        let mut shutdown = pin!(shutdown);
 
-        if let Some(blocks_remaining) = self.blocks_remaining_for_test {
-            if blocks_remaining == 0 {
-                info!(
-                    "No more blocks needed for this test, skipping block production for solution_hash={}",
-                    solution.solution_hash.0.to_base58()
-                );
-                return AtomicResponse::new(Box::pin(fut::ready(Ok(None))));
+        loop {
+            tokio::select! {
+                // Handle commands
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            self.handle_command(cmd).await;
+                        }
+                        None => {
+                            warn!("command channel closed");
+                            break;
+                        }
+                    }
+                }
+
+                // Handle shutdown
+                _ = &mut shutdown => {
+                    info!("shutdown signal received");
+                    break;
+                }
             }
         }
 
-        let inner = self.inner.clone();
-        AtomicResponse::new(Box::pin(
-            async move {
-                ProductionStrategy { inner }
-                    .fully_produce_new_block(solution)
-                    .await
-            }
-            .instrument(span2)
-            .into_actor(self)
-            .map(move |result, actor, _ctx| {
-                // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
-                    // If blocks_remaining_for_test is Some, decrement it by 1
-                    if let Some(remaining) = actor.blocks_remaining_for_test {
-                        actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
+        info!("shutting down block producer service");
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, fields(
+        cmd_type = ?std::mem::discriminant(&cmd)
+    ))]
+    async fn handle_command(&mut self, cmd: BlockProducerCommand) {
+        match cmd {
+            BlockProducerCommand::SolutionFound { solution, response } => {
+                info!(
+                    "BlockProducerService solution received: solution_hash={}",
+                    solution.solution_hash.0.to_base58()
+                );
+
+                if let Some(blocks_remaining) = self.blocks_remaining_for_test {
+                    if blocks_remaining == 0 {
+                        info!(
+                            "No more blocks needed for this test, skipping block production for solution_hash={}",
+                            solution.solution_hash.0.to_base58()
+                        );
+                        let _ = response.send(Ok(None));
+                        return;
                     }
                 }
-                result
-            })
-            .map_err(|e: eyre::Error, _, _| {
-                error!("Error producing a block: {}", &e);
-                std::process::abort();
-            }),
-        ))
+
+                let inner = self.inner.clone();
+                let result = Self::produce_block_inner(inner, solution).await;
+
+                // Only decrement blocks_remaining_for_test when a block is successfully produced
+                if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
+                    if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
+                        *remaining = remaining.saturating_sub(1);
+                    }
+                }
+
+                if result.is_err() {
+                    error!("Error producing a block: {:?}", &result);
+                    std::process::abort();
+                }
+
+                let _ = response.send(result);
+            }
+            BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
+                self.blocks_remaining_for_test = remaining;
+            }
+        }
+    }
+
+    /// Internal method to produce a block without the non-Send trait
+    async fn produce_block_inner(
+        inner: Arc<BlockProducerInner>,
+        solution: SolutionContext,
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+        let production_strategy = ProductionStrategy { inner };
+        production_strategy.fully_produce_new_block(solution).await
     }
 }
 
-#[async_trait::async_trait(?Send)]
-pub trait BlockProdStrategy {
+#[async_trait::async_trait]
+pub trait BlockProdStrategy: Send + Sync {
     fn inner(&self) -> &BlockProducerInner;
 
     /// Creates PoA data from the solution context
@@ -372,7 +407,8 @@ pub trait BlockProdStrategy {
             .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
             .await?;
 
-        Ok(payload)
+        // Ok(payload)
+        todo!()
     }
 
     async fn produce_block(
@@ -852,11 +888,12 @@ pub fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) ->
 
     bytes_added / chunk_size
 }
+
 /// When a block is confirmed, this message broadcasts the block header and the
 /// submit ledger TX that were added as part of this block.
 /// This works for bootstrap node mining, but eventually blocks will be received
 /// from peers and confirmed and their tx will be negotiated though the mempool.
-#[derive(Message, Debug, Clone)]
+#[derive(Debug, Clone, Message)]
 #[rtype(result = "eyre::Result<()>")]
 pub struct BlockConfirmedMessage(
     pub Arc<IrysBlockHeader>,
@@ -868,7 +905,7 @@ pub struct BlockConfirmedMessage(
 /// confirmed blocks and produce finalized blocks for the canonical chain when
 ///  enough confirmations have occurred. Chunks are moved from the in-memory
 /// index to the storage modules when a block is finalized.
-#[derive(Message, Debug, Clone)]
+#[derive(Debug, Clone, Message)]
 #[rtype(result = "eyre::Result<()>")]
 pub struct BlockFinalizedMessage {
     /// Block being finalized
