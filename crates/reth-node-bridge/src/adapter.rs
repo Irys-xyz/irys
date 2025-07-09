@@ -4,11 +4,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::node::{eth_payload_attributes, RethNode};
-use crate::node::{RethNodeAdapter, RethNodeAddOns};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
+use irys_database::db::RethDbWrapper;
 use irys_reth::{
     payload::{DeterministicShadowTxKey, ShadowTxStore},
     IrysEthereumNode,
@@ -16,14 +15,35 @@ use irys_reth::{
 use irys_types::Address;
 use reth::transaction_pool::EthPooledTransaction;
 use reth_e2e_test_utils::node::NodeTestContext;
-use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadTypes};
+use reth_node_api::{
+    EngineApiMessageVersion, FullNodeTypesAdapter, NodeTypes, NodeTypesWithDBAdapter, PayloadTypes,
+};
+use reth_node_builder::{Node, NodeAdapter, NodeComponentsBuilder};
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_payload_builder::PayloadKind;
-use reth_provider::BlockReaderIdExt as _;
+use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt as _};
+
+type TmpNodeAdapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, RethDbWrapper>>> =
+    FullNodeTypesAdapter<N, RethDbWrapper, Provider>;
+
+/// Type alias for a `NodeAdapter`
+pub type Adapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, RethDbWrapper>>> =
+    NodeAdapter<
+        TmpNodeAdapter<N, Provider>,
+        <<N as Node<TmpNodeAdapter<N, Provider>>>::ComponentsBuilder as NodeComponentsBuilder<
+            TmpNodeAdapter<N, Provider>,
+        >>::Components,
+    >;
+
+pub type NodeProvider = BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>;
+
+/// Type alias for a type of `NodeHelper`
+pub type NodeHelperType<N> =
+    NodeTestContext<Adapter<N, NodeProvider>, <N as Node<TmpNodeAdapter<N, NodeProvider>>>::AddOns>;
 
 #[derive(Clone)]
 pub struct IrysRethNodeAdapter {
-    pub reth_node: Arc<NodeTestContext<RethNodeAdapter, RethNodeAddOns>>,
+    pub reth_node: Arc<NodeHelperType<IrysEthereumNode>>,
     pub shadow_tx_store: ShadowTxStore,
 }
 
@@ -34,8 +54,10 @@ impl std::fmt::Debug for IrysRethNodeAdapter {
 }
 
 impl IrysRethNodeAdapter {
-    pub async fn new(node: RethNode, shadow_tx_store: ShadowTxStore) -> eyre::Result<Self> {
-        let reth_node = NodeTestContext::new(node, eth_payload_attributes).await?;
+    pub async fn new(
+        reth_node: NodeHelperType<IrysEthereumNode>,
+        shadow_tx_store: ShadowTxStore,
+    ) -> eyre::Result<Self> {
         Ok(Self {
             reth_node: Arc::new(reth_node),
             shadow_tx_store,
@@ -44,7 +66,7 @@ impl IrysRethNodeAdapter {
 }
 
 impl Deref for IrysRethNodeAdapter {
-    type Target = NodeTestContext<RethNodeAdapter, RethNodeAddOns>;
+    type Target = NodeHelperType<IrysEthereumNode>;
     fn deref(&self) -> &Self::Target {
         &self.reth_node
     }
@@ -62,10 +84,6 @@ impl IrysRethNodeAdapter {
     ) -> eyre::Result<()> {
         // get head block from notifications stream and verify the tx has been pushed to the
         // pool is actually present in the canonical block
-        // let head = self.engine_api.canonical_stream.next().await.unwrap();
-        // let tx = head.tip().transactions().next();
-        // assert_eq!(tx.unwrap().hash().as_slice(), tip_tx_hash.as_slice());
-
         loop {
             // wait for the block to commit
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

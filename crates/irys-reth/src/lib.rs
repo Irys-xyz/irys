@@ -40,11 +40,13 @@ use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardfor
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
+pub use reth_node_ethereum;
 use reth_node_ethereum::{
     node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
 };
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
+pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
@@ -1784,13 +1786,16 @@ pub mod test_utils {
 
             let block_producer_addresses =
                 vec![block_producer_a.address(), block_producer_b.address()];
-            let (nodes, tasks, ..) = setup_irys_reth(
+            let (mut nodes, tasks, ..) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,
                 payload_attributes,
             )
             .await?;
+
+            let first_node = nodes.pop();
+            tokio::spawn(async move { first_node });
 
             let genesis_blockhash = nodes
                 .first()
@@ -2497,6 +2502,7 @@ pub mod test_utils {
                 .await?;
 
             let mut node = NodeTestContext::new(node, attributes_generator.clone()).await?;
+            // let node_ = node == true;
 
             // Connect each node in a chain.
             if let Some(previous_node) = nodes.last_mut() {

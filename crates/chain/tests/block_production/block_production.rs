@@ -919,7 +919,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         pub prod: ProductionStrategy,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
@@ -1044,7 +1044,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
         pub prod: ProductionStrategy,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for OptimisticBlockMiningStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner

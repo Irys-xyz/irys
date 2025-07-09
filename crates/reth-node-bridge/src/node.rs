@@ -4,7 +4,6 @@ use irys_database::db::RethDbWrapper;
 use irys_reth::{
     evm::IrysEvmConfig, payload::ShadowTxStore, IrysEthereumNode, IrysShadowTxValidator,
 };
-use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
 use reth::{
     args::DatabaseArgs,
@@ -27,14 +26,12 @@ use reth_node_builder::{
     FullNode, FullNodeTypesAdapter, NodeAdapter, NodeBuilder, NodeConfig, NodeHandle,
     NodeTypesWithDBAdapter,
 };
-use reth_provider::providers::BlockchainProvider;
-use reth_rpc_eth_api::EthApiServer as _;
-use std::{collections::HashSet, fmt::Formatter, sync::Arc};
-use std::{fmt::Debug, ops::Deref};
-use tracing::error;
+use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt as _};
+use std::{collections::HashSet, sync::Arc};
 
-use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
+
+use crate::unwind::unwind_to;
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
@@ -70,6 +67,8 @@ pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<RethNodeAdapt
 
 pub type RethNode = FullNode<RethNodeAdapter, RethNodeAddOns>;
 
+pub type RethNodeProvider = FullNode<RethNodeAdapter, RethNodeAddOns>;
+
 pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
     let attributes = PayloadAttributes {
         timestamp,
@@ -81,38 +80,14 @@ pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
     EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
 }
 
-#[derive(Clone)]
-pub struct RethNodeProvider(pub Arc<RethNode>);
-
-impl Debug for RethNodeProvider {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RethNodeProvider")
-    }
-}
-
-impl Deref for RethNodeProvider {
-    type Target = Arc<RethNode>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<RethNodeProvider> for RethNode {
-    fn from(val: RethNodeProvider) -> Self {
-        val.0.as_ref().clone()
-    }
-}
-
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
-    _provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
     shadow_tx_store: ShadowTxStore,
-) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
+) -> eyre::Result<RethNodeHandle> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
     reth_config.network.discovery.disable_discovery = true;
@@ -147,33 +122,28 @@ pub async fn run_node(
         .with_database(database.clone())
         .with_launch_context(task_executor.clone());
 
-    let handle = builder
+    let handle: RethNodeHandle = builder
         .node(IrysEthereumNode {
             shadow_tx_store: shadow_tx_store.clone(),
         })
         .launch_with_debug_capabilities()
         .await?;
 
-    let context = IrysRethNodeAdapter::new(handle.node.clone(), shadow_tx_store).await?;
-    // check that the latest height lines up with the expected latest height from irys
-
-    let latest = context
-        .rpc
-        .inner
-        .eth_api()
-        .block_by_number(BlockNumberOrTag::Latest, false)
-        .await?
+    let latest = handle
+        .node
+        .provider()
+        .block_by_number_or_tag(BlockNumberOrTag::Latest)
+        .expect("data to be retrieved")
         .expect("latest block should be Some");
 
     if latest.header.number > latest_block {
-        error!("\x1b[1;31m!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth head is {}, Irys head is {}\x1b[0m", &latest.header.number, &latest_block);
+        tracing::error!("\x1b[1;31m!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth head is {}, Irys head is {}\x1b[0m", &latest.header.number, &latest_block);
         database.close(); // important! otherwise we get MDBX error 11
-        drop(context);
         drop(handle);
 
         unwind_to(node_config, chainspec.clone(), latest_block).await?;
         return Err(eyre::eyre!("Unwound blocks"));
     };
 
-    Ok((handle, context))
+    Ok(handle)
 }

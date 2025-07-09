@@ -20,7 +20,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         pub prod: ProductionStrategy,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
@@ -171,7 +171,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         pub extra_tx: IrysTransactionHeader,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
@@ -259,7 +259,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         pub prod: ProductionStrategy,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
