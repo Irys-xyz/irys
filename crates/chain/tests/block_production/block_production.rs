@@ -1126,6 +1126,12 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     // re-enable validation
     node.node_ctx.set_validation_enabled(true);
 
+    // FIXME: This will fail, why?
+    assert!(
+        node.get_block_by_height(5).await.is_ok(),
+        "Normal block should be at height 5"
+    );
+
     // Now mine a new block using the normal mining method
     // This should wait for validation and build on the last optimistic block
     info!("Mining normal block after optimistic chain");
