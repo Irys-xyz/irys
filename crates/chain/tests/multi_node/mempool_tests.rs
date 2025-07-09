@@ -818,10 +818,10 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
 
     a_node.post_data_tx_raw(&b_blk1_tx1.header).await;
-    b_node.send_block_to_peer(&a_node, &b_blk1).await?;
+    b_node.send_full_block(&a_node, &b_blk1).await?;
 
     a_node.post_data_tx_raw(&b_blk2_tx1.header).await;
-    b_node.send_block_to_peer(&a_node, &b_blk2).await?;
+    b_node.send_full_block(&a_node, &b_blk2).await?;
 
     a_node
         .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
@@ -934,7 +934,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // it shouldn't reorg, and should accept the block
     // as well as overriding the ingress proof it has locally with the one from the block
 
-    b_node.send_block_to_peer(&a_node, &b_blk3).await?;
+    b_node.send_full_block(&a_node, &b_blk3).await?;
 
     a_node
         .wait_until_height(network_height, seconds_to_wait)

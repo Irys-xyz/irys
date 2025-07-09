@@ -7,7 +7,7 @@ use actix_web::{
     dev::{Service, ServiceResponse},
     Error,
 };
-use alloy_eips::BlockId;
+use alloy_eips::{BlockHashOrNumber, BlockId};
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
@@ -27,6 +27,7 @@ use irys_actors::{
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::{
+    commitment_tx_by_txid,
     db::IrysDatabaseExt as _,
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
@@ -49,8 +50,10 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use reth::api::Block as _;
 use reth::network::{PeerInfo, Peers as _};
 use reth::payload::EthBuiltPayload;
+use reth::providers::BlockReader as _;
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
@@ -1224,6 +1227,95 @@ impl IrysNodeTest<IrysNodeCtx> {
                 ))
             }
         }
+    }
+
+    /// Sends a full block to the provided peer bypassing the gossip network.
+    ///
+    /// This method is useful in tests where gossip is disabled. It delivers all
+    /// transaction headers contained in the block as well as the block header and execution payload
+    /// itself directly to the peer's actors/services.
+    pub async fn send_full_block(
+        &self,
+        peer: &Self,
+        irys_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        // Send data txs
+        for tx_id in irys_block_header
+            .data_ledgers
+            .iter()
+            .flat_map(|l| l.tx_ids.0.iter())
+        {
+            // get tx locally from mempool or database
+            let tx_header = self
+                .get_storage_tx_header_from_mempool(tx_id)
+                .await
+                .or_else(|_| self.get_tx_header(tx_id))?;
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            peer.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTx(tx_header, tx))
+                .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+            // Ignore possible ingestion errors in tests
+            let _ = rx.await?;
+        }
+
+        // Send commitment txs
+        for tx_id in irys_block_header
+            .system_ledgers
+            .iter()
+            .flat_map(|l| l.tx_ids.0.iter())
+        {
+            // get tx locally from mempool or database
+            let mut commitment_tx = self.get_commitment_tx_from_mempool(tx_id).await;
+            if commitment_tx.is_err() {
+                commitment_tx = self
+                    .node_ctx
+                    .db
+                    .view_eyre(|tx| commitment_tx_by_txid(tx, tx_id))?
+                    .ok_or_else(|| eyre::eyre!("Commitment tx not found: {:?}", tx_id));
+            }
+            let commitment_tx = commitment_tx?;
+
+            tracing::error!(?commitment_tx.id);
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            peer.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestCommitmentTx(commitment_tx, tx))
+                .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+            if let Err(e) = rx.await {
+                tracing::error!("Error sending message IngestCommitmentTx to mempool: {e:?}");
+            }
+        }
+
+        // Deliver block header
+        peer.node_ctx
+            .actor_addresses
+            .block_discovery_addr
+            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
+            .await
+            .map_err(|e| eyre::eyre!("{e:?}"))??;
+
+        // Send execution payload if available
+        if let Some(evm_block) = self
+            .node_ctx
+            .reth_node_adapter
+            .inner
+            .provider
+            .block(BlockHashOrNumber::Hash(irys_block_header.evm_block_hash))?
+        {
+            peer.node_ctx
+                .block_pool
+                .add_execution_payload_to_cache(evm_block.seal_slow())
+                .await;
+        } else {
+            panic!("Full block cannot be sent to peer. Execution payload not available locally.");
+        }
+
+        Ok(())
     }
 
     pub async fn post_data_tx_without_gossip(
