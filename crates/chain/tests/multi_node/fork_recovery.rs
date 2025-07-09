@@ -925,6 +925,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;
         node_c.wait_for_block(&b_block3.block_hash, 10).await?;
         // check node A has not received blocks from B
+        // i.e. that gossip has been disabled and the there is a fork between A and B
         assert!(
             node_a
                 .wait_for_block(&b_block2.block_hash, 1)
