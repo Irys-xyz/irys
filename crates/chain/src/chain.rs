@@ -107,6 +107,7 @@ pub struct IrysNodeCtx {
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool:
         Arc<BlockPool<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
+    pub storage_modules_guard: StorageModulesReadGuard,
 }
 
 impl IrysNodeCtx {
@@ -552,7 +553,7 @@ impl IrysNode {
         // init the services
         let actor_main_thread_handle = Self::init_services_thread(
             self.config.clone(),
-            latest_block,
+            Arc::clone(&latest_block),
             reth_shutdown_sender,
             main_actor_thread_shutdown_rx,
             vdf_shutdown_sender,
@@ -614,6 +615,107 @@ impl IrysNode {
             Some(ctx.actor_addresses.reth.clone()),
         )
         .await?;
+
+        if config.node_config.stake_pledge_drives {
+            debug!("Checking Stake & Pledge status");
+            // NOTE: this assumes we're caught up with the chain
+            // primarily for the anchor used for the produced txs
+            // if we aren't caught up, the txs will be rejected
+            let signer = config.irys_signer();
+            let address = signer.address();
+
+            let api_uri = config.node_config.api_uri();
+
+            let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
+                let client = awc::Client::default();
+                let url = format!("{}/v1/commitment_tx", api_uri);
+                client.post(url).send_json(commitment_tx).await
+            };
+
+            let (is_historically_staked, commitment_snapshot) = {
+                let block_tree_guard = ctx.block_tree_guard.read();
+                let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
+                let is_historically_staked = epoch_snapshot
+                    .commitment_state
+                    .read()
+                    .unwrap()
+                    .is_staked(address);
+                let commitment_snapshot = block_tree_guard.canonical_commitment_snapshot();
+                (is_historically_staked, commitment_snapshot)
+            };
+
+            // check the commitment snapshot (pending commitment txs for the next epoch rollup)
+            // to see if we have pending stakes/commitments already
+            // if we do, don't submit any more than we need to (i.e if we have added some extra drives etc)
+            let pending_commitments = commitment_snapshot.commitments.get(&address);
+            let has_pending_stake =
+                pending_commitments.is_some_and(|commitments| commitments.stake.is_some());
+
+            // if we have a historic or pending stake, don't send another
+            let is_staked = is_historically_staked || has_pending_stake;
+
+            let anchor = if !is_staked {
+                debug!(
+                    "Local mining address {:?} is not staked, staking...",
+                    &address
+                );
+                // post a stake tx
+                let stake_tx = CommitmentTransaction {
+                    commitment_type: irys_primitives::CommitmentType::Stake,
+                    // TODO: real staking amounts
+                    fee: 1,
+                    anchor: latest_block.previous_block_hash,
+                    ..Default::default()
+                };
+                let stake_tx = signer.sign_commitment(stake_tx)?;
+
+                post_commitment_tx(&stake_tx).await.unwrap();
+                debug!("Posted stake tx {:?}", &stake_tx.id);
+                stake_tx.id
+            } else {
+                debug!("Local mining address {:?} is staked", &address);
+                latest_block.previous_block_hash
+            };
+
+            // get all SMs without a partition assignment
+
+            let to_pledge_sms = {
+                let sms = ctx.storage_modules_guard.read();
+                sms.iter()
+                    .filter(|&sm| sm.partition_assignment().is_none())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+
+            let to_pledge_count = to_pledge_sms.len();
+            // get the number of pending commitment txs for partitions, if the count is >= the unassigned len, do nothing
+            let pending_pledges = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
+            let to_pledge_count = (to_pledge_count as isize) - (pending_pledges as isize);
+            debug!(
+                "Found {} SMs without partition assignments",
+                &to_pledge_count
+            );
+            let mut prev_pledge_id = anchor;
+            for idx in 0..to_pledge_count {
+                // post a pledge tx
+                let pledge_tx = CommitmentTransaction {
+                    commitment_type: irys_primitives::CommitmentType::Pledge,
+                    // TODO: real pledge amounts
+                    fee: 1,
+                    anchor: prev_pledge_id, // use a cascading anchor so we don't have duplicate txids
+                    ..Default::default()
+                };
+                let pledge_tx = signer.sign_commitment(pledge_tx)?;
+
+                post_commitment_tx(&pledge_tx).await.unwrap();
+                debug!(
+                    "Posted pledge tx {}/{} {:?}",
+                    idx, to_pledge_count, &pledge_tx.id
+                );
+                prev_pledge_id = pledge_tx.id
+            }
+            debug!("Stake & Pledge check complete");
+        }
 
         Ok(ctx)
     }
@@ -1043,7 +1145,7 @@ impl IrysNode {
         );
 
         // set up chunk provider
-        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard);
+        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
 
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {
@@ -1076,6 +1178,7 @@ impl IrysNode {
             block_producer_inner,
             block_pool,
             validation_enabled,
+            storage_modules_guard,
         };
 
         // Spawn the StorageModuleService to manage the lifecycle of storage modules
