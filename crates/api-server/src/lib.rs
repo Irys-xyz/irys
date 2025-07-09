@@ -13,7 +13,6 @@ use irys_actors::{
     mempool_service::MempoolServiceMessage,
 };
 use irys_p2p::{PeerList as _, PeerListServiceFacade, SyncState};
-use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{

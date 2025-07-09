@@ -1320,7 +1320,7 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
-            reth_node_adapter,
+            reth_payload_builder: reth_node_adapter,
             reth_service: reth_service_actor,
         });
 

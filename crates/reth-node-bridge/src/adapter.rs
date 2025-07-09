@@ -25,21 +25,23 @@ use reth_payload_builder::PayloadKind;
 use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt as _};
 use tokio::sync::RwLock;
 
-pub type TmpDB = RethDbWrapper;
-type TmpNodeAdapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, TmpDB>>> =
-    FullNodeTypesAdapter<N, TmpDB, Provider>;
+type TmpNodeAdapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, RethDbWrapper>>> =
+    FullNodeTypesAdapter<N, RethDbWrapper, Provider>;
 
 /// Type alias for a `NodeAdapter`
-pub type Adapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, TmpDB>>> = NodeAdapter<
-    TmpNodeAdapter<N, Provider>,
-    <<N as Node<TmpNodeAdapter<N, Provider>>>::ComponentsBuilder as NodeComponentsBuilder<
+pub type Adapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, RethDbWrapper>>> =
+    NodeAdapter<
         TmpNodeAdapter<N, Provider>,
-    >>::Components,
->;
+        <<N as Node<TmpNodeAdapter<N, Provider>>>::ComponentsBuilder as NodeComponentsBuilder<
+            TmpNodeAdapter<N, Provider>,
+        >>::Components,
+    >;
+
+pub type NodeProvider = BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>;
 
 /// Type alias for a type of `NodeHelper`
-pub type NodeHelperType<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, TmpDB>>> =
-    NodeTestContext<Adapter<N, Provider>, <N as Node<TmpNodeAdapter<N, Provider>>>::AddOns>;
+pub type NodeHelperType<N> =
+    NodeTestContext<Adapter<N, NodeProvider>, <N as Node<TmpNodeAdapter<N, NodeProvider>>>::AddOns>;
 
 #[derive(Clone)]
 pub struct IrysRethNodeAdapter {
@@ -59,9 +61,16 @@ impl IrysRethNodeAdapter {
         shadow_tx_store: ShadowTxStore,
     ) -> eyre::Result<Self> {
         Ok(Self {
-            reth_node: Arc::new(RwLock::new(reth_node)),
+            reth_node: Arc::new(reth_node),
             shadow_tx_store,
         })
+    }
+}
+
+impl Deref for IrysRethNodeAdapter {
+    type Target = NodeHelperType<IrysEthereumNode>;
+    fn deref(&self) -> &Self::Target {
+        &self.reth_node
     }
 }
 
@@ -77,10 +86,6 @@ impl IrysRethNodeAdapter {
     ) -> eyre::Result<()> {
         // get head block from notifications stream and verify the tx has been pushed to the
         // pool is actually present in the canonical block
-        // let head = self.engine_api.canonical_stream.next().await.unwrap();
-        // let tx = head.tip().transactions().next();
-        // assert_eq!(tx.unwrap().hash().as_slice(), tip_tx_hash.as_slice());
-
         loop {
             // wait for the block to commit
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

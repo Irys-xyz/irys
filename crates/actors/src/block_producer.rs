@@ -22,8 +22,15 @@ use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_price_oracle::IrysPriceOracle;
-use irys_reth::compose_shadow_tx;
-use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_reth::{
+    compose_shadow_tx,
+    payload::{DeterministicShadowTxKey, ShadowTxStore},
+    reth_node_ethereum::EthEngineTypes,
+};
+use irys_reth_node_bridge::{
+    adapter::{NodeHelperType, NodeProvider},
+    IrysRethNodeAdapter,
+};
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
@@ -36,8 +43,9 @@ use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
+    api::PayloadKind,
     core::primitives::SealedBlock,
-    payload::EthBuiltPayload,
+    payload::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderHandle},
     revm::primitives::B256,
     rpc::types::BlockId,
     tasks::{shutdown::GracefulShutdown, TaskExecutor},
@@ -101,8 +109,12 @@ pub struct BlockProducerInner {
     pub block_tree_guard: BlockTreeReadGuard,
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
-    /// Reth node adapter
-    pub reth_node_adapter: IrysRethNodeAdapter,
+    /// Reth node payload builder
+    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes>,
+    /// Reth blockchain provider
+    pub reth_provider: NodeProvider,
+    /// Shadow tx store
+    pub shadow_tx_store: ShadowTxStore,
     /// Reth service actor
     pub reth_service: Addr<RethServiceActor>,
 }
@@ -392,22 +404,33 @@ pub trait BlockProdStrategy: Send + Sync {
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
     ) -> eyre::Result<EthBuiltPayload> {
-        // // generate payload attributes
-        // let payload_attrs = PayloadAttributes {
-        //     timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
-        //     prev_randao: parent_mix_hash,
-        //     suggested_fee_recipient: self.inner().config.node_config.reward_address,
-        //     withdrawals: None, // these should ALWAYS be none
-        //     parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
-        // };
+        // generate payload attributes
+        let attributes = PayloadAttributes {
+            timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
+            prev_randao: parent_mix_hash,
+            suggested_fee_recipient: self.inner().config.node_config.reward_address,
+            withdrawals: None, // these should ALWAYS be none
+            parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+        };
+        let attributes =
+            EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, attributes);
 
-        // let reth_node_adapter = self.inner().reth_node_adapter.clone();
-        // let payload = reth_node_adapter
-        //     .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
-        //     .await?;
+        let payload_builder = &self.inner().reth_payload_builder;
 
-        // Ok(payload)
-        todo!()
+        // store shadow txs
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
+
+        // send & await the payload
+        let payload_id = payload_builder
+            .send_new_payload(attributes.clone())
+            .await??;
+        let payload = payload_builder
+            .resolve_kind(payload_id, PayloadKind::WaitForPending)
+            .await
+            .unwrap()?;
+
+        Ok(payload)
     }
 
     async fn produce_block(
@@ -802,9 +825,7 @@ pub trait BlockProdStrategy: Send + Sync {
                 // whereas, if we use the reth rpc, it will fetch the block from reth peers (not what we want)!
                 let result = self
                     .inner()
-                    .reth_node_adapter
-                    .inner
-                    .provider
+                    .reth_provider
                     .block(BlockHashOrNumber::Hash(prev_block_header.evm_block_hash))?;
                 match result {
                     Some(block) => {

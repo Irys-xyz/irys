@@ -40,6 +40,7 @@ use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardfor
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
+pub use reth_node_ethereum;
 use reth_node_ethereum::{
     node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
