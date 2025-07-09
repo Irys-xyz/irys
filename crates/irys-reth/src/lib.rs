@@ -41,12 +41,12 @@ use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
 pub use reth_node_ethereum;
-pub use reth_provider::{BlockReaderIdExt, providers::BlockchainProvider};
 use reth_node_ethereum::{
     node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
 };
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
+pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},

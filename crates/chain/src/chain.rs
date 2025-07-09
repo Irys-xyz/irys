@@ -1,7 +1,6 @@
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
-use alloy_eips::BlockNumberOrTag;
 use base58::ToBase58 as _;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
@@ -37,7 +36,6 @@ use irys_p2p::{
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
-use irys_reth::BlockReaderIdExt;
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{
     eth_payload_attributes, NodeTestContext, RethNode, RethNodeAdapter,
@@ -46,7 +44,6 @@ pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::signal::{
     run_to_completion_or_panic, run_until_ctrl_c_or_channel_message,
 };
-use irys_reth_node_bridge::unwind::unwind_to;
 use irys_reth_node_bridge::{adapter::NodeProvider, IrysRethNodeAdapter};
 use irys_reward_curve::HalvingCurve;
 use irys_storage::StorageModulesReadGuard;
@@ -1133,7 +1130,7 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
-                chunk_provider: chunk_provider.clone(),
+                chunk_provider,
                 peer_list: peer_list_service,
                 db: irys_db,
                 reth_provider: reth_node.provider.clone(),
