@@ -9,6 +9,10 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", c_src.display());
 
+    env::set_var("PKG_CONFIG_LIBDIR", "/opt/homebrew/lib/pkgconfig");
+    env::set_var("CC", "/opt/homebrew/Cellar/llvm/20.1.7//bin/clang");
+    env::set_var("CXX", "/opt/homebrew/Cellar/llvm/20.1.7//bin/clang++");
+
     let (lib_dir, include_dir) = build_openssl();
     let pkgconfig_dir = lib_dir.join("pkgconfig");
     // tell pkgconfig to discover our vendored openssl build

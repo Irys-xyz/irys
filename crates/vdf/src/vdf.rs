@@ -1,8 +1,6 @@
 use crate::state::AtomicVdfState;
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
-use irys_types::{
-    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
-};
+use irys_types::{block_production::Seed, AtomicVdfStepNumber, BlockHash, H256List, IrysBlockHeader, H256, U256};
 use sha2::{Digest as _, Sha256};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
@@ -52,12 +50,32 @@ pub fn run_vdf_for_genesis_block(
     }
 }
 
+/// A struct that notifies VDF when a new block is created or received over the gossip.
+/// It is necessary to correctly apply the VDF reset seed to the next step.
+#[derive(Clone, Debug)]
+pub struct NewResetSeed {
+    pub block_hash: BlockHash,
+    pub block_height: u64,
+    pub global_step_number: u64,
+}
+
+// During the block production process, we need to determine whether the steps in the block header
+// content a step with a number/config.reset_frequency == 0. If it does, then we set the new_seed
+// field of this block header to the block hash of the previous block, then proceed as usual. During
+// the block validation (probably prevalidation?) we need to check that the header contains a step with
+// a number/config.reset_frequency == 0, and that the new_seed field is equal to the block hash of the
+// previous block. If it is not, then we return an error. Once the block that has a
+// reset step is being moved out of the tree, we send a NewResetSeed message to the VDF thread. When
+// the next reset step is reached, the VDF thread will use the block hash from the NewResetSeed message
+// to apply_reset to the VDF state.
+
 pub fn run_vdf(
     config: &irys_types::VdfConfig,
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
     mut fast_forward_receiver: UnboundedReceiver<VdfStep>,
+    mut new_reset_seed_receiver: UnboundedReceiver<NewResetSeed>,
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: impl MiningBroadcaster,
@@ -74,7 +92,7 @@ pub fn run_vdf(
         "VDF thread started at global_step_number: {}",
         global_step_number
     );
-    let nonce_limiter_reset_frequency = config.reset_frequency as u64;
+    let vdf_reset_frequency = config.reset_frequency as u64;
 
     // maintain a state of whether or not this vdf loop should be mining
     // don't start the VDF right away
@@ -103,7 +121,7 @@ pub fn run_vdf(
                 );
                 hash = process_reset(
                     global_step_number,
-                    nonce_limiter_reset_frequency,
+                    vdf_reset_frequency,
                     hash,
                     reset_seed,
                 );
@@ -164,7 +182,7 @@ pub fn run_vdf(
 
         hash = process_reset(
             global_step_number,
-            nonce_limiter_reset_frequency,
+            vdf_reset_frequency,
             hash,
             reset_seed,
         );
@@ -175,11 +193,11 @@ pub fn run_vdf(
 #[must_use]
 fn process_reset(
     global_step_number: u64,
-    nonce_limiter_reset_frequency: u64,
+    reset_frequency: u64,
     hash: H256,
     reset_seed: H256,
 ) -> H256 {
-    if global_step_number % nonce_limiter_reset_frequency == 0 {
+    if global_step_number % reset_frequency == 0 {
         // FIXME: is there an issue with reset_seed never changing here?
         info!(
             "Reset seed {:?} applied to step {}",
