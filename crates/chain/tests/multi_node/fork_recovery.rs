@@ -656,6 +656,11 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 #[test_log::test(actix_web::test)]
 async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     initialize_tracing();
+
+    //
+    // Stage 0: SETUP AND STARTUP
+    //
+
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
@@ -694,6 +699,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         .start_and_wait_for_packing("NODE_C", seconds_to_wait)
         .await;
 
+    // Expected state at end of stage 0:
+    //  Nodes A, B, C started
+    //  Nodes A, B, C at block height 0
+
     //
     // Stage 1: STARTING STATE CHECKS
     //
@@ -720,6 +729,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // check balances match genesis account balances i.e. they are not zero
     assert_ne!(U256::from(0), signer_b_genesis_balance);
     assert_ne!(U256::from(0), signer_c_genesis_balance);
+
+    // Expected state at end of stage 1:
+    //  Unchanged from Stage 0
 
     //
     // Stage 2: MINE BLOCK
@@ -784,12 +796,20 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     assert_ne!(b_block1.reward_amount, U256::from(0_u128));
     assert_ne!(c_block1.reward_amount, U256::from(0_u128));
 
+    // Expected state at end of stage 2:
+    //  Nodes A, B, C at block height 1
+    //  Signer B, C balance remains at genesis balance
+    //  Node A signer has recieved a block reward but we don't use Node A signer in this test
+
     //
     // Stage 3: DISABLE ANY/ALL GOSSIP
     //
     node_a.gossip_disable();
     node_b.gossip_disable();
     node_c.gossip_disable();
+
+    // Expected state at end of stage 3:
+    // Unchanged from stage 2
 
     //
     // Stage 4: GENERATE ISOLATED txs
@@ -812,6 +832,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     node_c
         .wait_for_mempool(peer_c_b2_submit_tx.header.id, seconds_to_wait)
         .await?;
+
+    // Expected state at end of stage 4:
+    //  Nodes A, B, C remain at block height 1
+    //  Signer B, C balance remains at genesis balance
+    //  Node C mempool now contains tx peer_b_b2_submit_tx
+    //  Node C mempool now contains tx peer_b_b2_submit_tx
 
     //
     // Stage 5: MINE FORK A and B TO HEIGHT 2 and 3
@@ -911,7 +937,18 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         c_signer.address()
     );
 
-    // NODE B -> Node C
+    // Expected state at end of stage 5:
+    //  Node A is now at block height 2
+    //  Node B is now at block height 3
+    //  Node C remains at block height 1
+    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - tx_fee * 2
+    //  Signer C balance remains at genesis balance
+    //  Node C mempool now has proof for tx peer_b_b2_submit_tx
+    //  Node C mempool now has proof for tx peer_b_b2_submit_tx
+
+    //
+    // STAGE 6: NODE B -> Node C
+    //
     // post commitment txs and then the blocks to node c
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
     // this will cause the txs that were previously canonical from C2 to become non canon
@@ -941,9 +978,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             "Node A should not yet have received block 3 from Node B"
         );
     }
+    // Expected state at end of stage 6:
+    //  Node A remains at block height 2
+    //  Node B remains at block height 3
+    //  Node C is now at block height 3 and reorgs having received two blocks from Node B
 
     //
-    // Stage 6: MINE FORK C TO HEIGHT 4
+    // Stage 7: MINE FORK C TO HEIGHT 4
     //
 
     // Node C mines on top of B's chain and does not gossip it back to B
@@ -966,7 +1007,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     assert_eq!(c_block4.height, 4, "Node C Failed to reach block height 4"); // block c4
 
     //
-    // Stage 7: FINAL SYNC / RE-ORGs
+    // Stage 8: FINAL SYNC / RE-ORGs
     //
     {
         // Enable gossip
@@ -980,7 +1021,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         node_a.gossip_block(&a_block2)?;
     }
     //
-    // Stage 8: FINAL STATE CHECKS
+    // Stage 9: FINAL STATE CHECKS
     //
 
     // confirm all three nodes are at the same and expected height "4"
