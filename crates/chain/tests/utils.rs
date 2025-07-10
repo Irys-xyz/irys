@@ -848,9 +848,6 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_tree_guard
             .read()
             .canonical_epoch_snapshot()
-            .commitment_state
-            .read()
-            .unwrap()
             .is_staked(commitment_tx.signer);
         commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
     }

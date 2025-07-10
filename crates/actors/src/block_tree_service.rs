@@ -1314,11 +1314,7 @@ impl BlockTreeCache {
                 // Mid-epoch blocks: accumulate new commitment transactions into the existing
                 // commitment snapshot without triggering epoch state transitions
                 for commitment_tx in &commitment_txs {
-                    let is_staked_in_current_epoch = epoch_snapshot
-                        .commitment_state
-                        .read()
-                        .unwrap()
-                        .is_staked(commitment_tx.signer);
+                    let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
                     commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
                 }
 
@@ -2245,11 +2241,7 @@ pub fn build_current_commitment_snapshot_from_index(
                         .unwrap()
                         .expect("commitment transactions to be in database");
 
-                    let is_staked_in_current_epoch = epoch_snapshot
-                        .commitment_state
-                        .read()
-                        .unwrap()
-                        .is_staked(commitment_tx.signer);
+                    let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
 
                     // Apply them to the commitment snapshot
                     let _status =
@@ -2277,7 +2269,6 @@ pub fn build_current_commitment_snapshot_from_index(
 /// * `commitment_txs` - Slice of commitment transactions to process for this block (should match txids in the block)
 /// * `prev_commitment_snapshot` - The commitment snapshot from the previous block
 /// * `consensus_config` - Configuration containing epoch settings
-/// * `commitment_state_guard` - Read guard for checking staking status of transaction signers
 ///
 /// # Returns
 /// Arc-wrapped commitment snapshot for the new block
@@ -2300,11 +2291,7 @@ fn create_commitment_snapshot_for_block(
 
     let mut new_commitment_snapshot = (**prev_commitment_snapshot).clone();
     for commitment_tx in commitment_txs {
-        let is_staked_in_current_epoch = epoch_snapshot
-            .commitment_state
-            .read()
-            .unwrap()
-            .is_staked(commitment_tx.signer);
+        let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
         new_commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
     }
     Arc::new(new_commitment_snapshot)
