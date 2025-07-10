@@ -1503,14 +1503,21 @@ fn find_initial_reset_block(
         .cloned()
         .expect("the block index must have at least one entry");
 
+    let mut block_hash = latest_block_index.block_hash;
+
     loop {
         if let Some(header) = database::block_header_by_hash(
             &irys_db.tx().unwrap(),
-            &latest_block_index.block_hash,
+            &block_hash,
             false,
-        )
-        .unwrap()
+        ).unwrap()
         {
+            if header.height == 0 {
+                // Reached the genesis block, no reset block found
+                return None;
+            }
+
+            block_hash = header.previous_block_hash;
             let first_step_in_block = header.vdf_limiter_info.first_step_number();
             let last_step_in_block = header.vdf_limiter_info.global_step_number;
             if first_step_in_block <= step && step <= last_step_in_block {
