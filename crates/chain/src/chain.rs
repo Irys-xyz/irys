@@ -23,7 +23,7 @@ use irys_actors::{
     services::ServiceSenders,
     validation_service::ValidationService,
 };
-use irys_actors::{ActorAddresses, EpochReplayData, StorageModuleService};
+use irys_actors::{ActorAddresses, BlockValidationTracker, EpochReplayData, StorageModuleService};
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -68,6 +68,7 @@ use reth::{
 };
 use reth_db::Database as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 use std::{
     net::TcpListener,
     sync::{Arc, RwLock},
@@ -617,11 +618,17 @@ impl IrysNode {
         .await?;
 
         if config.node_config.stake_pledge_drives {
+            const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+            let validation_tracker = BlockValidationTracker::new(
+                ctx.block_tree_guard.clone(),
+                ctx.service_senders.clone(),
+                MAX_WAIT_TIME,
+            );
             stake_and_pledge(
                 config,
-                latest_block,
                 ctx.block_tree_guard.clone(),
                 ctx.storage_modules_guard.clone(),
+                validation_tracker,
             )
             .await?;
         }
@@ -1530,9 +1537,9 @@ fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
 /// 4) post enough pledges so that there are enough pledges for all local storage modules
 async fn stake_and_pledge(
     config: &Config,
-    latest_block: Arc<IrysBlockHeader>,
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
+    mut validation_tracker: BlockValidationTracker,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
@@ -1548,6 +1555,10 @@ async fn stake_and_pledge(
         let url = format!("{}/v1/commitment_tx", api_uri);
         client.post(url).send_json(commitment_tx).await
     };
+
+    // wait for any pending blocks to finish validating
+    let latest_hash = validation_tracker.wait_for_validation().await?;
+    // now check the canonical state
 
     let (is_historically_staked, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
@@ -1571,17 +1582,18 @@ async fn stake_and_pledge(
     // if we have a historic or pending stake, don't send another
     let is_staked = is_historically_staked || has_pending_stake;
 
-    let anchor = if !is_staked {
+    let mut last_tx_id = if !is_staked {
         debug!(
             "Local mining address {:?} is not staked, staking...",
             &address
         );
+
         // post a stake tx
         let stake_tx = CommitmentTransaction {
             commitment_type: irys_primitives::CommitmentType::Stake,
             // TODO: real staking amounts
             fee: 1,
-            anchor: latest_block.previous_block_hash,
+            anchor: latest_hash,
             ..Default::default()
         };
         let stake_tx = signer.sign_commitment(stake_tx)?;
@@ -1591,12 +1603,13 @@ async fn stake_and_pledge(
         stake_tx.id
     } else {
         debug!("Local mining address {:?} is staked", &address);
-        latest_block.previous_block_hash
+        // latest_block.previous_block_hash
+        latest_hash
     };
 
     // get all SMs without a partition assignment
 
-    let to_pledge_sms = {
+    let unassigned_modules = {
         let sms = storage_modules_guard.read();
         sms.iter()
             .filter(|&sm| sm.partition_assignment().is_none())
@@ -1605,19 +1618,20 @@ async fn stake_and_pledge(
 
     // get the number of pending commitment txs for partitions, if the count is >= the unassigned len, do nothing
     let pending_pledges = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
-    let to_pledge_count = (to_pledge_sms as isize) - (pending_pledges as isize);
+    let to_pledge_count = unassigned_modules.saturating_sub(pending_pledges);
+
     debug!(
         "Found {} SMs without partition assignments ({} pending pledges)",
         &to_pledge_count, &pending_pledges
     );
-    let mut prev_pledge_id = anchor;
+
     for idx in 0..to_pledge_count {
         // post a pledge tx
         let pledge_tx = CommitmentTransaction {
             commitment_type: irys_primitives::CommitmentType::Pledge,
             // TODO: real pledge amounts
             fee: 1,
-            anchor: prev_pledge_id, // use a cascading anchor so we don't have duplicate txids
+            anchor: last_tx_id, // use a cascading anchor so we don't have duplicate txids
             ..Default::default()
         };
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
@@ -1625,9 +1639,11 @@ async fn stake_and_pledge(
         post_commitment_tx(&pledge_tx).await.unwrap();
         debug!(
             "Posted pledge tx {}/{} {:?}",
-            idx, to_pledge_count, &pledge_tx.id
+            idx + 1,
+            to_pledge_count,
+            &pledge_tx.id
         );
-        prev_pledge_id = pledge_tx.id
+        last_tx_id = pledge_tx.id
     }
     debug!("Stake & Pledge check complete");
 
