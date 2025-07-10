@@ -43,6 +43,8 @@ pub type NodeHelperType<N> =
 
 #[derive(Clone)]
 pub struct IrysRethNodeAdapter {
+    // todo: long term plan is to get rid of the NodeTestHelper and replace all the interactions
+    // with the BeaconHandle / Provider & other primitives that are exposed on the base node handle
     pub reth_node: Arc<NodeHelperType<IrysEthereumNode>>,
     pub shadow_tx_store: ShadowTxStore,
 }
@@ -54,14 +56,14 @@ impl std::fmt::Debug for IrysRethNodeAdapter {
 }
 
 impl IrysRethNodeAdapter {
-    pub async fn new(
+    pub fn new(
         reth_node: NodeHelperType<IrysEthereumNode>,
         shadow_tx_store: ShadowTxStore,
-    ) -> eyre::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             reth_node: Arc::new(reth_node),
             shadow_tx_store,
-        })
+        }
     }
 }
 

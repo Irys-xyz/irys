@@ -1787,7 +1787,7 @@ pub mod test_utils {
 
             let block_producer_addresses =
                 vec![block_producer_a.address(), block_producer_b.address()];
-            let (mut nodes, tasks, ..) = setup_irys_reth(
+            let (nodes, tasks, ..) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,

@@ -17,8 +17,7 @@ use alloy_consensus::{
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::TxSignerSync as _;
 use alloy_rpc_types_engine::{
-    ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, ExecutionPayloadV3,
-    PayloadAttributes, PayloadStatusEnum,
+    ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, PayloadAttributes, PayloadStatusEnum,
 };
 use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
@@ -28,7 +27,6 @@ use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
     compose_shadow_tx,
     payload::{DeterministicShadowTxKey, ShadowTxStore},
-    reth_ethereum_engine_primitives::EthPayloadTypes,
     reth_node_ethereum::EthEngineTypes,
     IrysEthereumNode,
 };
@@ -45,11 +43,11 @@ use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
-    api::{BeaconConsensusEngineHandle, FullNodeTypes, NodeTypes, PayloadKind, PayloadTypes},
+    api::{BeaconConsensusEngineHandle, NodeTypes, PayloadKind},
     core::primitives::SealedBlock,
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderHandle},
     revm::primitives::B256,
-    rpc::{api::EngineApiClient, types::BlockId},
+    rpc::types::BlockId,
     tasks::{shutdown::GracefulShutdown, TaskExecutor},
 };
 use reth_transaction_pool::EthPooledTransaction;
@@ -358,12 +356,11 @@ pub trait BlockProdStrategy: Send + Sync {
                             block_hash.0.to_base58()
                         )
                     })
-                    .map(|header| {
+                    .inspect(|header| {
                         debug!(
                             block_height = header.height,
                             "Block header found in database"
                         );
-                        header
                     })
             }
         }
@@ -383,13 +380,12 @@ pub trait BlockProdStrategy: Send + Sync {
                     block_hash.0.to_base58()
                 )
             })
-            .map(|snapshot| {
+            .inspect(|snapshot| {
                 debug!(
                     ema_price_current = %snapshot.ema_price_current_interval,
                     oracle_price_predecessor = %snapshot.oracle_price_for_current_ema_predecessor,
                     "EMA snapshot retrieved"
                 );
-                snapshot
             })
     }
 

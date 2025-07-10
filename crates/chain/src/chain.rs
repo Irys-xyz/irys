@@ -48,9 +48,8 @@ use irys_reth_node_bridge::{adapter::NodeProvider, IrysRethNodeAdapter};
 use irys_reward_curve::HalvingCurve;
 use irys_storage::StorageModulesReadGuard;
 use irys_storage::{
-    irys_consensus_data_db::open_or_create_irys_consensus_data_db,
-    reth_provider::{IrysRethProvider, IrysRethProviderInner},
-    ChunkProvider, ChunkType, StorageModule,
+    irys_consensus_data_db::open_or_create_irys_consensus_data_db, ChunkProvider, ChunkType,
+    StorageModule,
 };
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
@@ -541,8 +540,6 @@ impl IrysNode {
         let (shadow_tx_store, _shadow_tx_notification_stream) =
             ShadowTxStore::new_with_notifications();
 
-        let irys_provider = irys_storage::reth_provider::create_provider();
-
         // init the services
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
 
@@ -556,7 +553,6 @@ impl IrysNode {
             vdf_shutdown_receiver,
             reth_handle_receiver,
             irys_node_ctx_tx,
-            &irys_provider,
             task_manager.executor(),
             self.http_listener,
             irys_db,
@@ -576,7 +572,6 @@ impl IrysNode {
             shadow_tx_store,
             reth_handle_sender,
             actor_main_thread_handle,
-            irys_provider.clone(),
             chain_spec.clone(),
             latest_height,
             task_manager,
@@ -627,7 +622,6 @@ impl IrysNode {
         vdf_shutdown_receiver: mpsc::Receiver<()>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
-        irys_provider: &Arc<RwLock<Option<IrysRethProviderInner>>>,
         task_exec: TaskExecutor,
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
@@ -640,7 +634,6 @@ impl IrysNode {
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn({
-                let _irys_provider = Arc::clone(irys_provider);
                 move || {
                     System::new().block_on(async move {
                         // read the latest block info
@@ -739,7 +732,6 @@ impl IrysNode {
         shadow_tx_store: ShadowTxStore,
         reth_handle_sender: oneshot::Sender<RethNode>,
         actor_main_thread_handle: JoinHandle<RethNodeProvider>,
-        irys_provider: IrysRethProvider,
         reth_chainspec: ChainSpec,
         latest_block_height: u64,
         mut task_manager: TaskManager,
@@ -792,7 +784,6 @@ impl IrysNode {
                 task_manager.graceful_shutdown();
 
                 reth_node.provider.database.db.close();
-                irys_storage::reth_provider::cleanup_provider(&irys_provider);
                 info!("Reth thread finished");
             })?;
 
@@ -829,7 +820,7 @@ impl IrysNode {
         )
         .await?;
         let reth_node_adapter =
-            IrysRethNodeAdapter::new(reth_test_context, shadow_tx_store.clone()).await?;
+            IrysRethNodeAdapter::new(reth_test_context, shadow_tx_store.clone());
 
         // start service senders/receivers
         let (service_senders, receivers) = ServiceSenders::new();

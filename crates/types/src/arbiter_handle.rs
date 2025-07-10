@@ -86,8 +86,8 @@ pub enum ServiceHandle {
 impl ServiceHandle {
     pub async fn shutdown(self) {
         match self {
-            ServiceHandle::Actix(handle) => handle.stop_and_join(),
-            ServiceHandle::Tokio(handle) => {
+            Self::Actix(handle) => handle.stop_and_join(),
+            Self::Tokio(handle) => {
                 let _ = handle.await;
             }
         }

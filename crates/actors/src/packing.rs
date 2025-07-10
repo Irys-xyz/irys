@@ -281,7 +281,7 @@ impl Actor for PackingActor {
 
     fn started(&mut self, ctx: &mut Self::Context) {
         ctx.set_mailbox_capacity(5_000);
-        
+
         // Spawn the critical packing job processing tasks
         let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
         for key in keys {
