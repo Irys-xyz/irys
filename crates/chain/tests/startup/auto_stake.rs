@@ -1,60 +1,9 @@
-use std::time::Duration;
-
 use crate::utils::IrysNodeTest;
-use irys_actors::mempool_service::{MempoolServiceMessage, MempoolTxs};
-use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
 use irys_types::{CommitmentTransaction, NodeConfig, H256};
 use rstest::rstest;
 use tokio::task::yield_now;
-use tracing::{debug, info};
-
-// waits until mempool contains exact expected counts of each tx type.
-// all filters are AND conditions (e.g., submit_txs=1, publish_txs=1 requires both).
-pub async fn wait_for_mempool_shape(
-    node: &IrysNodeTest<IrysNodeCtx>,
-    submit_txs: usize,
-    publish_txs: usize,
-    commitment_txs: usize,
-    seconds_to_wait: u32,
-) -> eyre::Result<()> {
-    let mempool_service = node.node_ctx.service_senders.mempool.clone();
-    let mut retries = 0;
-    let max_retries = seconds_to_wait; // 1 second per retry
-    debug!(
-        "Waiting for {} submit, {} publish and {} commitment",
-        &submit_txs, &publish_txs, &commitment_txs
-    );
-    for _ in 0..max_retries {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        mempool_service.send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx))?;
-
-        let MempoolTxs {
-            commitment_tx,
-            submit_tx,
-            publish_tx,
-        } = oneshot_rx.await??;
-        if commitment_tx.len() == commitment_txs
-            && submit_tx.len() == submit_txs
-            && publish_tx.0.len() == publish_txs
-        {
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        retries += 1;
-    }
-
-    if retries == max_retries {
-        Err(eyre::eyre!(
-            "Failed to validate mempool state after {} retries",
-            retries
-        ))
-    } else {
-        info!("mempool state valid after {} retries", &retries);
-        Ok(())
-    }
-}
+use tracing::debug;
 
 #[rstest]
 #[case(false, 0)] // blank slate
@@ -112,7 +61,9 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         debug!("stake: {}", &stake_tx.id);
         // just the stake
         already_processed_count += 1;
-        wait_for_mempool_shape(&genesis_node, 0, 0, already_processed_count, 10).await?;
+        genesis_node
+            .wait_for_mempool_shape(0, 0, already_processed_count, 10)
+            .await?;
     }
 
     if pledges > 0 {
@@ -133,7 +84,9 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
             already_processed_count += 1;
             // don't wait if we haven't posted a stake (stuck in the LRU)
             if stake {
-                wait_for_mempool_shape(&genesis_node, 0, 0, already_processed_count, 10).await?;
+                genesis_node
+                    .wait_for_mempool_shape(0, 0, already_processed_count, 10)
+                    .await?;
             } else {
                 yield_now().await
             }
@@ -150,7 +103,9 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         .await;
 
     // wait for the expected txs to show up on the genesis node
-    wait_for_mempool_shape(&genesis_node, 0, 0, from_scratch_expected_count, 10).await?;
+    genesis_node
+        .wait_for_mempool_shape(0, 0, from_scratch_expected_count, 10)
+        .await?;
 
     // Mine a block to get the stake commitment included
     let irys_block1 = genesis_node.mine_block().await?;
