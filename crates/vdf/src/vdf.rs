@@ -1,4 +1,4 @@
-use crate::reset_seed::ResetSeedManager;
+use crate::reset_seed::{ResetSeed, ResetSeedManager};
 use crate::state::AtomicVdfState;
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
 use irys_types::block_provider::BlockProvider;
@@ -78,6 +78,7 @@ pub fn run_vdf<B: BlockProvider>(
     vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
     block_provider: B,
+    mut new_potential_reset_seed_receiver: UnboundedReceiver<ResetSeed>,
 ) {
     let mut reset_seed_manager = ResetSeedManager::new(
         initial_reset_seed,
@@ -127,6 +128,15 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number, global_step_number
                 );
             }
+        }
+
+        while let Ok(new_reset_seed) = new_potential_reset_seed_receiver.try_recv() {
+            // TODO: add a check that the reset seed is in the range we expect
+            debug!(
+                "New Reset Seed for Step {:?} with Seed {:?}",
+                new_reset_seed.global_step_number, new_reset_seed.seed
+            );
+            reset_seed_manager.add_reset_seed_candidate(new_reset_seed);
         }
 
         // check if vdf mining state should change
@@ -288,6 +298,7 @@ mod tests {
 
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
+        let (_, new_potential_seed_receiver) = mpsc::unbounded_channel::<ResetSeed>();
 
         let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
         mining_state_tx.send(true).await.unwrap();
@@ -314,6 +325,7 @@ mod tests {
                     vdf_state.clone(),
                     atomic_global_step_number,
                     MockBlockProvider,
+                    new_potential_seed_receiver,
                 )
             }
         });

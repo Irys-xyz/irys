@@ -20,7 +20,7 @@ pub struct ResetSeed {
 impl ResetSeed {
     /// Extracts a `ResetSeed` from the block header if it contains a reset step. Returns `None` if
     /// the block header does not contain a reset step.
-    pub fn extract_block_header(
+    pub fn try_extract_new_seed_from_block(
         block_header: &IrysBlockHeader,
         reset_frequency: u64,
     ) -> Option<Self> {

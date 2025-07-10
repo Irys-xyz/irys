@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
 use std::time::Duration;
 
-mod reset_seed;
+pub mod reset_seed;
 pub mod state;
 pub mod vdf;
 pub mod vdf_utils;

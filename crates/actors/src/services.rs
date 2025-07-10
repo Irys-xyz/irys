@@ -10,6 +10,7 @@ use crate::{
 use actix::Message;
 use core::ops::Deref;
 use irys_types::GossipBroadcastMessage;
+use irys_vdf::reset_seed::ResetSeed;
 use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
@@ -63,6 +64,7 @@ pub struct ServiceReceivers {
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
+    pub new_potential_reset_seed: UnboundedReceiver<ResetSeed>,
 }
 
 #[derive(Debug)]
@@ -78,6 +80,7 @@ pub struct ServiceSendersInner {
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
+    pub new_potential_reset_seed: UnboundedSender<ResetSeed>,
 }
 
 impl ServiceSendersInner {
@@ -103,6 +106,8 @@ impl ServiceSendersInner {
             broadcast::channel::<BlockMigratedEvent>(100);
         let (block_state_sender, block_state_receiver) =
             broadcast::channel::<BlockStateUpdated>(100);
+        let (new_potential_reset_seed_sender, new_potential_reset_seed_receiver) =
+            unbounded_channel::<ResetSeed>();
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -116,6 +121,7 @@ impl ServiceSendersInner {
             reorg_events: reorg_sender,
             block_migrated_events: block_migrated_sender,
             block_state_events: block_state_sender,
+            new_potential_reset_seed: new_potential_reset_seed_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -129,6 +135,7 @@ impl ServiceSendersInner {
             reorg_events: reorg_receiver,
             block_migrated_events: block_migrated_receiver,
             block_state_events: block_state_receiver,
+            new_potential_reset_seed: new_potential_reset_seed_receiver,
         };
         (senders, receivers)
     }
