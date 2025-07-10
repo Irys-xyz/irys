@@ -659,9 +659,7 @@ mod tests {
             let api_client_stub = ApiClientStub {
                 txs: Default::default(),
                 block_index_handler: Arc::new(RwLock::new(Box::new(
-                    move |_query: BlockIndexQuery| {
-                        return Err(eyre!("Simulating index request error"));
-                    },
+                    move |_query: BlockIndexQuery| Err(eyre!("Simulating index request error")),
                 ))),
                 block_index_calls: Arc::new(Default::default()),
             };
