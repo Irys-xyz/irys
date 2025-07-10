@@ -530,15 +530,12 @@ pub trait BlockProdStrategy {
                 },
             ],
             evm_block_hash,
-            vdf_limiter_info: VDFLimiterInfo {
-                global_step_number: solution.vdf_step,
-                output: solution.seed.into_inner(),
-                last_step_checkpoints: solution.checkpoints,
-                prev_output: prev_block_header.vdf_limiter_info.output,
-                seed: prev_block_header.vdf_limiter_info.seed,
+            vdf_limiter_info: VDFLimiterInfo::new(
+                &solution,
+                prev_block_header,
                 steps,
-                ..Default::default()
-            },
+                &self.inner().config,
+            ),
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
         };

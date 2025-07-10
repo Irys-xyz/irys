@@ -1,5 +1,6 @@
 use irys_actors::block_index_service::BlockIndexReadGuard;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
+use irys_types::block_provider::BlockProvider;
 use irys_types::{BlockHash, BlockIndexItem, H256};
 use tracing::debug;
 #[cfg(test)]
@@ -333,5 +334,23 @@ impl BlockStatusProvider {
                 .expect("to delete block from the tree");
             debug!("Deleted block {:?} from the tree", block_hash);
         }
+    }
+}
+
+impl BlockProvider for BlockStatusProvider {
+    fn does_block_exist(&self, hash: &BlockHash, height: u64) -> bool {
+        {
+            let binding = self.block_index_read_guard.read();
+            let index_item = binding.get_item(height);
+            if let Some(item) = index_item {
+                return item.block_hash == *hash;
+            }
+        }
+
+        self.block_tree_read_guard
+            .read()
+            .get_block(hash)
+            .map(|block| block.height == height)
+            .is_some()
     }
 }

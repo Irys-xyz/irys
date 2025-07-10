@@ -2,12 +2,13 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
+use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
-    Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
-    Proof, H256, U256,
+    Compact, Config, DataRootLeave, H256List, IngressProofsList, IrysSignature,
+    IrysTransactionHeader, Proof, H256, U256,
 };
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
@@ -68,12 +69,51 @@ pub struct VDFLimiterInfo {
 }
 
 impl VDFLimiterInfo {
+    pub fn new(
+        solution: &SolutionContext,
+        prev_block_header: &IrysBlockHeader,
+        steps: H256List,
+        config: &Config,
+    ) -> Self {
+        let mut vdf_limiter_info = VDFLimiterInfo {
+            global_step_number: solution.vdf_step,
+            output: solution.seed.clone().into_inner(),
+            last_step_checkpoints: solution.checkpoints.clone(),
+            prev_output: prev_block_header.vdf_limiter_info.output,
+            seed: prev_block_header.vdf_limiter_info.seed,
+            steps,
+            next_seed: Default::default(),
+            ..VDFLimiterInfo::default()
+        };
+
+        let reset_frequency = config.consensus.vdf.reset_frequency;
+        vdf_limiter_info.set_next_seed(reset_frequency as u64, prev_block_header);
+
+        vdf_limiter_info
+    }
+
     /// Returns the global step number for the first step in the block.
     pub fn first_step_number(&self) -> u64 {
         // It is + 1 because there's always at least one step. I.e., in case if there's only
         // one step, the first step and the last step are the same, in case if there are two
         // steps, the first step is the last step - 1, and so on.
         self.global_step_number - self.steps.len() as u64 + 1
+    }
+
+    pub fn contains_reset_step(&self, reset_frequency: u64) -> Option<u64> {
+        let first_step = self.first_step_number();
+        (first_step..=self.global_step_number)
+            .find(|step_number| step_number % reset_frequency == 0)
+    }
+
+    pub fn set_next_seed(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
+        if self.contains_reset_step(reset_frequency).is_some() {
+            // If the current block is a reset step, we set the next seed to the parent block's hash.
+            self.next_seed = parent_header.block_hash;
+        } else {
+            // Otherwise, we set the next seed to the previous block next_seed.
+            self.next_seed = parent_header.vdf_limiter_info.next_seed;
+        }
     }
 }
 

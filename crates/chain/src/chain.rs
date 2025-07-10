@@ -972,6 +972,9 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
+        let block_status_provider =
+            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
+
         let (p2p_service_handle, block_pool) = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
@@ -980,7 +983,7 @@ impl IrysNode {
             peer_list_service.clone(),
             irys_db.clone(),
             gossip_listener,
-            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
+            block_status_provider.clone(),
             execution_payload_provider,
             vdf_state_readonly.clone(),
             config.clone(),
@@ -1040,6 +1043,7 @@ impl IrysNode {
             broadcast_mining_actor,
             vdf_state,
             atomic_global_step_number,
+            block_status_provider.clone(),
         );
 
         // set up chunk provider
@@ -1177,6 +1181,7 @@ impl IrysNode {
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
+        block_status_provider: BlockStatusProvider,
     ) -> JoinHandle<()> {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
@@ -1224,6 +1229,7 @@ impl IrysNode {
                     MiningServiceBroadcaster::from(broadcast_mining_actor.clone()),
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
+                    block_status_provider,
                 )
             }
         });
