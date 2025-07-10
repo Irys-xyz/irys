@@ -1110,15 +1110,30 @@ impl IrysNode {
         {
             let mut service_handles_guard = irys_node_ctx.service_handles.write().unwrap();
 
-            // Add Tokio service handles first (in order of initialization)
+            // Add services in order that ensures proper shutdown (remember LIFO)
+            // These will be shut down last (core infrastructure)
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
+                peer_list_arbiter,
+                "peer_list_arbiter".to_string(),
+            )));
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
+                reth_arbiter,
+                "reth_arbiter".to_string(),
+            )));
+
+            // Core services
             service_handles_guard.push(ServiceHandle::Tokio(chunk_cache_handle));
             service_handles_guard.push(ServiceHandle::Tokio(block_tree_handle));
-            service_handles_guard.push(ServiceHandle::Tokio(mempool_handle));
-            service_handles_guard.push(ServiceHandle::Tokio(validation_handle));
-            service_handles_guard.push(ServiceHandle::Tokio(block_producer_handle));
-            service_handles_guard.push(ServiceHandle::Tokio(storage_module_handle));
 
-            // Add Actix arbiter handles
+            // Mempool - shuts down after block producer
+            service_handles_guard.push(ServiceHandle::Tokio(mempool_handle));
+
+            // Block producer - shuts down after mining but before mempool
+            service_handles_guard.push(ServiceHandle::Tokio(block_producer_handle));
+
+            // Other services
+            service_handles_guard.push(ServiceHandle::Tokio(validation_handle));
+            service_handles_guard.push(ServiceHandle::Tokio(storage_module_handle));
             service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
                 block_index_arbiter,
                 "block_index_arbiter".to_string(),
@@ -1128,24 +1143,18 @@ impl IrysNode {
                 "chunk_migration_arbiter".to_string(),
             )));
             service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
+                block_discovery_arbiter,
+                "block_discovery_arbiter".to_string(),
+            )));
+
+            // Mining-related services - these will shut down first
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
                 packing_arbiter,
                 "packing_arbiter".to_string(),
             )));
             service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
                 broadcast_arbiter,
                 "broadcast_arbiter".to_string(),
-            )));
-            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
-                block_discovery_arbiter,
-                "block_discovery_arbiter".to_string(),
-            )));
-            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
-                peer_list_arbiter,
-                "peer_list_arbiter".to_string(),
-            )));
-            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
-                reth_arbiter,
-                "reth_arbiter".to_string(),
             )));
             service_handles_guard.extend(part_arbiters.into_iter().map(|x| {
                 ServiceHandle::Actix(ArbiterHandle::new(x, "partition_arbiter".to_string()))
