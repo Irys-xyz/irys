@@ -609,7 +609,6 @@ impl IrysNode {
             ctx.sync_state.clone(),
             irys_api_client::IrysApiClient::new(),
             ctx.peer_list.clone(),
-            node_mode,
             latest_known_block_height as usize,
             &ctx.config,
             Some(Arc::clone(&ctx.block_pool)),
@@ -1563,11 +1562,7 @@ async fn stake_and_pledge(
     let (is_historically_staked, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
-        let is_historically_staked = epoch_snapshot
-            .commitment_state
-            .read()
-            .unwrap()
-            .is_staked(address);
+        let is_historically_staked = epoch_snapshot.is_staked(address);
         let commitment_snapshot = block_tree_guard.canonical_commitment_snapshot();
         (is_historically_staked, commitment_snapshot)
     };
