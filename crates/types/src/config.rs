@@ -220,6 +220,9 @@ pub struct NodeConfig {
     pub reth_peer_info: RethPeerInfo,
 
     pub genesis_peer_discovery_timeout_millis: u64,
+
+    // whether we should try to stake & pledge our local drives
+    pub stake_pledge_drives: bool,
 }
 
 impl From<NodeConfig> for Config {
@@ -713,6 +716,7 @@ impl NodeConfig {
             reth_peer_info: RethPeerInfo::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
+            stake_pledge_drives: false,
         }
     }
 
@@ -998,6 +1002,7 @@ mod tests {
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
         reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
         genesis_peer_discovery_timeout_millis = 10000
+        stake_pledge_drives = false
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
