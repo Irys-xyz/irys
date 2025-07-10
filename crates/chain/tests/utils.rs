@@ -967,6 +967,53 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    // waits until mempool contains exact expected counts of each tx type.
+    // all filters are AND conditions (e.g., submit_txs=1, publish_txs=1 requires both).
+    pub async fn wait_for_mempool_shape(
+        &self,
+        submit_txs: usize,
+        publish_txs: usize,
+        commitment_txs: usize,
+        seconds_to_wait: u32,
+    ) -> eyre::Result<()> {
+        let mempool_service = self.node_ctx.service_senders.mempool.clone();
+        let mut retries = 0;
+        let max_retries = seconds_to_wait; // 1 second per retry
+        debug!(
+            "Waiting for {} submit, {} publish and {} commitment",
+            &submit_txs, &publish_txs, &commitment_txs
+        );
+        for _ in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            mempool_service.send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx))?;
+
+            let MempoolTxs {
+                commitment_tx,
+                submit_tx,
+                publish_tx,
+            } = oneshot_rx.await??;
+            if commitment_tx.len() == commitment_txs
+                && submit_tx.len() == submit_txs
+                && publish_tx.0.len() == publish_txs
+            {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+
+        if retries == max_retries {
+            Err(eyre::eyre!(
+                "Failed to validate mempool state after {} retries",
+                retries
+            ))
+        } else {
+            info!("mempool state valid after {} retries", &retries);
+            Ok(())
+        }
+    }
+
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block
     // if None is provided, it will use the latest state.
     pub async fn get_best_mempool_tx(

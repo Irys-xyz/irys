@@ -249,11 +249,15 @@ pub trait BlockProdStrategy {
     #[tracing::instrument(skip(self), level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-
+        let inner = self.inner();
         // Use BlockValidationTracker to select the parent block
-        let parent_block_hash = BlockValidationTracker::new(self.inner(), MAX_WAIT_TIME)
-            .wait_for_validation()
-            .await?;
+        let parent_block_hash = BlockValidationTracker::new(
+            inner.block_tree_guard.clone(),
+            inner.service_senders.clone(),
+            MAX_WAIT_TIME,
+        )
+        .wait_for_validation()
+        .await?;
 
         // Fetch the parent block header
         let header = self.fetch_block_header(parent_block_hash).await?;
