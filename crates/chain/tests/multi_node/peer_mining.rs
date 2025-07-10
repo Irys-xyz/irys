@@ -49,13 +49,11 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     // Mine another block to perform epoch tasks
     genesis_node.mine_blocks(block_migration_depth).await?;
     genesis_node
-        .wait_until_height_on_chain(1, seconds_to_wait)
+        .wait_until_block_index_height(1, seconds_to_wait)
         .await?;
 
     // Get the genesis nodes view of the peers assignments
-    let peer_assignments = genesis_node
-        .get_partition_assignments(peer_signer.address())
-        .await;
+    let peer_assignments = genesis_node.get_partition_assignments(peer_signer.address());
 
     // Verify that one partition has been assigned to the peer to match its pledge
     assert_eq!(peer_assignments.len(), 1);
@@ -67,9 +65,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     peer_node.wait_for_packing(seconds_to_wait).await;
 
     // Verify that the peer has the same view of its own assignments
-    let peer_assignments_on_peer = peer_node
-        .get_partition_assignments(peer_signer.address())
-        .await;
+    let peer_assignments_on_peer = peer_node.get_partition_assignments(peer_signer.address());
 
     // Verify the peer has the same view of assignments as the genesis node
     assert_eq!(peer_assignments_on_peer.len(), 1);

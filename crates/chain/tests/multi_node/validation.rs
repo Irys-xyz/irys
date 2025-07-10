@@ -75,12 +75,12 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         },
     };
 
-    peer_node.node_ctx.sync_state.set_is_syncing(true);
+    peer_node.gossip_disable();
     let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    peer_node.node_ctx.sync_state.set_is_syncing(false);
+    peer_node.gossip_enable();
 
     peer_node.gossip_block(&block)?;
     let eth_block = eth_payload.block();
@@ -127,7 +127,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
         inner: peer_node.node_ctx.block_producer_inner.clone(),
     };
 
-    peer_node.node_ctx.sync_state.set_is_syncing(true);
+    peer_node.gossip_disable();
     let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
@@ -146,7 +146,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     irys_block.evm_block_hash = eth_payload_other.block().header().hash_slow();
     peer_signer.sign_block_header(&mut irys_block)?;
     let irys_block = Arc::new(irys_block);
-    peer_node.node_ctx.sync_state.set_is_syncing(false);
+    peer_node.gossip_enable();
 
     peer_node.gossip_block(&irys_block)?;
     peer_node.gossip_eth_block(eth_payload.block())?;
@@ -230,12 +230,12 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         },
     };
 
-    peer_node.node_ctx.sync_state.set_is_syncing(true);
+    peer_node.gossip_disable();
     let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    peer_node.node_ctx.sync_state.set_is_syncing(false);
+    peer_node.gossip_enable();
 
     peer_node.gossip_block(&block)?;
     let eth_block = eth_payload.block();
@@ -324,12 +324,12 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         },
     };
 
-    peer_node.node_ctx.sync_state.set_is_syncing(true);
+    peer_node.gossip_disable();
     let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    peer_node.node_ctx.sync_state.set_is_syncing(false);
+    peer_node.gossip_enable();
 
     peer_node.gossip_block(&block)?;
     let eth_block = eth_payload.block();

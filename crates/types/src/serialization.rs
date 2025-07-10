@@ -5,6 +5,7 @@ use alloy_primitives::{bytes, Address, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58 as _};
+use derive_more::Deref;
 use eyre::Error;
 use openssl::sha;
 use rand::RngCore as _;
@@ -341,6 +342,7 @@ impl TxIngressProof {
     Arbitrary,
     RlpDecodable,
     RlpEncodable,
+    Deref,
 )]
 pub struct IngressProofsList(pub Vec<TxIngressProof>);
 
@@ -679,7 +681,7 @@ impl<'de> Deserialize<'de> for Base64 {
 // H256List Type
 //------------------------------------------------------------------------------
 /// A struct of [`Vec<H256>`] used for lists of [`Base64`] encoded hashes
-#[derive(Default, Clone, Eq, PartialEq, Compact, Arbitrary, RlpEncodable, RlpDecodable)]
+#[derive(Default, Clone, Eq, PartialEq, Compact, Arbitrary, RlpEncodable, RlpDecodable, Deref)]
 pub struct H256List(pub Vec<H256>);
 
 impl H256List {

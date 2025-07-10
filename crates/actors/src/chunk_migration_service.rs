@@ -16,7 +16,7 @@ use irys_types::{
     TxChunkOffset, UnpackedChunk, H256,
 };
 use std::sync::{Arc, RwLock};
-use tracing::error;
+use tracing::{error, instrument};
 
 use crate::services::Stop;
 use crate::{
@@ -267,6 +267,8 @@ fn get_block_range(
         LedgerChunkOffset::from(block.data_ledgers[ledger].max_chunk_offset),
     ))
 }
+
+#[instrument(skip_all, err, fields(block_hash = %block.block_hash, height = %block.height))]
 fn get_tx_path_pairs(
     block: &IrysBlockHeader,
     ledger: DataLedger,
@@ -274,8 +276,14 @@ fn get_tx_path_pairs(
 ) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
     let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(txs);
 
-    if tx_root != block.data_ledgers[ledger].tx_root {
-        return Err(eyre::eyre!("Invalid tx_root"));
+    let block_tx_root = block.data_ledgers[ledger].tx_root;
+    if tx_root != block_tx_root {
+        return Err(eyre::eyre!(
+            "Invalid tx_root for {:?} ledger - expected {} got {} ",
+            &ledger,
+            &tx_root,
+            &block_tx_root
+        ));
     }
 
     Ok(proofs

@@ -18,3 +18,12 @@ pub struct CommitmentState {
     pub stake_commitments: BTreeMap<Address, CommitmentStateEntry>,
     pub pledge_commitments: BTreeMap<Address, Vec<CommitmentStateEntry>>,
 }
+
+impl CommitmentState {
+    pub fn is_staked(&self, address: Address) -> bool {
+        if let Some(commitment) = self.stake_commitments.get(&address) {
+            return commitment.commitment_status == CommitmentStatus::Active;
+        }
+        false
+    }
+}

@@ -21,7 +21,6 @@ use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG};
 
-use crate::utils::mine_block;
 use crate::utils::IrysNodeTest;
 
 // network simulation test for analytics
@@ -241,7 +240,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             }
         }
 
-        mine_block(&node.node_ctx).await?;
+        node.mine_block().await?;
         info!("Finished step {}", &i);
     }
 

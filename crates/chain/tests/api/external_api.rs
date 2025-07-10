@@ -7,9 +7,8 @@ use crate::{
     utils::IrysNodeTest,
 };
 use actix_web::{http::header::ContentType, HttpMessage as _};
-use irys_api_server::routes::index::NodeInfo;
 use irys_testing_utils::initialize_tracing;
-use irys_types::BlockIndexItem;
+use irys_types::{BlockIndexItem, NodeInfo};
 use tracing::info;
 
 #[actix::test]
@@ -62,7 +61,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
     ctx.mine_blocks(block_migration_depth as usize + 1).await?;
 
     // wait for 1 block in the index
-    if let Err(e) = ctx.wait_until_height_on_chain(1, 10).await {
+    if let Err(e) = ctx.wait_until_block_index_height(1, 10).await {
         panic!("Error waiting for block height on chain. Error: {:?}", e);
     }
 

@@ -2,7 +2,7 @@ use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionHeader,
-    IrysTransactionResponse, PeerResponse, VersionRequest, H256,
+    IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
 };
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -55,6 +55,8 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
         peer: SocketAddr,
         block_index_query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>>;
+
+    async fn node_info(&self, peer: SocketAddr) -> Result<NodeInfo>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
@@ -209,6 +211,18 @@ impl ApiClient for IrysApiClient {
             Err(e) => Err(e),
         }
     }
+
+    async fn node_info(&self, peer: SocketAddr) -> Result<NodeInfo> {
+        let path = "/info";
+        let response = self
+            .make_request::<NodeInfo, _>(peer, Method::GET, path, Some(&()))
+            .await;
+        match response {
+            Ok(Some(node_info)) => Ok(node_info),
+            Ok(None) => Err(eyre::eyre!("No response from peer")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(feature = "test-utils")]
@@ -273,6 +287,10 @@ pub mod test_utils {
             _block_index_query: BlockIndexQuery,
         ) -> eyre::Result<Vec<BlockIndexItem>> {
             Ok(vec![])
+        }
+
+        async fn node_info(&self, _peer: SocketAddr) -> eyre::Result<NodeInfo> {
+            Ok(NodeInfo::default())
         }
     }
 }
@@ -347,6 +365,10 @@ mod tests {
             _block_index_query: BlockIndexQuery,
         ) -> Result<Vec<BlockIndexItem>> {
             Ok(vec![])
+        }
+
+        async fn node_info(&self, _peer: SocketAddr) -> Result<NodeInfo> {
+            Ok(NodeInfo::default())
         }
     }
 

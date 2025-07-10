@@ -1,4 +1,4 @@
-use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _, time::Duration};
+use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
 pub use tempfile;
 use tempfile::TempDir;
 use tracing::debug;
@@ -16,11 +16,7 @@ pub fn initialize_tracing() {
         .try_init();
 }
 
-pub async fn tokio_sleep(seconds: u64) {
-    tokio::time::sleep(Duration::from_secs(seconds)).await;
-}
-
-/// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.  
+/// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.
 /// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
 /// unless the `keep` flag is set to `true` - in which case the folder persists indefinitely.
 pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {

@@ -29,9 +29,7 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
         .unwrap_or(matches!(config.mode, NodeMode::Genesis));
     if is_genesis {
         config.mode = NodeMode::Genesis;
-    } else {
-        config.mode = NodeMode::PeerSync;
-    };
+    }
 
     Ok(config)
 }

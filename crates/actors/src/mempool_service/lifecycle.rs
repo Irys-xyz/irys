@@ -1,13 +1,14 @@
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
-use base58::ToBase58 as _;
-use irys_database::insert_commitment_tx;
+use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
-use irys_types::{DataLedger, IrysBlockHeader, H256};
+use irys_database::{insert_commitment_tx, SystemLedger};
+use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256};
 use reth_db::{transaction::DbTx as _, Database as _};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
@@ -54,6 +55,7 @@ impl Inner {
                 // proof, indicating it is promoted.
                 let mempool_state = &self.mempool_state.clone();
                 let mut mempool_state_write_guard = mempool_state.write().await;
+
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .insert(tx_header.id, tx_header.clone());
@@ -69,12 +71,13 @@ impl Inner {
         Ok(())
     }
 
-    pub fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
+    pub async fn handle_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing reorg: {} orphaned blocks from height {}",
-            event.old_fork.len(),
-            event.fork_parent.height
+            &event.old_fork.len(),
+            &event.fork_parent.height
         );
+        let new_tip = event.new_tip;
 
         // TODO: Implement mempool-specific reorg handling
         // 1. Check to see that orphaned submit ledger tx are available in the mempool if not included in the new fork (canonical chain)
@@ -85,7 +88,351 @@ impl Inner {
         // 6. Similar work with commitment transactions (stake and pledge)
         //    - This may require adding some features to the commitment_snapshot so that stake/pledge tx can be rolled back and new ones applied
 
-        tracing::info!("Reorg handled, new tip: {}", event.new_tip.0.to_base58());
+        // TODO: re-org support for migrated blocks
+
+        self.handle_confirmed_data_tx_reorg(&event).await?;
+
+        self.handle_confirmed_commitment_tx_reorg(&event).await?;
+
+        tracing::info!("Reorg handled, new tip: {}", &new_tip);
+        Ok(())
+    }
+
+    fn get_confirmed_range(
+        &self,
+        fork: &[Arc<IrysBlockHeader>],
+    ) -> eyre::Result<Vec<Arc<IrysBlockHeader>>> {
+        let migration_depth = self.config.consensus.block_migration_depth;
+        let fork_len: u32 = fork.len().try_into()?;
+        let end_index: usize = migration_depth.min(fork_len).try_into()?;
+
+        Ok(fork[0..end_index].to_vec())
+    }
+
+    /// Handles reorging confirmed commitments (system ledger txs)
+    /// Goals:
+    /// - resubmit orphaned commitments to the mempool
+    /// Steps:
+    /// 1) slice just the confirmed block ranges for each fork (old and new)
+    /// 2) reduce down both forks to a `HashMap<SystemLedger, HashSet<IrysTransactionId>>`
+    /// 3) reduce down to a set of SystemLedger specific orphaned transactions
+    /// 4) resubmit these orphaned commitment transactions to the mempool
+    pub async fn handle_confirmed_commitment_tx_reorg(
+        &mut self,
+        event: &ReorgEvent,
+    ) -> eyre::Result<()> {
+        let ReorgEvent {
+            old_fork, new_fork, ..
+        } = event;
+
+        let old_fork_confirmed = self.get_confirmed_range(old_fork)?;
+        let new_fork_confirmed = self.get_confirmed_range(new_fork)?;
+
+        // reduce down the system tx ledgers (or well, ledger)
+
+        let reduce_system_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<
+            HashMap<SystemLedger, HashSet<IrysTransactionId>>,
+        > {
+            let mut ledger_txs_map = HashMap::<SystemLedger, HashSet<IrysTransactionId>>::new();
+            for ledger in SystemLedger::ALL {
+                // blocks can not have a system ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
+                ledger_txs_map.insert(ledger, HashSet::new());
+            }
+            for block in fork.iter().rev() {
+                for ledger in block.system_ledgers.iter() {
+                    // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
+                    ledger_txs_map
+                        .entry(ledger.ledger_id.try_into()?)
+                        .or_default()
+                        .extend(ledger.tx_ids.iter());
+                }
+            }
+            Ok(ledger_txs_map)
+        };
+
+        let old_fork_reduction = reduce_system_ledgers(&old_fork_confirmed.into())?;
+        let new_fork_reduction = reduce_system_ledgers(&new_fork_confirmed.into())?;
+
+        // diff the two
+        let mut orphaned_system_txs: HashMap<SystemLedger, Vec<IrysTransactionId>> = HashMap::new();
+
+        for ledger in SystemLedger::ALL {
+            let new_txs = new_fork_reduction
+                .get(&ledger)
+                .expect("should be populated");
+            let old_txs = old_fork_reduction
+                .get(&ledger)
+                .expect("should be populated");
+            // get the txs in old that are not in new (orphans)
+            // add them to the orphaned map
+            orphaned_system_txs
+                .entry(ledger)
+                .or_default()
+                .extend(old_txs.difference(new_txs));
+        }
+
+        // resubmit orphaned system txs
+
+        // since these are orphaned from our ""old"" fork, they should be accessible
+        // extract orphaned from commitment snapshot
+        let mut orphaned_full_commitment_txs =
+            HashMap::<IrysTransactionId, CommitmentTransaction>::new();
+        let orphaned_commitment_tx_ids = orphaned_system_txs
+            .get(&SystemLedger::Commitment)
+            .ok_or_eyre("Should be populated")?
+            .clone();
+
+        for block in old_fork.iter().rev() {
+            let entry = self
+                .block_tree_read_guard
+                .read()
+                .get_commitment_snapshot(&block.block_hash)?;
+            let all_commitments = entry.get_epoch_commitments();
+
+            // extract all the commitment txs
+            // TODO: change this so the above orphan code creates a block height/hash -> orphan tx list mapping
+            // so this is more efficient & so we can do block-by-block asserts
+            for orphan_commitment_tx_id in orphaned_commitment_tx_ids.iter() {
+                if let Some(commitment_tx) = all_commitments
+                    .iter()
+                    .find(|c| c.id == *orphan_commitment_tx_id)
+                {
+                    orphaned_full_commitment_txs
+                        .insert(*orphan_commitment_tx_id, commitment_tx.clone());
+                };
+            }
+        }
+
+        eyre::ensure!(
+            orphaned_full_commitment_txs.iter().len() == orphaned_commitment_tx_ids.iter().len(),
+            "Should always be able to get all orphaned commitment transactions"
+        );
+
+        // resubmit each commitment tx
+        for (id, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
+            let _ = self
+                .handle_ingress_commitment_tx_message(orphaned_full_commitment_tx)
+                .await
+                .inspect_err(|e| {
+                    error!(
+                        "Error resubmitting orphaned commitment tx {}: {:?}",
+                        &id, &e
+                    )
+                });
+        }
+
+        Ok(())
+    }
+
+    /// Handles reorging confirmed data (Submit, Publish) ledger transactions
+    /// Goals:
+    /// - resubmit orphaned submit txs to the mempool
+    /// - handle orphaned promotions
+    ///     - ensure that the mempool's state doesn't have an associated ingress proof for these txs
+    ///         this is so when get_best_mempool_txs is called, the txs are eligible for promotion again.
+    /// - handle double-promotions (promoted in both forks)
+    ///     - ensure the transaction is associated only with the ingress proofs from the new fork
+    ///         this is so transactions are only associated with the canonical ingress proofs responsible for their promotion
+    /// Steps:
+    /// 1) slice just the confirmed block ranges for each fork (old and new)
+    /// 2) reduce down both forks to a `HashMap<DataLedger, HashSet<IrysTransactionId>>`
+    ///     with a secondary `HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>` for reverse txid -> block lookups
+    /// 3) reduce these reductions down to just the list of orphaned transactions, using a set diff
+    /// 4) handle orphaned Submit transactions
+    ///     4.1) re-submit them back to the mempool
+    /// 5) handle orphaned Publish txs
+    ///     5.1) remove the orphaned ingress proofs from the mempool state
+    /// 6) handle double promotions (when a publish tx is promoted in both forks)
+    ///     6.1) get the associated proof from the new fork
+    ///     6.2) update mempool state valid_submit_ledger_tx to store the correct ingress proof
+    pub async fn handle_confirmed_data_tx_reorg(&mut self, event: &ReorgEvent) -> eyre::Result<()> {
+        let ReorgEvent {
+            old_fork, new_fork, ..
+        } = event;
+
+        // get the range of confirmed blocks from the old fork
+        // we will then reduce these down into a list of txids, which we will check against the *entire* new fork block range
+        // this is because a tx that is in the tip block of the old fork could be included in the base block of the new fork
+
+        let old_fork_confirmed = self.get_confirmed_range(old_fork)?;
+        let new_fork_confirmed = self.get_confirmed_range(new_fork)?;
+
+        // reduce the old fork and new fork into a list of ledger-specific txids
+        let reduce_data_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<(
+            HashMap<DataLedger, HashSet<IrysTransactionId>>,
+            HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>,
+        )> {
+            let mut ledger_txs_map = HashMap::new();
+            let mut tx_block_map = HashMap::new();
+            for ledger in DataLedger::ALL {
+                // blocks can not have a data ledger if it's empty, so we pre-populate the HM with all possible ledgers so the diff algo has an easier time
+                ledger_txs_map.insert(ledger, HashSet::new());
+                tx_block_map.insert(ledger, HashMap::new());
+            }
+            for block in fork.iter().rev() {
+                for ledger in block.data_ledgers.iter() {
+                    let ledger_id: DataLedger = ledger.ledger_id.try_into()?;
+                    // we shouldn't need to deduplicate txids, but we use a HashSet for efficient set operations & as a dedupe
+                    ledger_txs_map
+                        .entry(ledger_id)
+                        .or_default()
+                        .extend(ledger.tx_ids.iter());
+                    ledger.tx_ids.iter().for_each(|tx_id| {
+                        tx_block_map
+                            .entry(ledger_id)
+                            .or_default()
+                            .insert(*tx_id, Arc::clone(block));
+                    });
+                }
+            }
+            Ok((ledger_txs_map, tx_block_map))
+        };
+
+        let (old_fork_confirmed_reduction, _) = reduce_data_ledgers(&old_fork_confirmed.into())?;
+
+        let (new_fork_confirmed_reduction, new_fork_tx_block_map) =
+            reduce_data_ledgers(&new_fork_confirmed.into())?;
+
+        // diff the two
+        let mut orphaned_confirmed_ledger_txs: HashMap<DataLedger, Vec<IrysTransactionId>> =
+            HashMap::new();
+
+        for ledger in DataLedger::ALL {
+            let new_txs = new_fork_confirmed_reduction
+                .get(&ledger)
+                .expect("should be populated");
+            let old_txs = old_fork_confirmed_reduction
+                .get(&ledger)
+                .expect("should be populated");
+            // get the txs in old that are not in new (orphans)
+            // add them to the orphaned map
+            let orphaned_txs = old_txs.difference(new_txs).collect::<Vec<_>>();
+            debug!(
+                "{:?} Ledger reorg txs, old_confirmed: {:?}, new_confirmed: {:?}, orphaned: {:?}",
+                &ledger, &old_txs, &new_txs, &orphaned_txs
+            );
+            orphaned_confirmed_ledger_txs
+                .entry(ledger)
+                .or_default()
+                .extend(orphaned_txs);
+        }
+
+        // if a SUBMIT a tx is CONFIRMED in the old fork, but orphaned in the new - resubmit it to the mempool
+        let submit_txs = orphaned_confirmed_ledger_txs
+            .get(&DataLedger::Submit)
+            .cloned()
+            .unwrap_or_default();
+
+        // these txs should be present in the database, as they're part of the (technically sort of still current) chain
+        let full_orphaned_submit_txs = self.handle_get_data_tx_message(submit_txs.clone()).await;
+
+        // 2. Re-post any reorged submit ledger transactions though handle_tx_ingress_message so account balances and anchors are checked
+        // 3. Filter out any invalidated transactions
+        for (idx, tx) in full_orphaned_submit_txs.clone().into_iter().enumerate() {
+            if let Some(tx) = tx {
+                let tx_id = tx.id;
+                // TODO: handle errors better
+                // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
+                let _ = self
+                    .handle_data_tx_ingress_message(tx)
+                    .await
+                    .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e));
+            } else {
+                warn!("Unable to get orphaned tx {:?}", &submit_txs.get(idx))
+            }
+        }
+
+        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
+
+        // get the confirmed (but not published) publish ledger txs from the old fork
+        let orphaned_confirmed_publish_txs = orphaned_confirmed_ledger_txs
+            .get(&DataLedger::Publish)
+            .cloned()
+            .unwrap_or_default();
+
+        // these txs have been confirmed, but NOT migrated
+        {
+            let mut mempool_state_write_guard = self.mempool_state.write().await;
+
+            for tx in orphaned_confirmed_publish_txs {
+                debug!("reorging orphaned publish tx: {}", &tx);
+                // if the tx is in `valid_submit_ledger_tx`, update it so `ingress_proofs` is `none`
+                // note: sometimes txs are *not* in this list, and I don't currently understand why
+                mempool_state_write_guard
+                    .valid_submit_ledger_tx
+                    .entry(tx)
+                    .and_modify(|tx| tx.ingress_proofs = None);
+            }
+        }
+
+        // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
+
+        let published_in_both: Vec<IrysTransactionId> = old_fork_confirmed_reduction
+            .get(&DataLedger::Publish)
+            .expect("data ledger entry")
+            .intersection(
+                new_fork_confirmed_reduction
+                    .get(&DataLedger::Publish)
+                    .expect("data ledger entry"),
+            )
+            .copied()
+            .collect();
+
+        debug!("published in both forks: {:?}", &published_in_both);
+
+        let full_published_txs = self
+            .handle_get_data_tx_message(published_in_both.clone())
+            .await;
+
+        let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
+        for (idx, tx) in full_published_txs.into_iter().enumerate() {
+            if let Some(mut tx) = tx {
+                let id = tx.id;
+                let promoted_in_block = publish_tx_block_map.get(&tx.id).unwrap_or_else(|| {
+                    panic!("new fork publish_tx_block_map missing tx {}", &tx.id)
+                });
+
+                let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
+                // get publish tx pos
+                let proof_idx = publish_ledger
+                    .tx_ids
+                    .iter()
+                    .position(|tx_id| *tx_id == tx.id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "publish tx {} to be present in block {}",
+                            &tx.id, &promoted_in_block.block_hash
+                        )
+                    });
+                let proofs = publish_ledger.proofs.clone().unwrap_or_else(|| {
+                    panic!(
+                        "Publish ledger of block {} to have proofs",
+                        &promoted_in_block.block_hash
+                    )
+                });
+                let proof = proofs.get(proof_idx).unwrap_or_else(|| {
+                    panic!(
+                        "Publish ledger of block {} to have a proof at index {} for publish tx {}",
+                        &promoted_in_block.block_hash, &proof_idx, &tx.id
+                    )
+                });
+                tx.ingress_proofs = Some(proof.clone());
+                // update entry
+                {
+                    let mut mempool_state_write_guard = self.mempool_state.write().await;
+                    mempool_state_write_guard
+                        .valid_submit_ledger_tx
+                        .entry(tx.id)
+                        .and_modify(|t| *t = tx);
+                }
+                debug!("Reorged dual-published proof {} for {}", &proof.proof, &id);
+            } else {
+                eyre::bail!(
+                    "Unable to get dual-published tx {:?}",
+                    &published_in_both.get(idx)
+                );
+            }
+        }
 
         Ok(())
     }

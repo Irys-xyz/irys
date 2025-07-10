@@ -24,3 +24,4 @@ pub use reth_ethereum_primitives;
 pub use storage_module_service::*;
 
 pub use async_trait;
+pub use openssl::sha;

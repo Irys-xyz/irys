@@ -38,6 +38,12 @@ impl From<PeerListFacadeError> for GossipError {
     }
 }
 
+impl From<InternalGossipError> for GossipError {
+    fn from(value: InternalGossipError) -> Self {
+        Self::Internal(value)
+    }
+}
+
 impl From<TxIngressError> for GossipError {
     fn from(value: TxIngressError) -> Self {
         match value {
@@ -115,6 +121,8 @@ pub enum InternalGossipError {
     BroadcastReceiverShutdown,
     #[error("Trying to shutdown a server that is already shutdown: {0}")]
     AlreadyShutdown(String),
+    #[error("Failed to perform repair task for reth payloads: {0}")]
+    PayloadRepair(BlockPoolError),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;

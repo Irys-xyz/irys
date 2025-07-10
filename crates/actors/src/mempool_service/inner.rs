@@ -1,10 +1,13 @@
+use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::mempool_service::ChunkIngressError;
 use crate::services::ServiceSenders;
-use crate::CommitmentStateReadGuard;
 use base58::ToBase58 as _;
+use eyre::eyre;
 use futures::future::BoxFuture;
-use irys_database::SystemLedger;
+use futures::FutureExt as _;
+use irys_database::tables::IngressProofs;
+use irys_database::{cached_data_root_by_data_root, SystemLedger};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
@@ -14,11 +17,12 @@ use irys_types::{
 };
 use irys_types::{
     Address, Base64, CommitmentTransaction, DataRoot, IrysTransactionHeader, MempoolConfig,
-    TxChunkOffset, UnpackedChunk,
+    TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::TaskExecutor;
+use reth_db::cursor::*;
 use reth_db::{Database as _, DatabaseError};
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -35,7 +39,6 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug)]
 pub struct Inner {
     pub block_tree_read_guard: BlockTreeReadGuard,
-    pub commitment_state_guard: CommitmentStateReadGuard,
     pub config: Config,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
     /// instead of the actor executor runtime, while also providing some `QoL`
@@ -87,7 +90,7 @@ pub enum MempoolServiceMessage {
     /// Return filtered list of candidate txns
     /// Filtering based on funding status etc based on the provided EVM block ID
     /// If `None` is provided, the latest canonical block is used
-    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<MempoolTxs>),
+    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<eyre::Result<MempoolTxs>>),
     /// Retrieves a list of CommitmentTransactions based on the provided tx ids
     GetCommitmentTxs {
         commitment_tx_ids: Vec<IrysTransactionId>,
@@ -100,6 +103,7 @@ pub enum MempoolServiceMessage {
     ),
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
+    InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
 }
 
 impl Inner {
@@ -136,7 +140,8 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::IngestChunk(chunk, response) => {
-                    let response_value = self.handle_chunk_ingress_message(chunk).await;
+                    let response_value: Result<(), ChunkIngressError> =
+                        self.handle_chunk_ingress_message(chunk).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -185,6 +190,16 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+                MempoolServiceMessage::InsertPoAChunk(block_hash, chunk_data, response) => {
+                    self.mempool_state
+                        .write()
+                        .await
+                        .prevalidated_blocks_poa
+                        .insert(block_hash, chunk_data);
+                    if let Err(e) = response.send(()) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
             }
             Ok(())
         })
@@ -193,7 +208,7 @@ impl Inner {
     async fn handle_get_best_mempool_txs(
         &self,
         parent_evm_block_id: Option<BlockId>,
-    ) -> MempoolTxs {
+    ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
@@ -313,7 +328,11 @@ impl Inner {
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
 
         // Sort data transactions by fee (highest first) to maximize revenue
-        submit_ledger_txs.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+
+        submit_ledger_txs.sort_by(|a, b| match b.total_fee().cmp(&a.total_fee()) {
+            std::cmp::Ordering::Equal => a.id.cmp(&b.id),
+            fee_ordering => fee_ordering,
+        });
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
@@ -329,19 +348,126 @@ impl Inner {
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
+            debug!("Checking funding for {}", &tx.id);
             if check_funding(&tx) {
+                debug!("Submit tx {} passed the funding check", &tx.id);
                 submit_tx.push(tx);
                 if submit_tx.len() >= max_txs {
                     break;
                 }
+            } else {
+                debug!("Submit tx {} failed the funding check", &tx.id)
             }
         }
 
+        // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
+        let publish_txs_and_proofs = self.get_publish_txs_and_proofs().await?;
+
         // Return selected transactions grouped by type
-        MempoolTxs {
+        Ok(MempoolTxs {
             commitment_tx,
             submit_tx,
+            publish_tx: publish_txs_and_proofs,
+        })
+    }
+
+    pub async fn get_publish_txs_and_proofs(
+        &self,
+    ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+        let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
+        let mut proofs: Vec<TxIngressProof> = Vec::new();
+
+        {
+            let read_tx = self
+                .irys_db
+                .tx()
+                .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
+
+            let mut read_cursor = read_tx
+                .new_cursor::<IngressProofs>()
+                .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
+
+            let walker = read_cursor
+                .walk(None)
+                .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
+
+            let ingress_proofs = walker
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
+
+            let mut publish_txids: Vec<H256> = Vec::new();
+            // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
+            for data_root in ingress_proofs.keys() {
+                let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
+                if let Some(cached_data_root) = cached_data_root {
+                    let txids = cached_data_root.txid_set;
+                    debug!(tx_ids = ?txids, "Publish candidates");
+                    publish_txids.extend(txids)
+                }
+            }
+
+            // Loop though all the pending tx to see which haven't been promoted
+            let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
+            // TODO: improve this
+            let mut tx_headers = get_data_tx_in_parallel_inner(
+                publish_txids,
+                |_tx_ids| {
+                    {
+                        let txs = txs.clone(); // whyyyy
+                        async move { Ok(txs) }
+                    }
+                    .boxed()
+                },
+                &self.irys_db,
+            )
+            .await
+            .unwrap_or(vec![]);
+
+            // so the resulting publish_txs & proofs are sorted
+            tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
+
+            for tx_header in &tx_headers {
+                let has_ingress_proof = tx_header.ingress_proofs.is_some();
+                debug!(
+                    "Publish candidate {} has ingress proof? {}",
+                    &tx_header.id, &has_ingress_proof
+                );
+                // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
+                if !has_ingress_proof {
+                    // Get the proof
+                    match ingress_proofs.get(&tx_header.data_root) {
+                        Some(proof) => {
+                            let mut tx_header = tx_header.clone();
+                            let proof: TxIngressProof = TxIngressProof {
+                                proof: proof.proof,
+                                signature: proof.signature,
+                            };
+                            debug!(
+                                "Got ingress proof {} for publish candidate {}",
+                                &tx_header.data_root, &tx_header.id
+                            );
+                            proofs.push(proof.clone());
+                            tx_header.ingress_proofs = Some(proof);
+                            publish_txs.push(tx_header);
+                        }
+                        None => {
+                            error!(
+                                "No ingress proof found for data_root: {} tx: {}",
+                                tx_header.data_root, &tx_header.id
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
         }
+
+        let txs = &publish_txs
+            .iter()
+            .map(|h| h.id.0.to_base58())
+            .collect::<Vec<_>>();
+        debug!(?txs, "Publish transactions");
+        Ok((publish_txs, proofs))
     }
 
     /// return block header from mempool, if found
@@ -665,4 +791,5 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<IrysTransactionHeader>,
+    pub publish_tx: (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
 }

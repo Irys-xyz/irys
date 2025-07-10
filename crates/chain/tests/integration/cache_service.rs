@@ -69,9 +69,11 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     // mine block 1 and confirm height is exactly what we need
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 1_u64);
+    assert_eq!(node.get_canonical_chain_height().await, 1_u64);
 
-    let block = node.get_block_by_height(node.get_height().await).await?;
+    let block = node
+        .get_block_by_height(node.get_canonical_chain_height().await)
+        .await?;
     let anchor = Some(block.block_hash);
 
     // create and sign a data tx
@@ -91,7 +93,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     assert_eq!(resp.status(), StatusCode::OK);
 
     node.mine_block().await?;
-    assert_eq!(node.get_height().await, 2_u64);
+    assert_eq!(node.get_canonical_chain_height().await, 2_u64);
 
     // upload chunk(s)
     for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
