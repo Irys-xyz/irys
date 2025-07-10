@@ -1,7 +1,9 @@
 use crate::state::AtomicVdfState;
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
 use irys_types::block_provider::BlockProvider;
-use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256};
+use irys_types::{
+    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
+};
 use sha2::{Digest as _, Sha256};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
@@ -109,7 +111,12 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number,
                     canonical_global_step_number,
                 );
-                hash = process_reset(global_step_number, hash, vdf_reset_frequency, next_reset_seed);
+                hash = process_reset(
+                    global_step_number,
+                    hash,
+                    vdf_reset_frequency,
+                    next_reset_seed,
+                );
             } else {
                 debug!(
                     "Fastforward Step {} is not ahead of {}",
@@ -171,7 +178,12 @@ pub fn run_vdf<B: BlockProvider>(
             global_step_number,
         );
 
-        hash = process_reset(global_step_number, hash, vdf_reset_frequency, next_reset_seed);
+        hash = process_reset(
+            global_step_number,
+            hash,
+            vdf_reset_frequency,
+            next_reset_seed,
+        );
     }
     debug!(?global_step_number, "VDF thread stopped");
 }
@@ -184,20 +196,21 @@ fn store_step(
     new_global_step_number: u64,
     canonical_global_step_number: u64,
 ) -> u64 {
-    let mut vdf_guard = vdf_state
-        .write()
-        .expect("to write to VDF");
+    let mut vdf_guard = vdf_state.write().expect("to write to VDF");
 
     vdf_guard.set_canonical_step(canonical_global_step_number);
-    let global_step_number = {
-        vdf_guard.store_step(Seed(hash), new_global_step_number)
-    };
+    let global_step_number = { vdf_guard.store_step(Seed(hash), new_global_step_number) };
     atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
     global_step_number
 }
 
 #[must_use]
-pub fn process_reset(global_step_number: u64, hash: H256, reset_frequency: u64, reset_seed: H256) -> H256 {
+pub fn process_reset(
+    global_step_number: u64,
+    hash: H256,
+    reset_frequency: u64,
+    reset_seed: H256,
+) -> H256 {
     if global_step_number % reset_frequency == 0 {
         info!(
             "Reset seed {:?} applied to step {}",
@@ -235,7 +248,7 @@ mod tests {
 
     impl MockBlockProvider {
         fn new() -> Self {
-            MockBlockProvider(IrysBlockHeader::new_mock_header())
+            Self(IrysBlockHeader::new_mock_header())
         }
     }
 

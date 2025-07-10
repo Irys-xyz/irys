@@ -52,10 +52,7 @@ impl VdfState {
         }
     }
 
-    pub fn set_canonical_step(
-        &mut self,
-        global_canonical_step: u64,
-    ) {
+    pub fn set_canonical_step(&mut self, global_canonical_step: u64) {
         self.global_step_from_the_latest_canonical_block = global_canonical_step;
         self.minimum_step_to_keep = global_canonical_step.saturating_sub(self.capacity as u64);
     }

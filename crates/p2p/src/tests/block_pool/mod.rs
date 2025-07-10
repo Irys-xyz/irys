@@ -162,7 +162,8 @@ impl MockedServices {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);
 
-        let vdf_state_stub = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
+        let vdf_state_stub =
+            VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
         let (service_senders, service_receivers) = ServiceSenders::new();
 

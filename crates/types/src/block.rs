@@ -75,7 +75,7 @@ impl VDFLimiterInfo {
         steps: H256List,
         config: &Config,
     ) -> Self {
-        let mut vdf_limiter_info = VDFLimiterInfo {
+        let mut vdf_limiter_info = Self {
             global_step_number: solution.vdf_step,
             output: solution.seed.clone().into_inner(),
             last_step_checkpoints: solution.checkpoints.clone(),
@@ -84,7 +84,7 @@ impl VDFLimiterInfo {
             // Next two lines are going to be overridden by `set_next_seed`.
             seed: prev_block_header.vdf_limiter_info.seed,
             next_seed: Default::default(),
-            ..VDFLimiterInfo::default()
+            ..Self::default()
         };
 
         let reset_frequency = config.consensus.vdf.reset_frequency;

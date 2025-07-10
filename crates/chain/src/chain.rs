@@ -1043,7 +1043,7 @@ impl IrysNode {
             broadcast_mining_actor,
             vdf_state,
             atomic_global_step_number,
-            block_status_provider.clone(),
+            block_status_provider,
         );
 
         // set up chunk provider

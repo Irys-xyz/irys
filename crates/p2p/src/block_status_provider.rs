@@ -1,13 +1,13 @@
 use irys_actors::block_index_service::BlockIndexReadGuard;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_types::block_provider::BlockProvider;
-use irys_types::{BlockHash, BlockIndexItem, H256, VDFLimiterInfo};
+use irys_types::{BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
 use tracing::debug;
 #[cfg(test)]
 use {
     irys_actors::block_tree_service::BlockTreeCache,
     irys_database::BlockIndex,
-    irys_types::{NodeConfig, IrysBlockHeader},
+    irys_types::{IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
     tracing::warn,
 };
@@ -342,6 +342,8 @@ impl BlockProvider for BlockStatusProvider {
         let binding = self.block_tree_read_guard.read();
 
         let latest_canonical_hash = binding.get_latest_canonical_entry().block_hash;
-        binding.get_block(&latest_canonical_hash).map(|block| block.vdf_limiter_info.clone())
+        binding
+            .get_block(&latest_canonical_hash)
+            .map(|block| block.vdf_limiter_info.clone())
     }
 }

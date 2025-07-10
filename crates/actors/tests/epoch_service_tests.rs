@@ -27,7 +27,6 @@ use irys_types::{Config, U256};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth::payload::EthBuiltPayload;
-use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
@@ -360,11 +359,7 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
-        10,
-        0,
-        None,
-    ))));
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
     let packing_addr = packing.start();
     let mut part_actors = Vec::new();

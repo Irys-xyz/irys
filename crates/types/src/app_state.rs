@@ -1,5 +1,3 @@
-use crate::block_provider::BlockProvider;
-use crate::BlockHash;
 use reth_db::DatabaseEnv;
 use std::{ops::Deref, sync::Arc};
 
