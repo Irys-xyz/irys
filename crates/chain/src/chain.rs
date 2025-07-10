@@ -609,7 +609,6 @@ impl IrysNode {
             ctx.sync_state.clone(),
             irys_api_client::IrysApiClient::new(),
             ctx.peer_list.clone(),
-            node_mode,
             latest_known_block_height as usize,
             &ctx.config,
             Some(Arc::clone(&ctx.block_pool)),

@@ -199,7 +199,6 @@ pub async fn sync_chain<P, B, M>(
     sync_state: SyncState,
     api_client: impl ApiClient,
     peer_list: impl PeerList,
-    node_mode: &NodeMode,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
     // BlockPool is optional because tests are structured in a way that would require testing the
@@ -213,6 +212,7 @@ where
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
+    let node_mode = config.node_config.mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // If the peer doesn't have any blocks, it should start syncing from 1, as the genesis block
@@ -515,6 +515,7 @@ mod tests {
             };
 
             let mut node_config = NodeConfig::testnet();
+            node_config.mode = NodeMode::PeerSync;
             node_config.trusted_peers = vec![fake_peer_address];
             node_config.genesis_peer_discovery_timeout_millis = 10;
             let config = Config::new(node_config);
@@ -575,7 +576,6 @@ mod tests {
                 sync_state.clone(),
                 api_client_stub.clone(),
                 peer_list,
-                &NodeMode::PeerSync,
                 10,
                 &config,
                 None,
@@ -617,6 +617,56 @@ mod tests {
             // As the first call didn't return anything, the peer tries to fetch it once again
             assert!(requested_first_block_again.is_some());
             assert!(requested_second_block.is_some());
+
+            Ok(())
+        }
+
+        #[actix_web::test]
+        async fn should_sync_and_change_status_for_the_non_zero_genesis_with_no_peers() -> eyre::Result<()> {
+            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let start_from = 10;
+            let sync_state = SyncState::new(true, false);
+
+            let db = DatabaseProvider(Arc::new(
+                open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                    .expect("can't open temp dir"),
+            ));
+
+            let mut node_config = NodeConfig::testnet();
+            node_config.mode = NodeMode::Genesis;
+            node_config.trusted_peers = vec![];
+            node_config.genesis_peer_discovery_timeout_millis = 10;
+            let config = Config::new(node_config);
+
+            let api_client_stub = ApiClientStub::new();
+
+            let reth_mock = MockRethServiceActor {};
+            let reth_mock_addr = reth_mock.start();
+            let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+                db,
+                &config,
+                api_client_stub.clone(),
+                reth_mock_addr.clone(),
+            );
+            let peer_list = peer_list_service.start();
+
+            // Check that the sync status is syncing
+            assert!(sync_state.is_syncing());
+
+            sync_chain::<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>(
+                sync_state.clone(),
+                api_client_stub.clone(),
+                peer_list,
+                start_from,
+                &config,
+                None,
+                None,
+            )
+                .await
+                .expect("to finish catching up");
+
+            // Check that the sync status has changed to synced
+            assert!(!sync_state.is_syncing());
 
             Ok(())
         }
