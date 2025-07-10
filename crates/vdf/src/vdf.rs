@@ -1,31 +1,18 @@
-use crate::reset_seed::{ResetSeed, ResetSeedManager};
 use crate::state::AtomicVdfState;
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
 use irys_types::block_provider::BlockProvider;
-use irys_types::{
-    block_production::Seed, AtomicVdfStepNumber, BlockHash, DatabaseProvider, H256List,
-    IrysBlockHeader, H256, U256,
-};
+use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256};
 use sha2::{Digest as _, Sha256};
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tracing::{debug, info};
-
-struct GenesisBlockProvider<'a>(&'a IrysBlockHeader);
-impl<'a> BlockProvider for GenesisBlockProvider<'a> {
-    fn does_block_exist(&self, hash: &BlockHash, height: u64) -> bool {
-        // This is a mock implementation for the genesis VDF run.
-        self.0.block_hash == *hash && self.0.height == height
-    }
-}
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
     config: &irys_types::VdfConfig,
 ) {
     let reset_seed = genesis_block.vdf_limiter_info.seed;
+    let reset_frequency = config.reset_frequency as u64;
 
     let last_epoch_block_hash = genesis_block.last_epoch_hash;
     genesis_block.vdf_limiter_info.prev_output = last_epoch_block_hash;
@@ -55,14 +42,7 @@ pub fn run_vdf_for_genesis_block(
             genesis_block.vdf_limiter_info.steps.0 = vec![hash];
         }
 
-        {
-            let mut temp_reset_seed_manager = ResetSeedManager::new(
-                reset_seed,
-                config.reset_frequency as u64,
-                GenesisBlockProvider(genesis_block),
-            );
-            hash = temp_reset_seed_manager.process_reset(global_step_number, hash);
-        }
+        hash = process_reset(global_step_number, hash, reset_frequency, reset_seed);
     }
 }
 
@@ -78,13 +58,14 @@ pub fn run_vdf<B: BlockProvider>(
     vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
     block_provider: B,
-    mut new_potential_reset_seed_receiver: UnboundedReceiver<ResetSeed>,
 ) {
-    let mut reset_seed_manager = ResetSeedManager::new(
-        initial_reset_seed,
-        config.reset_frequency as u64,
-        block_provider,
-    );
+    let mut next_reset_seed = initial_reset_seed;
+    let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
+    // let mut reset_seed_manager = ResetSeedManager::new(
+    //     initial_reset_seed,
+    //     config.reset_frequency as u64,
+    //     block_provider,
+    // );
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
@@ -115,28 +96,26 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number, proposed_ff_step.step
                 );
                 hash = proposed_ff_step.step;
+
+                if let Some(vdf_info) = block_provider.latest_canonical_vdf_info() {
+                    next_reset_seed = vdf_info.next_seed;
+                    canonical_global_step_number = vdf_info.global_step_number;
+                }
+
                 global_step_number = store_step(
                     hash,
                     &atomic_vdf_global_step,
                     &vdf_state,
                     proposed_ff_step.global_step_number,
+                    canonical_global_step_number,
                 );
-                hash = reset_seed_manager.process_reset(global_step_number, hash);
+                hash = process_reset(global_step_number, hash, vdf_reset_frequency, next_reset_seed);
             } else {
                 debug!(
                     "Fastforward Step {} is not ahead of {}",
                     proposed_ff_step.global_step_number, global_step_number
                 );
             }
-        }
-
-        while let Ok(new_reset_seed) = new_potential_reset_seed_receiver.try_recv() {
-            // TODO: add a check that the reset seed is in the range we expect
-            debug!(
-                "New Reset Seed for Step {:?} with Seed {:?}",
-                new_reset_seed.global_step_number, new_reset_seed.seed
-            );
-            reset_seed_manager.add_reset_seed_candidate(new_reset_seed);
         }
 
         // check if vdf mining state should change
@@ -168,11 +147,17 @@ pub fn run_vdf<B: BlockProvider>(
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
 
+        if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
+            next_reset_seed = canonical_vdf_info.next_seed;
+            canonical_global_step_number = canonical_vdf_info.global_step_number;
+        }
+
         global_step_number = store_step(
             hash,
             &atomic_vdf_global_step,
             &vdf_state,
             global_step_number + 1,
+            canonical_global_step_number,
         );
         info!(
             "Seed created {} step number {}",
@@ -186,7 +171,7 @@ pub fn run_vdf<B: BlockProvider>(
             global_step_number,
         );
 
-        hash = reset_seed_manager.process_reset(global_step_number, hash);
+        hash = process_reset(global_step_number, hash, vdf_reset_frequency, next_reset_seed);
     }
     debug!(?global_step_number, "VDF thread stopped");
 }
@@ -197,15 +182,31 @@ fn store_step(
     atomic_vdf_global_step: &AtomicVdfStepNumber,
     vdf_state: &AtomicVdfState,
     new_global_step_number: u64,
+    canonical_global_step_number: u64,
 ) -> u64 {
+    let mut vdf_guard = vdf_state
+        .write()
+        .expect("to write to VDF");
+
+    vdf_guard.set_canonical_step(canonical_global_step_number);
     let global_step_number = {
-        vdf_state
-            .write()
-            .expect("to write to VDF")
-            .store_step(Seed(hash), new_global_step_number)
+        vdf_guard.store_step(Seed(hash), new_global_step_number)
     };
     atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
     global_step_number
+}
+
+#[must_use]
+pub fn process_reset(global_step_number: u64, hash: H256, reset_frequency: u64, reset_seed: H256) -> H256 {
+    if global_step_number % reset_frequency == 0 {
+        info!(
+            "Reset seed {:?} applied to step {}",
+            global_step_number, reset_seed
+        );
+        apply_reset_seed(hash, reset_seed)
+    } else {
+        hash
+    }
 }
 
 #[cfg(test)]
@@ -230,11 +231,17 @@ mod tests {
         fn broadcast(&self, _seed: Seed, _checkpoints: H256List, _global_step: u64) {}
     }
 
-    struct MockBlockProvider;
+    struct MockBlockProvider(IrysBlockHeader);
+
+    impl MockBlockProvider {
+        fn new() -> Self {
+            MockBlockProvider(IrysBlockHeader::new_mock_header())
+        }
+    }
 
     impl BlockProvider for MockBlockProvider {
-        fn does_block_exist(&self, hash: &BlockHash, height: u64) -> bool {
-            false
+        fn latest_canonical_vdf_info(&self) -> Option<VDFLimiterInfo> {
+            Some(self.0.vdf_limiter_info.clone())
         }
     }
 
@@ -298,7 +305,6 @@ mod tests {
 
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
-        let (_, new_potential_seed_receiver) = mpsc::unbounded_channel::<ResetSeed>();
 
         let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
         mining_state_tx.send(true).await.unwrap();
@@ -324,8 +330,7 @@ mod tests {
                     broadcast_mining_service,
                     vdf_state.clone(),
                     atomic_global_step_number,
-                    MockBlockProvider,
-                    new_potential_seed_receiver,
+                    MockBlockProvider::new(),
                 )
             }
         });

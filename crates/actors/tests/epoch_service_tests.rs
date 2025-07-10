@@ -360,12 +360,11 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-        capacity: 10,
-        global_step: 0,
-        seeds: VecDeque::new(),
-        mining_state_sender: None,
-    })));
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
+        10,
+        0,
+        None,
+    ))));
 
     let packing_addr = packing.start();
     let mut part_actors = Vec::new();

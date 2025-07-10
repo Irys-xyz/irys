@@ -80,14 +80,15 @@ impl VDFLimiterInfo {
             output: solution.seed.clone().into_inner(),
             last_step_checkpoints: solution.checkpoints.clone(),
             prev_output: prev_block_header.vdf_limiter_info.output,
-            seed: prev_block_header.vdf_limiter_info.seed,
             steps,
+            // Next two lines are going to be overridden by `set_next_seed`.
+            seed: prev_block_header.vdf_limiter_info.seed,
             next_seed: Default::default(),
             ..VDFLimiterInfo::default()
         };
 
         let reset_frequency = config.consensus.vdf.reset_frequency;
-        vdf_limiter_info.set_next_seed(reset_frequency as u64, prev_block_header);
+        vdf_limiter_info.set_seeds(reset_frequency as u64, prev_block_header);
 
         vdf_limiter_info
     }
@@ -106,13 +107,15 @@ impl VDFLimiterInfo {
             .find(|step_number| step_number % reset_frequency == 0)
     }
 
-    pub fn set_next_seed(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
+    pub fn set_seeds(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
         if self.contains_reset_step(reset_frequency).is_some() {
             // If the current block is a reset step, we set the next seed to the parent block's hash.
             self.next_seed = parent_header.block_hash;
+            self.seed = parent_header.vdf_limiter_info.next_seed;
         } else {
             // Otherwise, we set the next seed to the previous block next_seed.
             self.next_seed = parent_header.vdf_limiter_info.next_seed;
+            self.seed = parent_header.vdf_limiter_info.seed;
         }
     }
 }

@@ -37,7 +37,6 @@ use tracing::{debug, error, info};
 
 pub mod ema_snapshot;
 use ema_snapshot::{create_ema_snapshot_from_chain_history, EmaSnapshot};
-use irys_vdf::reset_seed::ResetSeed;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -825,22 +824,6 @@ impl BlockTreeServiceInner {
         }
 
         self.notify_services_of_block_confirmation(block_hash, &arc_block);
-
-        if let Some(new_reset_seed) = ResetSeed::try_extract_new_seed_from_block(
-            &arc_block,
-            self.config.consensus.vdf.reset_frequency as u64,
-        ) {
-            // If the block has a new reset seed, send it to the reset seed service
-            if let Err(err) = self
-                .service_senders
-                .new_potential_reset_seed
-                .send(new_reset_seed)
-            {
-                error!("Failed to send new reset seed: {}", err);
-            } else {
-                debug!("New reset seed sent: {}", new_reset_seed);
-            }
-        }
 
         // Handle block migration (move chunks to disk and add to block_index)
         self.try_notify_services_of_block_migration(&arc_block)

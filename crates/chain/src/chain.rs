@@ -56,7 +56,6 @@ use irys_types::{
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, H256, U256,
 };
-use irys_vdf::reset_seed::ResetSeed;
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
     state::{AtomicVdfState, VdfStateReadonly},
@@ -1045,7 +1044,6 @@ impl IrysNode {
             vdf_state,
             atomic_global_step_number,
             block_status_provider.clone(),
-            receivers.new_potential_reset_seed,
         );
 
         // set up chunk provider
@@ -1184,7 +1182,6 @@ impl IrysNode {
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
-        new_reset_seed_rx: mpsc::UnboundedReceiver<ResetSeed>,
     ) -> JoinHandle<()> {
         let next_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
@@ -1233,7 +1230,6 @@ impl IrysNode {
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
                     block_status_provider,
-                    new_reset_seed_rx,
                 )
             }
         });

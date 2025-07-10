@@ -381,12 +381,7 @@ impl GossipServiceTestFixture {
             RethBlockProvider::Mock(mocked_execution_payloads),
         );
 
-        let vdf_state_stub = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-            global_step: 0,
-            capacity: 0,
-            seeds: Default::default(),
-            mining_state_sender: None,
-        })));
+        let vdf_state_stub = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
         let vdf_state = vdf_state_stub.clone();
         let mut vdf_receiver = service_receivers.vdf_fast_forward;

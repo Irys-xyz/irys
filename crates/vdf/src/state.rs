@@ -31,17 +31,37 @@ pub struct VdfState {
     /// whether the VDF thread is mining or paused
     pub mining_state_sender: Option<Sender<bool>>,
     /// global step from the latest canonical block
-    pub global_step_from_the_latest_canonical_block: u64,
-    pub minimal_step_to_keep: u64,
+    global_step_from_the_latest_canonical_block: u64,
+    /// minimum global step to keep in the seeds VecDeque
+    minimum_step_to_keep: u64,
 }
 
 impl VdfState {
-    pub fn set_global_step_from_the_latest_canonical_block(
-        &mut self,
+    pub fn new(
+        capacity: usize,
         global_step: u64,
+        mining_state_sender: Option<Sender<bool>>,
+    ) -> Self {
+        Self {
+            global_step,
+            global_step_from_the_latest_canonical_block: global_step,
+            minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
+            seeds: VecDeque::with_capacity(capacity),
+            capacity,
+            mining_state_sender,
+        }
+    }
+
+    pub fn set_canonical_step(
+        &mut self,
+        global_canonical_step: u64,
     ) {
-        self.global_step_from_the_latest_canonical_block = global_step;
-        self.minimal_step_to_keep = global_step.saturating_sub(self.capacity as u64);
+        self.global_step_from_the_latest_canonical_block = global_canonical_step;
+        self.minimum_step_to_keep = global_canonical_step.saturating_sub(self.capacity as u64);
+    }
+
+    pub fn canonical_step(&self) -> u64 {
+        self.global_step_from_the_latest_canonical_block
     }
 
     pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
@@ -58,7 +78,7 @@ impl VdfState {
         if self.global_step >= global_step {
             return self.global_step;
         }
-        let vdf_depth = global_step.saturating_sub(self.minimal_step_to_keep) as usize;
+        let vdf_depth = global_step.saturating_sub(self.minimum_step_to_keep) as usize;
         if self.seeds.len() >= vdf_depth {
             self.seeds.pop_front();
         }
@@ -234,7 +254,7 @@ pub fn create_state(
     VdfState {
         global_step: global_step_number,
         global_step_from_the_latest_canonical_block: global_step_number,
-        minimal_step_to_keep: global_step_number.saturating_sub(capacity as u64),
+        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
         seeds,
         capacity,
         mining_state_sender: Some(vdf_mining_state_sender),
@@ -394,7 +414,7 @@ pub mod test_helpers {
         let state = VdfState {
             global_step: 0,
             global_step_from_the_latest_canonical_block: 0,
-            minimal_step_to_keep: 0,
+            minimum_step_to_keep: 0,
             capacity,
             seeds: VecDeque::default(),
             mining_state_sender: Some(vdf_mining_state_sender),

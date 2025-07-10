@@ -1,5 +1,5 @@
 use crate::VdfStep;
-use irys_types::{H256List, VDFLimiterInfo};
+use irys_types::{VDFLimiterInfo};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
