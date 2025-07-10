@@ -239,7 +239,7 @@ impl P2PService {
         P: PeerList,
     {
         // Check if gossip broadcast is enabled
-        if !self.sync_state.is_gossip_broadcast_enabled() || self.is_syncing() {
+        if !self.sync_state.is_gossip_broadcast_enabled() {
             debug!("Gossip broadcast is disabled, skipping broadcast");
             return Ok(());
         }

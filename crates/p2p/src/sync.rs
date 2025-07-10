@@ -47,6 +47,7 @@ impl SyncState {
 
     pub fn set_is_syncing(&self, is_syncing: bool) {
         self.syncing.store(is_syncing, Ordering::Relaxed);
+        self.set_gossip_broadcast_enabled(!is_syncing);
     }
 
     pub fn set_syncing_from(&self, height: usize) {
