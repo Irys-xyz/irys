@@ -1,4 +1,4 @@
-use crate::{BlockHash, DatabaseProvider, IrysBlockHeader, VDFLimiterInfo, H256};
+use crate::{BlockHash, VDFLimiterInfo, H256};
 
 /// A trait that is used to provide access to blocks by their hash. Used to avoid circular dependencies,
 /// such as between VDF and BlockIndexService.
@@ -14,7 +14,6 @@ pub trait BlockIndex {
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
-use tokio::io::AsyncReadExt;
 
 #[derive(Debug)]
 struct ResetSeedManagerInner<BI: BlockIndex> {
@@ -29,7 +28,7 @@ impl<BI: BlockIndex> ResetSeedManagerInner<BI> {
         // let previous_reset_step = block_step - (block_step % reset_frequency);
         // let reset_block_height = reset_block.height;
 
-        let mut possible_reset_seed_heights = HashMap::new();
+        let possible_reset_seed_heights = HashMap::new();
 
         Self {
             possible_reset_seed_heights,
