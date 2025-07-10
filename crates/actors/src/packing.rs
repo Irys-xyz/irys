@@ -279,7 +279,10 @@ fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
 impl Actor for PackingActor {
     type Context = Context<Self>;
 
-    fn start(self) -> actix::Addr<Self> {
+    fn started(&mut self, ctx: &mut Self::Context) {
+        ctx.set_mailbox_capacity(5_000);
+        
+        // Spawn the critical packing job processing tasks
         let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
         for key in keys {
             self.task_executor.spawn_critical(
@@ -291,12 +294,6 @@ impl Actor for PackingActor {
                 ),
             );
         }
-
-        Context::new().run(self)
-    }
-
-    fn started(&mut self, ctx: &mut Self::Context) {
-        ctx.set_mailbox_capacity(5_000);
     }
 }
 
