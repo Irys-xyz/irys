@@ -1594,14 +1594,12 @@ async fn stake_and_pledge(
         let sms = storage_modules_guard.read();
         sms.iter()
             .filter(|&sm| sm.partition_assignment().is_none())
-            .cloned()
-            .collect::<Vec<_>>()
+            .count()
     };
 
-    let to_pledge_count = to_pledge_sms.len();
     // get the number of pending commitment txs for partitions, if the count is >= the unassigned len, do nothing
     let pending_pledges = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
-    let to_pledge_count = (to_pledge_count as isize) - (pending_pledges as isize);
+    let to_pledge_count = (to_pledge_sms as isize) - (pending_pledges as isize);
     debug!(
         "Found {} SMs without partition assignments ({} pending pledges)",
         &to_pledge_count, &pending_pledges
