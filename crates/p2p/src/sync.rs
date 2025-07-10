@@ -673,8 +673,6 @@ mod tests {
                 reth_mock_addr.clone(),
             );
 
-            // let fake_gossip_server = FakeGossipServer::new();
-            // let fake_gossip_address = fake_gossip_server.spawn();
             let fake_peer_address = PeerAddress {
                 gossip: SocketAddr::from(([127, 0, 0, 1], 1279)),
                 api: SocketAddr::from(([127, 0, 0, 1], 1270)),
