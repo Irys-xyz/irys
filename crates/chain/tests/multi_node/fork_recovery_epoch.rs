@@ -152,7 +152,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
         .canonical_epoch_snapshot();
 
     {
-        let cs = epoch_snapshot.commitment_state.read().unwrap();
+        let cs = &epoch_snapshot.commitment_state;
 
         // Verify Peer2's pledge is in the commitment state now
         assert!(cs

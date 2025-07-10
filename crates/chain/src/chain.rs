@@ -1623,11 +1623,7 @@ async fn stake_and_pledge(
     let (is_historically_staked, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
-        let is_historically_staked = epoch_snapshot
-            .commitment_state
-            .read()
-            .unwrap()
-            .is_staked(address);
+        let is_historically_staked = epoch_snapshot.is_staked(address);
         let commitment_snapshot = block_tree_guard.canonical_commitment_snapshot();
         (is_historically_staked, commitment_snapshot)
     };
