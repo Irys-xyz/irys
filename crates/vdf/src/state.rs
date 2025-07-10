@@ -30,9 +30,20 @@ pub struct VdfState {
     pub seeds: VecDeque<Seed>,
     /// whether the VDF thread is mining or paused
     pub mining_state_sender: Option<Sender<bool>>,
+    /// global step from the latest canonical block
+    pub global_step_from_the_latest_canonical_block: u64,
+    pub minimal_step_to_keep: u64,
 }
 
 impl VdfState {
+    pub fn set_global_step_from_the_latest_canonical_block(
+        &mut self,
+        global_step: u64,
+    ) {
+        self.global_step_from_the_latest_canonical_block = global_step;
+        self.minimal_step_to_keep = global_step.saturating_sub(self.capacity as u64);
+    }
+
     pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
         (
             self.global_step,
@@ -47,7 +58,8 @@ impl VdfState {
         if self.global_step >= global_step {
             return self.global_step;
         }
-        if self.seeds.len() >= self.capacity {
+        let vdf_depth = global_step.saturating_sub(self.minimal_step_to_keep) as usize;
+        if self.seeds.len() >= vdf_depth {
             self.seeds.pop_front();
         }
         if self.global_step + 1 == global_step {
@@ -221,6 +233,8 @@ pub fn create_state(
 
     VdfState {
         global_step: global_step_number,
+        global_step_from_the_latest_canonical_block: global_step_number,
+        minimal_step_to_keep: global_step_number.saturating_sub(capacity as u64),
         seeds,
         capacity,
         mining_state_sender: Some(vdf_mining_state_sender),
@@ -375,10 +389,13 @@ pub mod test_helpers {
 
     pub fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
+        let capacity = calc_capacity(config);
 
         let state = VdfState {
             global_step: 0,
-            capacity: calc_capacity(config),
+            global_step_from_the_latest_canonical_block: 0,
+            minimal_step_to_keep: 0,
+            capacity,
             seeds: VecDeque::default(),
             mining_state_sender: Some(vdf_mining_state_sender),
         };

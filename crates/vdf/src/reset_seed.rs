@@ -92,31 +92,6 @@ impl<B: BlockProvider> ResetSeedManager<B> {
             .and_then(|map| map.remove(&block_hash))
     }
 
-    pub fn find_new_seed(&self, step_number: u64) -> Option<&ResetSeed> {
-        let candidate_hashes = self.possible_reset_seeds.get(&step_number)?;
-        let possible_finalized_seeds = candidate_hashes
-            .values()
-            .filter(|reset_seed| {
-                self.block_provider
-                    .does_block_exist(&reset_seed.block_hash, reset_seed.block_height)
-            })
-            .collect::<Vec<_>>();
-
-        // If no finalized reset seeds are found, return None
-        if possible_finalized_seeds.is_empty() {
-            return None;
-        }
-        // It shouldn't be possible to have more than one finalized reset seed for a given step number
-        if possible_finalized_seeds.len() > 1 {
-            panic!(
-                "Multiple reset seeds found for step {}: {:?}",
-                step_number, possible_finalized_seeds
-            );
-        }
-        // Return the only finalized reset seed
-        Some(possible_finalized_seeds[0])
-    }
-
     pub fn remove_all_candidates_for_step(
         &mut self,
         step_number: u64,
@@ -130,14 +105,14 @@ impl<B: BlockProvider> ResetSeedManager<B> {
     pub fn process_reset(&mut self, global_step_number: u64, hash: H256) -> H256 {
         if global_step_number % self.reset_frequency == 0 {
             info!("Processing reset for step {}", global_step_number);
-            let seed = if let Some(reset_seed) = self.find_new_seed(global_step_number).cloned() {
-                self.current_reset_seed = reset_seed.seed;
+            let seed = if let Some(latest_canonical_block) = self.block_provider.latest_canonical_block() {
+                self.current_reset_seed = latest_canonical_block.seed;
                 self.remove_all_candidates_for_step(global_step_number);
                 info!(
                     "Found new reset seed for {}: {:?}",
-                    global_step_number, reset_seed.seed
+                    global_step_number, latest_canonical_block.seed
                 );
-                reset_seed.seed
+                latest_canonical_block.seed
             } else {
                 info!(
                     "No new reset seed found for step {}, using existing one",
