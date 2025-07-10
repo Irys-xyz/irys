@@ -51,7 +51,7 @@ pub fn run_vdf_for_genesis_block(
 pub fn run_vdf<B: BlockProvider>(
     config: &irys_types::VdfConfig,
     global_step_number: u64,
-    seed: H256,
+    current_vdf_hash: H256,
     initial_reset_seed: H256,
     mut fast_forward_receiver: UnboundedReceiver<VdfStep>,
     mut vdf_mining_state_listener: Receiver<bool>,
@@ -65,7 +65,7 @@ pub fn run_vdf<B: BlockProvider>(
     let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
 
     let mut hasher = Sha256::new();
-    let mut hash: H256 = seed;
+    let mut hash: H256 = current_vdf_hash;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
     let mut global_step_number = global_step_number;
     // FIXME: The reset seed is the same as the seed... which I suspect is incorrect!

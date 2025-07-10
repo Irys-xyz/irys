@@ -3,6 +3,7 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 use crate::block_production::SolutionContext;
+use crate::block_provider::{BlockIndex, ResetSeedCache};
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
@@ -69,11 +70,12 @@ pub struct VDFLimiterInfo {
 }
 
 impl VDFLimiterInfo {
-    pub fn new(
+    pub fn new<BI: BlockIndex>(
         solution: &SolutionContext,
         prev_block_header: &IrysBlockHeader,
         steps: H256List,
         config: &Config,
+        reset_seed_manager: &ResetSeedCache<BI>,
     ) -> Self {
         let mut vdf_limiter_info = Self {
             global_step_number: solution.vdf_step,
@@ -88,7 +90,11 @@ impl VDFLimiterInfo {
         };
 
         let reset_frequency = config.consensus.vdf.reset_frequency;
-        vdf_limiter_info.set_seeds(reset_frequency as u64, prev_block_header);
+        vdf_limiter_info.set_seeds(
+            reset_frequency as u64,
+            prev_block_header,
+            reset_seed_manager,
+        );
 
         vdf_limiter_info
     }
@@ -101,16 +107,24 @@ impl VDFLimiterInfo {
         self.global_step_number - self.steps.len() as u64 + 1
     }
 
-    pub fn contains_reset_step(&self, reset_frequency: u64) -> Option<u64> {
+    /// Returns the reset step if the block contains one
+    pub fn reset_step(&self, reset_frequency: u64) -> Option<u64> {
         let first_step = self.first_step_number();
         (first_step..=self.global_step_number)
             .find(|step_number| step_number % reset_frequency == 0)
     }
 
-    pub fn set_seeds(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
-        if self.contains_reset_step(reset_frequency).is_some() {
+    pub fn set_seeds<BI: BlockIndex>(
+        &mut self,
+        reset_frequency: u64,
+        parent_header: &IrysBlockHeader,
+        reset_seed_manager: &ResetSeedCache<BI>,
+    ) {
+        if let Some(step) = self.reset_step(reset_frequency) {
             // If the current block is a reset step, we set the next seed to the parent block's hash.
-            self.next_seed = parent_header.block_hash;
+            self.next_seed = reset_seed_manager
+                .block_hash_that_contains_step(step.saturating_sub(reset_frequency))
+                .expect("Reset seed must always be available for the current step");
             self.seed = parent_header.vdf_limiter_info.next_seed;
         } else {
             // Otherwise, we set the next seed to the previous block next_seed.

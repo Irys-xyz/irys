@@ -49,7 +49,9 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 mod block_validation_tracker;
+use crate::block_index_service::BlockIndexReadGuard;
 pub use block_validation_tracker::BlockValidationTracker;
+use irys_types::block_provider::ResetSeedCache;
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -97,6 +99,8 @@ pub struct BlockProducerInner {
     pub reth_node_adapter: IrysRethNodeAdapter,
     /// Reth service actor
     pub reth_service: Addr<RethServiceActor>,
+    /// Reset seed manager
+    pub reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -539,6 +543,7 @@ pub trait BlockProdStrategy {
                 prev_block_header,
                 steps,
                 &self.inner().config,
+                &self.inner().reset_seed_cache,
             ),
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
@@ -592,6 +597,14 @@ pub trait BlockProdStrategy {
                 ))
             }
         }?;
+
+        let reset_frequency = self.inner().config.consensus.vdf.reset_frequency as u64;
+        if let Some(step) = block.vdf_limiter_info.reset_step(reset_frequency) {
+            // If the block contains a reset seed, we need to update the reset seed cache
+            self.inner()
+                .reset_seed_cache
+                .record_block_that_contains_step(step, block.height, block.block_hash);
+        }
 
         if is_difficulty_updated {
             self.inner()

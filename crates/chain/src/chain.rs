@@ -51,6 +51,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
+use irys_types::block_provider::ResetSeedCache;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
@@ -866,6 +867,23 @@ impl IrysNode {
             .send(GetBlockIndexGuardMessage)
             .await?;
 
+        let current_canonical_step = latest_block.vdf_limiter_info.global_step_number;
+        let initial_reset_step = current_canonical_step
+            - (current_canonical_step % config.consensus.vdf.reset_frequency as u64);
+
+        let reset_seed_cache = ResetSeedCache::new(block_index_guard.clone());
+
+        if let Some(reset_block) =
+            find_initial_reset_block(&block_index_guard, initial_reset_step, &irys_db)
+        {
+            // If we have a reset block, we need to record it
+            reset_seed_cache.record_block_that_contains_step(
+                initial_reset_step,
+                reset_block.height,
+                reset_block.block_hash,
+            );
+        }
+
         // start the broadcast mining service
         let span = Span::current();
         let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
@@ -899,6 +917,7 @@ impl IrysNode {
             &config,
             &service_senders,
             reth_service_actor.clone(),
+            reset_seed_cache.clone(),
         );
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -1024,10 +1043,12 @@ impl IrysNode {
                 price_oracle,
                 reth_node_adapter.clone(),
                 reth_service_actor.clone(),
+                reset_seed_cache.clone(),
             );
 
-        let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
-        let seed = seed.0;
+        let (global_step_number, last_step_hash) =
+            vdf_state_readonly.read().get_last_step_and_seed();
+        let initial_hash = last_step_hash.0;
 
         // set up packing actor
         let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(
@@ -1055,7 +1076,7 @@ impl IrysNode {
             receivers.vdf_fast_forward,
             receivers.vdf_mining,
             latest_block,
-            seed,
+            initial_hash,
             global_step_number,
             broadcast_mining_actor,
             vdf_state,
@@ -1194,7 +1215,7 @@ impl IrysNode {
         vdf_fast_forward_receiver: mpsc::UnboundedReceiver<VdfStep>,
         vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
-        seed: H256,
+        initial_hash: H256,
         global_step_number: u64,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         vdf_state: AtomicVdfState,
@@ -1239,7 +1260,7 @@ impl IrysNode {
                 run_vdf(
                     &vdf_config,
                     global_step_number,
-                    seed,
+                    initial_hash,
                     next_vdf_seed,
                     vdf_fast_forward_receiver,
                     vdf_mining_state_rx,
@@ -1328,6 +1349,7 @@ impl IrysNode {
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         reth_service_actor: actix::Addr<RethServiceActor>,
+        reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
     ) -> (
         actix::Addr<BlockProducerActor>,
         Arbiter,
@@ -1346,6 +1368,7 @@ impl IrysNode {
             service_senders: service_senders.clone(),
             reth_node_adapter,
             reth_service: reth_service_actor,
+            reset_seed_cache,
         });
         let block_producer_actor = BlockProducerActor {
             inner: block_producer_inner.clone(),
@@ -1467,6 +1490,38 @@ fn read_latest_block_data(
         .unwrap(),
     );
     (latest_block_height, latest_block)
+}
+
+fn find_initial_reset_block(
+    block_index: &BlockIndexReadGuard,
+    step: u64,
+    irys_db: &DatabaseProvider,
+) -> Option<IrysBlockHeader> {
+    let latest_block_index = block_index
+        .read()
+        .get_latest_item()
+        .cloned()
+        .expect("the block index must have at least one entry");
+
+    loop {
+        if let Some(header) = database::block_header_by_hash(
+            &irys_db.tx().unwrap(),
+            &latest_block_index.block_hash,
+            false,
+        )
+        .unwrap()
+        {
+            let first_step_in_block = header.vdf_limiter_info.first_step_number();
+            let last_step_in_block = header.vdf_limiter_info.global_step_number;
+            if first_step_in_block <= step && step <= last_step_in_block {
+                // Found the block that contains the required step
+                return Some(header);
+            }
+        } else {
+            // Did not find the block with the required step
+            return None;
+        }
+    }
 }
 
 fn init_peer_list_service(
