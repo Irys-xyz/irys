@@ -188,22 +188,6 @@ pub fn run_vdf<B: BlockProvider>(
 }
 
 #[must_use]
-fn store_step(
-    hash: H256,
-    atomic_vdf_global_step: &AtomicVdfStepNumber,
-    vdf_state: &AtomicVdfState,
-    new_global_step_number: u64,
-    canonical_global_step_number: u64,
-) -> u64 {
-    let mut vdf_guard = vdf_state.write().expect("to write to VDF");
-
-    vdf_guard.set_canonical_step(canonical_global_step_number);
-    let global_step_number = { vdf_guard.store_step(Seed(hash), new_global_step_number) };
-    atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
-    global_step_number
-}
-
-#[must_use]
 pub fn process_reset(
     global_step_number: u64,
     hash: H256,
@@ -219,6 +203,22 @@ pub fn process_reset(
     } else {
         hash
     }
+}
+
+#[must_use]
+fn store_step(
+    hash: H256,
+    atomic_vdf_global_step: &AtomicVdfStepNumber,
+    vdf_state: &AtomicVdfState,
+    new_global_step_number: u64,
+    canonical_global_step_number: u64,
+) -> u64 {
+    let mut vdf_guard = vdf_state.write().expect("to write to VDF");
+
+    vdf_guard.set_canonical_step(canonical_global_step_number);
+    let global_step_number = { vdf_guard.store_step(Seed(hash), new_global_step_number) };
+    atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
+    global_step_number
 }
 
 #[cfg(test)]
