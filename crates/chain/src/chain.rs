@@ -1506,11 +1506,8 @@ fn find_initial_reset_block(
     let mut block_hash = latest_block_index.block_hash;
 
     loop {
-        if let Some(header) = database::block_header_by_hash(
-            &irys_db.tx().unwrap(),
-            &block_hash,
-            false,
-        ).unwrap()
+        if let Some(header) =
+            database::block_header_by_hash(&irys_db.tx().unwrap(), &block_hash, false).unwrap()
         {
             if header.height == 0 {
                 // Reached the genesis block, no reset block found
