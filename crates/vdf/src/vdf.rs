@@ -7,7 +7,7 @@ use irys_types::{
 use sha2::{Digest as _, Sha256};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
@@ -137,7 +137,13 @@ pub fn run_vdf<B: BlockProvider>(
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
         if !vdf_mining || is_too_far_ahead {
-            tracing::trace!("VDF Mining Paused, waiting 200ms");
+            if is_too_far_ahead {
+                warn!(
+                    "VDF mining is too far ahead: {} >= {} + {} * 2, waiting a bit to catch up",
+                    global_step_number, canonical_global_step_number, vdf_reset_frequency
+                );
+            }
+            info!("VDF Mining Paused, waiting 200ms");
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
@@ -243,7 +249,7 @@ mod tests {
         fn broadcast(&self, _seed: Seed, _checkpoints: H256List, _global_step: u64) {}
     }
 
-    struct MockBlockProvider(IrysBlockHeader);
+    struct MockBlockProvider(pub IrysBlockHeader);
 
     impl MockBlockProvider {
         fn new() -> Self {
@@ -328,6 +334,120 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
+        let mut mock_header = IrysBlockHeader::new_mock_header();
+        // Set global step number to 2 to simulate a scenario where canonical chain progresses
+        mock_header.vdf_limiter_info.global_step_number = 2;
+
+        let vdf_thread_handler = std::thread::spawn({
+            let config = config.clone();
+            move || {
+                run_vdf(
+                    &config.consensus.vdf,
+                    0,
+                    seed,
+                    reset_seed,
+                    ff_step_receiver,
+                    mining_state_rx,
+                    shutdown_rx,
+                    broadcast_mining_service,
+                    vdf_state.clone(),
+                    atomic_global_step_number,
+                    MockBlockProvider(mock_header),
+                )
+            }
+        });
+
+        // wait for some vdf steps
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let step_num = vdf_steps_guard.read().global_step;
+
+        assert!(
+            step_num > 4,
+            "Should have more than 4 seeds, only have {}",
+            step_num
+        );
+
+        // get last 4 steps
+        let steps = vdf_steps_guard
+            .read()
+            .get_steps(ii(step_num - 3, step_num))
+            .unwrap();
+
+        // calculate last step checkpoints
+        let mut hasher = Sha256::new();
+        let mut salt = U256::from(step_number_to_salt_number(
+            &config.consensus.vdf,
+            step_num - 1_u64,
+        ));
+        let mut seed = steps[2];
+
+        let mut checkpoints: Vec<H256> =
+            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+        if step_num > 0 && (step_num - 1) % config.consensus.vdf.reset_frequency as u64 == 0 {
+            seed = apply_reset_seed(seed, reset_seed);
+        }
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut seed,
+            config.consensus.vdf.num_checkpoints_in_vdf_step,
+            config.consensus.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        let vdf_info = VDFLimiterInfo {
+            global_step_number: step_num,
+            output: steps[3],
+            prev_output: steps[0],
+            steps: H256List(steps.0[1..=3].into()),
+            last_step_checkpoints: H256List(checkpoints),
+            seed: reset_seed,
+            ..VDFLimiterInfo::default()
+        };
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+            .build()
+            .expect("to be able to build vdf validation pool");
+
+        assert!(
+            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard).is_ok(),
+            "Invalid VDF"
+        );
+
+        // Send shutdown signal
+        shutdown_tx.send(()).await.unwrap();
+
+        // Wait for vdf thread to finish
+        vdf_thread_handler.join().unwrap();
+    }
+
+    #[actix_rt::test]
+    async fn test_vdf_does_not_get_too_far_ahead() {
+        let mut node_config = NodeConfig::testnet();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new(node_config);
+
+        let seed = H256::random();
+        let reset_seed = H256::random();
+
+        init_tracing();
+
+        let broadcast_mining_service = MockMining;
+        let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
+
+        let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
+        mining_state_tx.send(true).await.unwrap();
+
+        let vdf_state = mocked_vdf_service(&config);
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
+
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let atomic_global_step_number = Arc::new(AtomicU64::new(0));
+
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
             move || {
@@ -352,11 +472,7 @@ mod tests {
 
         let step_num = vdf_steps_guard.read().global_step;
 
-        assert!(
-            step_num > 4,
-            "Should have more than 4 seeds, only have {}",
-            step_num
-        );
+        assert_eq!(step_num, 4,);
 
         // get last 4 steps
         let steps = vdf_steps_guard
