@@ -13,13 +13,13 @@ pub enum CommitmentSnapshotStatus {
 
 #[derive(Debug, Default, Clone)]
 pub struct CommitmentSnapshot {
-    commitments: BTreeMap<Address, MinerCommitments>,
+    pub commitments: BTreeMap<Address, MinerCommitments>,
 }
 
 #[derive(Default, Debug, Clone)]
-struct MinerCommitments {
-    stake: Option<CommitmentTransaction>,
-    pledges: Vec<CommitmentTransaction>,
+pub struct MinerCommitments {
+    pub stake: Option<CommitmentTransaction>,
+    pub pledges: Vec<CommitmentTransaction>,
 }
 
 impl CommitmentSnapshot {

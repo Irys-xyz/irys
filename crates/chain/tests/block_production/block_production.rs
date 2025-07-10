@@ -1165,3 +1165,80 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
 
     Ok(())
 }
+
+// Setup: Configure a node with block_tree_depth=3 to test pruning behavior
+// Action: Mine 10 blocks, checking that blocks get pruned while mining.
+// Assert: Verify blocks 1-7 are pruned and blocks 8, 9, 10 still exist in the tree
+#[test_log::test(tokio::test)]
+async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
+    // Setup
+    // Configure test parameters
+    let block_tree_depth = 3;
+    let num_blocks_to_mine = 10;
+
+    // Configure a node with specified block_tree_depth
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().block_tree_depth = block_tree_depth;
+
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    // Action
+    // Mine blocks and collect their hashes
+    let mut all_block_hashes = Vec::new();
+
+    for height_to_mine in 1..=num_blocks_to_mine {
+        info!("Mining block {}", height_to_mine);
+
+        // Mine a block using the utility that auto-waits
+        let block = node.mine_block().await?;
+
+        // Store the block hash
+        all_block_hashes.push(block.block_hash);
+
+        // Assert the tree size is as expected
+        // The canonical chain starts with genesis (1 block) and adds mined blocks
+        // But only keeps up to block_tree_depth blocks total
+        let total_blocks = height_to_mine + 1; // genesis + mined blocks
+        let expected_tree_size = std::cmp::min(total_blocks, block_tree_depth as usize);
+        let actual_tree_size = node.get_canonical_chain().len();
+        assert_eq!(
+            actual_tree_size, expected_tree_size,
+            "Tree size mismatch at height {}: expected {}, got {}",
+            height_to_mine, expected_tree_size, actual_tree_size
+        );
+    }
+
+    // Assert
+    // Verify tree has exactly block_tree_depth blocks
+    assert_eq!(
+        node.get_canonical_chain().len(),
+        block_tree_depth as usize,
+        "Final tree size should be exactly {}",
+        block_tree_depth
+    );
+
+    // Verify blocks that should be pruned [1-7]
+    for height in 1..=7 {
+        let block_hash = &all_block_hashes[height - 1];
+        let block_result = node.get_block_by_hash(block_hash);
+        assert!(
+            block_result.is_err(),
+            "Block at height {} should be pruned",
+            height
+        );
+    }
+
+    // Verify blocks that should still exist [8-10]
+    for height in 8..=10 {
+        let block_hash = &all_block_hashes[height - 1];
+        let block_result = node.get_block_by_hash(block_hash);
+        assert!(
+            block_result.is_ok(),
+            "Block at height {} should not be pruned",
+            height
+        );
+    }
+
+    node.stop().await;
+    Ok(())
+}
