@@ -819,31 +819,16 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
-        let prev_is_gossip_broadcast_enabled =
-            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
-        let prev_is_gossip_reception_enabled =
-            self.node_ctx.sync_state.is_gossip_reception_enabled();
-        self.gossip_disable();
-        self.mine_blocks(num_blocks).await?;
-        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
-            self.gossip_enable();
-        }
-        Ok(())
+        self.with_gossip_disabled(self.mine_blocks(num_blocks))
+            .await
     }
 
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
-        let prev_is_gossip_broadcast_enabled =
-            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
-        let prev_is_gossip_reception_enabled =
-            self.node_ctx.sync_state.is_gossip_reception_enabled();
-        self.gossip_disable();
-        let res = mine_block(&self.node_ctx).await?.unwrap();
-        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
-            self.gossip_enable();
-        }
-        Ok(res)
+        self.with_gossip_disabled(mine_block(&self.node_ctx))
+            .await?
+            .ok_or_eyre("block not returned")
     }
 
     pub fn get_commitment_snapshot_status(
@@ -1350,16 +1335,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         data: Vec<u8>,
         signer: &IrysSigner,
     ) -> IrysTransaction {
-        let prev_is_gossip_broadcast_enabled =
-            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
-        let prev_is_gossip_reception_enabled =
-            self.node_ctx.sync_state.is_gossip_reception_enabled();
-        self.gossip_disable();
-        let tx = self.post_data_tx(anchor, data, signer).await;
-        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
-            self.gossip_enable();
-        }
-        tx
+        self.with_gossip_disabled(self.post_data_tx(anchor, data, signer))
+            .await
     }
 
     pub async fn post_data_tx(
@@ -1500,17 +1477,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_tx: &CommitmentTransaction,
     ) {
         let api_uri = self.node_ctx.config.node_config.api_uri();
-
-        let prev_is_gossip_broadcast_enabled =
-            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
-        let prev_is_gossip_reception_enabled =
-            self.node_ctx.sync_state.is_gossip_reception_enabled();
-        self.gossip_disable();
-        self.post_commitment_tx_request(&api_uri, commitment_tx)
+        self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
             .await;
-        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
-            self.gossip_enable();
-        }
     }
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1535,17 +1503,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: H256,
     ) -> CommitmentTransaction {
-        let prev_is_gossip_broadcast_enabled =
-            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
-        let prev_is_gossip_reception_enabled =
-            self.node_ctx.sync_state.is_gossip_reception_enabled();
-        self.gossip_disable();
-        let stake_tx = self.post_pledge_commitment(anchor).await;
-        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
-            self.gossip_enable();
-        }
-
-        stake_tx
+        self.with_gossip_disabled(self.post_pledge_commitment(anchor))
+            .await
     }
 
     pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1572,17 +1531,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: H256,
     ) -> CommitmentTransaction {
-        let prev_is_gossip_broadcast_enabled =
-            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
-        let prev_is_gossip_reception_enabled =
-            self.node_ctx.sync_state.is_gossip_reception_enabled();
-        self.gossip_disable();
-        let stake_tx = self.post_stake_commitment(anchor).await;
-        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
-            self.gossip_enable();
-        }
-
-        stake_tx
+        self.with_gossip_disabled(self.post_stake_commitment(anchor))
+            .await
     }
 
     pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
@@ -1681,6 +1631,24 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub fn gossip_disable(&self) {
         self.node_ctx.sync_state.set_gossip_reception_enabled(false);
         self.node_ctx.sync_state.set_gossip_broadcast_enabled(false);
+    }
+
+    /// Execute the provided future with gossip temporarily disabled.
+    async fn with_gossip_disabled<F>(&self, fut: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let prev_is_gossip_broadcast_enabled =
+            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let prev_is_gossip_reception_enabled =
+            self.node_ctx.sync_state.is_gossip_reception_enabled();
+
+        self.gossip_disable();
+        let res = fut.await;
+        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
+            self.gossip_enable();
+        }
+        res
     }
 
     /// Get the full canonical chain as BlockTreeEntry items
