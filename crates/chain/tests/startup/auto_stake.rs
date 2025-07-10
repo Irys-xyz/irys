@@ -9,9 +9,8 @@ use rstest::rstest;
 use tokio::task::yield_now;
 use tracing::{debug, info};
 
-// this function waits for the "shape" of the mempool to be what you expect
-// primarily, that the number of each type of tx match what you expect
-// each tx count is an AND filter
+// waits until mempool contains exact expected counts of each tx type.
+// all filters are AND conditions (e.g., submit_txs=1, publish_txs=1 requires both).
 pub async fn wait_for_mempool_shape(
     node: &IrysNodeTest<IrysNodeCtx>,
     submit_txs: usize,

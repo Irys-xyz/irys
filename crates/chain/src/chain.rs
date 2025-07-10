@@ -1522,6 +1522,12 @@ fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
     Ok(irys_db)
 }
 
+/// This function is used by the node to automatically stake & pledge on startup, if the `node_config.stake_pledge_drives` option is `true`
+/// method:
+/// 1) check if we have an existing stake - historic (already in an epoch) or pending (ready to be rolled up at the end of the current epoch)
+/// 2) if we have no existing stake, submit a stake to the local mempool
+/// 3) check all local storage modules for partition assignments against all known partition pledges - historic or pending
+/// 4) post enough pledges so that there are enough pledges for all local storage modules
 async fn stake_and_pledge(
     config: &Config,
     latest_block: Arc<IrysBlockHeader>,
