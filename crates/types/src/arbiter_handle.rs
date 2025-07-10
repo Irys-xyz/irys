@@ -76,3 +76,20 @@ impl<T> From<JoinHandle<T>> for CloneableJoinHandle<T> {
         Self::new(handle)
     }
 }
+
+#[derive(Debug)]
+pub enum ServiceHandle {
+    Actix(ArbiterHandle),
+    Tokio(tokio::task::JoinHandle<()>),
+}
+
+impl ServiceHandle {
+    pub async fn shutdown(self) {
+        match self {
+            ServiceHandle::Actix(handle) => handle.stop_and_join(),
+            ServiceHandle::Tokio(handle) => {
+                let _ = handle.await;
+            }
+        }
+    }
+}

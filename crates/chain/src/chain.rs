@@ -55,7 +55,7 @@ use irys_storage::{
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, H256, U256,
+    PartitionChunkRange, ServiceHandle, H256, U256,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
@@ -87,7 +87,7 @@ pub struct IrysNodeCtx {
     pub reth_node_adapter: IrysRethNodeAdapter,
     pub reth_db: RethDbWrapper,
     pub actor_addresses: ActorAddresses,
-    pub arbiters: Arc<RwLock<Vec<ArbiterHandle>>>,
+    pub service_handles: Arc<RwLock<Vec<ServiceHandle>>>,
     pub db: DatabaseProvider,
     pub config: Config,
     pub reward_curve: Arc<HalvingCurve>,
@@ -640,7 +640,7 @@ impl IrysNode {
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn({
-                let irys_provider = Arc::clone(irys_provider);
+                let _irys_provider = Arc::clone(irys_provider);
                 move || {
                     System::new().block_on(async move {
                         // read the latest block info
@@ -650,7 +650,7 @@ impl IrysNode {
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
                         let block_index = Arc::new(RwLock::new(block_index));
-                        let block_index_service_actor = Self::init_block_index_service(&config, &block_index);
+                        let (block_index_service_actor, block_index_arbiter) = Self::init_block_index_service(&config, &block_index);
 
                         // start the rest of the services
                         let (irys_node, actix_server, vdf_thread, reth_node, gossip_service_handle) = Self::init_services(
@@ -661,6 +661,7 @@ impl IrysNode {
                                 block_index,
                                 latest_block,
                                 block_index_service_actor,
+                                block_index_arbiter,
                                 &task_exec,
                                 http_listener,
                                 irys_db,
@@ -671,7 +672,7 @@ impl IrysNode {
                             .await
                             .expect("initializing services should not fail");
 
-                        let arbiters_guard = irys_node.arbiters.clone();
+                        let service_handles_guard = irys_node.service_handles.clone();
                         irys_node_ctx_tx
                             .send(irys_node)
                             .expect("irys node ctx sender should not be dropped. Is the reth node thread down?");
@@ -696,15 +697,25 @@ impl IrysNode {
                             Err(e) => warn!("Gossip service is already stopped: {:?}", e),
                         }
 
-                        debug!("Stopping actors");
+                        debug!("Stopping services");
                         {
-                            let arbiters = arbiters_guard.read().unwrap();
-                            for arbiter in arbiters.iter() {
-                                arbiter.clone().stop_and_join();
+                            let mut service_handles = service_handles_guard.write().unwrap();
+                            // Shut down services in reverse order (LIFO)
+                            while let Some(handle) = service_handles.pop() {
+                                match handle {
+                                    ServiceHandle::Actix(arbiter) => {
+                                        debug!("Stopping Actix service: {}", arbiter.name);
+                                        arbiter.stop_and_join();
+                                    }
+                                    ServiceHandle::Tokio(handle) => {
+                                        debug!("Stopping Tokio service");
+                                        handle.abort();
+                                    }
+                                }
                             }
-                            drop(arbiters);
+                            drop(service_handles);
                         }
-                        debug!("Actors stopped");
+                        debug!("Services stopped");
 
                         // Send shutdown signal
                         vdf_shutdown_sender.send(()).await.unwrap();
@@ -796,6 +807,7 @@ impl IrysNode {
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
         block_index_service_actor: Addr<BlockIndexService>,
+        block_index_arbiter: Arbiter,
         task_exec: &TaskExecutor,
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
@@ -845,7 +857,7 @@ impl IrysNode {
             .await??;
         debug!("Reth Service Actor updated about fork choice");
 
-        let _handle = ChunkCacheService::spawn_service(
+        let chunk_cache_handle = ChunkCacheService::spawn_service(
             task_exec,
             irys_db.clone(),
             receivers.chunk_cache,
@@ -880,7 +892,7 @@ impl IrysNode {
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
-        let _handle = BlockTreeService::spawn_service(
+        let block_tree_handle = BlockTreeService::spawn_service(
             task_exec,
             receivers.block_tree,
             irys_db.clone(),
@@ -917,7 +929,7 @@ impl IrysNode {
         );
 
         // Spawn mempool service
-        let _mempool_handle = MempoolService::spawn_service(
+        let mempool_handle = MempoolService::spawn_service(
             task_exec,
             irys_db.clone(),
             reth_node_adapter.clone(),
@@ -926,11 +938,11 @@ impl IrysNode {
             receivers.mempool,
             &config,
             &service_senders,
-        );
+        )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
         // spawn the chunk migration service
-        Self::init_chunk_migration_service(
+        let chunk_migration_arbiter = Self::init_chunk_migration_service(
             &config,
             block_index.clone(),
             &irys_db,
@@ -948,7 +960,7 @@ impl IrysNode {
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
         // Spawn the validation service
-        let (_handle, validation_enabled) = ValidationService::spawn_service(
+        let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             task_exec,
             block_index_guard.clone(),
             block_tree_guard.clone(),
@@ -999,7 +1011,7 @@ impl IrysNode {
         let price_oracle = Self::init_price_oracle(&config);
 
         // set up the block producer
-        let block_producer_inner = Self::init_block_producer(
+        let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
             &config,
             Arc::clone(&reward_curve),
             &irys_db,
@@ -1021,12 +1033,13 @@ impl IrysNode {
         let seed = seed.0;
 
         // set up packing actor
-        let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(
-            &config,
-            global_step_number,
-            task_exec,
-            &storage_modules_guard,
-        );
+        let (atomic_global_step_number, packing_actor_addr, packing_arbiter) =
+            Self::init_packing_actor(
+                &config,
+                global_step_number,
+                task_exec,
+                &storage_modules_guard,
+            );
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
@@ -1065,7 +1078,7 @@ impl IrysNode {
                 block_index: block_index_service_actor,
                 reth: reth_service_actor,
             },
-            arbiters: Arc::new(RwLock::new(Vec::new())),
+            service_handles: Arc::new(RwLock::new(Vec::new())),
             reward_curve,
             reth_handle: reth_node.clone(),
             reth_db,
@@ -1095,7 +1108,7 @@ impl IrysNode {
         // - Handles the dynamic addition/removal of storage modules
         // - Coordinates with the epoch service for runtime updates
         debug!("Starting StorageModuleService");
-        let _handle = StorageModuleService::spawn_service(
+        let storage_module_handle = StorageModuleService::spawn_service(
             task_exec,
             receivers.storage_modules,
             storage_modules,
@@ -1104,27 +1117,49 @@ impl IrysNode {
         );
 
         {
-            let mut arbiters_guard = irys_node_ctx.arbiters.write().unwrap();
+            let mut service_handles_guard = irys_node_ctx.service_handles.write().unwrap();
 
-            arbiters_guard.push(ArbiterHandle::new(
+            // Add Tokio service handles first (in order of initialization)
+            service_handles_guard.push(ServiceHandle::Tokio(chunk_cache_handle));
+            service_handles_guard.push(ServiceHandle::Tokio(block_tree_handle));
+            service_handles_guard.push(ServiceHandle::Tokio(mempool_handle));
+            service_handles_guard.push(ServiceHandle::Tokio(validation_handle));
+            service_handles_guard.push(ServiceHandle::Tokio(block_producer_handle));
+            service_handles_guard.push(ServiceHandle::Tokio(storage_module_handle));
+
+            // Add Actix arbiter handles
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
+                block_index_arbiter,
+                "block_index_arbiter".to_string(),
+            )));
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
+                chunk_migration_arbiter,
+                "chunk_migration_arbiter".to_string(),
+            )));
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
+                packing_arbiter,
+                "packing_arbiter".to_string(),
+            )));
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
                 broadcast_arbiter,
                 "broadcast_arbiter".to_string(),
-            ));
-            arbiters_guard.push(ArbiterHandle::new(
+            )));
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
                 block_discovery_arbiter,
                 "block_discovery_arbiter".to_string(),
-            ));
-            arbiters_guard.push(ArbiterHandle::new(
+            )));
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
                 peer_list_arbiter,
                 "peer_list_arbiter".to_string(),
-            ));
-            arbiters_guard.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
-            arbiters_guard.extend(
-                part_arbiters
-                    .into_iter()
-                    .map(|x| ArbiterHandle::new(x, "partition_arbiter".to_string())),
-            );
-            drop(arbiters_guard);
+            )));
+            service_handles_guard.push(ServiceHandle::Actix(ArbiterHandle::new(
+                reth_arbiter,
+                "reth_arbiter".to_string(),
+            )));
+            service_handles_guard.extend(part_arbiters.into_iter().map(|x| {
+                ServiceHandle::Actix(ArbiterHandle::new(x, "partition_arbiter".to_string()))
+            }));
+            drop(service_handles_guard);
         }
 
         let server = run_server(
@@ -1269,10 +1304,12 @@ impl IrysNode {
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
-                packing_actor_addr.do_send(PackingRequest {
-                    storage_module: sm.clone(),
-                    chunk_range: PartitionChunkRange(interval),
-                });
+                packing_actor_addr
+                    .try_send(PackingRequest {
+                        storage_module: sm.clone(),
+                        chunk_range: PartitionChunkRange(interval),
+                    })
+                    .unwrap();
             }
         }
         (part_actors, arbiters)
@@ -1283,13 +1320,21 @@ impl IrysNode {
         global_step_number: u64,
         task_executor: &TaskExecutor,
         storage_modules_guard: &StorageModulesReadGuard,
-    ) -> (Arc<AtomicU64>, actix::Addr<PackingActor>) {
+    ) -> (Arc<AtomicU64>, actix::Addr<PackingActor>, Arbiter) {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let packing_config = PackingConfig::new(config);
+        let packing_arbiter = Arbiter::new();
+        let task_executor_clone = task_executor.clone();
         let packing_actor_addr =
-            PackingActor::new(task_executor.clone(), sm_ids, packing_config).start();
-        (atomic_global_step_number, packing_actor_addr)
+            PackingActor::start_in_arbiter(&packing_arbiter.handle(), move |_| {
+                PackingActor::new(task_executor_clone, sm_ids, packing_config)
+            });
+        (
+            atomic_global_step_number,
+            packing_actor_addr,
+            packing_arbiter,
+        )
     }
     fn init_block_producer(
         config: &Config,
@@ -1307,7 +1352,10 @@ impl IrysNode {
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,
-    ) -> Arc<irys_actors::BlockProducerInner> {
+    ) -> (
+        Arc<irys_actors::BlockProducerInner>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),
@@ -1326,14 +1374,14 @@ impl IrysNode {
         });
 
         // Spawn the service and get the handle
-        let _join_handle = irys_actors::BlockProducerService::spawn_service(
+        let block_producer_handle = irys_actors::BlockProducerService::spawn_service(
             task_executor,
             block_producer_inner.clone(),
             None, // blocks_remaining_for_test
             block_producer_rx,
         );
 
-        block_producer_inner
+        (block_producer_inner, block_producer_handle)
     }
 
     fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {
@@ -1386,7 +1434,7 @@ impl IrysNode {
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
         storage_modules_guard: &StorageModulesReadGuard,
-    ) {
+    ) -> Arbiter {
         let chunk_migration_service = ChunkMigrationService::new(
             block_index,
             config.clone(),
@@ -1394,7 +1442,13 @@ impl IrysNode {
             irys_db.clone(),
             service_senders.clone(),
         );
-        SystemRegistry::set(chunk_migration_service.start());
+        let chunk_migration_arbiter = Arbiter::new();
+        let chunk_migration_actor =
+            ChunkMigrationService::start_in_arbiter(&chunk_migration_arbiter.handle(), |_| {
+                chunk_migration_service
+            });
+        SystemRegistry::set(chunk_migration_actor);
+        chunk_migration_arbiter
     }
 
     fn init_storage_modules(
@@ -1413,11 +1467,15 @@ impl IrysNode {
     fn init_block_index_service(
         config: &Config,
         block_index: &Arc<RwLock<BlockIndex>>,
-    ) -> actix::Addr<BlockIndexService> {
+    ) -> (actix::Addr<BlockIndexService>, Arbiter) {
         let block_index_service = BlockIndexService::new(block_index.clone(), &config.consensus);
-        let block_index_service_actor = block_index_service.start();
+        let block_index_arbiter = Arbiter::new();
+        let block_index_service_actor =
+            BlockIndexService::start_in_arbiter(&block_index_arbiter.handle(), |_| {
+                block_index_service
+            });
         SystemRegistry::set(block_index_service_actor.clone());
-        block_index_service_actor
+        (block_index_service_actor, block_index_arbiter)
     }
 }
 
