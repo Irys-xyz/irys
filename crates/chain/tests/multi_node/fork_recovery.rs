@@ -473,8 +473,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
     // this will cause the txs that were previously canonical from C2 to become non canon
     {
-        //node_c.post_commitment_tx(&peer_b_b2_stake_tx).await;
-        //node_c.post_commitment_tx(&peer_b_b2_pledge_tx).await;
         node_b.send_full_block(&node_c, &b_block2).await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
         node_b.send_full_block(&node_c, &b_block3).await?;
