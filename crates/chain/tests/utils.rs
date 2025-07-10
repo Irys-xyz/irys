@@ -819,20 +819,30 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        let prev_is_gossip_broadcast_enabled =
+            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let prev_is_gossip_reception_enabled =
+            self.node_ctx.sync_state.is_gossip_reception_enabled();
         self.gossip_disable();
         self.mine_blocks(num_blocks).await?;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
+            self.gossip_enable();
+        }
         Ok(())
     }
 
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        let prev_is_gossip_broadcast_enabled =
+            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let prev_is_gossip_reception_enabled =
+            self.node_ctx.sync_state.is_gossip_reception_enabled();
         self.gossip_disable();
         let res = mine_block(&self.node_ctx).await?.unwrap();
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
+            self.gossip_enable();
+        }
         Ok(res)
     }
 
@@ -1340,10 +1350,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         data: Vec<u8>,
         signer: &IrysSigner,
     ) -> IrysTransaction {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        let prev_is_gossip_broadcast_enabled =
+            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let prev_is_gossip_reception_enabled =
+            self.node_ctx.sync_state.is_gossip_reception_enabled();
         self.gossip_disable();
         let tx = self.post_data_tx(anchor, data, signer).await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
+            self.gossip_enable();
+        }
         tx
     }
 
@@ -1485,11 +1500,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_tx: &CommitmentTransaction,
     ) {
         let api_uri = self.node_ctx.config.node_config.api_uri();
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
+
+        let prev_is_gossip_broadcast_enabled =
+            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let prev_is_gossip_reception_enabled =
+            self.node_ctx.sync_state.is_gossip_reception_enabled();
+        self.gossip_disable();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
             .await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
+            self.gossip_enable();
+        }
     }
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1514,11 +1535,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: H256,
     ) -> CommitmentTransaction {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        let prev_is_gossip_broadcast_enabled =
+            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let prev_is_gossip_reception_enabled =
+            self.node_ctx.sync_state.is_gossip_reception_enabled();
         self.gossip_disable();
-
         let stake_tx = self.post_pledge_commitment(anchor).await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
+            self.gossip_enable();
+        }
 
         stake_tx
     }
@@ -1547,11 +1572,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: H256,
     ) -> CommitmentTransaction {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
+        let prev_is_gossip_broadcast_enabled =
+            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let prev_is_gossip_reception_enabled =
+            self.node_ctx.sync_state.is_gossip_reception_enabled();
         self.gossip_disable();
-
         let stake_tx = self.post_stake_commitment(anchor).await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
+        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
+            self.gossip_enable();
+        }
 
         stake_tx
     }
