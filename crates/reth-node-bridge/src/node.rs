@@ -27,6 +27,7 @@ use reth_node_builder::{
     NodeTypesWithDBAdapter,
 };
 use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt as _};
+use reth_rpc_eth_api::EthApiServer;
 use std::{collections::HashSet, sync::Arc};
 
 pub use reth_e2e_test_utils::node::NodeTestContext;

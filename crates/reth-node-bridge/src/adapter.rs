@@ -213,7 +213,8 @@ impl IrysRethNodeAdapter {
 
         eyre::ensure!(
             res.payload_status.status == PayloadStatusEnum::Valid,
-            "Reth has gone out of sync"
+            "Reth has gone out of sync {:?}",
+            res.payload_status.status
         );
 
         Ok(())

@@ -1322,6 +1322,7 @@ impl IrysNode {
             reth_provider,
             shadow_tx_store,
             reth_service: reth_service_actor,
+            beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
         });
 
         // Spawn the service and get the handle

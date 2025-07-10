@@ -37,6 +37,7 @@ use reth::{
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
+pub use reth_ethereum_engine_primitives;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
@@ -1794,9 +1795,6 @@ pub mod test_utils {
             )
             .await?;
 
-            let first_node = nodes.pop();
-            tokio::spawn(async move { first_node });
-
             let genesis_blockhash = nodes
                 .first()
                 .unwrap()
@@ -2502,7 +2500,6 @@ pub mod test_utils {
                 .await?;
 
             let mut node = NodeTestContext::new(node, attributes_generator.clone()).await?;
-            // let node_ = node == true;
 
             // Connect each node in a chain.
             if let Some(previous_node) = nodes.last_mut() {
