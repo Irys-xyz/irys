@@ -1685,16 +1685,21 @@ impl IrysNodeTest<IrysNodeCtx> {
     where
         F: std::future::Future,
     {
-        let prev_is_gossip_broadcast_enabled =
-            self.node_ctx.sync_state.is_gossip_broadcast_enabled();
-        let prev_is_gossip_reception_enabled =
-            self.node_ctx.sync_state.is_gossip_reception_enabled();
+        // save state so we can set back to it
+        let was_broadcast_enabled = self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let was_reception_enabled = self.node_ctx.sync_state.is_gossip_reception_enabled();
 
         self.gossip_disable();
         let res = fut.await;
-        if prev_is_gossip_broadcast_enabled || prev_is_gossip_reception_enabled {
-            self.gossip_enable();
-        }
+
+        // return to original state
+        self.node_ctx
+            .sync_state
+            .set_gossip_broadcast_enabled(was_broadcast_enabled);
+        self.node_ctx
+            .sync_state
+            .set_gossip_reception_enabled(was_reception_enabled);
+
         res
     }
 
