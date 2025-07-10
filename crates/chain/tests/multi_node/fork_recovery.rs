@@ -475,9 +475,9 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     {
         node_c.post_commitment_tx(&peer_b_b2_stake_tx).await;
         node_c.post_commitment_tx(&peer_b_b2_pledge_tx).await;
-        node_b.send_block_to_peer(&node_c, &b_block2).await?;
+        node_b.send_full_block(&node_c, &b_block2).await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
-        node_b.send_block_to_peer(&node_c, &b_block3).await?;
+        node_b.send_full_block(&node_c, &b_block3).await?;
         tracing::error!("posted block 3: {:?}", b_block3.block_hash);
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;
