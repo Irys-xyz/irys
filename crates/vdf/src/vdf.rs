@@ -63,11 +63,7 @@ pub fn run_vdf<B: BlockProvider>(
 ) {
     let mut next_reset_seed = initial_reset_seed;
     let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
-    // let mut reset_seed_manager = ResetSeedManager::new(
-    //     initial_reset_seed,
-    //     config.reset_frequency as u64,
-    //     block_provider,
-    // );
+
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
@@ -131,8 +127,16 @@ pub fn run_vdf<B: BlockProvider>(
             vdf_mining = new_mining_state;
         }
 
+        if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
+            next_reset_seed = canonical_vdf_info.next_seed;
+            canonical_global_step_number = canonical_vdf_info.global_step_number;
+        }
+
+        let is_too_far_ahead =
+            global_step_number >= canonical_global_step_number + vdf_reset_frequency * 2;
+
         // if mining disabled, wait 200ms and continue loop i.e. check again
-        if !vdf_mining {
+        if !vdf_mining || is_too_far_ahead {
             tracing::trace!("VDF Mining Paused, waiting 200ms");
             std::thread::sleep(Duration::from_millis(200));
             continue;
@@ -153,11 +157,6 @@ pub fn run_vdf<B: BlockProvider>(
 
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
-
-        if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
-            next_reset_seed = canonical_vdf_info.next_seed;
-            canonical_global_step_number = canonical_vdf_info.global_step_number;
-        }
 
         global_step_number = store_step(
             hash,
