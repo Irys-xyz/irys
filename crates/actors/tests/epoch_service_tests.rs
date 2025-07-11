@@ -90,7 +90,7 @@ async fn genesis_test() {
 
         // Verify data partition assignments match _PUBLISH_ ledger slots
         for (slot_idx, slot) in pub_slots.iter().enumerate() {
-            let pa = epoch_snapshot.partition_assignments.read().unwrap();
+            let pa = &epoch_snapshot.partition_assignments;
             for &partition_hash in &slot.partitions {
                 let assignment = pa
                     .data_partitions
@@ -115,7 +115,7 @@ async fn genesis_test() {
 
         // Verify data partition assignments match _SUBMIT_ledger slots
         for (slot_idx, slot) in sub_slots.iter().enumerate() {
-            let pa = epoch_snapshot.partition_assignments.read().unwrap();
+            let pa = &epoch_snapshot.partition_assignments;
             for &partition_hash in &slot.partitions {
                 let assignment = pa
                     .data_partitions
@@ -141,7 +141,7 @@ async fn genesis_test() {
 
     // Verify the correct number of genesis partitions have been activated
     {
-        let pa = epoch_snapshot.partition_assignments.read().unwrap();
+        let pa = &epoch_snapshot.partition_assignments;
         let data_partition_count = pa.data_partitions.len() as u64;
         let expected_partitions = data_partition_count
             + EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config.consensus);
@@ -391,8 +391,6 @@ async fn partition_expiration_and_repacking_test() {
     let assign_submit_partition_hash = {
         let partition_hash = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
@@ -419,8 +417,6 @@ async fn partition_expiration_and_repacking_test() {
     let capacity_partitions = {
         let capacity_partitions: Vec<H256> = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .capacity_partitions
             .keys()
             .copied()
@@ -560,20 +556,13 @@ async fn partition_expiration_and_repacking_test() {
     // check repacking request expired partition for its whole interval range, and partitions assignments are consistent
     {
         assert_eq!(
-            epoch_snapshot
-                .partition_assignments
-                .read()
-                .unwrap()
-                .data_partitions
-                .len(),
+            epoch_snapshot.partition_assignments.data_partitions.len(),
             3,
             "Should have four partitions assignments"
         );
 
         if let Some(publish_assignment) = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .get(&publish_partition)
         {
@@ -593,8 +582,6 @@ async fn partition_expiration_and_repacking_test() {
 
         if let Some(submit_assignment) = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .get(&submit_partition)
         {
@@ -614,8 +601,6 @@ async fn partition_expiration_and_repacking_test() {
 
         if let Some(submit_assignment) = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .get(&submit_partition2)
         {
@@ -872,19 +857,13 @@ async fn partitions_assignment_determinism_test() {
         &config,
     );
 
-    epoch_snapshot
-        .partition_assignments
-        .read()
-        .unwrap()
-        .print_assignments();
+    epoch_snapshot.partition_assignments.print_assignments();
 
     // Because we aren't actually building blocks with block_producer we need to
     // stub out some block hashes, for this tests we use the capacity partition hashes
     // as the source because it doubles down on determinism.
     let test_hashes: Vec<_> = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .capacity_partitions
         .keys()
         .copied()
@@ -915,11 +894,7 @@ async fn partitions_assignment_determinism_test() {
         previous_epoch_block = new_epoch_block.clone();
     }
 
-    epoch_snapshot
-        .partition_assignments
-        .read()
-        .unwrap()
-        .print_assignments();
+    epoch_snapshot.partition_assignments.print_assignments();
 
     debug!(
         "\nAll Partitions({})\n{}",
@@ -933,8 +908,6 @@ async fn partitions_assignment_determinism_test() {
 
     if let Some(publish_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .get(&publish_slot_0)
     {
@@ -954,18 +927,12 @@ async fn partitions_assignment_determinism_test() {
 
     let publish_slot_1 = H256::from_base58("2HVmW86qVyKTw1DYJMX6NoNvVxATLNZHSAyMceEWPtLC");
 
-    epoch_snapshot
-        .partition_assignments
-        .read()
-        .unwrap()
-        .print_assignments();
+    epoch_snapshot.partition_assignments.print_assignments();
 
     debug!("expected publish[1] -> {}", publish_slot_1.0.to_base58());
 
     if let Some(publish_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .get(&publish_slot_1)
     {
@@ -987,8 +954,6 @@ async fn partitions_assignment_determinism_test() {
 
     if let Some(capacity_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .capacity_partitions
         .get(&capacity_partition)
     {
@@ -1008,8 +973,6 @@ async fn partitions_assignment_determinism_test() {
 
     if let Some(submit_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .get(&submit_slot_2)
     {
