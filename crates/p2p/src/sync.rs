@@ -27,6 +27,8 @@ pub struct SyncState {
     sync_target_height: Arc<AtomicUsize>,
     highest_processed_block: Arc<AtomicUsize>,
     switch_to_full_validation_at_height: Arc<RwLock<Option<usize>>>,
+    gossip_broadcast_enabled: Arc<AtomicBool>,
+    gossip_reception_enabled: Arc<AtomicBool>,
 }
 
 impl SyncState {
@@ -38,11 +40,14 @@ impl SyncState {
             sync_target_height: Arc::new(AtomicUsize::new(0)),
             highest_processed_block: Arc::new(AtomicUsize::new(0)),
             switch_to_full_validation_at_height: Arc::new(RwLock::new(None)),
+            gossip_broadcast_enabled: Arc::new(AtomicBool::new(true)),
+            gossip_reception_enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 
     pub fn set_is_syncing(&self, is_syncing: bool) {
         self.syncing.store(is_syncing, Ordering::Relaxed);
+        self.set_gossip_broadcast_enabled(!is_syncing);
     }
 
     pub fn set_syncing_from(&self, height: usize) {
@@ -135,6 +140,28 @@ impl SyncState {
         self.highest_processed_block.load(Ordering::Relaxed)
     }
 
+    /// Sets whether gossip broadcast is enabled
+    pub fn set_gossip_broadcast_enabled(&self, enabled: bool) {
+        self.gossip_broadcast_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Returns whether gossip broadcast is enabled
+    pub fn is_gossip_broadcast_enabled(&self) -> bool {
+        self.gossip_broadcast_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Sets whether gossip reception is enabled
+    pub fn set_gossip_reception_enabled(&self, enabled: bool) {
+        self.gossip_reception_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Returns whether gossip reception is enabled
+    pub fn is_gossip_reception_enabled(&self) -> bool {
+        self.gossip_reception_enabled.load(Ordering::Relaxed)
+    }
+
     /// Checks if more blocks can be scheduled for validation by checking the
     /// number of blocks scheduled for validation so far versus the highest block
     /// marked by [`crate::block_pool::BlockPool`] after pre-validation
@@ -215,6 +242,13 @@ where
     let node_mode = config.node_config.mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
+    // Check if gossip reception is enabled before starting sync
+    if !sync_state.is_gossip_reception_enabled() {
+        debug!("Sync task: Gossip reception is disabled, skipping sync");
+        sync_state.finish_sync();
+        return Ok(());
+    }
+
     // If the peer doesn't have any blocks, it should start syncing from 1, as the genesis block
     // should always be present
     if start_sync_from_height == 0 {

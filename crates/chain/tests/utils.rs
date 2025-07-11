@@ -8,7 +8,7 @@ use actix_web::{
     Error,
 };
 use alloy_core::primitives::FixedBytes;
-use alloy_eips::BlockId;
+use alloy_eips::{BlockHashOrNumber, BlockId};
 use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
@@ -28,6 +28,7 @@ use irys_actors::{
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::{
+    commitment_tx_by_txid,
     db::IrysDatabaseExt as _,
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
@@ -53,8 +54,10 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::{
+    api::Block as _,
     network::{PeerInfo, Peers as _},
     payload::EthBuiltPayload,
+    providers::BlockReader as _,
     rpc::types::RpcBlockHash,
 };
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
@@ -816,21 +819,16 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.gossip_disable();
-        self.mine_blocks(num_blocks).await?;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
-        Ok(())
+        self.with_gossip_disabled(self.mine_blocks(num_blocks))
+            .await
     }
 
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.gossip_disable();
-        let res = mine_block(&self.node_ctx).await?.unwrap();
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
-        Ok(res)
+        self.with_gossip_disabled(mine_block(&self.node_ctx))
+            .await?
+            .ok_or_eyre("block not returned")
     }
 
     pub fn get_commitment_snapshot_status(
@@ -1298,17 +1296,103 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    /// Sends a full block to the provided peer bypassing the gossip network.
+    ///
+    /// This method is useful in tests where gossip is disabled. It delivers all
+    /// transaction headers contained in the block as well as the block header and execution payload
+    /// itself directly to the peer's actors/services.
+    pub async fn send_full_block(
+        &self,
+        peer: &Self,
+        irys_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        // Send data txs
+        for tx_id in irys_block_header
+            .data_ledgers
+            .iter()
+            .flat_map(|l| l.tx_ids.0.iter())
+        {
+            // get tx locally from mempool or database
+            let tx_header = self
+                .get_storage_tx_header_from_mempool(tx_id)
+                .await
+                .or_else(|_| self.get_tx_header(tx_id))?;
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            peer.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTx(tx_header, tx))
+                .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+            // Ignore possible ingestion errors in tests
+            let _ = rx.await?;
+        }
+
+        // Send commitment txs
+        for tx_id in irys_block_header
+            .system_ledgers
+            .iter()
+            .flat_map(|l| l.tx_ids.0.iter())
+        {
+            // get tx locally from mempool or database
+            let mut commitment_tx = self.get_commitment_tx_from_mempool(tx_id).await;
+            if commitment_tx.is_err() {
+                commitment_tx = self
+                    .node_ctx
+                    .db
+                    .view_eyre(|tx| commitment_tx_by_txid(tx, tx_id))?
+                    .ok_or_else(|| eyre::eyre!("Commitment tx not found: {:?}", tx_id));
+            }
+            let commitment_tx = commitment_tx?;
+
+            tracing::error!(?commitment_tx.id);
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            peer.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestCommitmentTx(commitment_tx, tx))
+                .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+            if let Err(e) = rx.await {
+                tracing::error!("Error sending message IngestCommitmentTx to mempool: {e:?}");
+            }
+        }
+
+        // Deliver block header
+        peer.node_ctx
+            .actor_addresses
+            .block_discovery_addr
+            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
+            .await
+            .map_err(|e| eyre::eyre!("{e:?}"))??;
+
+        // Send execution payload if available
+        if let Some(evm_block) = self
+            .node_ctx
+            .reth_node_adapter
+            .inner
+            .provider
+            .block(BlockHashOrNumber::Hash(irys_block_header.evm_block_hash))?
+        {
+            peer.node_ctx
+                .block_pool
+                .add_execution_payload_to_cache(evm_block.seal_slow())
+                .await;
+        } else {
+            panic!("Full block cannot be sent to peer. Execution payload not available locally.");
+        }
+
+        Ok(())
+    }
+
     pub async fn post_data_tx_without_gossip(
         &self,
         anchor: H256,
         data: Vec<u8>,
         signer: &IrysSigner,
     ) -> IrysTransaction {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.gossip_disable();
-        let tx = self.post_data_tx(anchor, data, signer).await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
-        tx
+        self.with_gossip_disabled(self.post_data_tx(anchor, data, signer))
+            .await
     }
 
     pub async fn post_data_tx(
@@ -1449,11 +1533,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_tx: &CommitmentTransaction,
     ) {
         let api_uri = self.node_ctx.config.node_config.api_uri();
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.node_ctx.sync_state.set_is_syncing(true);
-        self.post_commitment_tx_request(&api_uri, commitment_tx)
+        self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
             .await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
     }
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1478,13 +1559,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: H256,
     ) -> CommitmentTransaction {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.gossip_disable();
-
-        let stake_tx = self.post_pledge_commitment(anchor).await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
-
-        stake_tx
+        self.with_gossip_disabled(self.post_pledge_commitment(anchor))
+            .await
     }
 
     pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1511,13 +1587,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: H256,
     ) -> CommitmentTransaction {
-        let prev_is_syncing = self.node_ctx.sync_state.is_syncing();
-        self.gossip_disable();
-
-        let stake_tx = self.post_stake_commitment(anchor).await;
-        self.node_ctx.sync_state.set_is_syncing(prev_is_syncing);
-
-        stake_tx
+        self.with_gossip_disabled(self.post_stake_commitment(anchor))
+            .await
     }
 
     pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
@@ -1608,16 +1679,37 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // enable node to gossip until disabled
     pub fn gossip_enable(&self) {
-        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
-        //       broadcasts can be replaced with something more appropriate and correctly named
-        self.node_ctx.sync_state.set_is_syncing(false);
+        self.node_ctx.sync_state.set_gossip_reception_enabled(true);
+        self.node_ctx.sync_state.set_gossip_broadcast_enabled(true);
     }
 
     // disable node ability to gossip until enabled
     pub fn gossip_disable(&self) {
-        //FIXME: In future this "workaround" of using the syncing state to prevent gossip
-        //       broadcasts can be replaced with something more appropriate and correctly named
-        self.node_ctx.sync_state.set_is_syncing(true);
+        self.node_ctx.sync_state.set_gossip_reception_enabled(false);
+        self.node_ctx.sync_state.set_gossip_broadcast_enabled(false);
+    }
+
+    /// Execute the provided future with gossip temporarily disabled.
+    async fn with_gossip_disabled<F>(&self, fut: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        // save state so we can set back to it
+        let was_broadcast_enabled = self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let was_reception_enabled = self.node_ctx.sync_state.is_gossip_reception_enabled();
+
+        self.gossip_disable();
+        let res = fut.await;
+
+        // return to original state
+        self.node_ctx
+            .sync_state
+            .set_gossip_broadcast_enabled(was_broadcast_enabled);
+        self.node_ctx
+            .sync_state
+            .set_gossip_reception_enabled(was_reception_enabled);
+
+        res
     }
 
     /// Get the full canonical chain as BlockTreeEntry items
