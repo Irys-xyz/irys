@@ -693,18 +693,8 @@ impl IrysNode {
                         debug!("Stopping services");
                         {
                             let mut service_handles = service_handles_guard.write().unwrap();
-                            // Shut down services in reverse order (LIFO)
                             while let Some(handle) = service_handles.pop() {
-                                match handle {
-                                    ServiceHandle::Actix(arbiter) => {
-                                        debug!("Stopping Actix service: {}", arbiter.name);
-                                        arbiter.stop_and_join();
-                                    }
-                                    ServiceHandle::Tokio(handle) => {
-                                        debug!("Stopping Tokio service");
-                                        handle.abort();
-                                    }
-                                }
+                                handle.shutdown().await;
                             }
                             drop(service_handles);
                         }

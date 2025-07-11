@@ -159,17 +159,24 @@ impl BlockProducerService {
             "Service configuration - reward_address: {}, chain_id: {}",
             self.inner.config.node_config.reward_address, self.inner.config.consensus.chain_id
         );
-
-        let shutdown = self.shutdown.clone();
-        let mut shutdown = pin!(shutdown);
-
         loop {
             tokio::select! {
                 // Handle commands
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(cmd) => {
-                            self.handle_command(cmd).await;
+                            let res = self.handle_command(cmd).await;
+                            if let Err(err) = res {
+                                // because we don't have our shutdown system fully finished,
+                                // block producer may error out while other services are in the middle of shutting down.
+                                let is_shutdown = futures::future::poll_immediate(&mut self.shutdown).await.is_some();
+                                if is_shutdown {
+                                    // graceful shutdown
+                                    break;
+                                }
+                                // legit error - propagate
+                                return Err(err)
+                            }
                         }
                         None => {
                             warn!("Command channel closed unexpectedly");
@@ -177,9 +184,8 @@ impl BlockProducerService {
                         }
                     }
                 }
-
-                // Handle shutdown
-                _ = &mut shutdown => {
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block producer service");
                     break;
                 }
@@ -191,7 +197,7 @@ impl BlockProducerService {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_command(&mut self, cmd: BlockProducerCommand) {
+    async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
                 let solution_hash = solution.solution_hash.0.to_base58();
@@ -209,16 +215,16 @@ impl BlockProducerService {
                             "No more blocks needed for test, skipping block production"
                         );
                         let _ = response.send(Ok(None));
-                        return;
+                        return Ok(());
                     }
                     debug!("Test blocks remaining: {}", blocks_remaining);
                 }
 
                 let inner = self.inner.clone();
-                let result = Self::produce_block_inner(inner, solution).await;
+                let result = Self::produce_block_inner(inner, solution).await?;
 
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Ok(Some((irys_block_header, _eth_built_payload))) = &result {
+                if let Some((irys_block_header, _eth_built_payload)) = &result {
                     info!(
                         block_hash = %irys_block_header.block_hash.0.to_base58(),
                         block_height = irys_block_header.height,
@@ -229,16 +235,11 @@ impl BlockProducerService {
                         *remaining = remaining.saturating_sub(1);
                         debug!("Test blocks remaining after production: {}", *remaining);
                     }
-                } else if let Ok(None) = &result {
+                } else {
                     info!("Block production skipped (solution outdated or invalid)");
                 }
 
-                if result.is_err() {
-                    error!("Fatal error producing block: {:?}", &result);
-                    std::process::abort();
-                }
-
-                let _ = response.send(result);
+                let _ = response.send(Ok(result));
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
@@ -249,6 +250,7 @@ impl BlockProducerService {
                 self.blocks_remaining_for_test = remaining;
             }
         }
+        Ok(())
     }
 
     /// Internal method to produce a block without the non-Send trait
