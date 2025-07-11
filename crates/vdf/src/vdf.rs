@@ -477,12 +477,12 @@ mod tests {
 
         let step_num = vdf_steps_guard.read().global_step;
 
-        assert_eq!(step_num, 4,);
+        assert_eq!(step_num, 3);
 
         // get last 4 steps
         let steps = vdf_steps_guard
             .read()
-            .get_steps(ii(step_num - 3, step_num))
+            .get_steps(ii(step_num - 2, step_num))
             .unwrap();
 
         // calculate last step checkpoints
@@ -509,9 +509,9 @@ mod tests {
 
         let vdf_info = VDFLimiterInfo {
             global_step_number: step_num,
-            output: steps[3],
+            output: steps[2],
             prev_output: steps[0],
-            steps: H256List(steps.0[1..=3].into()),
+            steps: H256List(steps.0[1..=2].into()),
             last_step_checkpoints: H256List(checkpoints),
             seed: reset_seed,
             ..VDFLimiterInfo::default()
