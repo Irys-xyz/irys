@@ -88,6 +88,7 @@ impl ServiceHandle {
         match self {
             Self::Actix(handle) => handle.stop_and_join(),
             Self::Tokio(handle) => {
+                handle.abort();
                 let _ = handle.await;
             }
         }

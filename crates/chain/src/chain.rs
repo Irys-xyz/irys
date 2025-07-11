@@ -690,7 +690,7 @@ impl IrysNode {
                             Err(e) => warn!("Gossip service is already stopped: {:?}", e),
                         }
 
-                        debug!("Stopping services");
+                        info!("Stopping services");
                         {
                             let mut service_handles = service_handles_guard.write().unwrap();
                             while let Some(handle) = service_handles.pop() {
@@ -698,7 +698,7 @@ impl IrysNode {
                             }
                             drop(service_handles);
                         }
-                        debug!("Services stopped");
+                        info!("Services stopped");
 
                         // Send shutdown signal
                         vdf_shutdown_sender.send(()).await.unwrap();
