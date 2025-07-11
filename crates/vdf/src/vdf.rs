@@ -132,8 +132,8 @@ pub fn run_vdf<B: BlockProvider>(
             canonical_global_step_number = canonical_vdf_info.global_step_number;
         }
 
-        let is_too_far_ahead =
-            global_step_number >= canonical_global_step_number + vdf_reset_frequency * 2;
+        let is_too_far_ahead = global_step_number + 1 % vdf_reset_frequency == 0
+            && global_step_number + 1 > canonical_global_step_number + vdf_reset_frequency;
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
         if !vdf_mining || is_too_far_ahead {

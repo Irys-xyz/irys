@@ -139,6 +139,7 @@ pub fn apply_reset_seed(seed: H256, reset_seed: H256) -> H256 {
 pub async fn last_step_checkpoints_is_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
+    reset_seed: H256,
 ) -> eyre::Result<()> {
     let last_step = vdf_info
         .steps
@@ -178,7 +179,6 @@ pub async fn last_step_checkpoints_is_valid(
             global_step_number,
             seed
         );
-        let reset_seed = vdf_info.seed;
         seed = apply_reset_seed(seed, reset_seed);
     } else {
         tracing::info!(
@@ -335,7 +335,7 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 mod tests {
     use super::*;
     use base58::{FromBase58 as _, ToBase58 as _};
-    use irys_types::ConsensusConfig;
+    use irys_types::{BlockHash, ConsensusConfig};
     use tracing::debug;
 
     #[tokio::test]
@@ -385,7 +385,7 @@ mod tests {
         let mut config = testnet_config.vdf;
         config.sha_1s_difficulty = 100_000;
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_is_valid(&vdf_info, &config, BlockHash::zero()).await;
         if x.is_err() {
             debug!("{:?}", x);
         }
@@ -465,7 +465,7 @@ mod tests {
         let mut config = testnet_config.vdf;
         config.sha_1s_difficulty = 100_000;
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_is_valid(&vdf_info, &config, BlockHash::zero()).await;
         assert!(x.is_ok());
 
         if x.is_ok() {
@@ -539,7 +539,7 @@ mod tests {
 
         let config = testnet_config.vdf;
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_is_valid(&vdf_info, &config, BlockHash::zero()).await;
         assert!(x.is_ok());
     }
 
@@ -607,7 +607,7 @@ mod tests {
         // spellchecker:on
 
         let config = testnet_config.vdf;
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_is_valid(&vdf_info, &config, BlockHash::zero()).await;
         assert!(x.is_ok());
 
         if x.is_ok() {

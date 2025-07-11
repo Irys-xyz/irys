@@ -113,7 +113,12 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+    last_step_checkpoints_is_valid(
+        &block.vdf_limiter_info,
+        &config.consensus.vdf,
+        previous_block.vdf_limiter_info.seed,
+    )
+    .await?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
