@@ -286,8 +286,8 @@ pub fn vdf_steps_are_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
     vdf_steps_guard: &VdfStateReadonly,
-    reset_seed: H256,
 ) -> eyre::Result<()> {
+    let reset_seed = vdf_info.seed;
     info!(
         "Checking seed {:?} reset_seed {:?}",
         vdf_info.prev_output, reset_seed
