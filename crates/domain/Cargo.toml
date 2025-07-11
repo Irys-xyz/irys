@@ -1,0 +1,27 @@
+[package]
+name = "irys-domain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+test-utils = ["irys-types/test-utils"]
+
+[dependencies]
+actix.workspace = true
+openssl.workspace = true
+eyre.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
+irys-config.workspace = true
+irys-database.workspace = true
+irys-primitives.workspace = true
+irys-storage.workspace = true
+tracing.workspace = true
+base58.workspace = true
+reth-db.workspace = true
+
+[dev-dependencies]
+test-log.workspace = true
+
+[lints]
+workspace = true

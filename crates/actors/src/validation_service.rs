@@ -13,7 +13,6 @@
 
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::{
-    block_index_service::BlockIndexReadGuard,
     block_tree_service::{BlockTreeServiceMessage, ReorgEvent, ValidationResult},
     block_validation::PayloadProvider,
     services::ServiceSenders,
@@ -22,6 +21,7 @@ use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
 use eyre::ensure;
 use futures::FutureExt as _;
+use irys_domain::BlockIndexReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::rayon;

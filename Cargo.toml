@@ -37,6 +37,7 @@ authors = []
 # Irys
 irys-macros = { path = "./crates/macros" }
 irys-database = { path = "./crates/database" }
+irys-domain = { path = "./crates/domain" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
 irys-api-client = { path = "./crates/api-client" }

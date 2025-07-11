@@ -4749,6 +4749,7 @@ dependencies = [
  "irys-api-client",
  "irys-config",
  "irys-database",
+ "irys-domain",
  "irys-efficient-sampling",
  "irys-packing",
  "irys-price-oracle",
@@ -4806,6 +4807,7 @@ dependencies = [
  "eyre",
  "irys-actors",
  "irys-database",
+ "irys-domain",
  "irys-p2p",
  "irys-reth-node-bridge",
  "irys-storage",
@@ -4866,6 +4868,7 @@ dependencies = [
  "irys-api-server",
  "irys-config",
  "irys-database",
+ "irys-domain",
  "irys-p2p",
  "irys-packing",
  "irys-price-oracle",
@@ -4964,6 +4967,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-domain"
+version = "0.1.0"
+dependencies = [
+ "actix",
+ "base58",
+ "eyre",
+ "irys-config",
+ "irys-database",
+ "irys-primitives",
+ "irys-storage",
+ "irys-types",
+ "openssl",
+ "reth-db",
+ "test-log",
+ "tracing",
+]
+
+[[package]]
 name = "irys-efficient-sampling"
 version = "0.1.0"
 dependencies = [
@@ -4999,6 +5020,7 @@ dependencies = [
  "irys-actors",
  "irys-api-client",
  "irys-database",
+ "irys-domain",
  "irys-primitives",
  "irys-reth-node-bridge",
  "irys-storage",
