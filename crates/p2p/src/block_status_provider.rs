@@ -1,6 +1,7 @@
 use irys_actors::block_index_service::BlockIndexReadGuard;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_types::{BlockHash, BlockIndexItem, H256};
+use irys_types::block_provider::BlockProvider;
+use irys_types::{BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
 use tracing::debug;
 #[cfg(test)]
 use {
@@ -333,5 +334,16 @@ impl BlockStatusProvider {
                 .expect("to delete block from the tree");
             debug!("Deleted block {:?} from the tree", block_hash);
         }
+    }
+}
+
+impl BlockProvider for BlockStatusProvider {
+    fn latest_canonical_vdf_info(&self) -> Option<VDFLimiterInfo> {
+        let binding = self.block_tree_read_guard.read();
+
+        let latest_canonical_hash = binding.get_latest_canonical_entry().block_hash;
+        binding
+            .get_block(&latest_canonical_hash)
+            .map(|block| block.vdf_limiter_info.clone())
     }
 }

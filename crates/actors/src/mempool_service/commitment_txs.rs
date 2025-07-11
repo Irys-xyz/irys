@@ -290,11 +290,7 @@ impl Inner {
 
         let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
 
-        let is_staked = epoch_snapshot
-            .commitment_state
-            .read()
-            .unwrap()
-            .is_staked(commitment_tx.signer);
+        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
 
         let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, is_staked);
 

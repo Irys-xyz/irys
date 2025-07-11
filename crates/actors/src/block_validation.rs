@@ -213,8 +213,6 @@ pub fn check_poa_data_expiration(
 ) -> eyre::Result<()> {
     let is_data_partition_assigned = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .contains_key(&poa.partition_hash);
 

@@ -851,6 +851,17 @@ where
         }
     }
 
+    /// Inserts an execution payload into the internal cache so that it can be
+    /// retrieved by the [`ExecutionPayloadProvider`].
+    pub async fn add_execution_payload_to_cache(
+        &self,
+        sealed_block: reth::primitives::SealedBlock<reth::primitives::Block>,
+    ) {
+        self.execution_payload_provider
+            .add_payload_to_cache(sealed_block)
+            .await;
+    }
+
     pub(crate) async fn get_block_data(
         &self,
         block_hash: &BlockHash,

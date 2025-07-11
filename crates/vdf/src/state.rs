@@ -30,9 +30,37 @@ pub struct VdfState {
     pub seeds: VecDeque<Seed>,
     /// whether the VDF thread is mining or paused
     pub mining_state_sender: Option<Sender<bool>>,
+    /// global step from the latest canonical block
+    global_step_from_the_latest_canonical_block: u64,
+    /// minimum global step to keep in the seeds VecDeque
+    minimum_step_to_keep: u64,
 }
 
 impl VdfState {
+    pub fn new(
+        capacity: usize,
+        global_step: u64,
+        mining_state_sender: Option<Sender<bool>>,
+    ) -> Self {
+        Self {
+            global_step,
+            global_step_from_the_latest_canonical_block: global_step,
+            minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
+            seeds: VecDeque::with_capacity(capacity),
+            capacity,
+            mining_state_sender,
+        }
+    }
+
+    pub fn set_canonical_step(&mut self, global_canonical_step: u64) {
+        self.global_step_from_the_latest_canonical_block = global_canonical_step;
+        self.minimum_step_to_keep = global_canonical_step.saturating_sub(self.capacity as u64);
+    }
+
+    pub fn canonical_step(&self) -> u64 {
+        self.global_step_from_the_latest_canonical_block
+    }
+
     pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
         (
             self.global_step,
@@ -47,7 +75,8 @@ impl VdfState {
         if self.global_step >= global_step {
             return self.global_step;
         }
-        if self.seeds.len() >= self.capacity {
+        let vdf_depth = global_step.saturating_sub(self.minimum_step_to_keep) as usize;
+        if self.seeds.len() >= vdf_depth {
             self.seeds.pop_front();
         }
         if self.global_step + 1 == global_step {
@@ -221,6 +250,8 @@ pub fn create_state(
 
     VdfState {
         global_step: global_step_number,
+        global_step_from_the_latest_canonical_block: global_step_number,
+        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
         seeds,
         capacity,
         mining_state_sender: Some(vdf_mining_state_sender),
@@ -375,10 +406,13 @@ pub mod test_helpers {
 
     pub fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
+        let capacity = calc_capacity(config);
 
         let state = VdfState {
             global_step: 0,
-            capacity: calc_capacity(config),
+            global_step_from_the_latest_canonical_block: 0,
+            minimum_step_to_keep: 0,
+            capacity,
             seeds: VecDeque::default(),
             mining_state_sender: Some(vdf_mining_state_sender),
         };

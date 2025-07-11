@@ -66,6 +66,17 @@ impl BlockIndexReadGuard {
     }
 }
 
+impl irys_types::block_provider::BlockIndex for BlockIndexReadGuard {
+    fn contains_block(&self, block_height: u64, block_hash: H256) -> bool {
+        let binding = self.read();
+        if let Some(item) = binding.get_item(block_height) {
+            item.block_hash == block_hash
+        } else {
+            false
+        }
+    }
+}
+
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
 #[rtype(result = "BlockIndexReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse

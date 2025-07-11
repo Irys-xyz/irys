@@ -469,15 +469,13 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     ); // 0 commitments, also means 0 system ledgers
 
     // NODE B -> Node C
-    // post commitment txs and then the blocks to node c
+    // send full blocks to node c, this includes commitment txs for block 2
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
     // this will cause the txs that were previously canonical from C2 to become non canon
     {
-        node_c.post_commitment_tx(&peer_b_b2_stake_tx).await;
-        node_c.post_commitment_tx(&peer_b_b2_pledge_tx).await;
-        node_b.send_block_to_peer(&node_c, &b_block2).await?;
+        node_b.send_full_block(&node_c, &b_block2).await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
-        node_b.send_block_to_peer(&node_c, &b_block3).await?;
+        node_b.send_full_block(&node_c, &b_block3).await?;
         tracing::error!("posted block 3: {:?}", b_block3.block_hash);
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;
@@ -949,14 +947,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     //
     // STAGE 6: NODE B -> Node C
     //
-    // post commitment txs and then the blocks to node c
+    // send full block to node c. This will include the commitment txs for block 2
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
     // this will cause the txs that were previously canonical from C2 to become non canon
     {
-        node_c.post_data_tx_raw(&peer_b_b2_submit_tx.header).await;
-        node_b.send_block_to_peer(&node_c, &b_block2).await?;
+        node_b.send_full_block(&node_c, &b_block2).await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
-        node_b.send_block_to_peer(&node_c, &b_block3).await?;
+        node_b.send_full_block(&node_c, &b_block3).await?;
         tracing::error!("posted block 3: {:?}", b_block3.block_hash);
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;

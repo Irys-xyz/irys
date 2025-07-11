@@ -12,13 +12,13 @@ use actix_web::{
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
-use base58::ToBase58 as _;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
     Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
     PeerListItem, UnpackedChunk,
 };
+use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::net::TcpListener;
 use tracing::{debug, error, info, warn};
@@ -72,6 +72,15 @@ where
         unpacked_chunk_json: web::Json<GossipRequest<UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let chunk_hash = unpacked_chunk_json.0.data.chunk_path_hash();
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring chunk {:?}",
+                node_id, chunk_hash
+            );
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = unpacked_chunk_json.0;
         let source_miner_address = gossip_request.miner_address;
 
@@ -129,6 +138,15 @@ where
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let block_hash = irys_block_header_json.0.data.block_hash;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring block header {:?}",
+                node_id, block_hash
+            );
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = irys_block_header_json.0;
         let source_miner_address = gossip_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
@@ -144,7 +162,7 @@ where
         let this_node_id = server.data_handler.gossip_client.mining_address;
 
         tokio::spawn(async move {
-            let block_hash_string = gossip_request.data.block_hash.0.to_base58();
+            let block_hash_string = gossip_request.data.block_hash;
             if let Err(error) = server
                 .data_handler
                 .handle_block_header_request(gossip_request, peer.address.api, source_socket_addr)
@@ -152,13 +170,13 @@ where
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
                 error!(
-                    "Node {:?}: Failed to process the block {}: {:?}",
+                    "Node {:?}: Failed to process the block {:?}: {:?}",
                     this_node_id, block_hash_string, error
                 );
                 // return HttpResponse::InternalServerError().finish();
             } else {
                 info!(
-                    "Node {:?}: Server handler handled block {}",
+                    "Node {:?}: Server handler handled block {:?}",
                     this_node_id, block_hash_string
                 );
             }
@@ -176,6 +194,15 @@ where
         irys_execution_payload_json: web::Json<GossipRequest<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let evm_block_hash = irys_execution_payload_json.0.data.seal_slow().hash();
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring the execution payload for block {:?}",
+                node_id, evm_block_hash
+            );
+            return HttpResponse::Forbidden().finish();
+        }
         let evm_block_request = irys_execution_payload_json.0;
         let source_miner_address = evm_block_request.miner_address;
 
@@ -204,6 +231,15 @@ where
         irys_transaction_header_json: web::Json<GossipRequest<IrysTransactionHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let tx_id = irys_transaction_header_json.0.data.id;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring transaction {:?}",
+                node_id, tx_id
+            );
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = irys_transaction_header_json.0;
         let source_miner_address = gossip_request.miner_address;
 
@@ -227,6 +263,15 @@ where
         commitment_tx_json: web::Json<GossipRequest<CommitmentTransaction>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let tx_id = commitment_tx_json.0.data.id;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring the commitment transaction {:?}",
+                node_id, tx_id
+            );
+            return HttpResponse::Forbidden().finish();
+        }
         let gossip_request = commitment_tx_json.0;
         let source_miner_address = gossip_request.miner_address;
 
@@ -279,6 +324,25 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled()
+            || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
+        {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let request_id = match &data_request.0.data {
+                GossipDataRequest::Block(hash) => format!("block {:?}", hash),
+                GossipDataRequest::Transaction(hash) => {
+                    format!("transaction {:?}", hash)
+                }
+                GossipDataRequest::ExecutionPayload(hash) => {
+                    format!("execution payload for block {:?}", hash)
+                }
+            };
+            warn!(
+                "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
+                node_id, request_id
+            );
+            return HttpResponse::Forbidden().finish();
+        }
         let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address).await
         {
             Ok(peer_address) => peer_address,

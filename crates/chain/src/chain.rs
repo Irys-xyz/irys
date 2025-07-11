@@ -51,6 +51,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
+use irys_types::block_provider::ResetSeedCache;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterHandle, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
@@ -611,7 +612,6 @@ impl IrysNode {
             ctx.sync_state.clone(),
             irys_api_client::IrysApiClient::new(),
             ctx.peer_list.clone(),
-            node_mode,
             latest_known_block_height as usize,
             &ctx.config,
             Some(Arc::clone(&ctx.block_pool)),
@@ -869,6 +869,23 @@ impl IrysNode {
             .send(GetBlockIndexGuardMessage)
             .await?;
 
+        let current_canonical_step = latest_block.vdf_limiter_info.global_step_number;
+        let initial_reset_step = current_canonical_step
+            - (current_canonical_step % config.consensus.vdf.reset_frequency as u64);
+
+        let reset_seed_cache = ResetSeedCache::new(block_index_guard.clone());
+
+        if let Some(reset_block) =
+            find_initial_reset_block(&block_index_guard, initial_reset_step, &irys_db)
+        {
+            // If we have a reset block, we need to record it
+            reset_seed_cache.record_block_that_contains_step(
+                initial_reset_step,
+                reset_block.height,
+                reset_block.block_hash,
+            );
+        }
+
         // start the broadcast mining service
         let span = Span::current();
         let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
@@ -902,6 +919,7 @@ impl IrysNode {
             &config,
             &service_senders,
             reth_service_actor.clone(),
+            reset_seed_cache.clone(),
         );
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -992,6 +1010,9 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
+        let block_status_provider =
+            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
+
         let (p2p_service_handle, block_pool) = p2p_service.run(
             mempool_facade,
             block_discovery_facade,
@@ -1000,7 +1021,7 @@ impl IrysNode {
             peer_list_service.clone(),
             irys_db.clone(),
             gossip_listener,
-            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone()),
+            block_status_provider.clone(),
             execution_payload_provider,
             vdf_state_readonly.clone(),
             config.clone(),
@@ -1024,10 +1045,12 @@ impl IrysNode {
                 price_oracle,
                 reth_node_adapter.clone(),
                 reth_service_actor.clone(),
+                reset_seed_cache.clone(),
             );
 
-        let (global_step_number, seed) = vdf_state_readonly.read().get_last_step_and_seed();
-        let seed = seed.0;
+        let (global_step_number, last_step_hash) =
+            vdf_state_readonly.read().get_last_step_and_seed();
+        let initial_hash = last_step_hash.0;
 
         // set up packing actor
         let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(
@@ -1055,11 +1078,12 @@ impl IrysNode {
             receivers.vdf_fast_forward,
             receivers.vdf_mining,
             latest_block,
-            seed,
+            initial_hash,
             global_step_number,
             broadcast_mining_actor,
             vdf_state,
             atomic_global_step_number,
+            block_status_provider,
         );
 
         // set up chunk provider
@@ -1190,16 +1214,17 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        new_seed_rx: mpsc::UnboundedReceiver<VdfStep>,
+        vdf_fast_forward_receiver: mpsc::UnboundedReceiver<VdfStep>,
         vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
-        seed: H256,
+        initial_hash: H256,
         global_step_number: u64,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
+        block_status_provider: BlockStatusProvider,
     ) -> JoinHandle<()> {
-        let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
+        let next_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
         // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
         let is_test_based_on_base_dir = config
@@ -1237,14 +1262,15 @@ impl IrysNode {
                 run_vdf(
                     &vdf_config,
                     global_step_number,
-                    seed,
-                    vdf_reset_seed,
-                    new_seed_rx,
+                    initial_hash,
+                    next_vdf_seed,
+                    vdf_fast_forward_receiver,
                     vdf_mining_state_rx,
                     vdf_shutdown_receiver,
                     MiningServiceBroadcaster::from(broadcast_mining_actor.clone()),
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
+                    block_status_provider,
                 )
             }
         });
@@ -1325,6 +1351,7 @@ impl IrysNode {
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         reth_service_actor: actix::Addr<RethServiceActor>,
+        reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
     ) -> (
         actix::Addr<BlockProducerActor>,
         Arbiter,
@@ -1343,6 +1370,7 @@ impl IrysNode {
             service_senders: service_senders.clone(),
             reth_node_adapter,
             reth_service: reth_service_actor,
+            reset_seed_cache,
         });
         let block_producer_actor = BlockProducerActor {
             inner: block_producer_inner.clone(),
@@ -1466,6 +1494,42 @@ fn read_latest_block_data(
     (latest_block_height, latest_block)
 }
 
+fn find_initial_reset_block(
+    block_index: &BlockIndexReadGuard,
+    step: u64,
+    irys_db: &DatabaseProvider,
+) -> Option<IrysBlockHeader> {
+    let latest_block_index = block_index
+        .read()
+        .get_latest_item()
+        .cloned()
+        .expect("the block index must have at least one entry");
+
+    let mut block_hash = latest_block_index.block_hash;
+
+    loop {
+        if let Some(header) =
+            database::block_header_by_hash(&irys_db.tx().unwrap(), &block_hash, false).unwrap()
+        {
+            if header.height == 0 {
+                // Reached the genesis block, no reset block found
+                return None;
+            }
+
+            block_hash = header.previous_block_hash;
+            let first_step_in_block = header.vdf_limiter_info.first_step_number();
+            let last_step_in_block = header.vdf_limiter_info.global_step_number;
+            if first_step_in_block <= step && step <= last_step_in_block {
+                // Found the block that contains the required step
+                return Some(header);
+            }
+        } else {
+            // Did not find the block with the required step
+            return None;
+        }
+    }
+}
+
 fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
@@ -1565,11 +1629,7 @@ async fn stake_and_pledge(
     let (is_historically_staked, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
-        let is_historically_staked = epoch_snapshot
-            .commitment_state
-            .read()
-            .unwrap()
-            .is_staked(address);
+        let is_historically_staked = epoch_snapshot.is_staked(address);
         let commitment_snapshot = block_tree_guard.canonical_commitment_snapshot();
         (is_historically_staked, commitment_snapshot)
     };

@@ -37,6 +37,7 @@ use tracing::{debug, error, info};
 
 pub mod ema_snapshot;
 use ema_snapshot::{create_ema_snapshot_from_chain_history, EmaSnapshot};
+use irys_types::block_provider::ResetSeedCache;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -118,6 +119,8 @@ pub struct BlockTreeServiceInner {
     pub system: System,
     /// Tracing span
     pub span: tracing::Span,
+    /// Reset seed cache
+    pub reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +158,7 @@ impl BlockTreeService {
         config: &Config,
         service_senders: &ServiceSenders,
         reth_service_actor: Addr<RethServiceActor>,
+        reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
     ) -> JoinHandle<()> {
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
@@ -192,6 +196,7 @@ impl BlockTreeService {
                         system,
                         span,
                         storage_submodules_config: storage_submodules_config.clone(),
+                        reset_seed_cache,
                     },
                 };
                 block_tree_service
@@ -816,6 +821,19 @@ impl BlockTreeServiceInner {
             mark_tip_result
         }; // RwLockWriteGuard is dropped here, before the await
 
+        if let Some(step) = arc_block
+            .vdf_limiter_info
+            .reset_step(self.config.consensus.vdf.reset_frequency as u64)
+        {
+            self.reset_seed_cache.record_block_that_contains_step(
+                step,
+                arc_block.height,
+                arc_block.block_hash,
+            );
+            self.reset_seed_cache
+                .remove_old_steps(step, self.config.consensus.vdf.reset_frequency as u64);
+        }
+
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
             // Send the epoch events
@@ -1314,11 +1332,7 @@ impl BlockTreeCache {
                 // Mid-epoch blocks: accumulate new commitment transactions into the existing
                 // commitment snapshot without triggering epoch state transitions
                 for commitment_tx in &commitment_txs {
-                    let is_staked_in_current_epoch = epoch_snapshot
-                        .commitment_state
-                        .read()
-                        .unwrap()
-                        .is_staked(commitment_tx.signer);
+                    let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
                     commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
                 }
 
@@ -2245,11 +2259,7 @@ pub fn build_current_commitment_snapshot_from_index(
                         .unwrap()
                         .expect("commitment transactions to be in database");
 
-                    let is_staked_in_current_epoch = epoch_snapshot
-                        .commitment_state
-                        .read()
-                        .unwrap()
-                        .is_staked(commitment_tx.signer);
+                    let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
 
                     // Apply them to the commitment snapshot
                     let _status =
@@ -2277,7 +2287,6 @@ pub fn build_current_commitment_snapshot_from_index(
 /// * `commitment_txs` - Slice of commitment transactions to process for this block (should match txids in the block)
 /// * `prev_commitment_snapshot` - The commitment snapshot from the previous block
 /// * `consensus_config` - Configuration containing epoch settings
-/// * `commitment_state_guard` - Read guard for checking staking status of transaction signers
 ///
 /// # Returns
 /// Arc-wrapped commitment snapshot for the new block
@@ -2300,11 +2309,7 @@ fn create_commitment_snapshot_for_block(
 
     let mut new_commitment_snapshot = (**prev_commitment_snapshot).clone();
     for commitment_tx in commitment_txs {
-        let is_staked_in_current_epoch = epoch_snapshot
-            .commitment_state
-            .read()
-            .unwrap()
-            .is_staked(commitment_tx.signer);
+        let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
         new_commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
     }
     Arc::new(new_commitment_snapshot)
