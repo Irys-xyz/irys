@@ -130,7 +130,6 @@ pub fn run_vdf<B: BlockProvider>(
         if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
             next_reset_seed = canonical_vdf_info.next_seed;
             canonical_global_step_number = canonical_vdf_info.global_step_number;
-            debug!("Canonical VDF info received");
             debug!(
                 "Canonical global step number: {}, next reset seed: {:?}, prev output: {:?}, global_step: {:?}",
                 canonical_global_step_number, next_reset_seed, canonical_vdf_info.prev_output, global_step_number
