@@ -16,10 +16,7 @@ use irys_types::{
     PartitionChunkOffset,
 };
 use openssl::sha;
-use std::{
-    collections::VecDeque,
-    sync::{Arc, RwLock},
-};
+use std::collections::VecDeque;
 use tracing::{debug, error, trace, warn};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
@@ -28,7 +25,7 @@ pub struct EpochSnapshot {
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Ledgers,
     /// Tracks active mining assignments for partitions (by hash)
-    pub partition_assignments: Arc<RwLock<PartitionAssignments>>,
+    pub partition_assignments: PartitionAssignments,
     /// Sequential list of activated partition hashes
     pub all_active_partitions: Vec<PartitionHash>,
     /// List of partition hashes not yet assigned to a mining address
@@ -51,10 +48,7 @@ impl Clone for EpochSnapshot {
     fn clone(&self) -> Self {
         Self {
             ledgers: self.ledgers.clone(),
-            // Deep copy the partition assignments by cloning the inner data
-            partition_assignments: Arc::new(RwLock::new(
-                self.partition_assignments.read().unwrap().clone(),
-            )),
+            partition_assignments: self.partition_assignments.clone(),
             all_active_partitions: self.all_active_partitions.clone(),
             unassigned_partitions: self.unassigned_partitions.clone(),
             storage_submodules_config: self.storage_submodules_config.clone(),
@@ -73,7 +67,7 @@ impl Default for EpochSnapshot {
         let config = Config::new(node_config);
         Self {
             ledgers: Ledgers::new(&config.consensus),
-            partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
+            partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
             storage_submodules_config: None, // This is only ever valid for test scenarios where epochs don't matter
@@ -109,7 +103,7 @@ impl EpochSnapshot {
     ) -> Self {
         let mut new_self = Self {
             ledgers: Ledgers::new(&config.consensus),
-            partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
+            partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
             storage_submodules_config: Some(storage_submodules_config.clone()),
@@ -367,14 +361,11 @@ impl EpochSnapshot {
     fn allocate_additional_capacity(&mut self) {
         debug!("Allocating additional capacity");
         // Calculate total number of active partitions based on the amount of data stored
-        let total_parts: u64;
-        {
-            let pa = self.partition_assignments.read().unwrap();
-            let num_data_partitions = pa.data_partitions.len() as u64;
-            let num_capacity_partitions =
-                Self::get_num_capacity_partitions(num_data_partitions, &self.config.consensus);
-            total_parts = num_capacity_partitions + num_data_partitions;
-        }
+        let pa = &self.partition_assignments;
+        let num_data_partitions = pa.data_partitions.len() as u64;
+        let num_capacity_partitions =
+            Self::get_num_capacity_partitions(num_data_partitions, &self.config.consensus);
+        let total_parts = num_capacity_partitions + num_data_partitions;
 
         // Add additional capacity partitions as needed
         if total_parts > self.all_active_partitions.len() as u64 {
@@ -388,11 +379,13 @@ impl EpochSnapshot {
     fn backfill_missing_partitions(&mut self) {
         debug!("Backfilling missing partitions...");
         // Start with a sorted list of capacity partitions (sorted by hash)
-        let mut capacity_partitions: Vec<H256>;
-        {
-            let pa = self.partition_assignments.read().unwrap();
-            capacity_partitions = pa.capacity_partitions.keys().copied().collect();
-        }
+
+        let mut capacity_partitions: Vec<_> = self
+            .partition_assignments
+            .capacity_partitions
+            .keys()
+            .copied()
+            .collect();
 
         // Sort partitions using `sort_unstable` for better performance.
         // Stability isn't needed/affected as each partition hash is unique.
@@ -499,9 +492,12 @@ impl EpochSnapshot {
     // Updates PartitionAssignment information about a partition hash, marking
     // it as expired (or unassigned to a slot in a data ledger)
     fn return_expired_partition_to_capacity(&mut self, partition_hash: H256) {
-        let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
-        if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
+        if let Some(mut assignment) = self
+            .partition_assignments
+            .data_partitions
+            .remove(&partition_hash)
+        {
             // Remove the partition hash from the slots state
             let ledger: DataLedger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
             let partition_hash = assignment.partition_hash;
@@ -514,14 +510,16 @@ impl EpochSnapshot {
             assignment.slot_index = None;
 
             // Return the partition hash to the capacity pool
-            pa.capacity_partitions.insert(partition_hash, assignment);
+            self.partition_assignments
+                .capacity_partitions
+                .insert(partition_hash, assignment);
         }
     }
 
     /// Takes a capacity partition hash and updates its `PartitionAssignment`
     /// state to indicate it is part of a data ledger
     fn assign_partition_to_slot(
-        &self,
+        &mut self,
         partition_hash: H256,
         ledger: DataLedger,
         slot_index: usize,
@@ -532,11 +530,16 @@ impl EpochSnapshot {
             &slot_index,
             &ledger
         );
-        let mut pa = self.partition_assignments.write().unwrap();
-        if let Some(mut assignment) = pa.capacity_partitions.remove(&partition_hash) {
+        if let Some(mut assignment) = self
+            .partition_assignments
+            .capacity_partitions
+            .remove(&partition_hash)
+        {
             assignment.ledger_id = Some(ledger as u32);
             assignment.slot_index = Some(slot_index);
-            pa.data_partitions.insert(partition_hash, assignment);
+            self.partition_assignments
+                .data_partitions
+                .insert(partition_hash, assignment);
         }
     }
 
@@ -732,8 +735,7 @@ impl EpochSnapshot {
             entry.partition_hash = Some(partition_hash);
 
             // Update partition assignments state to reference the assigned address
-            let mut pa = self.partition_assignments.write().unwrap();
-            pa.capacity_partitions.insert(
+            self.partition_assignments.capacity_partitions.insert(
                 partition_hash,
                 PartitionAssignment {
                     partition_hash,
@@ -771,7 +773,7 @@ impl EpochSnapshot {
         let mut assignments = Vec::new();
 
         // Get a read only view of the partition assignments
-        let pa = self.partition_assignments.read().unwrap();
+        let pa = &self.partition_assignments;
 
         // Filter the data ledgers and get assignments matching the miner_address
         let assigned_data_partitions: Vec<&PartitionAssignment> = pa
@@ -908,8 +910,7 @@ impl EpochSnapshot {
         &self,
         partition_hash: PartitionHash,
     ) -> Option<PartitionAssignment> {
-        let pa = self.partition_assignments.read().unwrap();
-        pa.get_assignment(partition_hash)
+        self.partition_assignments.get_assignment(partition_hash)
     }
 
     pub fn is_staked(&self, miner_address: Address) -> bool {
