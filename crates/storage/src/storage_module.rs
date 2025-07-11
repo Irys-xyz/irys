@@ -102,6 +102,19 @@ pub struct StorageModule {
     pub config: Config,
 }
 
+// force flush pending writes when an SM is dropped
+impl Drop for StorageModule {
+    fn drop(&mut self) {
+        info!("Syncing SM {} to disk...", &self.id);
+        let _ = self.force_sync_pending_chunks().inspect_err(|e| {
+            error!(
+                "Unable to sync writes while dropping SM {} - {:?}",
+                &self.id, &e
+            )
+        });
+    }
+}
+
 /// On-disk metadata for StorageModule persistence
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageModuleInfo {
@@ -473,6 +486,64 @@ impl StorageModule {
                     } else {
                         Vec::new()
                     }
+                })
+                .collect::<Vec<_>>();
+
+            drop(pending);
+            pending_writes
+        };
+
+        // Only acquire write lock if we have work to do
+        if !write_batch.is_empty() {
+            let mut pending = arc.write().unwrap();
+
+            for (chunk_offset, (bytes, chunk_type)) in write_batch {
+                // self.intervals are updated by write_chunk_internal()
+                self.write_chunk_internal(chunk_offset, bytes, chunk_type.clone())?;
+                pending.remove(&chunk_offset); // Clean up written chunks
+            }
+            drop(pending);
+
+            // Save the updated intervals
+            if self.write_intervals_to_submodules().is_err() {
+                error!("Could not update submodule interval files");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Force syncs (writes) all pending writes for this SM
+    ///
+    /// Process:
+    /// 1. Collects pending writes for each submodule
+    /// 2. Acquires write lock only if some pending writes exist
+    /// 3. Writes chunks to disk and removes them from pending queue
+    ///
+    pub fn force_sync_pending_chunks(&self) -> eyre::Result<()> {
+        // let threshold = self.config.node_config.storage.num_writes_before_sync;
+        let arc = self.pending_writes.clone();
+
+        // First use read lock to check if we have work to do
+        let write_batch = {
+            let pending = arc.read().unwrap();
+
+            let pending_writes = self
+                .submodules
+                .iter()
+                .flat_map(|(interval, _)| {
+                    let submodule_writes: Vec<_> = pending
+                        .iter()
+                        .filter(|(offset, _)| interval.contains_point(**offset))
+                        .map(|(offset, state)| (*offset, state.clone()))
+                        .collect();
+
+                    // if submodule_writes.len() as u64 >= threshold {
+                    //     submodule_writes
+                    // } else {
+                    //     Vec::new()
+                    // }
+                    submodule_writes
                 })
                 .collect::<Vec<_>>();
 
