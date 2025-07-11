@@ -598,14 +598,6 @@ pub trait BlockProdStrategy {
             }
         }?;
 
-        let reset_frequency = self.inner().config.consensus.vdf.reset_frequency as u64;
-        if let Some(step) = block.vdf_limiter_info.reset_step(reset_frequency) {
-            // If the block contains a reset seed, we need to update the reset seed cache
-            self.inner()
-                .reset_seed_cache
-                .record_block_that_contains_step(step, block.height, block.block_hash);
-        }
-
         if is_difficulty_updated {
             self.inner()
                 .mining_broadcaster
