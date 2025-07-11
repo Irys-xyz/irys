@@ -14,6 +14,7 @@ pub trait BlockIndex {
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tracing::debug;
 
 #[derive(Debug)]
 struct ResetSeedManagerInner<BI: BlockIndex> {
@@ -37,6 +38,10 @@ impl<BI: BlockIndex> ResetSeedManagerInner<BI> {
     }
 
     fn block_hash_that_contains_step(&self, step: u64) -> Option<H256> {
+        debug!(
+            "Possible reset steps: {:?}",
+            self.possible_reset_seed_heights
+        );
         let possible_reset_heights = self.possible_reset_seed_heights.get(&step)?;
         possible_reset_heights
             .iter()

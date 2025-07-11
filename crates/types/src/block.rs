@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::{Index, IndexMut};
+use tracing::debug;
 
 pub type BlockHash = H256;
 
@@ -121,12 +122,27 @@ impl VDFLimiterInfo {
         reset_seed_manager: &ResetSeedCache<BI>,
     ) {
         if let Some(step) = self.reset_step(reset_frequency) {
-            // If the current block is a reset step, we set the next seed to the parent block's hash.
-            self.next_seed = reset_seed_manager
+            debug!("Creating VDF with reset step: {}", step);
+            if let Some(reset_seed) = reset_seed_manager
                 .block_hash_that_contains_step(step.saturating_sub(reset_frequency))
-                .expect("Reset seed must always be available for the current step");
-            self.seed = parent_header.vdf_limiter_info.next_seed;
+            {
+                self.next_seed = reset_seed;
+                self.seed = parent_header.vdf_limiter_info.next_seed;
+            } else {
+                // TODO: this is a branch for the very first reset, as we don't want to use
+                //  genesis hash as the reset seed.
+                debug!("No reset seed found for step: {}", step);
+                // If we don't have a reset seed, we use the previous block's next_seed.
+                self.next_seed = parent_header.vdf_limiter_info.next_seed;
+                self.seed = parent_header.vdf_limiter_info.seed;
+            }
         } else {
+            debug!(
+                "Using previous VDF seeds. First step: {}, last step: {}, reset_frequency: {}",
+                self.first_step_number(),
+                self.global_step_number,
+                reset_frequency
+            );
             // Otherwise, we set the next seed to the previous block next_seed.
             self.next_seed = parent_header.vdf_limiter_info.next_seed;
             self.seed = parent_header.vdf_limiter_info.seed;

@@ -139,7 +139,7 @@ pub fn run_vdf<B: BlockProvider>(
         if !vdf_mining || is_too_far_ahead {
             if is_too_far_ahead {
                 warn!(
-                    "VDF mining is too far ahead: {} >= {} + {} * 2, waiting a bit to catch up",
+                    "VDF mining is too far ahead: global step is {}, canonical global step is {} + cutoff is {} * 2, waiting a bit to catch up",
                     global_step_number, canonical_global_step_number, vdf_reset_frequency
                 );
             }
