@@ -12,7 +12,6 @@ use actix_web::{
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
-use base58::ToBase58 as _;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
@@ -75,9 +74,9 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let chunk_hash = unpacked_chunk_json.0.data.chunk_path_hash().0.to_base58();
+            let chunk_hash = unpacked_chunk_json.0.data.chunk_path_hash();
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring chunk {}",
+                "Node {}: Gossip reception is disabled, ignoring chunk {:?}",
                 node_id, chunk_hash
             );
             return HttpResponse::Forbidden().finish();
@@ -141,9 +140,9 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let block_hash = irys_block_header_json.0.data.block_hash.0.to_base58();
+            let block_hash = irys_block_header_json.0.data.block_hash;
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring block header {}",
+                "Node {}: Gossip reception is disabled, ignoring block header {:?}",
                 node_id, block_hash
             );
             return HttpResponse::Forbidden().finish();
@@ -163,7 +162,7 @@ where
         let this_node_id = server.data_handler.gossip_client.mining_address;
 
         tokio::spawn(async move {
-            let block_hash_string = gossip_request.data.block_hash.0.to_base58();
+            let block_hash_string = gossip_request.data.block_hash;
             if let Err(error) = server
                 .data_handler
                 .handle_block_header_request(gossip_request, peer.address.api, source_socket_addr)
@@ -171,13 +170,13 @@ where
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
                 error!(
-                    "Node {:?}: Failed to process the block {}: {:?}",
+                    "Node {:?}: Failed to process the block {:?}: {:?}",
                     this_node_id, block_hash_string, error
                 );
                 // return HttpResponse::InternalServerError().finish();
             } else {
                 info!(
-                    "Node {:?}: Server handler handled block {}",
+                    "Node {:?}: Server handler handled block {:?}",
                     this_node_id, block_hash_string
                 );
             }
@@ -234,9 +233,9 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let tx_id = irys_transaction_header_json.0.data.id.0.to_base58();
+            let tx_id = irys_transaction_header_json.0.data.id;
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring transaction {}",
+                "Node {}: Gossip reception is disabled, ignoring transaction {:?}",
                 node_id, tx_id
             );
             return HttpResponse::Forbidden().finish();
@@ -266,9 +265,9 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let tx_id = commitment_tx_json.0.data.id.0.to_base58();
+            let tx_id = commitment_tx_json.0.data.id;
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring the commitment transaction {}",
+                "Node {}: Gossip reception is disabled, ignoring the commitment transaction {:?}",
                 node_id, tx_id
             );
             return HttpResponse::Forbidden().finish();
@@ -330,9 +329,9 @@ where
         {
             let node_id = server.data_handler.gossip_client.mining_address;
             let request_id = match &data_request.0.data {
-                GossipDataRequest::Block(hash) => format!("block {}", hash.0.to_base58()),
+                GossipDataRequest::Block(hash) => format!("block {:?}", hash),
                 GossipDataRequest::Transaction(hash) => {
-                    format!("transaction {}", hash.0.to_base58())
+                    format!("transaction {:?}", hash)
                 }
                 GossipDataRequest::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
