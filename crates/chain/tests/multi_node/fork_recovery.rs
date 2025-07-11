@@ -1157,3 +1157,88 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     tokio::join!(node_a.stop(), node_b.stop(), node_c.stop(),);
     Ok(())
 }
+
+/// Two node max block depth re-org test
+/// Gossip disabled after block 1. Peer 1 mines just short of block migration depth
+/// Peer 2 mines 1 less block than peer 1
+/// Gossip is re-enabled, peers gossip and peer 2 will reorg to the state of peer 1.
+#[test_log::test(actix_web::test)]
+async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
+    // Configure test network
+    let mut genesis_config = NodeConfig::testnet();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    let block_migration_depth: u64 = genesis_config
+        .consensus
+        .get_mut()
+        .block_migration_depth
+        .into();
+    let block_migration_depth: u64 = block_migration_depth - 1;
+    let seconds_to_wait = 20;
+
+    // signers
+    let a_signer = genesis_config.new_random_signer();
+    let b_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&a_signer, &b_signer]);
+
+    // Start first node (acts as genesis)
+    let node1 = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("NODE1", seconds_to_wait)
+        .await;
+    node1.start_public_api().await;
+
+    // additional configs for peer
+    let config_b = node1.testnet_peer_with_signer(&b_signer);
+
+    // start peer nodes
+    let node2 = IrysNodeTest::new(config_b)
+        .start_and_wait_for_packing("NODE2", seconds_to_wait)
+        .await;
+
+    // Mine initial block and wait both nodes to sync
+    node1.mine_block().await?;
+    node1.wait_until_height(1, seconds_to_wait).await?;
+    node2.wait_until_height(1, seconds_to_wait).await?;
+
+    // Disable gossip on both nodes
+    node1.gossip_disable();
+    node2.gossip_disable();
+    let node1_peers = node1.disconnect_all_reth_peers().await?;
+    let node2_peers = node2.disconnect_all_reth_peers().await?;
+
+    // Node1 mines blocks to just shy of the migration depth
+    let node1_blocks = (block_migration_depth - 1) as usize;
+    node1.mine_blocks(node1_blocks).await?;
+    node1
+        .wait_until_height(block_migration_depth, seconds_to_wait)
+        .await?;
+
+    // Node2 mines one block fewer
+    let node2_blocks = (block_migration_depth - 2) as usize;
+    node2.mine_blocks(node2_blocks).await?;
+    node2
+        .wait_until_height(block_migration_depth - 1, seconds_to_wait)
+        .await?;
+
+    // Re-enable gossip
+    node1.gossip_enable();
+    node2.gossip_enable();
+    node1.reconnect_all_reth_peers(&node1_peers);
+    node2.reconnect_all_reth_peers(&node2_peers);
+
+    // Gossip node1's tip block to node2
+    let tip = node1.get_block_by_height(block_migration_depth).await?;
+    node1.gossip_block(&Arc::new(tip))?;
+
+    // Wait for node2 to reorg
+    node2.wait_for_reorg(seconds_to_wait * 3).await?;
+
+    // Verify node2 has the same canonical tip as node1
+    let node1_tip = node1.get_max_difficulty_block();
+    let node2_tip = node2.get_max_difficulty_block();
+    assert_eq!(node1_tip.block_hash, node2_tip.block_hash);
+    assert_eq!(node1_tip.height, node2_tip.height);
+
+    node2.stop().await;
+    node1.stop().await;
+    Ok(())
+}
