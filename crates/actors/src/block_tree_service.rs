@@ -1,12 +1,12 @@
 use crate::{
-    block_index_service::{BlockIndexReadGuard, BlockIndexService},
+    block_index_service::BlockIndexService,
     broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockFinalizedMessage, EpochReplayData, EpochSnapshot, StorageModuleServiceMessage,
+    BlockFinalizedMessage, StorageModuleServiceMessage,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
@@ -17,6 +17,7 @@ use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, CommitmentSnapshot,
     SystemLedger,
 };
+use irys_domain::{block_index_guard::BlockIndexReadGuard, EpochReplayData, EpochSnapshot};
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DatabaseProvider, H256List, IrysBlockHeader, IrysTransactionHeader, H256, U256,

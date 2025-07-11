@@ -8,6 +8,7 @@ rust-version.workspace = true
 assert_matches = "1.5.0"
 irys-types.workspace = true
 irys-database.workspace = true
+irys-domain.workspace = true
 irys-packing.workspace = true
 irys-storage.workspace = true
 irys-config.workspace = true

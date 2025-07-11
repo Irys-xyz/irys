@@ -4,14 +4,12 @@ use std::{
 };
 
 use irys_database::CommitmentSnapshot;
+use irys_domain::EpochSnapshot;
 use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysTokenPrice, H256};
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
-use crate::{
-    services::{ServiceReceivers, ServiceSenders},
-    EpochSnapshot,
-};
+use crate::services::{ServiceReceivers, ServiceSenders};
 
 use super::{
     ema_snapshot::EmaSnapshot, BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent,

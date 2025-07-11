@@ -1,5 +1,5 @@
-use irys_actors::block_index_service::BlockIndexReadGuard;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
+use irys_domain::BlockIndexReadGuard;
 use irys_types::block_provider::BlockProvider;
 use irys_types::{BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
 use tracing::debug;
@@ -288,8 +288,9 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::{block_tree_service::ema_snapshot::EmaSnapshot, EpochSnapshot};
+        use irys_actors::block_tree_service::ema_snapshot::EmaSnapshot;
         use irys_database::CommitmentSnapshot;
+        use irys_domain::EpochSnapshot;
 
         self.block_tree_read_guard
             .write()
