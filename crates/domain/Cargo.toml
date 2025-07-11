@@ -10,25 +10,15 @@ test-utils = ["irys-types/test-utils"]
 [dependencies]
 actix.workspace = true
 openssl.workspace = true
-nodit.workspace = true
 eyre.workspace = true
-serde.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
-rand.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-serde_json.workspace = true
-toml.workspace = true
 irys-config.workspace = true
 irys-database.workspace = true
 irys-primitives.workspace = true
 irys-storage.workspace = true
-irys-testing-utils.workspace = true
-derive_more.workspace = true
+tracing.workspace = true
 base58.workspace = true
-atomic-write-file = "0.2"
 reth-db.workspace = true
-
 
 [dev-dependencies]
 test-log.workspace = true

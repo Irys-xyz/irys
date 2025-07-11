@@ -4971,25 +4971,16 @@ name = "irys-domain"
 version = "0.1.0"
 dependencies = [
  "actix",
- "atomic-write-file",
  "base58",
- "derive_more",
  "eyre",
  "irys-config",
  "irys-database",
  "irys-primitives",
  "irys-storage",
- "irys-testing-utils",
  "irys-types",
- "nodit",
  "openssl",
- "rand 0.8.5",
  "reth-db",
- "serde",
- "serde_json",
  "test-log",
- "tokio",
- "toml",
  "tracing",
 ]
 
