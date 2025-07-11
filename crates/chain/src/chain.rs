@@ -1202,7 +1202,7 @@ impl IrysNode {
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
     ) -> JoinHandle<()> {
-        let current_canonical_vdf_seed = latest_block.vdf_limiter_info.seed;
+        let current_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
         // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
         let is_test_based_on_base_dir = config

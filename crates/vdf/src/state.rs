@@ -286,14 +286,14 @@ pub fn vdf_steps_are_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
     vdf_steps_guard: &VdfStateReadonly,
-    reset_seed: H256,
 ) -> eyre::Result<()> {
+    let reset_seed = vdf_info.seed;
     info!(
         "Checking seed {:?} reset_seed {:?}",
-        vdf_info.prev_output, vdf_info.seed
+        vdf_info.prev_output, reset_seed
     );
 
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1_u64;
+    let start = vdf_info.first_step_number();
     let end: u64 = vdf_info.global_step_number;
 
     match vdf_steps_guard.read().get_steps(ii(start, end)) {
@@ -342,6 +342,7 @@ pub fn vdf_steps_are_valid(
                 if start_step_number + i as u64 > 0
                     && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
                 {
+                    // This is a reset step, seed needs to be applied to the previous step
                     info!(
                         "Applying reset seed {:?} to step number {}",
                         reset_seed,

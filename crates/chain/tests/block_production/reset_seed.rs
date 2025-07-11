@@ -18,13 +18,13 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     let reset_interval_in_blocks = 4;
     // Approximately every 4 blocks - every 48 steps
     let reset_frequency = approximate_steps_in_a_block * reset_interval_in_blocks;
+    let required_index_blocks_height: usize = reset_interval_in_blocks * 10;
 
     // Setting up parameters explicitly to check that the reset seed is applied correctly
     let mut consensus_config = ConsensusConfig::testnet();
     consensus_config.vdf.reset_frequency = reset_frequency;
     consensus_config.block_migration_depth = 1;
-
-    let required_index_blocks_height: usize = reset_interval_in_blocks * 8;
+    consensus_config.block_tree_depth = 200;
 
     // setup trusted peers connection data and configs for genesis and nodes
     let mut testnet_config_genesis = NodeConfig::testnet();
@@ -207,6 +207,11 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         .await
         .expect("expected peer 1 to be fully synced");
 
+    warn!("Peer node synced, shutting down the nodes as we've got all blocks");
+
+    ctx_genesis_node.stop().await;
+    ctx_peer1_node.stop().await;
+
     for (index, peer_node_block) in peer_node_blocks.iter().enumerate() {
         let genesis_node_block = &genesis_node_blocks[index];
         assert_eq!(
@@ -229,9 +234,7 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         );
     }
 
-    warn!("Reset seed peer verification completed, shutting down nodes");
-
-    tokio::join!(ctx_peer1_node.stop(), ctx_genesis_node.stop(),);
+    warn!("Reset seed peer verification completed");
 
     Ok(())
 }

@@ -12,6 +12,7 @@ pub fn initialize_tracing() {
     let _ = SubscriberBuilder::default()
         .with_env_filter(EnvFilter::from_default_env())
         .with_span_events(fmt::format::FmtSpan::NONE)
+        .with_ansi(false)
         .finish()
         .try_init();
 }
