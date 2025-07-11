@@ -137,6 +137,9 @@ pub fn run_vdf<B: BlockProvider>(
             );
         }
 
+        // If the next step is a reset step, we need to be sure that the canonical chain tip
+        // is higher than the previous reset step. Otherwise, we'll end up applying a reset seed
+        // that belongs to the previous reset range
         let is_too_far_ahead = (global_step_number + 1) % vdf_reset_frequency == 0
             && global_step_number + 1 > canonical_global_step_number + vdf_reset_frequency;
 
