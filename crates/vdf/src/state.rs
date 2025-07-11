@@ -342,7 +342,6 @@ pub fn vdf_steps_are_valid(
                 if start_step_number + i as u64 > 0
                     && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
                 {
-                    // This is a reset step, seed needs to be applied to the previous step
                     info!(
                         "Applying reset seed {:?} to step number {}",
                         reset_seed,
