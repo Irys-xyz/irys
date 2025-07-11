@@ -694,7 +694,7 @@ mod tests {
     use actix::{prelude::*, SystemRegistry};
     use irys_config::StorageSubmodulesConfig;
     use irys_database::{add_genesis_commitments, BlockIndex};
-    use irys_domain::{BlockIndexReadGuard, EpochSnapshot};
+    use irys_domain::EpochSnapshot;
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
         irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransactionLedger,
