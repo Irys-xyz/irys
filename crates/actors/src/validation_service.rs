@@ -292,6 +292,12 @@ impl<T: PayloadProvider> ValidationServiceInner<T> {
         // Spawn VDF validation task
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let vdf_state = self.vdf_state.clone();
+        let reset_seed = self
+            .block_tree_guard
+            .read()
+            .get_block(&block.previous_block_hash)
+            .map(|block| block.vdf_limiter_info.seed)
+            .expect("to get parent block for the block currently being validated");
         {
             let vdf_info = vdf_info.clone();
             tokio::task::spawn_blocking(move || {
@@ -300,6 +306,7 @@ impl<T: PayloadProvider> ValidationServiceInner<T> {
                     &vdf_info,
                     &self.config.consensus.vdf,
                     &self.vdf_state,
+                    reset_seed,
                 )
             })
             .await??;

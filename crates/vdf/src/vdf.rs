@@ -96,7 +96,7 @@ pub fn run_vdf<B: BlockProvider>(
                 hash = proposed_ff_step.step;
 
                 if let Some(vdf_info) = block_provider.latest_canonical_vdf_info() {
-                    next_reset_seed = vdf_info.next_seed;
+                    next_reset_seed = vdf_info.seed;
                     canonical_global_step_number = vdf_info.global_step_number;
                 }
 
@@ -128,7 +128,7 @@ pub fn run_vdf<B: BlockProvider>(
         }
 
         if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
-            next_reset_seed = canonical_vdf_info.next_seed;
+            next_reset_seed = canonical_vdf_info.seed;
             canonical_global_step_number = canonical_vdf_info.global_step_number;
         }
 
@@ -412,7 +412,14 @@ mod tests {
             .expect("to be able to build vdf validation pool");
 
         assert!(
-            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard).is_ok(),
+            vdf_steps_are_valid(
+                &pool,
+                &vdf_info,
+                &config.consensus.vdf,
+                &vdf_steps_guard,
+                reset_seed
+            )
+            .is_ok(),
             "Invalid VDF"
         );
 
@@ -518,7 +525,14 @@ mod tests {
             .expect("to be able to build vdf validation pool");
 
         assert!(
-            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard).is_ok(),
+            vdf_steps_are_valid(
+                &pool,
+                &vdf_info,
+                &config.consensus.vdf,
+                &vdf_steps_guard,
+                reset_seed
+            )
+            .is_ok(),
             "Invalid VDF"
         );
 

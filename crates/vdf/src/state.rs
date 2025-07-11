@@ -286,6 +286,7 @@ pub fn vdf_steps_are_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
     vdf_steps_guard: &VdfStateReadonly,
+    reset_seed: H256,
 ) -> eyre::Result<()> {
     info!(
         "Checking seed {:?} reset_seed {:?}",
@@ -309,8 +310,6 @@ pub fn vdf_steps_are_valid(
         Err(err) =>
             tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err.to_string())
     };
-
-    let reset_seed = vdf_info.seed;
 
     let mut step_hashes = vdf_info.steps.clone();
 
