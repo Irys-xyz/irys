@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_actors::block_tree_service::get_canonical_chain;
+use irys_domain::get_canonical_chain;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::NodeConfig;
 

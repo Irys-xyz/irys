@@ -1,7 +1,6 @@
 use crate::BlockFinalizedMessage;
 use actix::prelude::*;
-use irys_database::BlockIndex;
-use irys_domain::block_index_guard::BlockIndexReadGuard;
+use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
     BlockIndexItem, ConsensusConfig, IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };

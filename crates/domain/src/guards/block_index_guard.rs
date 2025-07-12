@@ -1,10 +1,12 @@
 use actix::MessageResponse;
 use base58::ToBase58 as _;
-use irys_database::{block_header_by_hash, BlockIndex};
+use irys_database::block_header_by_hash;
 use irys_types::{DatabaseProvider, H256};
 use reth_db::Database as _;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};
+
+use crate::BlockIndex;
 
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 /// As soon as `block_index` is no longer an actix service this `MessageResponse` and the corresponding

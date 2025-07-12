@@ -10,8 +10,6 @@
 //! 3. **Parallel Validation**: Three concurrent stages (recall, POA, reth state)
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
-
-use crate::block_tree_service::BlockTreeReadGuard;
 use crate::{
     block_tree_service::{BlockTreeServiceMessage, ReorgEvent, ValidationResult},
     block_validation::PayloadProvider,
@@ -21,7 +19,7 @@ use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
 use eyre::ensure;
 use futures::FutureExt as _;
-use irys_domain::BlockIndexReadGuard;
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
 use irys_vdf::rayon;

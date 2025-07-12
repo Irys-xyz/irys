@@ -19,9 +19,16 @@ irys-storage.workspace = true
 tracing.workspace = true
 base58.workspace = true
 reth-db.workspace = true
+rust_decimal.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 test-log.workspace = true
+assert_matches = "1.5.0"
+rstest.workspace = true
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
+irys-testing-utils.workspace = true
 
 [lints]
 workspace = true

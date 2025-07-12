@@ -8,8 +8,8 @@ use actix_web::{
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
-use irys_actors::{block_tree_service::BlockTreeReadGuard, mempool_service::MempoolServiceMessage};
-use irys_domain::BlockIndexReadGuard;
+use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
 use irys_p2p::{PeerList as _, PeerListServiceFacade, SyncState};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;

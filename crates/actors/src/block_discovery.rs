@@ -1,17 +1,17 @@
 use crate::{
-    block_tree_service::{BlockTreeReadGuard, BlockTreeServiceMessage},
-    block_validation::prevalidate_block,
-    mempool_service::MempoolServiceMessage,
-    services::ServiceSenders,
+    block_tree_service::BlockTreeServiceMessage, block_validation::prevalidate_block,
+    mempool_service::MempoolServiceMessage, services::ServiceSenders,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt as _};
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
-    CommitmentSnapshotStatus, SystemLedger,
+    SystemLedger,
 };
-use irys_domain::block_index_guard::BlockIndexReadGuard;
+use irys_domain::{
+    block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
+};
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage,

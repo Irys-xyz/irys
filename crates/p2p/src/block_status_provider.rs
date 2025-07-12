@@ -1,12 +1,8 @@
-use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_domain::BlockIndexReadGuard;
-use irys_types::block_provider::BlockProvider;
-use irys_types::{BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
+use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_actors::block_tree_service::BlockTreeCache,
-    irys_database::BlockIndex,
     irys_types::{IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
     tracing::warn,
@@ -168,13 +164,13 @@ impl BlockStatusProvider {
 impl BlockStatusProvider {
     #[cfg(test)]
     pub async fn mock(node_config: &NodeConfig) -> Self {
+        use irys_domain::{BlockIndex, BlockTree};
+
         Self {
-            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
-                BlockTreeCache::new(
-                    &IrysBlockHeader::new_mock_header(),
-                    node_config.consensus_config(),
-                ),
-            ))),
+            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+                &IrysBlockHeader::new_mock_header(),
+                node_config.consensus_config(),
+            )))),
             block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
                 BlockIndex::new(node_config)
                     .await
@@ -288,9 +284,7 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::block_tree_service::ema_snapshot::EmaSnapshot;
-        use irys_database::CommitmentSnapshot;
-        use irys_domain::EpochSnapshot;
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
 
         self.block_tree_read_guard
             .write()

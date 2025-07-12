@@ -4971,16 +4971,22 @@ name = "irys-domain"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "assert_matches",
  "base58",
  "eyre",
  "irys-config",
  "irys-database",
  "irys-primitives",
  "irys-storage",
+ "irys-testing-utils",
  "irys-types",
  "openssl",
  "reth-db",
+ "rstest",
+ "rust_decimal",
+ "rust_decimal_macros",
  "test-log",
+ "tokio",
  "tracing",
 ]
 
@@ -5270,6 +5276,7 @@ dependencies = [
  "eyre",
  "hex",
  "irys-database",
+ "irys-domain",
  "irys-efficient-sampling",
  "irys-types",
  "nodit",

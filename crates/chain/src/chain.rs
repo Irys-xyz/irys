@@ -9,7 +9,6 @@ use irys_actors::{
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
-    block_tree_service::BlockTreeReadGuard,
     block_tree_service::BlockTreeService,
     broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
@@ -28,10 +27,8 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
-};
-use irys_domain::{BlockIndexReadGuard, EpochReplayData};
+use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
+use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData};
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
     BlockPool, BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,

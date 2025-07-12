@@ -1,6 +1,7 @@
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::eyre;
-use irys_database::{block_header_by_hash, BlockIndex};
+use irys_database::block_header_by_hash;
+use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,

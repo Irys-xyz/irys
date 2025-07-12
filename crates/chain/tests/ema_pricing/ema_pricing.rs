@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::utils::IrysNodeTest;
-use irys_actors::block_tree_service::{get_canonical_chain, BlockTreeReadGuard};
+use irys_domain::{get_canonical_chain, BlockTreeReadGuard};
 use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
 use rust_decimal_macros::dec;
 

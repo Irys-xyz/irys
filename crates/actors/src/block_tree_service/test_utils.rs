@@ -3,16 +3,17 @@ use std::{
     time::SystemTime,
 };
 
-use irys_database::CommitmentSnapshot;
-use irys_domain::EpochSnapshot;
+use irys_domain::{
+    dummy_ema_snapshot, BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot,
+    EpochSnapshot,
+};
 use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysTokenPrice, H256};
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
-use crate::services::{ServiceReceivers, ServiceSenders};
-
-use super::{
-    ema_snapshot::EmaSnapshot, BlockTreeCache, BlockTreeReadGuard, ChainState, ReorgEvent,
+use crate::{
+    block_tree_service::ReorgEvent,
+    services::{ServiceReceivers, ServiceSenders},
 };
 
 pub fn build_genesis_tree_with_n_blocks(
@@ -54,20 +55,6 @@ pub fn deterministic_price(height: u64) -> IrysTokenPrice {
     IrysTokenPrice::new(amount)
 }
 
-pub fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
-    let config = irys_types::ConsensusConfig::testnet();
-    let genesis_header = IrysBlockHeader {
-        oracle_irys_price: config.genesis_price,
-        ema_irys_price: config.genesis_price,
-        ..Default::default()
-    };
-    EmaSnapshot::genesis(&genesis_header)
-}
-
-pub fn dummy_epoch_snapshot() -> Arc<EpochSnapshot> {
-    Arc::new(EpochSnapshot::default())
-}
-
 pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
     let mut block_hash = if blocks[0].0.block_hash == H256::default() {
         H256::random()
@@ -80,7 +67,7 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
     genesis_block.cumulative_diff = 0.into();
 
     let mut block_tree_cache =
-        BlockTreeCache::new(genesis_block, irys_types::ConsensusConfig::testnet());
+        BlockTree::new(genesis_block, irys_types::ConsensusConfig::testnet());
     block_tree_cache.mark_tip(&block_hash).unwrap();
     for (block, state) in iter {
         block.previous_block_hash = block_hash;

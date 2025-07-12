@@ -1,5 +1,4 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::block_tree_service::BlockTreeReadGuard;
 use crate::mempool_service::ChunkIngressError;
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
@@ -8,6 +7,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
+use irys_domain::BlockTreeReadGuard;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};

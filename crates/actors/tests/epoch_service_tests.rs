@@ -11,8 +11,8 @@ use irys_actors::{
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex};
-use irys_domain::{EpochBlockData, EpochSnapshot};
+use irys_database::{add_genesis_commitments, add_test_commitments};
+use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::PartitionChunkRange;

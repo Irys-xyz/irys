@@ -28,10 +28,8 @@
 //! This ensures each significant change gets a fresh timeout window, preventing
 //! premature fallbacks during active network progress.
 
-use crate::{
-    block_tree_service::{BlockStateUpdated, BlockTreeReadGuard},
-    services::ServiceSenders,
-};
+use crate::{block_tree_service::BlockStateUpdated, services::ServiceSenders};
+use irys_domain::BlockTreeReadGuard;
 use irys_types::{BlockHash, U256};
 use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
