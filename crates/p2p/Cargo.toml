@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 # Internal dependencies
 irys-actors.workspace = true
+irys-domain = { workspace = true, features = ["test-utils"] }
 irys-types.workspace = true
 irys-primitives.workspace = true
 irys-api-client.workspace = true

@@ -12,13 +12,12 @@
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
-use crate::block_tree_service::{
-    BlockState, BlockTreeReadGuard, BlockTreeServiceMessage, ChainState, ValidationResult,
-};
+use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
     poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid, PayloadProvider,
 };
 use crate::validation_service::ValidationServiceInner;
+use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};

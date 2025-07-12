@@ -4,7 +4,7 @@ use actix_web::{
     web::{self},
     HttpResponse,
 };
-use irys_actors::block_tree_service::get_canonical_chain;
+use irys_domain::get_canonical_chain;
 use irys_p2p::PeerList as _;
 use irys_types::NodeInfo;
 

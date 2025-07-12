@@ -14,6 +14,7 @@ test-utils = []
 [dependencies]
 # Irys
 irys-database.workspace = true
+irys-domain.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }

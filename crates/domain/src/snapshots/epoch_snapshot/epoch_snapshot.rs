@@ -80,9 +80,9 @@ impl Default for EpochSnapshot {
     }
 }
 
-/// Reasons why the epoch service actors epoch tasks might fail
+/// Reasons why the EpochSnapshot functions might fail
 #[derive(Debug)]
-pub enum EpochServiceError {
+pub enum EpochSnapshotError {
     /// Catchall error until more detailed errors are added
     InternalError,
     /// Attempted to do epoch tasks on a block that was not an epoch block
@@ -185,13 +185,13 @@ impl EpochSnapshot {
         Ok(())
     }
 
-    fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochServiceError> {
+    fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochSnapshotError> {
         if block_header.height % self.config.consensus.epoch.num_blocks_in_epoch != 0 {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
                 block_header.height, self.config.consensus.epoch.num_blocks_in_epoch
             );
-            return Err(EpochServiceError::NotAnEpochBlock);
+            return Err(EpochSnapshotError::NotAnEpochBlock);
         }
         Ok(())
     }
@@ -202,7 +202,7 @@ impl EpochSnapshot {
         previous_epoch_block: &Option<IrysBlockHeader>,
         new_epoch_block: &IrysBlockHeader,
         new_epoch_commitments: Vec<CommitmentTransaction>,
-    ) -> Result<(), EpochServiceError> {
+    ) -> Result<(), EpochSnapshotError> {
         // Validate the epoch blocks
         self.is_epoch_block(new_epoch_block)?;
 
@@ -213,19 +213,19 @@ impl EpochSnapshot {
             // For non-genesis blocks, previous epoch block must exist and have correct height
             let prev_block = previous_epoch_block
                 .as_ref()
-                .ok_or(EpochServiceError::IncorrectPreviousEpochBlock)?;
+                .ok_or(EpochSnapshotError::IncorrectPreviousEpochBlock)?;
 
             // Validate the previous epoch block is the correct height
             if prev_block.height + self.config.consensus.epoch.num_blocks_in_epoch
                 != new_epoch_block.height
             {
-                return Err(EpochServiceError::IncorrectPreviousEpochBlock);
+                return Err(EpochSnapshotError::IncorrectPreviousEpochBlock);
             }
         }
 
         // Validate the commitments
         Self::validate_commitments(new_epoch_block, &new_epoch_commitments)
-            .map_err(|_| EpochServiceError::InvalidCommitments)?;
+            .map_err(|_| EpochSnapshotError::InvalidCommitments)?;
 
         debug!(
             height = new_epoch_block.height,

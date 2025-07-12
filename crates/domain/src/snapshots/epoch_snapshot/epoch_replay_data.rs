@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
 
-use crate::block_index_service::BlockIndexReadGuard;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_storage::RecoveredMempoolState;
 use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
 use reth_db::Database as _;
+
+use crate::block_index_guard::BlockIndexReadGuard;
 
 #[derive(Debug, Clone)]
 /// Represents an epoch block and its associated commitment transactions

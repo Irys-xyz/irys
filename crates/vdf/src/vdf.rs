@@ -130,10 +130,17 @@ pub fn run_vdf<B: BlockProvider>(
         if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
             next_reset_seed = canonical_vdf_info.next_seed;
             canonical_global_step_number = canonical_vdf_info.global_step_number;
+            debug!(
+                "Canonical global step number: {}, next reset seed: {:?}, prev output: {:?}, global_step: {:?}",
+                canonical_global_step_number, next_reset_seed, canonical_vdf_info.prev_output, global_step_number
+            );
         }
 
-        let is_too_far_ahead =
-            global_step_number >= canonical_global_step_number + vdf_reset_frequency * 2;
+        // If the next step is a reset step, we need to be sure that the canonical chain tip
+        // is higher than the previous reset step. Otherwise, we'll end up applying a reset seed
+        // that belongs to the previous reset range
+        let is_too_far_ahead = (global_step_number + 1) % vdf_reset_frequency == 0
+            && global_step_number + 1 > canonical_global_step_number + vdf_reset_frequency;
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
         if !vdf_mining || is_too_far_ahead {
@@ -203,7 +210,7 @@ pub fn process_reset(
     if global_step_number % reset_frequency == 0 {
         info!(
             "Reset seed {:?} applied to step {}",
-            global_step_number, reset_seed
+            reset_seed, global_step_number
         );
         apply_reset_seed(hash, reset_seed)
     } else {
@@ -412,7 +419,7 @@ mod tests {
             .expect("to be able to build vdf validation pool");
 
         assert!(
-            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard).is_ok(),
+            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard,).is_ok(),
             "Invalid VDF"
         );
 
@@ -472,12 +479,12 @@ mod tests {
 
         let step_num = vdf_steps_guard.read().global_step;
 
-        assert_eq!(step_num, 4,);
+        assert_eq!(step_num, 3);
 
         // get last 4 steps
         let steps = vdf_steps_guard
             .read()
-            .get_steps(ii(step_num - 3, step_num))
+            .get_steps(ii(step_num - 2, step_num))
             .unwrap();
 
         // calculate last step checkpoints
@@ -504,9 +511,9 @@ mod tests {
 
         let vdf_info = VDFLimiterInfo {
             global_step_number: step_num,
-            output: steps[3],
+            output: steps[2],
             prev_output: steps[0],
-            steps: H256List(steps.0[1..=3].into()),
+            steps: H256List(steps.0[1..=2].into()),
             last_step_checkpoints: H256List(checkpoints),
             seed: reset_seed,
             ..VDFLimiterInfo::default()
@@ -518,7 +525,7 @@ mod tests {
             .expect("to be able to build vdf validation pool");
 
         assert!(
-            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard).is_ok(),
+            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard,).is_ok(),
             "Invalid VDF"
         );
 
