@@ -18,10 +18,7 @@ use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
-use irys_domain::{
-    block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot,
-    ExponentialMarketAvgCalculation,
-};
+use irys_domain::{BlockTreeReadGuard, EmaSnapshot, ExponentialMarketAvgCalculation};
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_shadow_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -50,7 +47,6 @@ use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 mod block_validation_tracker;
 pub use block_validation_tracker::BlockValidationTracker;
-use irys_types::block_provider::ResetSeedCache;
 
 /// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -98,8 +94,6 @@ pub struct BlockProducerInner {
     pub reth_node_adapter: IrysRethNodeAdapter,
     /// Reth service actor
     pub reth_service: Addr<RethServiceActor>,
-    /// Reset seed manager
-    pub reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -542,7 +536,6 @@ pub trait BlockProdStrategy {
                 prev_block_header,
                 steps,
                 &self.inner().config,
-                &self.inner().reset_seed_cache,
             ),
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,

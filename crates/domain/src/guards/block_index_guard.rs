@@ -1,7 +1,7 @@
 use actix::MessageResponse;
 use base58::ToBase58 as _;
 use irys_database::block_header_by_hash;
-use irys_types::{DatabaseProvider, H256};
+use irys_types::DatabaseProvider;
 use reth_db::Database as _;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};
@@ -60,16 +60,5 @@ impl BlockIndexReadGuard {
     /// Accessor method to get a write guard for the `block_index`
     pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, BlockIndex> {
         self.block_index_data.write().unwrap()
-    }
-}
-
-impl irys_types::block_provider::BlockIndex for BlockIndexReadGuard {
-    fn contains_block(&self, block_height: u64, block_hash: H256) -> bool {
-        let binding = self.read();
-        if let Some(item) = binding.get_item(block_height) {
-            item.block_hash == block_hash
-        } else {
-            false
-        }
     }
 }

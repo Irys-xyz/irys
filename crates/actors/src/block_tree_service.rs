@@ -19,7 +19,6 @@ use irys_domain::{
     create_epoch_snapshot_for_block, make_block_tree_entry, BlockState, BlockTree, BlockTreeEntry,
     BlockTreeReadGuard, ChainState, EpochReplayData,
 };
-use irys_types::block_provider::ResetSeedCache;
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, H256List,
     IrysBlockHeader, IrysTransactionHeader, H256,
@@ -92,8 +91,6 @@ pub struct BlockTreeServiceInner {
     pub system: System,
     /// Tracing span
     pub span: tracing::Span,
-    /// Reset seed cache
-    pub reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +128,6 @@ impl BlockTreeService {
         config: &Config,
         service_senders: &ServiceSenders,
         reth_service_actor: Addr<RethServiceActor>,
-        reset_seed_cache: ResetSeedCache<BlockIndexReadGuard>,
     ) -> JoinHandle<()> {
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
@@ -182,7 +178,6 @@ impl BlockTreeService {
                         system,
                         span,
                         storage_submodules_config: storage_submodules_config.clone(),
-                        reset_seed_cache,
                     },
                 };
                 block_tree_service
@@ -820,19 +815,6 @@ impl BlockTreeServiceInner {
 
             mark_tip_result
         }; // RwLockWriteGuard is dropped here, before the await
-
-        if let Some(step) = arc_block
-            .vdf_limiter_info
-            .reset_step(self.config.consensus.vdf.reset_frequency as u64)
-        {
-            self.reset_seed_cache.record_block_that_contains_step(
-                step,
-                arc_block.height,
-                arc_block.block_hash,
-            );
-            self.reset_seed_cache
-                .remove_old_steps(step, self.config.consensus.vdf.reset_frequency as u64);
-        }
 
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
