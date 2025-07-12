@@ -4741,7 +4741,6 @@ dependencies = [
  "alloy-network",
  "alloy-rpc-types-engine",
  "alloy-signer-local",
- "assert_matches",
  "async-trait",
  "base58",
  "eyre",
@@ -4941,10 +4940,8 @@ dependencies = [
 name = "irys-database"
 version = "0.1.0"
 dependencies = [
- "actix",
  "alloy-primitives",
  "arbitrary",
- "base58",
  "bytes",
  "eyre",
  "irys-config",
@@ -4962,7 +4959,6 @@ dependencies = [
  "tempfile",
  "test-fuzz",
  "test-log",
- "tokio",
  "tracing",
 ]
 
