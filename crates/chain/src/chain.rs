@@ -654,7 +654,7 @@ impl IrysNode {
         block_index: BlockIndex,
         gossip_listener: TcpListener,
         shadow_tx_store: ShadowTxStore,
-    ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
+    ) -> Result<JoinHandle<()>, eyre::Error> {
         let span = Span::current();
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
@@ -667,7 +667,7 @@ impl IrysNode {
                         let block_index_service_actor = Self::init_block_index_service(&config, &block_index);
 
                         // start the rest of the services
-                        let (irys_node, actix_server, vdf_thread, reth_node, gossip_service_handle, service_set) = Self::init_services(
+                        let (irys_node, actix_server, vdf_thread,  gossip_service_handle, service_set) = Self::init_services(
                                 &config,
                                 reth_shutdown_sender,
                                 vdf_shutdown_receiver,
@@ -718,7 +718,6 @@ impl IrysNode {
                         vdf_thread.join().unwrap();
 
                         debug!("VDF thread finished");
-                        reth_node
                     }.instrument(span.clone()))
                 }
             })?;
@@ -731,8 +730,7 @@ impl IrysNode {
         main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<()>,
         shadow_tx_store: ShadowTxStore,
         reth_handle_sender: oneshot::Sender<RethNode>,
-        actor_main_thread_handle: JoinHandle<RethNodeProvider>,
-        // todo get rid of the irys_reth_provider
+        actor_main_thread_handle: JoinHandle<()>,
         irys_provider: IrysRethProvider,
         reth_chainspec: ChainSpec,
         latest_block_height: u64,
@@ -764,19 +762,18 @@ impl IrysNode {
                     let service_set = service_set.await.expect("Service Set must be awaited");
 
                     let mut service_set = std::pin::pin!(service_set);
-                    let mut task_manager = std::pin::pin!(&mut task_manager);
+                    let mut task_manager_pinned = std::pin::pin!(&mut task_manager);
                     let reth_node = std::pin::pin!(node_handle.node_exit_future.instrument(span2));
 
                     let future = async {
                         tokio::select! {
                             _ = &mut service_set => {
                             },
-                            res = &mut task_manager => {
+                            res = &mut task_manager_pinned => {
                                 tracing::warn!(?res)
                             }
                             _ = reth_node => {}
                         }
-                        service_set.graceful_shutdown().await;
                         Ok(())
                     };
 
@@ -791,13 +788,16 @@ impl IrysNode {
 
                     actor_main_thread_handle
                         .join()
-                        .expect("to successfully join the actor thread handle")
+                        .expect("to successfully join the actor thread handle");
+                    service_set.graceful_shutdown().await;
+                    debug!(
+                        "Shutting down the rest of the reth jobs in case there are unfinished ones"
+                    );
+                    task_manager.graceful_shutdown();
+                    node_handle.node
                 };
 
                 let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
-
-                debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
-                task_manager.graceful_shutdown();
 
                 reth_node.provider.database.db.close();
                 irys_storage::reth_provider::cleanup_provider(&irys_provider);
@@ -825,7 +825,6 @@ impl IrysNode {
         IrysNodeCtx,
         Server,
         JoinHandle<()>,
-        RethNodeProvider,
         ServiceHandleWithShutdownSignal,
         ServiceSet,
     )> {
@@ -1203,7 +1202,6 @@ impl IrysNode {
             irys_node_ctx,
             server,
             vdf_thread_handler,
-            reth_node,
             p2p_service_handle,
             ServiceSet::new(services),
         ))
