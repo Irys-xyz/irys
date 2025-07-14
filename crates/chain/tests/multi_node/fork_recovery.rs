@@ -1172,7 +1172,7 @@ async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
         .get_mut()
         .block_migration_depth
         .into();
-    let block_migration_depth: u64 = block_migration_depth - 1;
+    let block_migration_depth_minus_one = block_migration_depth - 1;
     let seconds_to_wait = 20;
 
     // signers
@@ -1204,12 +1204,13 @@ async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
     // Disable gossip on both nodes
     node1.gossip_disable();
     node2.gossip_disable();
+    // prevent reth from contacting peers on both nodes
     let node1_peers = node1.disconnect_all_reth_peers().await?;
     let node2_peers = node2.disconnect_all_reth_peers().await?;
 
     // Node1 mines blocks to just shy of the migration depth
-    let node1_blocks = (block_migration_depth - 1) as usize;
-    node1.mine_blocks(node1_blocks).await?;
+    let node1_blocks = block_migration_depth_minus_one as usize;
+    node1.mine_blocks_without_gossip(node1_blocks).await?;
     node1
         .wait_until_height(node1_blocks.try_into()?, seconds_to_wait)
         .await?;
