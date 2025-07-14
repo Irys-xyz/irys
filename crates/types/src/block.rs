@@ -119,8 +119,8 @@ impl VDFLimiterInfo {
         self.seed = seed;
     }
 
-    /// Returns a pair of expected seeds for the VDF limiter. The firs seed is `next_seed`,
-    /// and the second seed is `seed`.
+    /// Returns a pair of expected seeds for the VDF limiter. The first value is the `next_seed`,
+    /// and the second value is the `seed`.
     pub fn calculate_seeds(
         &self,
         reset_frequency: u64,
