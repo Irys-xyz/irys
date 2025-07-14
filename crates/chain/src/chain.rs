@@ -74,7 +74,7 @@ use std::{
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot::{self};
-use tracing::{debug, error, info, warn, Instrument as _, Span};
+use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -846,16 +846,6 @@ impl IrysNode {
         node_config.reth_peer_info = reth_peering;
         let config = Config::new(node_config);
 
-        // update reth service about the latest block data it must use
-        reth_service_actor
-            .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
-                confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
-                finalized_hash: None,
-            })
-            .await??;
-        debug!("Reth Service Actor updated about fork choice");
-
         let _handle = ChunkCacheService::spawn_service(
             task_exec,
             irys_db.clone(),
@@ -1008,6 +998,21 @@ impl IrysNode {
             config.clone(),
             service_senders.clone(),
         )?;
+
+        // repair any missing payloads before triggering an FCU
+        block_pool
+            .repair_missing_payloads_if_any(Some(reth_service_actor.clone()))
+            .await?;
+
+        // update reth service about the latest block data it must use
+        reth_service_actor
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
+                confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
+                finalized_hash: None,
+            })
+            .await??;
+        debug!("Reth Service Actor updated about fork choice");
 
         // set up the price oracle
         let price_oracle = Self::init_price_oracle(&config);
@@ -1546,6 +1551,7 @@ fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
 /// 2) if we have no existing stake, submit a stake to the local mempool
 /// 3) check all local storage modules for partition assignments against all known partition pledges - historic or pending
 /// 4) post enough pledges so that there are enough pledges for all local storage modules
+#[instrument(skip_all)]
 async fn stake_and_pledge(
     config: &Config,
     block_tree_guard: BlockTreeReadGuard,
