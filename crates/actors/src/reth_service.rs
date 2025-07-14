@@ -222,6 +222,31 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                     "Updating Reth fork choice"
                 );
 
+                let latest = handle
+                    .inner
+                    .eth_api()
+                    .block_by_number(BlockNumberOrTag::Latest, false)
+                    .await;
+
+                let safe = handle
+                    .inner
+                    .eth_api()
+                    .block_by_number(BlockNumberOrTag::Safe, false)
+                    .await;
+
+                let finalized = handle
+                    .inner
+                    .eth_api()
+                    .block_by_number(BlockNumberOrTag::Finalized, false)
+                    .await;
+
+                debug!(
+                    latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+                    safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+                    finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+                    "Reth state before fork choice update"
+                );
+
                 handle
                     .update_forkchoice_full(head_hash, confirmed_hash, finalized_hash)
                     .await
@@ -251,9 +276,9 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                     .await;
 
                 debug!(
-                    latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| b.header.number),
-                    safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| b.header.number),
-                    finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| b.header.number),
+                    latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+                    safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+                    finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
                     "Reth state after fork choice update"
                 );
                 Ok(fcu)
