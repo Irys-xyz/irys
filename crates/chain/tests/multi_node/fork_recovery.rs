@@ -1211,7 +1211,7 @@ async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
     let node1_blocks = (block_migration_depth - 1) as usize;
     node1.mine_blocks(node1_blocks).await?;
     node1
-        .wait_until_height(block_migration_depth, seconds_to_wait)
+        .wait_until_height(node1_blocks.try_into()?, seconds_to_wait)
         .await?;
 
     // Node2 mines one block fewer
