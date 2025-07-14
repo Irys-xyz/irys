@@ -8,7 +8,7 @@ use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-    block_producer::BlockProducerActor,
+    block_producer::BlockProducerCommand,
     block_tree_service::BlockTreeService,
     broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
@@ -36,7 +36,7 @@ use irys_p2p::{
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
-use irys_reth_node_bridge::node::{RethNode, RethNodeHandle};
+use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::signal::run_until_ctrl_c_or_channel_message;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -50,7 +50,7 @@ use irys_storage::{
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
     CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, ServiceSet, H256, U256,
+    OracleConfig, PartitionChunkRange, ServiceSet, TokioServiceHandle, H256, U256,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
@@ -1013,20 +1013,23 @@ impl IrysNode {
         let price_oracle = Self::init_price_oracle(&config);
 
         // set up the block producer
-        let (block_producer_addr, block_producer_arbiter, block_producer_inner) =
-            Self::init_block_producer(
-                &config,
-                Arc::clone(&reward_curve),
-                &irys_db,
-                &service_senders,
-                &block_tree_guard,
-                &vdf_state_readonly,
-                block_discovery.clone(),
-                broadcast_mining_actor.clone(),
-                price_oracle,
-                reth_node_adapter.clone(),
-                reth_service_actor.clone(),
-            );
+        let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
+            &config,
+            Arc::clone(&reward_curve),
+            &irys_db,
+            &service_senders,
+            &block_tree_guard,
+            &vdf_state_readonly,
+            block_discovery.clone(),
+            broadcast_mining_actor.clone(),
+            price_oracle,
+            reth_node_adapter.clone(),
+            reth_service_actor.clone(),
+            task_exec,
+            receivers.block_producer,
+            reth_node.provider.clone(),
+            shadow_tx_store.clone(),
+        );
 
         let (global_step_number, last_step_hash) =
             vdf_state_readonly.read().get_last_step_and_seed();
@@ -1045,7 +1048,7 @@ impl IrysNode {
             &config,
             &storage_modules_guard,
             &vdf_state_readonly,
-            &block_producer_addr,
+            &service_senders.block_producer,
             &atomic_global_step_number,
             &packing_actor_addr,
             latest_block.diff,
@@ -1074,7 +1077,7 @@ impl IrysNode {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
                 block_discovery_addr: block_discovery,
-                block_producer: block_producer_addr,
+                block_producer: service_senders.block_producer.clone(),
                 packing: packing_actor_addr,
                 block_index: block_index_service_actor,
                 reth: reth_service_actor,
@@ -1119,12 +1122,9 @@ impl IrysNode {
 
         let mut services = Vec::new();
         {
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(
-                    block_producer_arbiter,
-                    "block_producer_arbiter".to_string(),
-                ),
-            });
+            // Add the tokio service handle for block producer
+            services.push(ArbiterEnum::TokioService(block_producer_handle));
+
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(broadcast_arbiter, "broadcast_arbiter".to_string()),
             });
@@ -1264,7 +1264,7 @@ impl IrysNode {
         config: &Config,
         storage_modules_guard: &StorageModulesReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
-        block_producer_addr: &actix::Addr<BlockProducerActor>,
+        block_producer_tx: &mpsc::UnboundedSender<BlockProducerCommand>,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
         initial_difficulty: U256,
@@ -1274,7 +1274,7 @@ impl IrysNode {
         for sm in storage_modules_guard.read().iter() {
             let partition_mining_actor = PartitionMiningActor::new(
                 config,
-                block_producer_addr.clone().recipient(),
+                block_producer_tx.clone(),
                 packing_actor_addr.clone().recipient(),
                 sm.clone(),
                 false, // do not start mining automatically
@@ -1334,12 +1334,11 @@ impl IrysNode {
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         reth_service_actor: actix::Addr<RethServiceActor>,
-    ) -> (
-        actix::Addr<BlockProducerActor>,
-        Arbiter,
-        Arc<irys_actors::BlockProducerInner>,
-    ) {
-        let block_producer_arbiter = Arbiter::new();
+        _task_executor: &TaskExecutor,
+        block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        reth_provider: NodeProvider,
+        shadow_tx_store: ShadowTxStore,
+    ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),
@@ -1350,23 +1349,21 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
-            reth_node_adapter,
+            reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
+            reth_provider,
+            shadow_tx_store,
             reth_service: reth_service_actor,
+            beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
         });
-        let block_producer_actor = BlockProducerActor {
-            inner: block_producer_inner.clone(),
-            blocks_remaining_for_test: None,
-            span: Span::current(),
-        };
-        let block_producer_addr =
-            BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), move |_| {
-                block_producer_actor
-            });
-        (
-            block_producer_addr,
-            block_producer_arbiter,
-            block_producer_inner,
-        )
+
+        // Spawn the service and get the handle
+        let tokio_service_handle = irys_actors::BlockProducerService::spawn_service(
+            block_producer_inner.clone(),
+            None, // blocks_remaining_for_test
+            block_producer_rx,
+        );
+
+        (block_producer_inner, tokio_service_handle)
     }
 
     fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {

@@ -5,7 +5,7 @@ use irys_reth::{
     evm::IrysEvmConfig, payload::ShadowTxStore, IrysEthereumNode, IrysShadowTxValidator,
 };
 use irys_storage::reth_provider::IrysRethProvider;
-use irys_types::Address;
+use irys_types::{Address, Node as MerkleNode};
 use reth::{
     args::DatabaseArgs,
     consensus::{ConsensusError, FullConsensus},
@@ -24,8 +24,8 @@ use reth::{
 use reth_chainspec::ChainSpec;
 use reth_db::init_db;
 use reth_node_builder::{
-    FullNode, FullNodeTypesAdapter, NodeAdapter, NodeBuilder, NodeConfig, NodeHandle,
-    NodeTypesWithDBAdapter,
+    FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder, NodeComponentsBuilder,
+    NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
 };
 use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
@@ -36,35 +36,23 @@ use tracing::error;
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
 
-pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
+type TmpNodeAdapter = FullNodeTypesAdapter<IrysEthereumNode, RethDbWrapper, NodeProvider>;
 
+/// Type alias for a `NodeAdapter`
 pub type RethNodeAdapter = NodeAdapter<
-    FullNodeTypesAdapter<
-        IrysEthereumNode,
-        RethDbWrapper,
-        BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
-    >,
-    reth_node_builder::components::Components<
-        FullNodeTypesAdapter<
-            IrysEthereumNode,
-            RethDbWrapper,
-            BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
-        >,
-        NetworkHandle,
-        reth::transaction_pool::Pool<
-            TransactionValidationTaskExecutor<
-                IrysShadowTxValidator<
-                    BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
-                    EthPooledTransaction,
-                >,
-            >,
-            CoinbaseTipOrdering<EthPooledTransaction>,
-            DiskFileBlobStore,
-        >,
-        IrysEvmConfig,
-        Arc<(dyn FullConsensus<EthPrimitives, Error = ConsensusError> + 'static)>,
-    >,
+    TmpNodeAdapter,
+    <<IrysEthereumNode as Node<TmpNodeAdapter>>::ComponentsBuilder as NodeComponentsBuilder<
+        TmpNodeAdapter,
+    >>::Components,
 >;
+
+pub type NodeProvider = BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>;
+
+/// Type alias for a type of `NodeHelper`
+pub type NodeHelperType =
+    NodeTestContext<RethNodeAdapter, <IrysEthereumNode as Node<TmpNodeAdapter>>::AddOns>;
+
+pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
 pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<RethNodeAdapter>;
 

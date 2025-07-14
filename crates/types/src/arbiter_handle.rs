@@ -81,7 +81,7 @@ impl fmt::Debug for ServiceSet {
                 for service in services {
                     match service {
                         ArbiterEnum::ActixArbiter { .. } => actix_count += 1,
-                        ArbiterEnum::TokioService { .. } => tokio_count += 1,
+                        ArbiterEnum::TokioService(_) => tokio_count += 1,
                     }
                 }
 
@@ -163,15 +163,18 @@ impl Future for ServiceSet {
 }
 
 #[derive(Debug)]
+pub struct TokioServiceHandle {
+    pub name: String,
+    pub handle: TokioJoinHandle<()>,
+    pub shutdown_signal: reth::tasks::shutdown::Signal,
+}
+
+#[derive(Debug)]
 pub enum ArbiterEnum {
     ActixArbiter {
         arbiter: ArbiterHandle,
     },
-    TokioService {
-        name: String,
-        handle: TokioJoinHandle<()>,
-        shutdown_signal: reth::tasks::shutdown::Signal,
-    },
+    TokioService(TokioServiceHandle),
 }
 
 impl ArbiterEnum {
@@ -180,17 +183,17 @@ impl ArbiterEnum {
         handle: TokioJoinHandle<()>,
         shutdown_signal: reth::tasks::shutdown::Signal,
     ) -> Self {
-        Self::TokioService {
+        Self::TokioService(TokioServiceHandle {
             name,
             handle,
             shutdown_signal,
-        }
+        })
     }
 
     pub fn name(&self) -> &str {
         match self {
             Self::ActixArbiter { arbiter } => &arbiter.name,
-            Self::TokioService { name, .. } => name,
+            Self::TokioService(service) => &service.name,
         }
     }
 
@@ -199,21 +202,17 @@ impl ArbiterEnum {
             Self::ActixArbiter { arbiter } => {
                 arbiter.stop_and_join();
             }
-            Self::TokioService {
-                name,
-                handle,
-                shutdown_signal,
-            } => {
+            Self::TokioService(service) => {
                 // Fire the shutdown signal
-                shutdown_signal.fire();
+                service.shutdown_signal.fire();
 
                 // Wait for the task to complete
-                match handle.await {
+                match service.handle.await {
                     Ok(()) => {
-                        tracing::debug!("Tokio service '{}' shut down successfully", name)
+                        tracing::debug!("Tokio service '{}' shut down successfully", service.name)
                     }
                     Err(e) => {
-                        tracing::error!("Tokio service '{}' panicked: {:?}", name, e)
+                        tracing::error!("Tokio service '{}' panicked: {:?}", service.name, e)
                     }
                 }
             }
@@ -221,7 +220,7 @@ impl ArbiterEnum {
     }
 
     pub fn is_tokio_service(&self) -> bool {
-        matches!(self, Self::TokioService { .. })
+        matches!(self, Self::TokioService(_))
     }
 }
 
@@ -238,9 +237,9 @@ impl Future for ArbiterEnum {
                 // They need to be explicitly stopped
                 std::task::Poll::Pending
             }
-            Self::TokioService { handle, .. } => {
+            Self::TokioService(service) => {
                 // Poll the tokio join handle
-                match handle.poll_unpin(cx) {
+                match service.handle.poll_unpin(cx) {
                     std::task::Poll::Ready(res) => {
                         std::task::Poll::Ready(res.map_err(|err| eyre::Report::new(err)))
                     }

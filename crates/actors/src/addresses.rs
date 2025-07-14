@@ -1,8 +1,9 @@
 use actix::Addr;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     block_discovery::BlockDiscoveryActor, block_index_service::BlockIndexService,
-    block_producer::BlockProducerActor, mining::PartitionMiningActor, packing::PackingActor,
+    block_producer::BlockProducerCommand, mining::PartitionMiningActor, packing::PackingActor,
     reth_service::RethServiceActor,
 };
 
@@ -12,7 +13,7 @@ use crate::{
 pub struct ActorAddresses {
     pub partitions: Vec<Addr<PartitionMiningActor>>,
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
-    pub block_producer: Addr<BlockProducerActor>,
+    pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub packing: Addr<PackingActor>,
     pub block_index: Addr<BlockIndexService>,
     pub reth: Addr<RethServiceActor>,
