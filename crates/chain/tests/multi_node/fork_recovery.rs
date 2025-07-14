@@ -1186,11 +1186,11 @@ async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
         .await;
     node1.start_public_api().await;
 
-    // additional configs for peer
-    let config_b = node1.testnet_peer_with_signer(&b_signer);
+    // config for node 2
+    let node2_config = node1.testnet_peer_with_signer(&b_signer);
 
     // start peer nodes
-    let node2 = IrysNodeTest::new(config_b)
+    let node2 = IrysNodeTest::new(node2_config)
         .start_and_wait_for_packing("NODE2", seconds_to_wait)
         .await;
 
