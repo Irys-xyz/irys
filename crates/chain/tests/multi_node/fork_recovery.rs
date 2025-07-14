@@ -1216,7 +1216,7 @@ async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
         .await?;
 
     // confirm heights on both nodes
-    assert_eq!(5, node1.get_max_difficulty_block().height);
+    assert_eq!(6, node1.get_max_difficulty_block().height);
     assert_eq!(1, node2.get_max_difficulty_block().height);
     // confirm we have not migrate blocks to the index
     assert_eq!(0, node1.get_block_index_height());
