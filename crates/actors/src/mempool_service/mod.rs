@@ -8,8 +8,9 @@ pub mod lifecycle;
 pub use chunks::*;
 pub use facade::*;
 pub use inner::*;
+use irys_domain::BlockTreeReadGuard;
 
-use crate::block_tree_service::{BlockMigratedEvent, BlockTreeReadGuard, ReorgEvent};
+use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::services::ServiceSenders;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_storage::StorageModulesReadGuard;

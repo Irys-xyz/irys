@@ -7,7 +7,6 @@ pub mod block_validation;
 pub mod broadcast_mining_service;
 pub mod cache_service;
 pub mod chunk_migration_service;
-pub mod epoch_service;
 pub mod mempool_service;
 pub mod mining;
 pub mod packing;
@@ -19,7 +18,6 @@ pub mod validation_service;
 
 pub use addresses::*;
 pub use block_producer::*;
-pub use epoch_service::*;
 pub use reth_ethereum_primitives;
 pub use storage_module_service::*;
 

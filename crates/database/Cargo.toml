@@ -9,9 +9,6 @@ test-utils = []
 
 [dependencies]
 alloy-primitives.workspace = true
-actix.workspace = true
-base58.workspace = true
-tokio = { workspace = true, features = ["fs"] }
 irys-config.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }

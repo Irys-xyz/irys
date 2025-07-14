@@ -1,13 +1,9 @@
 use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
 use actix::{Actor as _, SystemService as _};
 use base58::ToBase58 as _;
+use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
-};
-use irys_actors::EpochBlockData;
-use irys_actors::{
-    block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-    epoch_service::EpochSnapshot,
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -15,7 +11,8 @@ use irys_actors::{
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex};
+use irys_database::{add_genesis_commitments, add_test_commitments};
+use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::PartitionChunkRange;
@@ -27,7 +24,6 @@ use irys_types::{Config, U256};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth::payload::EthBuiltPayload;
-use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
@@ -360,12 +356,7 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-        capacity: 10,
-        global_step: 0,
-        seeds: VecDeque::new(),
-        mining_state_sender: None,
-    })));
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
     let packing_addr = packing.start();
     let mut part_actors = Vec::new();

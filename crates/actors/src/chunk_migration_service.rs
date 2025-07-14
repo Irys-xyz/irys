@@ -4,8 +4,8 @@ use irys_database::{
     cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
-    BlockIndex,
 };
+use irys_domain::BlockIndex;
 use irys_storage::{
     get_overlapped_storage_modules, ie, ii, InclusiveInterval as _, StorageModule,
     StorageModulesReadGuard,

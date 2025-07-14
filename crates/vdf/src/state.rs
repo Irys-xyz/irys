@@ -1,6 +1,7 @@
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::eyre;
-use irys_database::{block_header_by_hash, BlockIndex};
+use irys_database::block_header_by_hash;
+use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
@@ -30,9 +31,37 @@ pub struct VdfState {
     pub seeds: VecDeque<Seed>,
     /// whether the VDF thread is mining or paused
     pub mining_state_sender: Option<Sender<bool>>,
+    /// global step from the latest canonical block
+    global_step_from_the_latest_canonical_block: u64,
+    /// minimum global step to keep in the seeds VecDeque
+    minimum_step_to_keep: u64,
 }
 
 impl VdfState {
+    pub fn new(
+        capacity: usize,
+        global_step: u64,
+        mining_state_sender: Option<Sender<bool>>,
+    ) -> Self {
+        Self {
+            global_step,
+            global_step_from_the_latest_canonical_block: global_step,
+            minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
+            seeds: VecDeque::with_capacity(capacity),
+            capacity,
+            mining_state_sender,
+        }
+    }
+
+    pub fn set_canonical_step(&mut self, global_canonical_step: u64) {
+        self.global_step_from_the_latest_canonical_block = global_canonical_step;
+        self.minimum_step_to_keep = global_canonical_step.saturating_sub(self.capacity as u64);
+    }
+
+    pub fn canonical_step(&self) -> u64 {
+        self.global_step_from_the_latest_canonical_block
+    }
+
     pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
         (
             self.global_step,
@@ -47,7 +76,8 @@ impl VdfState {
         if self.global_step >= global_step {
             return self.global_step;
         }
-        if self.seeds.len() >= self.capacity {
+        let vdf_depth = global_step.saturating_sub(self.minimum_step_to_keep) as usize;
+        if self.seeds.len() >= vdf_depth {
             self.seeds.pop_front();
         }
         if self.global_step + 1 == global_step {
@@ -221,6 +251,8 @@ pub fn create_state(
 
     VdfState {
         global_step: global_step_number,
+        global_step_from_the_latest_canonical_block: global_step_number,
+        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
         seeds,
         capacity,
         mining_state_sender: Some(vdf_mining_state_sender),
@@ -256,12 +288,13 @@ pub fn vdf_steps_are_valid(
     config: &VdfConfig,
     vdf_steps_guard: &VdfStateReadonly,
 ) -> eyre::Result<()> {
+    let reset_seed = vdf_info.seed;
     info!(
         "Checking seed {:?} reset_seed {:?}",
-        vdf_info.prev_output, vdf_info.seed
+        vdf_info.prev_output, reset_seed
     );
 
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1_u64;
+    let start = vdf_info.first_step_number();
     let end: u64 = vdf_info.global_step_number;
 
     match vdf_steps_guard.read().get_steps(ii(start, end)) {
@@ -278,8 +311,6 @@ pub fn vdf_steps_are_valid(
         Err(err) =>
             tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err.to_string())
     };
-
-    let reset_seed = vdf_info.seed;
 
     let mut step_hashes = vdf_info.steps.clone();
 
@@ -375,10 +406,13 @@ pub mod test_helpers {
 
     pub fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
         let (vdf_mining_state_sender, _) = channel::<bool>(1);
+        let capacity = calc_capacity(config);
 
         let state = VdfState {
             global_step: 0,
-            capacity: calc_capacity(config),
+            global_step_from_the_latest_canonical_block: 0,
+            minimum_step_to_keep: 0,
+            capacity,
             seeds: VecDeque::default(),
             mining_state_sender: Some(vdf_mining_state_sender),
         };

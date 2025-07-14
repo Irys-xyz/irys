@@ -1,9 +1,5 @@
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    block_tree_service::{
-        ema_snapshot::{EmaSnapshot, ExponentialMarketAvgCalculation},
-        BlockTreeReadGuard,
-    },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
@@ -22,6 +18,7 @@ use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
+use irys_domain::{BlockTreeReadGuard, EmaSnapshot, ExponentialMarketAvgCalculation};
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::compose_shadow_tx;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -534,15 +531,12 @@ pub trait BlockProdStrategy {
                 },
             ],
             evm_block_hash,
-            vdf_limiter_info: VDFLimiterInfo {
-                global_step_number: solution.vdf_step,
-                output: solution.seed.into_inner(),
-                last_step_checkpoints: solution.checkpoints,
-                prev_output: prev_block_header.vdf_limiter_info.output,
-                seed: prev_block_header.vdf_limiter_info.seed,
+            vdf_limiter_info: VDFLimiterInfo::new(
+                &solution,
+                prev_block_header,
                 steps,
-                ..Default::default()
-            },
+                &self.inner().config,
+            ),
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
         };

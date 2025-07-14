@@ -16,10 +16,7 @@ use futures::future::select;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     block_producer::SolutionFoundMessage,
-    block_tree_service::{
-        ema_snapshot::EmaSnapshot, get_canonical_chain, BlockState, BlockTreeEntry, ChainState,
-        ReorgEvent,
-    },
+    block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
@@ -32,7 +29,11 @@ use irys_database::{
     db::IrysDatabaseExt as _,
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
-    tx_header_by_txid, CommitmentSnapshotStatus,
+    tx_header_by_txid,
+};
+use irys_domain::{
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
+    EmaSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -1193,6 +1194,18 @@ impl IrysNodeTest<IrysNodeCtx> {
                     .cloned()
             })
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+    }
+
+    pub async fn get_blocks(
+        &self,
+        start_height: u64,
+        end_height: u64,
+    ) -> eyre::Result<Vec<IrysBlockHeader>> {
+        let mut blocks = Vec::new();
+        for height in start_height..=end_height {
+            blocks.push(self.get_block_by_height(height).await?);
+        }
+        Ok(blocks)
     }
 
     pub fn gossip_block(&self, block_header: &Arc<IrysBlockHeader>) -> eyre::Result<()> {

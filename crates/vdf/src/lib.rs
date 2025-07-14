@@ -140,6 +140,7 @@ pub async fn last_step_checkpoints_is_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
 ) -> eyre::Result<()> {
+    let reset_seed = vdf_info.seed;
     let last_step = vdf_info
         .steps
         .0
@@ -178,7 +179,6 @@ pub async fn last_step_checkpoints_is_valid(
             global_step_number,
             seed
         );
-        let reset_seed = vdf_info.seed;
         seed = apply_reset_seed(seed, reset_seed);
     } else {
         tracing::info!(

@@ -1,4 +1,3 @@
-use crate::block_tree_service::get_optimistic_chain;
 use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use base58::ToBase58 as _;
@@ -6,6 +5,7 @@ use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::DataRootLRU, tx_header_by_txid,
 };
+use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     DataLedger, GossipBroadcastMessage, IrysTransactionCommon as _, IrysTransactionHeader,

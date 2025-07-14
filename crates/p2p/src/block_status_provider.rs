@@ -1,11 +1,8 @@
-use irys_actors::block_index_service::BlockIndexReadGuard;
-use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_types::{BlockHash, BlockIndexItem, H256};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
+use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_actors::block_tree_service::BlockTreeCache,
-    irys_database::BlockIndex,
     irys_types::{IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
     tracing::warn,
@@ -167,13 +164,13 @@ impl BlockStatusProvider {
 impl BlockStatusProvider {
     #[cfg(test)]
     pub async fn mock(node_config: &NodeConfig) -> Self {
+        use irys_domain::{BlockIndex, BlockTree};
+
         Self {
-            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
-                BlockTreeCache::new(
-                    &IrysBlockHeader::new_mock_header(),
-                    node_config.consensus_config(),
-                ),
-            ))),
+            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+                &IrysBlockHeader::new_mock_header(),
+                node_config.consensus_config(),
+            )))),
             block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
                 BlockIndex::new(node_config)
                     .await
@@ -287,8 +284,7 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::{block_tree_service::ema_snapshot::EmaSnapshot, EpochSnapshot};
-        use irys_database::CommitmentSnapshot;
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
 
         self.block_tree_read_guard
             .write()
@@ -333,5 +329,16 @@ impl BlockStatusProvider {
                 .expect("to delete block from the tree");
             debug!("Deleted block {:?} from the tree", block_hash);
         }
+    }
+}
+
+impl BlockProvider for BlockStatusProvider {
+    fn latest_canonical_vdf_info(&self) -> Option<VDFLimiterInfo> {
+        let binding = self.block_tree_read_guard.read();
+
+        let latest_canonical_hash = binding.get_latest_canonical_entry().block_hash;
+        binding
+            .get_block(&latest_canonical_hash)
+            .map(|block| block.vdf_limiter_info.clone())
     }
 }
