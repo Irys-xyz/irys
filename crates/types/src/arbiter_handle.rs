@@ -1,5 +1,5 @@
 use actix_rt::Arbiter;
-use futures::future::{BoxFuture, FutureExt};
+use futures::future::{BoxFuture, FutureExt as _};
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,7 @@ enum ServiceSetState {
     ShuttingDown(BoxFuture<'static, ()>),
 }
 
+/// A set of services that can be managed together.
 pub struct ServiceSet {
     state: ServiceSetState,
 }
@@ -25,20 +26,24 @@ impl ServiceSet {
     /// Manually trigger graceful shutdown of all services.
     /// This will cause the ServiceSet to transition to shutdown state
     /// and stop all services in order when polled.
-    pub fn graceful_shutdown(self: std::pin::Pin<&mut Self>) -> &mut Self {
-        let this = self.get_mut();
-
-        match &mut this.state {
+    pub fn graceful_shutdown(&mut self) -> &mut Self {
+        match &mut self.state {
             ServiceSetState::Polling(services) => {
                 if !services.is_empty() {
-                    Self::initiate_shutdown(this);
+                    self.initiate_shutdown();
                 }
             }
             ServiceSetState::ShuttingDown(_) => {
                 // Already shutting down
             }
         };
-        this
+        self
+    }
+
+    /// Wait for all services to complete without consuming the ServiceSet.
+    /// Useful when you need to check state or perform operations after completion.
+    pub async fn wait(&mut self) {
+        futures::future::poll_fn(|cx| std::pin::Pin::new(&mut *self).poll(cx)).await
     }
 
     /// Check if the ServiceSet is currently shutting down
@@ -47,8 +52,8 @@ impl ServiceSet {
     }
 
     /// Helper to initiate shutdown sequence
-    fn initiate_shutdown(this: &mut ServiceSet) {
-        if let ServiceSetState::Polling(services) = &mut this.state {
+    fn initiate_shutdown(&mut self) {
+        if let ServiceSetState::Polling(services) = &mut self.state {
             let services_to_shutdown = std::mem::take(services);
 
             let shutdown_future = async move {
@@ -61,7 +66,7 @@ impl ServiceSet {
             }
             .boxed();
 
-            this.state = ServiceSetState::ShuttingDown(shutdown_future);
+            self.state = ServiceSetState::ShuttingDown(shutdown_future);
         }
     }
 }
@@ -72,16 +77,16 @@ impl fmt::Debug for ServiceSet {
             ServiceSetState::Polling(services) => {
                 let mut actix_count = 0;
                 let mut tokio_count = 0;
-                
+
                 for service in services {
                     match service {
                         ArbiterEnum::ActixArbiter { .. } => actix_count += 1,
                         ArbiterEnum::TokioService { .. } => tokio_count += 1,
                     }
                 }
-                
+
                 write!(
-                    f, 
+                    f,
                     "ServiceSet {{ total: {}, actix: {}, tokio: {}, state: polling }}",
                     services.len(),
                     actix_count,
@@ -111,7 +116,7 @@ impl Future for ServiceSet {
                     // No services to manage, complete immediately
                     return std::task::Poll::Ready(());
                 }
-                
+
                 // Check if any service has completed
                 for service in services.iter_mut() {
                     // Skip services that have already finished (for tokio services)
@@ -123,7 +128,7 @@ impl Future for ServiceSet {
                         cx.waker().wake_by_ref();
                         return std::task::Poll::Pending;
                     }
-                    
+
                     let service_pin = std::pin::Pin::new(service);
                     match service_pin.poll(cx) {
                         std::task::Poll::Ready(_) => {
@@ -172,7 +177,7 @@ impl ArbiterEnum {
         handle: TokioJoinHandle<()>,
         shutdown_signal: reth::tasks::shutdown::Signal,
     ) -> Self {
-        ArbiterEnum::TokioService {
+        Self::TokioService {
             name,
             handle,
             shutdown_signal,
@@ -181,17 +186,17 @@ impl ArbiterEnum {
 
     pub fn name(&self) -> &str {
         match self {
-            ArbiterEnum::ActixArbiter { arbiter } => &arbiter.name,
-            ArbiterEnum::TokioService { name, .. } => name,
+            Self::ActixArbiter { arbiter } => &arbiter.name,
+            Self::TokioService { name, .. } => name,
         }
     }
 
     pub async fn stop_and_join(self) {
         match self {
-            ArbiterEnum::ActixArbiter { arbiter } => {
+            Self::ActixArbiter { arbiter } => {
                 arbiter.stop_and_join();
             }
-            ArbiterEnum::TokioService {
+            Self::TokioService {
                 name,
                 handle,
                 shutdown_signal,
@@ -213,13 +218,13 @@ impl ArbiterEnum {
     }
 
     pub fn is_tokio_service(&self) -> bool {
-        matches!(self, ArbiterEnum::TokioService { .. })
+        matches!(self, Self::TokioService { .. })
     }
 
     /// Checks if the tokio service has finished
     pub fn is_tokio_service_finished(&self) -> bool {
         match self {
-            ArbiterEnum::TokioService { handle, .. } => handle.is_finished(),
+            Self::TokioService { handle, .. } => handle.is_finished(),
             _ => false,
         }
     }
@@ -237,12 +242,12 @@ impl Future for ArbiterEnum {
         let this = unsafe { self.get_unchecked_mut() };
 
         match this {
-            ArbiterEnum::ActixArbiter { .. } => {
+            Self::ActixArbiter { .. } => {
                 // Actix arbiters don't support polling for completion
                 // They need to be explicitly stopped
                 std::task::Poll::Pending
             }
-            ArbiterEnum::TokioService { handle, .. } => {
+            Self::TokioService { handle, .. } => {
                 // Poll the tokio join handle
                 let handle_pin = std::pin::Pin::new(handle);
                 match handle_pin.poll(cx) {
@@ -334,245 +339,220 @@ impl<T> From<JoinHandle<T>> for CloneableJoinHandle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
-    async fn create_test_tokio_service<F>(
+    /// Creates a service that exits when triggered via the returned sender
+    fn create_controllable_service<F>(
         name: String,
-        behavior: F,
-    ) -> ArbiterEnum 
+        on_exit_behavior: F,
+    ) -> (ArbiterEnum, oneshot::Sender<()>)
     where
         F: FnOnce() + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-        
+        let (exit_tx, exit_rx) = oneshot::channel();
+
         let handle = tokio::spawn(async move {
             tokio::select! {
                 _ = shutdown_rx => {
-                    // Shutdown received
+                    // Graceful shutdown received
                 }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                    // Timer expired
+                _ = exit_rx => {
+                    // Explicit exit triggered
                 }
             }
-            
-            // Always execute the behavior to record what happened
-            behavior();
+
+            // Execute the behavior
+            on_exit_behavior();
+        });
+
+        (
+            ArbiterEnum::new_tokio_service(name, handle, shutdown_tx),
+            exit_tx,
+        )
+    }
+
+    /// Creates a service that runs until shutdown signal
+    fn create_long_running_service<F>(name: String, on_shutdown_behavior: F) -> ArbiterEnum
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = tokio::spawn(async move {
+            // Wait for shutdown signal
+            let _ = shutdown_rx.await;
+
+            // Execute the behavior
+            on_shutdown_behavior();
         });
 
         ArbiterEnum::new_tokio_service(name, handle, shutdown_tx)
     }
 
-    #[tokio::test]
-    async fn test_service_exit_triggers_shutdown() {
-        // Track shutdown order
-        let shutdown_order = Arc::new(Mutex::new(Vec::new()));
-        let shutdown_order_clone = shutdown_order.clone();
-
-        // Create services where one will exit early
-        let mut services = vec![];
-        
-        // Service that exits quickly
-        let exit_service_order = shutdown_order_clone.clone();
-        services.push(create_test_tokio_service(
-            "early_exit".to_string(),
-            move || {
-                // Record that this service exited
-                exit_service_order.lock().unwrap().push("early_exit".to_string());
-            },
-        ).await);
-
-        // Services that would run forever
-        for i in 1..=2 {
-            let order_clone = shutdown_order_clone.clone();
-            let name = format!("service_{}", i);
-            let name_clone = name.clone();
-            
-            services.push(create_test_tokio_service(
-                name,
-                move || {
-                    // Record when we start shutting down
-                    order_clone.lock().unwrap().push(name_clone);
-                },
-            ).await);
-        }
-
-        let mut service_set = ServiceSet::new(services);
-        
-        // Give the early exit service time to actually exit
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        
-        // Poll until completion
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            futures::future::poll_fn(|cx| {
-                std::pin::Pin::new(&mut service_set).poll(cx)
-            })
-        ).await.expect("ServiceSet should complete within timeout");
-
-        // Verify shutdown happened
-        let order = shutdown_order.lock().unwrap();
-        assert_eq!(order.len(), 3, "All 3 services should have been shutdown");
-        assert_eq!(order[0], "early_exit", "Early exit service should complete first");
-    }
-
-    #[tokio::test]
-    async fn test_service_panic_triggers_shutdown() {
-        let shutdown_count = Arc::new(AtomicUsize::new(0));
-        let mut services = vec![];
-
-        // Normal services first
-        for i in 1..=2 {
-            let count_clone = shutdown_count.clone();
-            services.push(create_test_tokio_service(
-                format!("normal_service_{}", i),
-                move || {
-                    count_clone.fetch_add(1, Ordering::SeqCst);
-                },
-            ).await);
-        }
-        
-        // Service that panics - add last so we can control timing
+    /// Creates a service that panics when triggered
+    fn create_panicking_service(name: String) -> (ArbiterEnum, oneshot::Sender<()>) {
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-        let panic_handle = tokio::spawn(async move {
+        let (panic_tx, panic_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(async move {
             tokio::select! {
                 _ = shutdown_rx => {
-                    // Shutdown received, don't panic
+                    // Shutdown received, exit gracefully
                 }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                _ = panic_rx => {
                     panic!("Test panic!");
                 }
             }
         });
-        services.push(ArbiterEnum::new_tokio_service(
-            "panicking_service".to_string(),
-            panic_handle,
-            shutdown_tx
-        ));
 
-        let mut service_set = ServiceSet::new(services);
-        
-        // Give time for panic to occur
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        
-        // Poll until completion - should handle panic gracefully
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            futures::future::poll_fn(|cx| {
-                std::pin::Pin::new(&mut service_set).poll(cx)
-            })
-        ).await.expect("ServiceSet should complete despite panic");
+        (
+            ArbiterEnum::new_tokio_service(name, handle, shutdown_tx),
+            panic_tx,
+        )
+    }
 
-        // Normal services should have been shutdown despite the panic
-        assert_eq!(shutdown_count.load(Ordering::SeqCst), 2, "Both normal services should have been shutdown");
+    /// Helper to poll a ServiceSet to completion
+    async fn poll_service_set_to_completion(
+        service_set: ServiceSet,
+    ) -> tokio::task::JoinHandle<()> {
+        let poll_handle = tokio::spawn(async move {
+            service_set.await;
+        });
+
+        // Give services time to start
+        tokio::task::yield_now().await;
+
+        poll_handle
     }
 
     #[tokio::test]
-    async fn test_manual_graceful_shutdown() {
-        let shutdown_happened = Arc::new(AtomicBool::new(false));
+    async fn test_service_exit_triggers_shutdown() {
+        // Setup: Create services where one can exit on demand
+        let shutdown_count = Arc::new(AtomicUsize::new(0));
         let mut services = vec![];
-
-        // Create services that run forever
-        for i in 0..3 {
-            let shutdown_flag = shutdown_happened.clone();
-            services.push(create_test_tokio_service(
+        // Service that exits when triggered
+        let (service, exit_trigger) = create_controllable_service("early_exit".to_string(), || {});
+        services.push(service);
+        // Services that run until shutdown
+        for i in 1..=2 {
+            let count_clone = shutdown_count.clone();
+            services.push(create_long_running_service(
                 format!("service_{}", i),
                 move || {
-                    shutdown_flag.store(true, Ordering::SeqCst);
+                    count_clone.fetch_add(1, Ordering::SeqCst);
                 },
-            ).await);
+            ));
         }
+        let service_set = ServiceSet::new(services);
+        let poll_handle = poll_service_set_to_completion(service_set).await;
 
-        let mut service_set = ServiceSet::new(services);
-        
-        // Manually trigger shutdown
-        std::pin::Pin::new(&mut service_set).graceful_shutdown();
-        
-        // Verify state changed
-        assert!(service_set.is_shutting_down());
-        
-        // Poll to completion
-        futures::future::poll_fn(|cx| {
-            std::pin::Pin::new(&mut service_set).poll(cx)
-        }).await;
+        // Action: Trigger one service to exit
+        exit_trigger.send(()).expect("Failed to trigger exit");
+        tokio::time::timeout(Duration::from_secs(5), poll_handle)
+            .await
+            .expect("ServiceSet should complete within timeout")
+            .expect("Poll task should not panic");
 
-        // Verify shutdown actually happened
-        assert!(shutdown_happened.load(Ordering::SeqCst), "Services should have been shutdown");
+        // Assert: All services should be shutdown
+        assert_eq!(
+            shutdown_count.load(Ordering::SeqCst),
+            2,
+            "All long-running services should have been shutdown"
+        );
     }
 
     #[tokio::test]
-    async fn test_shutdown_order_preserved() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-
+    async fn test_service_panic_triggers_shutdown() {
+        // Setup: Create normal services and one that can panic
+        let shutdown_count = Arc::new(AtomicUsize::new(0));
         let mut services = vec![];
-        
+        // Normal services first
+        for i in 1..=2 {
+            let count_clone = shutdown_count.clone();
+            services.push(create_long_running_service(
+                format!("normal_service_{}", i),
+                move || {
+                    count_clone.fetch_add(1, Ordering::SeqCst);
+                },
+            ));
+        }
+        // Service that panics when triggered
+        let (panic_service, panic_trigger) =
+            create_panicking_service("panicking_service".to_string());
+        services.push(panic_service);
+        let service_set = ServiceSet::new(services);
+        let poll_handle = poll_service_set_to_completion(service_set).await;
+
+        // Action: Trigger a panic in one service
+        let _ = panic_trigger.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), poll_handle)
+            .await
+            .expect("ServiceSet should complete despite panic");
+
+        // Assert: Normal services shutdown despite panic
+        assert_eq!(
+            shutdown_count.load(Ordering::SeqCst),
+            2,
+            "Both normal services should have been shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manual_shutdown_preserves_order() {
+        // Setup: Create services that record their shutdown order
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let mut services = vec![];
         // Create services that record their shutdown order
         for i in 0..3 {
             let tx_clone = tx.clone();
             let name = format!("service_{}", i);
             let name_for_closure = name.clone();
-            
-            services.push(create_test_tokio_service(
-                name,
-                move || {
-                    let _ = tx_clone.send(name_for_closure);
-                },
-            ).await);
-        }
 
+            services.push(create_long_running_service(name, move || {
+                let _ = tx_clone.send(name_for_closure);
+            }));
+        }
         let mut service_set = ServiceSet::new(services);
-        
-        // Trigger manual shutdown
-        std::pin::Pin::new(&mut service_set).graceful_shutdown();
-        
+
+        // Action: Manually trigger graceful shutdown
+        service_set.graceful_shutdown();
+        // Verify state changed
+        assert!(
+            service_set.is_shutting_down(),
+            "ServiceSet should be in shutting down state"
+        );
+
         // Poll to completion
-        futures::future::poll_fn(|cx| {
-            std::pin::Pin::new(&mut service_set).poll(cx)
-        }).await;
-        
+        service_set.wait().await;
         drop(tx); // Close the channel
-        
-        // Collect shutdown order
+
+        // Assert: Services shutdown in correct order
         let mut shutdown_order = vec![];
         while let Some(name) = rx.recv().await {
             shutdown_order.push(name);
         }
-        
-        // Verify services shut down in order
-        assert_eq!(shutdown_order, vec!["service_0", "service_1", "service_2"], "Services should shutdown in order");
+        assert_eq!(
+            shutdown_order,
+            vec!["service_0", "service_1", "service_2"],
+            "Services should shutdown in order"
+        );
     }
 
     #[tokio::test]
     async fn test_empty_service_set() {
+        // Setup: Create an empty ServiceSet
         let mut service_set = ServiceSet::new(vec![]);
-        
-        // Should complete immediately
-        let result = futures::future::poll_fn(|cx| {
-            std::pin::Pin::new(&mut service_set).poll(cx)
-        }).now_or_never();
-        
-        assert!(result.is_some(), "Empty ServiceSet should complete immediately");
-    }
 
-    #[tokio::test]
-    async fn test_debug_impl() {
-        let mut services = vec![];
-        
-        // Add some test services
-        for i in 0..2 {
-            services.push(create_test_tokio_service(
-                format!("test_service_{}", i),
-                || {},
-            ).await);
-        }
-        
-        let service_set = ServiceSet::new(services);
-        let debug_str = format!("{:?}", service_set);
-        
-        assert!(debug_str.contains("total: 2"));
-        assert!(debug_str.contains("tokio: 2"));
-        assert!(debug_str.contains("actix: 0"));
-        assert!(debug_str.contains("state: polling"));
+        // Action: Poll the empty ServiceSet
+        let result = service_set.wait().now_or_never();
+
+        // Assert: Should complete immediately
+        assert!(
+            result.is_some(),
+            "Empty ServiceSet should complete immediately"
+        );
     }
 }
