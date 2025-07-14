@@ -118,31 +118,35 @@ impl Future for ServiceSet {
                 }
 
                 // Check if any service has completed
-                for service in services.iter_mut() {
-                    // Skip services that have already finished (for tokio services)
-                    if service.is_tokio_service_finished() {
-                        // A service has exited, start shutdown sequence
-                        Self::initiate_shutdown(this);
-
-                        // Re-poll immediately to start the shutdown
-                        cx.waker().wake_by_ref();
-                        return std::task::Poll::Pending;
-                    }
-
+                let mut completed_idx = None;
+                for (idx, service) in services.iter_mut().enumerate() {
                     let service_pin = std::pin::Pin::new(service);
                     match service_pin.poll(cx) {
                         std::task::Poll::Ready(_) => {
-                            // A service has exited, start shutdown sequence
-                            Self::initiate_shutdown(this);
-
-                            // Re-poll immediately to start the shutdown
-                            cx.waker().wake_by_ref();
-                            return std::task::Poll::Pending;
+                            // A service has exited, mark for removal
+                            completed_idx = Some(idx);
+                            break;
                         }
                         std::task::Poll::Pending => {
                             // This service is still running
                         }
                     }
+                }
+
+                if let Some(idx) = completed_idx {
+                    // Remove the completed service to avoid polling it again
+                    let completed_service = services.remove(idx);
+                    tracing::info!(
+                        "Service {} has exited, initiating shutdown",
+                        completed_service.name()
+                    );
+
+                    // Now initiate shutdown with remaining services
+                    Self::initiate_shutdown(this);
+
+                    // Re-poll immediately to start the shutdown
+                    cx.waker().wake_by_ref();
+                    return std::task::Poll::Pending;
                 }
 
                 // All services are still running
@@ -219,14 +223,6 @@ impl ArbiterEnum {
 
     pub fn is_tokio_service(&self) -> bool {
         matches!(self, Self::TokioService { .. })
-    }
-
-    /// Checks if the tokio service has finished
-    pub fn is_tokio_service_finished(&self) -> bool {
-        match self {
-            Self::TokioService { handle, .. } => handle.is_finished(),
-            _ => false,
-        }
     }
 }
 
