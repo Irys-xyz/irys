@@ -110,10 +110,31 @@ impl VDFLimiterInfo {
     }
 
     pub fn set_seeds(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
+        let (next_seed, seed) = self.calculate_seeds(reset_frequency, parent_header);
+        debug!(
+            "Setting VDF seeds: next_seed: {}, seed: {}",
+            next_seed, seed
+        );
+        self.next_seed = next_seed;
+        self.seed = seed;
+    }
+
+    /// Returns a pair of expected seeds for the VDF limiter. The firs seed is `next_seed`,
+    /// and the second seed is `seed`.
+    pub fn calculate_seeds(
+        &self,
+        reset_frequency: u64,
+        parent_header: &IrysBlockHeader,
+    ) -> (H256, H256) {
         if let Some(step) = self.reset_step(reset_frequency) {
-            debug!("Creating VDF with reset step: {}", step);
-            self.next_seed = parent_header.block_hash;
-            self.seed = parent_header.vdf_limiter_info.next_seed;
+            debug!(
+                "VDFInfo contains a reset step {}, switching the seeds",
+                step
+            );
+            (
+                parent_header.block_hash,
+                parent_header.vdf_limiter_info.next_seed,
+            )
         } else {
             debug!(
                 "Using previous VDF seeds. First step: {}, last step: {}, reset_frequency: {}",
@@ -121,9 +142,10 @@ impl VDFLimiterInfo {
                 self.global_step_number,
                 reset_frequency
             );
-            // Otherwise, we set the next seed to the previous block next_seed.
-            self.next_seed = parent_header.vdf_limiter_info.next_seed;
-            self.seed = parent_header.vdf_limiter_info.seed;
+            (
+                parent_header.vdf_limiter_info.next_seed,
+                parent_header.vdf_limiter_info.seed,
+            )
         }
     }
 }
