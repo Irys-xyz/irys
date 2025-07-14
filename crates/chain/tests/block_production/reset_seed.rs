@@ -18,13 +18,13 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     let reset_interval_in_blocks = 4;
     // Approximately every 4 blocks - every 48 steps
     let reset_frequency = approximate_steps_in_a_block * reset_interval_in_blocks;
+    let required_index_blocks_height: usize = reset_interval_in_blocks * 10;
 
     // Setting up parameters explicitly to check that the reset seed is applied correctly
     let mut consensus_config = ConsensusConfig::testnet();
     consensus_config.vdf.reset_frequency = reset_frequency;
     consensus_config.block_migration_depth = 1;
-
-    let required_index_blocks_height: usize = reset_interval_in_blocks * 8;
+    consensus_config.block_tree_depth = 200;
 
     // setup trusted peers connection data and configs for genesis and nodes
     let mut testnet_config_genesis = NodeConfig::testnet();
@@ -78,14 +78,21 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     let expected_reset_steps = [48, 96, 144, 192];
     let blocks_with_resets = genesis_node_blocks
         .iter()
-        .filter_map(|block| {
+        .enumerate()
+        .filter_map(|(index, block)| {
             let first_step = block.vdf_limiter_info.first_step_number();
             let last_step = block.vdf_limiter_info.global_step_number;
+            let previous_block = if index == 0 {
+                // The first block should not have a previous block
+                None
+            } else {
+                Some(&genesis_node_blocks[index - 1])
+            };
             let is_reset_block = expected_reset_steps
                 .iter()
                 .find(|reset_step| first_step <= **reset_step && last_step >= **reset_step);
             if is_reset_block.is_some() {
-                Some(block.clone())
+                Some((block.clone(), previous_block.cloned()))
             } else {
                 None
             }
@@ -100,20 +107,14 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         return Err(eyre::eyre!("No blocks with reset seed found"));
     }
 
-    for (index, block) in blocks_with_resets.iter().enumerate() {
-        let expected_next_reset_seed = if index == 0 {
-            // The first reset shouldn't have a next_seed set, as we should jump over the genesis block
-            BlockHash::zero()
-        } else {
-            // Subsequent reset blocks should have the seed set to the hash of previous reset block
-            blocks_with_resets[index - 1].block_hash
-        };
-        let expected_current_reset_seed = if index < 2 {
-            BlockHash::zero()
-        } else {
-            // Subsequent reset blocks should have the seed set to the previous reset block hash
-            blocks_with_resets[index - 2].block_hash
-        };
+    for (block, previous_block) in blocks_with_resets.iter() {
+        // When performing a reset, the next reset seed is set to the block hash of the previous block,
+        // and the current reset seed is set to the next reset seed of the previous block.
+        let (expected_next_reset_seed, expected_current_reset_seed) = previous_block
+            .as_ref()
+            .map(|block| (block.block_hash, block.vdf_limiter_info.next_seed))
+            .unwrap_or_else(|| (BlockHash::zero(), BlockHash::zero()));
+
         let first_step = block.vdf_limiter_info.first_step_number();
         let last_step = block.vdf_limiter_info.global_step_number;
 
@@ -155,17 +156,13 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
                 if resets_so_far == 0 {
                     // During the first reset, both seeds should be zero
                     assert_eq!(block.vdf_limiter_info.seed, BlockHash::zero());
-                    assert_eq!(block.vdf_limiter_info.next_seed, BlockHash::zero());
-                } else if resets_so_far == 1 {
-                    // At the second reset the current seed should stay the same, but the next seed
-                    // should rotate
-                    assert_eq!(block.vdf_limiter_info.seed, BlockHash::zero());
-                    assert_ne!(
-                        block.vdf_limiter_info.next_seed,
-                        prev_block.vdf_limiter_info.next_seed
-                    );
+                    assert_eq!(block.vdf_limiter_info.next_seed, prev_block.block_hash);
                 } else {
                     // After that point seeds should rotate each reset block
+                    assert_eq!(
+                        block.vdf_limiter_info.seed,
+                        prev_block.vdf_limiter_info.next_seed
+                    );
                     assert_ne!(
                         block.vdf_limiter_info.seed,
                         prev_block.vdf_limiter_info.seed
@@ -210,6 +207,11 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         .await
         .expect("expected peer 1 to be fully synced");
 
+    warn!("Peer node synced, shutting down the nodes as we've got all blocks");
+
+    ctx_genesis_node.stop().await;
+    ctx_peer1_node.stop().await;
+
     for (index, peer_node_block) in peer_node_blocks.iter().enumerate() {
         let genesis_node_block = &genesis_node_blocks[index];
         assert_eq!(
@@ -232,8 +234,7 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         );
     }
 
-    // shut down peer nodes and then genesis node, we have what we need
-    tokio::join!(ctx_peer1_node.stop(), ctx_genesis_node.stop(),);
+    warn!("Reset seed peer verification completed");
 
     Ok(())
 }

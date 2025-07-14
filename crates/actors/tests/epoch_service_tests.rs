@@ -1,13 +1,9 @@
 use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
 use actix::{Actor as _, SystemService as _};
 use base58::ToBase58 as _;
+use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
-};
-use irys_actors::EpochBlockData;
-use irys_actors::{
-    block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-    epoch_service::EpochSnapshot,
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -15,7 +11,8 @@ use irys_actors::{
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex};
+use irys_database::{add_genesis_commitments, add_test_commitments};
+use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::PartitionChunkRange;

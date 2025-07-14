@@ -1,6 +1,7 @@
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::eyre;
-use irys_database::{block_header_by_hash, BlockIndex};
+use irys_database::block_header_by_hash;
+use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
     block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
@@ -287,12 +288,13 @@ pub fn vdf_steps_are_valid(
     config: &VdfConfig,
     vdf_steps_guard: &VdfStateReadonly,
 ) -> eyre::Result<()> {
+    let reset_seed = vdf_info.seed;
     info!(
         "Checking seed {:?} reset_seed {:?}",
-        vdf_info.prev_output, vdf_info.seed
+        vdf_info.prev_output, reset_seed
     );
 
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1_u64;
+    let start = vdf_info.first_step_number();
     let end: u64 = vdf_info.global_step_number;
 
     match vdf_steps_guard.read().get_steps(ii(start, end)) {
@@ -309,8 +311,6 @@ pub fn vdf_steps_are_valid(
         Err(err) =>
             tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err.to_string())
     };
-
-    let reset_seed = vdf_info.seed;
 
     let mut step_hashes = vdf_info.steps.clone();
 
