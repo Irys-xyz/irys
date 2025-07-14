@@ -1198,6 +1198,8 @@ async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
     node1.mine_block().await?;
     node1.wait_until_height(1, seconds_to_wait).await?;
     node2.wait_until_height(1, seconds_to_wait).await?;
+    assert_eq!(1, node1.get_max_difficulty_block().height);
+    assert_eq!(1, node2.get_max_difficulty_block().height);
 
     // Disable gossip on both nodes
     node1.gossip_disable();
