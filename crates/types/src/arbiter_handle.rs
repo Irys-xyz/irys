@@ -1,37 +1,81 @@
 use actix_rt::Arbiter;
+use futures::future::{BoxFuture, FutureExt};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tokio::task::JoinHandle as TokioJoinHandle;
 
-pub struct ServiceSet(Vec<ArbiterEnum>);
+enum ServiceSetState {
+    Polling(Vec<ArbiterEnum>),
+    ShuttingDown(BoxFuture<'static, ()>),
+}
+
+pub struct ServiceSet {
+    state: ServiceSetState,
+}
+
+impl ServiceSet {
+    pub fn new(services: Vec<ArbiterEnum>) -> Self {
+        Self {
+            state: ServiceSetState::Polling(services),
+        }
+    }
+}
 
 impl Future for ServiceSet {
     type Output = ();
 
     fn poll(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // Poll each service to see if any have completed
-        let services = &mut self.0;
-
-        for service in services.iter_mut() {
-            // Use pin_mut to create a pinned reference to each service
-            let service_pin = std::pin::Pin::new(service);
-            match service_pin.poll(cx) {
-                std::task::Poll::Ready(_) => {
-                    // At least one service has exited
-                    return std::task::Poll::Ready(());
+        // Get mutable access to self
+        let this = self.get_mut();
+        
+        match &mut this.state {
+            ServiceSetState::Polling(services) => {
+                // Check if any service has completed
+                for service in services.iter_mut() {
+                    let service_pin = std::pin::Pin::new(service);
+                    match service_pin.poll(cx) {
+                        std::task::Poll::Ready(_) => {
+                            // A service has exited, start shutdown sequence
+                            let services_to_shutdown = std::mem::take(services);
+                            
+                            // Create shutdown future that processes services sequentially
+                            let shutdown_future = async move {
+                                for service in services_to_shutdown {
+                                    let name = service.name().to_string();
+                                    tracing::info!("Shutting down service: {}", name);
+                                    service.stop_and_join().await;
+                                    tracing::info!("Service {} shut down", name);
+                                }
+                            }.boxed();
+                            
+                            // Transition to shutting down state
+                            this.state = ServiceSetState::ShuttingDown(shutdown_future);
+                            
+                            // Re-poll immediately to start the shutdown
+                            cx.waker().wake_by_ref();
+                            return std::task::Poll::Pending;
+                        }
+                        std::task::Poll::Pending => {
+                            // This service is still running
+                        }
+                    }
                 }
-                std::task::Poll::Pending => {
-                    // This service is still running, continue checking others
+                
+                // All services are still running
+                std::task::Poll::Pending
+            }
+            ServiceSetState::ShuttingDown(shutdown_future) => {
+                // Poll the shutdown future
+                match shutdown_future.poll_unpin(cx) {
+                    std::task::Poll::Ready(()) => std::task::Poll::Ready(()),
+                    std::task::Poll::Pending => std::task::Poll::Pending,
                 }
             }
         }
-
-        // All services are still running
-        std::task::Poll::Pending
     }
 }
 
