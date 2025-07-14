@@ -120,8 +120,7 @@ impl Future for ServiceSet {
                 // Check if any service has completed
                 let mut completed_idx = None;
                 for (idx, service) in services.iter_mut().enumerate() {
-                    let service_pin = std::pin::Pin::new(service);
-                    match service_pin.poll(cx) {
+                    match service.poll_unpin(cx) {
                         std::task::Poll::Ready(_) => {
                             // A service has exited, mark for removal
                             completed_idx = Some(idx);
@@ -233,11 +232,7 @@ impl Future for ArbiterEnum {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // Use unsafe to access the inner fields
-        // This is safe because we're not moving the data, just accessing it
-        let this = unsafe { self.get_unchecked_mut() };
-
-        match this {
+        match self.get_mut() {
             Self::ActixArbiter { .. } => {
                 // Actix arbiters don't support polling for completion
                 // They need to be explicitly stopped
@@ -245,8 +240,7 @@ impl Future for ArbiterEnum {
             }
             Self::TokioService { handle, .. } => {
                 // Poll the tokio join handle
-                let handle_pin = std::pin::Pin::new(handle);
-                match handle_pin.poll(cx) {
+                match handle.poll_unpin(cx) {
                     std::task::Poll::Ready(res) => {
                         std::task::Poll::Ready(res.map_err(|err| eyre::Report::new(err)))
                     }
