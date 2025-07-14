@@ -247,9 +247,6 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                     "Reth state before fork choice update"
                 );
 
-
-
-
                 handle
                     .update_forkchoice_full(head_hash, confirmed_hash, finalized_hash)
                     .await
