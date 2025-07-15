@@ -62,7 +62,7 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
                     .count()
                     >= min_resets_required
             },
-            10,  // blocks_per_batch
+            1,   // blocks_per_batch
             100, // max_blocks
             max_seconds,
         )
