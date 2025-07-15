@@ -1159,15 +1159,16 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 }
 
 /// Two node max block depth re-org test
-/// Gossip disabled after block 1. Peer 1 mines just short of block migration depth
-/// Peer 2 mines 1 less block than peer 1
-/// This means the fork is as long as it can be prior to reorg
-/// Gossip is re-enabled, peers gossip and peer 2 will reorg to the state of peer 1.
+/// Gossip disabled after block 1. Peer A mines just short of the migration depth
+/// while peer B mines one additional block. This creates the longest possible
+/// fork without triggering migration. Once gossip is re-enabled peer A should
+/// reorg to peer B's chain.
 #[test_log::test(actix_web::test)]
 async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
-    let num_blocks_in_epoch = 6; // test currently mines 4 blocks, and expects txs to remain in mempool
+    // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg
+    let num_blocks_in_epoch = 6;
     let seconds_to_wait = 15;
 
     // setup config
@@ -1243,22 +1244,34 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         .await;
 
     //
-    // Stage 5: MINE FORK A and B TO HEIGHT 4 and 5
+    // Stage 5: MINE FORK A and B TO HEIGHT block_migration_depth - 1 and
+    // block_migration_depth
     //
 
+    let blocks_a_to_mine = block_migration_depth as usize - 2;
+    let blocks_b_to_mine = block_migration_depth as usize - 1;
+
     // Mine competing blocks on A and B without gossip
-    let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
-    let (a_block3, _) = node_a.mine_block_without_gossip().await?; // block a3
-    let (a_block4, _) = node_a.mine_block_without_gossip().await?; // block a4
-    let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
-    let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
-    let (b_block4, _) = node_b.mine_block_without_gossip().await?; // block b4
-    let (b_block5, _) = node_b.mine_block_without_gossip().await?; // block b5
+    let mut a_blocks = Vec::with_capacity(blocks_a_to_mine);
+    for _ in 0..blocks_a_to_mine {
+        let (block, _) = node_a.mine_block_without_gossip().await?;
+        a_blocks.push(block);
+    }
+    let mut b_blocks = Vec::with_capacity(blocks_b_to_mine);
+    for _ in 0..blocks_b_to_mine {
+        let (block, _) = node_b.mine_block_without_gossip().await?;
+        b_blocks.push(block);
+    }
 
     // confirm the chains have forked
-    assert_ne!(a_block2, b_block2);
-    assert_ne!(a_block3, b_block3);
-    assert_ne!(a_block4, b_block4);
+    for (a_block, b_block) in a_blocks.iter().zip(b_blocks.iter()) {
+        assert_ne!(a_block, b_block);
+    }
+
+    // For convenience keep references to the first and last blocks on each chain
+    let a_block2 = &a_blocks[0];
+    let b_block2 = &b_blocks[0];
+    let b_last = b_blocks.last().expect("b_blocks not empty");
 
     // check how many txs made it into each block, we expect no more than 2
     assert_eq!(
@@ -1281,25 +1294,24 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         node_a.gossip_enable();
         node_b.gossip_enable();
         // Gossip all blocks so everyone syncs
-        node_b.gossip_block(&b_block2)?;
-        node_b.gossip_block(&b_block3)?;
-        node_b.gossip_block(&b_block4)?;
-        node_b.gossip_block(&b_block5)?;
-        node_a.gossip_block(&a_block2)?;
-        node_a.gossip_block(&a_block3)?;
-        node_a.gossip_block(&a_block4)?;
+        for block in &b_blocks {
+            node_b.gossip_block(block)?;
+        }
+        for block in &a_blocks {
+            node_a.gossip_block(block)?;
+        }
     }
     //
     // Stage 8: FINAL STATE CHECKS
     //
 
-    // confirm both nodes are at the same and expected height "5"
+    // confirm both nodes are at the same and expected height
     {
         node_a
-            .wait_until_height(b_block5.height, seconds_to_wait)
+            .wait_until_height(b_last.height, seconds_to_wait)
             .await?;
         node_b
-            .wait_until_height(b_block5.height, seconds_to_wait)
+            .wait_until_height(b_last.height, seconds_to_wait)
             .await?;
 
         // confirm chain has identical and expected height on all nodes
@@ -1307,10 +1319,10 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         let b_latest_height = node_b.get_canonical_chain_height().await;
         assert_eq!(a_latest_height, b_latest_height);
 
-        // confirm blocks at this height match b5
-        let a5 = node_a.get_block_by_height(b_block5.height).await?;
-        let b5 = node_b.get_block_by_height(b_block5.height).await?;
-        assert_eq!(a5, b5);
+        // confirm blocks at this height match on both nodes
+        let a_final = node_a.get_block_by_height(b_last.height).await?;
+        let b_final = node_b.get_block_by_height(b_last.height).await?;
+        assert_eq!(a_final, b_final);
     }
 
     // confirm mempool txs in nodes have remained in the mempool and,
