@@ -1302,7 +1302,7 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
             .wait_until_height(b_block5.height, seconds_to_wait)
             .await?;
 
-        // confirm chain has identical and expected height on all three nodes
+        // confirm chain has identical and expected height on all nodes
         let a_latest_height = node_a.get_canonical_chain_height().await;
         let b_latest_height = node_b.get_canonical_chain_height().await;
         assert_eq!(a_latest_height, b_latest_height);
