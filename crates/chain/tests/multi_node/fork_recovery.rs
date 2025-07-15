@@ -1306,24 +1306,23 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     //
 
     // confirm both nodes are at the same and expected height
-    {
-        node_a
-            .wait_until_height(b_last.height, seconds_to_wait)
-            .await?;
-        node_b
-            .wait_until_height(b_last.height, seconds_to_wait)
-            .await?;
+    node_a
+        .wait_until_height(b_last.height, seconds_to_wait)
+        .await?;
+    node_b
+        .wait_until_height(b_last.height, seconds_to_wait)
+        .await?;
 
-        // confirm chain has identical and expected height on all nodes
-        let a_latest_height = node_a.get_canonical_chain_height().await;
-        let b_latest_height = node_b.get_canonical_chain_height().await;
-        assert_eq!(a_latest_height, b_latest_height);
+    // confirm chain has identical and expected height on all nodes
+    let a_latest_height = node_a.get_canonical_chain_height().await;
+    let b_latest_height = node_b.get_canonical_chain_height().await;
+    assert_eq!(a_latest_height, b_latest_height);
 
-        // confirm blocks at this height match on both nodes
-        let a_final = node_a.get_block_by_height(b_last.height).await?;
-        let b_final = node_b.get_block_by_height(b_last.height).await?;
-        assert_eq!(a_final, b_final);
-    }
+    // confirm blocks at this height match on both nodes
+    let a_final = node_a.get_block_by_height(b_last.height).await?;
+    let b_final = node_b.get_block_by_height(b_last.height).await?;
+    assert_eq!(a_final, b_final);
+
 
     // confirm mempool txs in nodes have remained in the mempool and,
     // confirm that all txs have made it to all peers, regardless of canon status
@@ -1358,7 +1357,9 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         assert_eq!(
             sorted_commitments_at(&node_a, 2).await?,
             peer_b_commitment_txs
-        ); // expect only the two txs included in Peer B B2
+        );
+        assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
+        // expect only the two txs included in Peer B B2
         assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
         assert_eq!(sorted_commitments_at(&node_b, 1).await?, vec![]);
         assert_eq!(
@@ -1366,6 +1367,9 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
             peer_b_commitment_txs
         );
         assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
+        //also check final blocks for good measure, they should have no txs as we didn't post any after block 2
+        assert_eq!(sorted_commitments_at(&node_a, a_final.height).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, b_final.height).await?, vec![]);
     }
 
     // gracefully shutdown nodes
