@@ -710,6 +710,7 @@ pub fn is_seed_data_valid(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
         BlockFinalizedMessage,
@@ -718,13 +719,16 @@ mod tests {
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
     use irys_domain::{BlockIndex, EpochSnapshot};
+    use irys_testing_utils::initialize_tracing;
     use irys_testing_utils::utils::temporary_directory;
-    use irys_types::{hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, NodeConfig, Signature, H256, U256};
+    use irys_types::{
+        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64,
+        DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, NodeConfig,
+        Signature, H256, U256,
+    };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
     use tracing::{debug, info};
-    use irys_testing_utils::initialize_tracing;
-    use super::*;
 
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
@@ -1082,7 +1086,7 @@ mod tests {
                     9,
                     context.consensus_config.chunk_size as usize,
                 )
-                    .await;
+                .await;
             }
         }
     }
@@ -1090,7 +1094,7 @@ mod tests {
     async fn test_poa_with_malicious_merkle_data(
         context: &TestContext,
         txs: &[IrysTransaction],
-        #[allow(
+        #[expect(
             clippy::ptr_arg,
             reason = "we need to clone this so it needs to be a Vec"
         )]

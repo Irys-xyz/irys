@@ -1,6 +1,7 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
 use crate::chunked::ChunkedIterator;
+use crate::Base64;
 use crate::ChunkBytes;
 use crate::H256;
 use alloy_primitives::Address;
@@ -11,7 +12,6 @@ use eyre::Error;
 use eyre::OptionExt as _;
 use openssl::sha;
 use tracing::debug;
-use crate::Base64;
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
@@ -186,7 +186,8 @@ pub fn validate_path(
     );
 
     if !path_hash_matches_leaf {
-        return Err(eyre!("Invalid Leaf Proof: hash mismatch, expected: {:?}, got: {:?}",
+        return Err(eyre!(
+            "Invalid Leaf Proof: hash mismatch, expected: {:?}, got: {:?}",
             base64_url::encode(&expected_path_hash),
             base64_url::encode(&leaf_proof.data_hash)
         ));
