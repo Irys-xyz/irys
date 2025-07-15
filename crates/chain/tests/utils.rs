@@ -416,7 +416,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height of {} after {} retries",
+                "Failed to reach target index height of {} after {} retries",
                 target_height,
                 retries
             ))
@@ -526,7 +526,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             if retries >= max_retries {
                 return Err(eyre::eyre!(
-                    "Failed to reach target height {} after {} retries",
+                    "Failed to reach target confirmed height {} after {} retries",
                     target_height,
                     retries
                 ));
