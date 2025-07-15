@@ -1167,7 +1167,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
-    let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
+    let num_blocks_in_epoch = 6; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
 
     // setup config
