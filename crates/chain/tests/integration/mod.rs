@@ -6,3 +6,4 @@ pub mod tests {
     pub use crate::promotion;
 }
 pub mod cache_service;
+pub mod test_double_spend;
