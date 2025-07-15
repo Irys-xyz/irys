@@ -1168,8 +1168,8 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
     // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg
-    let num_blocks_in_epoch = 6;
-    let seconds_to_wait = 15;
+    let num_blocks_in_epoch = 10;
+    let seconds_to_wait = 30;
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
@@ -1322,7 +1322,6 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     let a_final = node_a.get_block_by_height(b_last.height).await?;
     let b_final = node_b.get_block_by_height(b_last.height).await?;
     assert_eq!(a_final, b_final);
-
 
     // confirm mempool txs in nodes have remained in the mempool and,
     // confirm that all txs have made it to all peers, regardless of canon status
