@@ -719,7 +719,11 @@ mod tests {
     use irys_database::add_genesis_commitments;
     use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
-    use irys_types::{irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash, DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, NodeConfig, Signature, H256, U256};
+    use irys_types::{
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
+        DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, NodeConfig,
+        Signature, H256, U256,
+    };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
     use tracing::{debug, info};
@@ -916,12 +920,39 @@ mod tests {
         //  should result in the seeds being rotated
         header_2.vdf_limiter_info.global_step_number = 3;
         header_2.vdf_limiter_info.steps = H256List(vec![H256::zero(); 2]);
-        header_2.vdf_limiter_info.set_seeds(reset_frequency, &parent_header);
+        header_2
+            .vdf_limiter_info
+            .set_seeds(reset_frequency, &parent_header);
         let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
 
-        assert_eq!(header_2.vdf_limiter_info.next_seed, parent_header.block_hash);
+        assert_eq!(
+            header_2.vdf_limiter_info.next_seed,
+            parent_header.block_hash
+        );
         assert_eq!(header_2.vdf_limiter_info.seed, parent_next_seed);
-        assert!(matches!(is_valid, ValidationResult::Valid), "Seed data should be valid");
+        assert!(
+            matches!(is_valid, ValidationResult::Valid),
+            "Seed data should be valid"
+        );
+
+        // Now let's try to rotate the seeds when no rotation is needed by increasing the
+        // reset frequency
+        let large_reset_frequency = 100;
+        let is_valid = is_seed_data_valid(&header_2, &parent_header, large_reset_frequency);
+        assert!(
+            matches!(is_valid, ValidationResult::Invalid),
+            "Seed data should still be valid"
+        );
+
+        // Now let's try to set some random seeds that are not valid
+        header_2.vdf_limiter_info.seed = BlockHash::from_slice(&[5; 32]);
+        header_2.vdf_limiter_info.next_seed = BlockHash::from_slice(&[6; 32]);
+        let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
+
+        assert!(
+            matches!(is_valid, ValidationResult::Invalid),
+            "Seed data should be invalid"
+        );
     }
 
     async fn poa_test(
