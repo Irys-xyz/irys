@@ -1317,3 +1317,230 @@ async fn heavy_two_node_reorg_upto_migration_depth() -> eyre::Result<()> {
     node1.stop().await;
     Ok(())
 }
+
+/// Two node max block depth re-org test
+/// Gossip disabled after block 1. Peer 1 mines just short of block migration depth
+/// Peer 2 mines 1 less block than peer 1
+/// This means the fork is as long as it can be prior to reorg
+/// Gossip is re-enabled, peers gossip and peer 2 will reorg to the state of peer 1.
+#[test_log::test(actix_web::test)]
+async fn heavy_reorg_upto_block_migration_depth2() -> eyre::Result<()> {
+    initialize_tracing();
+    // config variables
+    let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
+    let seconds_to_wait = 15;
+
+    // setup config
+    let block_migration_depth = num_blocks_in_epoch - 1;
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+
+    // signers
+    let b_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&b_signer]);
+
+    // genesis node / node_a
+    let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("NODE_A", seconds_to_wait)
+        .await;
+
+    // additional configs for peers
+    let config_b = node_a.testnet_peer_with_signer(&b_signer);
+
+    // start peer nodes
+    let node_b = IrysNodeTest::new(config_b)
+        .start_and_wait_for_packing("NODE_B", seconds_to_wait)
+        .await;
+
+    //
+    // Stage 1: STARTING STATE CHECKS
+    //
+
+    // check peer heights match genesis - i.e. that we are all in sync
+    let current_height = node_a.get_canonical_chain_height().await;
+    assert_eq!(current_height, 0);
+    node_b
+        .wait_until_height(current_height, seconds_to_wait)
+        .await?;
+
+    //
+    // Stage 2: MINE BLOCK
+    //
+
+    // mine a single block, and let everyone sync so future txs start at block height 1.
+    node_a.mine_block().await?; // mine block a1
+    node_a.wait_until_height(1, seconds_to_wait).await?;
+    let block_height_1 = node_a.get_block_by_height(1).await?; // get block a1
+    node_b
+        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
+        .await?;
+
+    assert_eq!(
+        block_height_1.system_ledgers.len(),
+        0,
+        "No txs should exist to be included in this block"
+    );
+
+    //
+    // Stage 3: DISABLE ANY/ALL GOSSIP
+    //
+    {
+        node_a.gossip_disable();
+        node_b.gossip_disable();
+    }
+
+    //
+    // Stage 4: GENERATE ISOLATED txs
+    //
+
+    // node_b generates txs in isolation for inclusion in block 2
+    let peer_b_b2_stake_tx = node_b
+        .post_stake_commitment_without_gossip(block_height_1.block_hash)
+        .await;
+    let peer_b_b2_pledge_tx = node_b
+        .post_pledge_commitment_without_gossip(peer_b_b2_stake_tx.id)
+        .await;
+
+    //
+    // Stage 5: MINE FORK A and B TO HEIGHT 4 and 5
+    //
+
+    // Mine competing blocks on A and B without gossip
+    let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    let (a_block3, _) = node_a.mine_block_without_gossip().await?; // block a3
+    let (a_block4, _) = node_a.mine_block_without_gossip().await?; // block a4
+    let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    let (b_block4, _) = node_b.mine_block_without_gossip().await?; // block b4
+    let (b_block5, _) = node_b.mine_block_without_gossip().await?; // block b5
+
+    // check how many txs made it into each block, we expect no more than 2
+    assert_eq!(
+        b_block2.system_ledgers.len(),
+        1,
+        "Expect 1 of the 2 isolated txs on peer B to be in this block. The stake tx and not the pledge tx."
+    );
+    assert_eq!(
+        a_block2.system_ledgers.len(),
+        0,
+        "No txs should have been gossiped back to peer A! {:?}",
+        a_block2.system_ledgers[0].tx_ids
+    ); // 0 commitments, also means 0 system ledgers
+
+    // NODE B -> Node C
+    // send full blocks to node c, this includes commitment txs for block 2
+    // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
+    // this will cause the txs that were previously canonical from C2 to become non canon
+    /*{
+        node_b.send_full_block(&node_c, &b_block2).await?;
+        tracing::error!("posted block 2: {:?}", b_block2.block_hash);
+        node_b.send_full_block(&node_c, &b_block3).await?;
+        tracing::error!("posted block 3: {:?}", b_block3.block_hash);
+
+        node_c.wait_for_block(&b_block2.block_hash, 10).await?;
+        node_c.wait_for_block(&b_block3.block_hash, 10).await?;
+        // check node A has not received blocks from B
+        assert!(
+            node_a
+                .wait_for_block(&b_block2.block_hash, 1)
+                .await
+                .is_err(),
+            "Node A should not yet have received block 2 from Node B"
+        );
+        assert!(
+            node_a
+                .wait_for_block(&b_block3.block_hash, 1)
+                .await
+                .is_err(),
+            "Node A should not yet have received block 3 from Node B"
+        );
+    }*/
+
+    //
+    // Stage 6: FINAL SYNC / RE-ORGs
+    //
+    {
+        // Enable gossip
+        node_a.gossip_enable();
+        node_b.gossip_enable();
+        // Gossip all blocks so everyone syncs
+        node_b.gossip_block(&b_block2)?;
+        node_b.gossip_block(&b_block3)?;
+        node_b.gossip_block(&b_block4)?;
+        node_b.gossip_block(&b_block5)?;
+        node_a.gossip_block(&a_block2)?;
+        node_a.gossip_block(&a_block3)?;
+        node_a.gossip_block(&a_block4)?;
+    }
+    //
+    // Stage 8: FINAL STATE CHECKS
+    //
+
+    // confirm all three nodes are at the same and expected height "4"
+    {
+        node_a
+            .wait_until_height(b_block5.height, seconds_to_wait)
+            .await?;
+        node_b
+            .wait_until_height(b_block5.height, seconds_to_wait)
+            .await?;
+
+        // confirm chain has identical and expected height on all three nodes
+        let a_latest_height = node_a.get_canonical_chain_height().await;
+        let b_latest_height = node_b.get_canonical_chain_height().await;
+        assert_eq!(a_latest_height, b_latest_height);
+
+        // confirm blocks at this height match c4
+        let a5 = node_a.get_block_by_height(b_block5.height).await?;
+        let b5 = node_b.get_block_by_height(b_block5.height).await?;
+        assert_eq!(a5, b5);
+    }
+
+    // confirm mempool txs in nodes have remained in the mempool and,
+    // confirm that all txs have made it to all peers, regardless of canon status
+    // Canonical blocks by mining peer: A1, B2, B3, C4
+    {
+        let mut peer_b_commitment_txs = vec![peer_b_b2_stake_tx.id, peer_b_b2_pledge_tx.id];
+        peer_b_commitment_txs.sort();
+        let mut all_commitment_txs = peer_b_commitment_txs.clone();
+        all_commitment_txs.sort();
+
+        // check txs are in mempools
+        node_b
+            .wait_for_mempool_commitment_txs(all_commitment_txs.clone(), seconds_to_wait)
+            .await
+            .expect("node_b and node_c txs to still be on node_b");
+
+        // sort tx order
+        async fn sorted_commitments_at(
+            node: &IrysNodeTest<IrysNodeCtx>,
+            height: u64,
+        ) -> eyre::Result<Vec<H256>> {
+            let mut txs = node
+                .get_block_by_height(height)
+                .await?
+                .get_commitment_ledger_tx_ids();
+            txs.sort();
+            Ok(txs)
+        }
+
+        // check correct txs made it into specific canon blocks, that are now synced across every node
+        assert_eq!(sorted_commitments_at(&node_a, 1).await?, vec![]);
+        assert_eq!(
+            sorted_commitments_at(&node_a, 2).await?,
+            peer_b_commitment_txs
+        ); // expect only the two txs included in Peer B B2
+        assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, 1).await?, vec![]);
+        assert_eq!(
+            sorted_commitments_at(&node_b, 2).await?,
+            peer_b_commitment_txs
+        );
+        assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
+    }
+
+    // gracefully shutdown nodes
+    tokio::join!(node_a.stop(), node_b.stop());
+    Ok(())
+}
