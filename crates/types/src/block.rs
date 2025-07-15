@@ -281,7 +281,9 @@ impl IrysBlockHeader {
     /// 1.) generating the prehash
     /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
-        self.signature
+        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
+        let signature_hash_matches_block_hash = self.block_hash == H256::from_slice(&id);
+        signature_hash_matches_block_hash && self.signature
             .validate_signature(self.signature_hash(), self.miner_address)
     }
 
@@ -1070,9 +1072,9 @@ mod tests {
             assert!(!header_clone.is_signature_valid());
         }
 
-        // assert that changing the block hash, the signature is still valid (because the validation does not validate )
+        // assert that changing the block hash changes the validation result to invalid
         header.block_hash = H256::random();
-        assert!(header.is_signature_valid());
+        assert!(!header.is_signature_valid());
     }
 
     fn mock_header() -> IrysBlockHeader {
