@@ -14,7 +14,7 @@ use tracing::{debug, error, warn};
 /// What we're testing:
 /// - Genesis node mines a bunch of blocks (about 42) with reset happening every 8 VDF steps
 /// - Since test mining produces ~1-2 steps per block, resets happen roughly every 4-8 blocks
-/// - We verify the reset seed logic: when a reset happens, the new seed comes from the 
+/// - We verify the reset seed logic: when a reset happens, the new seed comes from the
 ///   previous block's hash, and the current seed rotates from the previous next_seed
 /// - Then we spin up a peer node to sync all these blocks and make sure it validates
 ///   the reset seeds correctly too
