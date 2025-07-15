@@ -118,8 +118,12 @@ impl IrysTransactionHeader {
     /// 1.) generating the prehash
     /// 2.) recovering the sender address, and comparing it to the tx's sender (sender MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
-        self.signature
-            .validate_signature(self.signature_hash(), self.signer)
+        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
+        let id_matches_signature = self.id == H256::from(id);
+        id_matches_signature
+            && self
+                .signature
+                .validate_signature(self.signature_hash(), self.signer)
     }
 }
 
@@ -247,8 +251,12 @@ impl CommitmentTransaction {
     /// 1.) generating the prehash (signature_hash)
     /// 2.) recovering the sender address, and comparing it to the tx's sender (sender MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
-        self.signature
-            .validate_signature(self.signature_hash(), self.signer)
+        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
+        let id_matches_signature = self.id == H256::from(id);
+        id_matches_signature
+            && self
+                .signature
+                .validate_signature(self.signature_hash(), self.signer)
     }
 }
 

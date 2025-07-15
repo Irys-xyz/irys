@@ -282,9 +282,11 @@ impl IrysBlockHeader {
     /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
         let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
-        let signature_hash_matches_block_hash = self.block_hash == H256::from_slice(&id);
-        signature_hash_matches_block_hash && self.signature
-            .validate_signature(self.signature_hash(), self.miner_address)
+        let signature_hash_matches_block_hash = self.block_hash == H256::from(id);
+        signature_hash_matches_block_hash
+            && self
+                .signature
+                .validate_signature(self.signature_hash(), self.miner_address)
     }
 
     // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
