@@ -53,7 +53,7 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
-use itertools::Itertools;
+use itertools::Itertools as _;
 use reth::{
     api::Block as _,
     network::{PeerInfo, Peers as _},
