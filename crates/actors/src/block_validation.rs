@@ -719,7 +719,6 @@ mod tests {
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
     use irys_domain::{BlockIndex, EpochSnapshot};
-    use irys_testing_utils::initialize_tracing;
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64,
@@ -1050,7 +1049,6 @@ mod tests {
 
     #[actix::test]
     async fn poa_does_not_allow_modified_leaves() {
-        initialize_tracing();
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
