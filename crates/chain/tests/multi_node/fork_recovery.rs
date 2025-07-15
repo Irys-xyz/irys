@@ -1368,8 +1368,14 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         );
         assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
         //also check final blocks for good measure, they should have no txs as we didn't post any after block 2
-        assert_eq!(sorted_commitments_at(&node_a, a_final.height).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_b, b_final.height).await?, vec![]);
+        assert_eq!(
+            sorted_commitments_at(&node_a, a_final.height).await?,
+            vec![]
+        );
+        assert_eq!(
+            sorted_commitments_at(&node_b, b_final.height).await?,
+            vec![]
+        );
     }
 
     // gracefully shutdown nodes
