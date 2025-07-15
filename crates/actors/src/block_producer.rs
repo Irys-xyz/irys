@@ -160,33 +160,24 @@ impl BlockProducerService {
         );
         loop {
             tokio::select! {
+                biased;
+
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for block producer service");
+                    break;
+                }
                 // Handle commands
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(cmd) => {
-                            let res = self.handle_command(cmd).await;
-                            if let Err(err) = res {
-                                // because we don't have our shutdown system fully finished,
-                                // block producer may error out while other services are in the middle of shutting down.
-                                let is_shutdown = futures::future::poll_immediate(&mut self.shutdown).await.is_some();
-                                if is_shutdown {
-                                    // graceful shutdown
-                                    break;
-                                }
-                                // legit error - propagate
-                                return Err(err)
-                            }
+                            self.handle_command(cmd).await?;
                         }
                         None => {
                             warn!("Command channel closed unexpectedly");
                             break;
                         }
                     }
-                }
-                // Check for shutdown signal
-                _ = &mut self.shutdown => {
-                    info!("Shutdown signal received for block producer service");
-                    break;
                 }
             }
         }
