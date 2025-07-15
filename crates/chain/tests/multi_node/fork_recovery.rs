@@ -1302,7 +1302,7 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         }
     }
     //
-    // Stage 8: FINAL STATE CHECKS
+    // Stage 7: FINAL STATE CHECKS
     //
 
     // confirm both nodes are at the same and expected height
