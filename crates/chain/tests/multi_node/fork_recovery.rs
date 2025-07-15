@@ -1197,7 +1197,7 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // Stage 1: STARTING STATE CHECKS
     //
 
-    // check peer heights match genesis - i.e. that we are all in sync
+    // check peer heights match genesis - i.e. that we are all in sync on block 0
     let current_height = node_a.get_canonical_chain_height().await;
     assert_eq!(current_height, 0);
     node_b
@@ -1254,6 +1254,11 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
     let (b_block4, _) = node_b.mine_block_without_gossip().await?; // block b4
     let (b_block5, _) = node_b.mine_block_without_gossip().await?; // block b5
+
+    // confirm the chains have forked
+    assert_ne!(a_block2, b_block2);
+    assert_ne!(a_block3, b_block3);
+    assert_ne!(a_block4, b_block4);
 
     // check how many txs made it into each block, we expect no more than 2
     assert_eq!(
@@ -1317,7 +1322,7 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // Stage 8: FINAL STATE CHECKS
     //
 
-    // confirm all three nodes are at the same and expected height "4"
+    // confirm both nodes are at the same and expected height "5"
     {
         node_a
             .wait_until_height(b_block5.height, seconds_to_wait)
@@ -1331,7 +1336,7 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         let b_latest_height = node_b.get_canonical_chain_height().await;
         assert_eq!(a_latest_height, b_latest_height);
 
-        // confirm blocks at this height match c4
+        // confirm blocks at this height match b5
         let a5 = node_a.get_block_by_height(b_block5.height).await?;
         let b5 = node_b.get_block_by_height(b_block5.height).await?;
         assert_eq!(a5, b5);
