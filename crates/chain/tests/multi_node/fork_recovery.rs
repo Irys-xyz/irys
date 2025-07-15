@@ -1248,8 +1248,8 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // block_migration_depth
     //
 
-    let blocks_a_to_mine = block_migration_depth as usize - 2;
-    let blocks_b_to_mine = block_migration_depth as usize - 1;
+    let blocks_a_to_mine = block_migration_depth - 2;
+    let blocks_b_to_mine = block_migration_depth - 1;
 
     // Mine competing blocks on A and B without gossip
     let mut a_blocks = Vec::with_capacity(blocks_a_to_mine);
