@@ -276,22 +276,45 @@ fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     unsafe { Vec::from_raw_parts(ptr as *mut [u8; N], length, length) }
 }
 
+impl PackingActor {
+    /// Spawn packing controllers and return TokioServiceHandles for them
+    pub fn spawn_packing_controllers(
+        &self,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Vec<irys_types::TokioServiceHandle> {
+        let mut handles = Vec::new();
+        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
+
+        for key in keys {
+            let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+            let self_clone = self.clone();
+            let pending_jobs = self.pending_jobs.get(&key).unwrap().clone();
+
+            let handle = runtime_handle.spawn(async move {
+                tokio::select! {
+                    _ = Self::process_jobs(self_clone, key, pending_jobs) => {},
+                    _ = shutdown_rx => {
+                        tracing::info!("Packing controller for SM {} received shutdown signal", key);
+                    }
+                }
+            });
+
+            handles.push(irys_types::TokioServiceHandle {
+                name: format!("packing_controller_sm_{}", key),
+                handle,
+                shutdown_signal: shutdown_tx,
+            });
+        }
+
+        handles
+    }
+}
+
 impl Actor for PackingActor {
     type Context = Context<Self>;
 
     fn start(self) -> actix::Addr<Self> {
-        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
-        for key in keys {
-            self.task_executor.spawn_critical(
-                "packing controller",
-                Self::process_jobs(
-                    self.clone(),
-                    key,
-                    self.pending_jobs.get(&key).unwrap().clone(),
-                ),
-            );
-        }
-
+        // Controllers are now spawned separately via spawn_packing_controllers
         Context::new().run(self)
     }
 

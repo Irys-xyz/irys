@@ -124,6 +124,7 @@ impl BlockProducerService {
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
         rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!(
             "Spawning block producer service with blocks_remaining_for_test: {:?}",
@@ -131,7 +132,7 @@ impl BlockProducerService {
         );
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-        let handle = tokio::spawn(async move {
+        let handle = runtime_handle.spawn(async move {
             let service = Self {
                 shutdown: shutdown_rx,
                 cmd_rx: rx,

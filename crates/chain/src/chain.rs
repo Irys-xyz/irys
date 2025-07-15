@@ -565,6 +565,7 @@ impl IrysNode {
             block_index,
             self.gossip_listener,
             shadow_tx_store.clone(),
+            tokio_runtime.handle().clone(),
         )?;
 
         // start reth
@@ -648,6 +649,7 @@ impl IrysNode {
         block_index: BlockIndex,
         gossip_listener: TcpListener,
         shadow_tx_store: ShadowTxStore,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Result<JoinHandle<()>, eyre::Error> {
         let span = Span::current();
         let actor_main_thread_handle = std::thread::Builder::new()
@@ -675,6 +677,7 @@ impl IrysNode {
                                 irys_db,
                                 gossip_listener,
                                 shadow_tx_store,
+                                runtime_handle,
                             )
                             .instrument(Span::current())
                             .await
@@ -815,6 +818,7 @@ impl IrysNode {
         irys_db: DatabaseProvider,
         gossip_listener: TcpListener,
         shadow_tx_store: ShadowTxStore,
+        runtime_handle: tokio::runtime::Handle,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -844,11 +848,11 @@ impl IrysNode {
         node_config.reth_peer_info = reth_peering;
         let config = Config::new(node_config);
 
-        let _handle = ChunkCacheService::spawn_service(
-            task_exec,
+        let chunk_cache_handle = ChunkCacheService::spawn_service(
             irys_db.clone(),
             receivers.chunk_cache,
             config.clone(),
+            runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
 
@@ -879,8 +883,7 @@ impl IrysNode {
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
-        let _handle = BlockTreeService::spawn_service(
-            task_exec,
+        let block_tree_handle = BlockTreeService::spawn_service(
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
@@ -889,6 +892,7 @@ impl IrysNode {
             &config,
             &service_senders,
             reth_service_actor.clone(),
+            runtime_handle.clone(),
         );
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -916,8 +920,7 @@ impl IrysNode {
         );
 
         // Spawn mempool service
-        let _mempool_handle = MempoolService::spawn_service(
-            task_exec,
+        let mempool_handle = MempoolService::spawn_service(
             irys_db.clone(),
             reth_node_adapter.clone(),
             storage_modules_guard.clone(),
@@ -925,7 +928,8 @@ impl IrysNode {
             receivers.mempool,
             &config,
             &service_senders,
-        );
+            runtime_handle.clone(),
+        )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
         // spawn the chunk migration service
@@ -947,8 +951,7 @@ impl IrysNode {
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
         // Spawn the validation service
-        let (_handle, validation_enabled) = ValidationService::spawn_service(
-            task_exec,
+        let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),
             vdf_state_readonly.clone(),
@@ -958,6 +961,7 @@ impl IrysNode {
             irys_db.clone(),
             execution_payload_provider.clone(),
             receivers.validation_service,
+            runtime_handle.clone(),
         );
 
         // create the block reward curve
@@ -1031,6 +1035,7 @@ impl IrysNode {
             receivers.block_producer,
             reth_node.provider.clone(),
             shadow_tx_store.clone(),
+            runtime_handle.clone(),
         );
 
         let (global_step_number, last_step_hash) =
@@ -1038,12 +1043,14 @@ impl IrysNode {
         let initial_hash = last_step_hash.0;
 
         // set up packing actor
-        let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(
-            &config,
-            global_step_number,
-            task_exec,
-            &storage_modules_guard,
-        );
+        let (atomic_global_step_number, packing_actor_addr, packing_controller_handles) =
+            Self::init_packing_actor(
+                &config,
+                global_step_number,
+                task_exec,
+                &storage_modules_guard,
+                runtime_handle.clone(),
+            );
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
@@ -1106,40 +1113,29 @@ impl IrysNode {
             storage_modules_guard,
         };
 
-        // Spawn the StorageModuleService to manage the lifecycle of storage modules
+        // Spawn the StorageModuleService to manage the life-cycle of storage modules
         // This service:
         // - Monitors partition assignments from the network
         // - Initializes storage modules when they receive partition assignments
         // - Handles the dynamic addition/removal of storage modules
         // - Coordinates with the epoch service for runtime updates
         debug!("Starting StorageModuleService");
-        let _handle = StorageModuleService::spawn_service(
-            task_exec,
+        let storage_module_handle = StorageModuleService::spawn_service(
             receivers.storage_modules,
             storage_modules,
             &irys_node_ctx.actor_addresses,
             &config,
+            runtime_handle.clone(),
         );
 
         let mut services = Vec::new();
         {
-            // Add the tokio service handle for block producer
-            services.push(ArbiterEnum::TokioService(block_producer_handle));
+            // Services are shut down in FIFO order (first added = first to shut down)
+            // So we add them in order of least critical to most critical
 
+            // 1. Mining operations (can stop first)
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(broadcast_arbiter, "broadcast_arbiter".to_string()),
-            });
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(
-                    block_discovery_arbiter,
-                    "block_discovery_arbiter".to_string(),
-                ),
-            });
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()),
-            });
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()),
             });
             services.extend(
                 part_arbiters
@@ -1148,6 +1144,42 @@ impl IrysNode {
                         arbiter: ArbiterHandle::new(x, "partition_arbiter".to_string()),
                     }),
             );
+            // Add packing controllers to services
+            services.extend(
+                packing_controller_handles
+                    .into_iter()
+                    .map(ArbiterEnum::TokioService),
+            );
+
+            // 2. Block production flow
+            services.push(ArbiterEnum::TokioService(block_producer_handle));
+            services.push(ArbiterEnum::ActixArbiter {
+                arbiter: ArbiterHandle::new(
+                    block_discovery_arbiter,
+                    "block_discovery_arbiter".to_string(),
+                ),
+            });
+
+            // 3. Validation
+            services.push(ArbiterEnum::TokioService(validation_handle));
+
+            // 4. Storage operations
+            services.push(ArbiterEnum::TokioService(chunk_cache_handle));
+            services.push(ArbiterEnum::TokioService(storage_module_handle));
+
+            // 5. Chain management
+            services.push(ArbiterEnum::TokioService(block_tree_handle));
+
+            // 6. State management
+            services.push(ArbiterEnum::TokioService(mempool_handle));
+
+            // 7. Core infrastructure (shutdown last)
+            services.push(ArbiterEnum::ActixArbiter {
+                arbiter: ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()),
+            });
+            services.push(ArbiterEnum::ActixArbiter {
+                arbiter: ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()),
+            });
         }
 
         let server = run_server(
@@ -1315,13 +1347,23 @@ impl IrysNode {
         global_step_number: u64,
         task_executor: &TaskExecutor,
         storage_modules_guard: &StorageModulesReadGuard,
-    ) -> (Arc<AtomicU64>, actix::Addr<PackingActor>) {
+        runtime_handle: tokio::runtime::Handle,
+    ) -> (
+        Arc<AtomicU64>,
+        actix::Addr<PackingActor>,
+        Vec<TokioServiceHandle>,
+    ) {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let packing_config = PackingConfig::new(config);
-        let packing_actor_addr =
-            PackingActor::new(task_executor.clone(), sm_ids, packing_config).start();
-        (atomic_global_step_number, packing_actor_addr)
+        let packing_actor = PackingActor::new(task_executor.clone(), sm_ids, packing_config);
+        let packing_controller_handles = packing_actor.spawn_packing_controllers(runtime_handle);
+        let packing_actor_addr = packing_actor.start();
+        (
+            atomic_global_step_number,
+            packing_actor_addr,
+            packing_controller_handles,
+        )
     }
 
     fn init_block_producer(
@@ -1339,6 +1381,7 @@ impl IrysNode {
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,
+        runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
@@ -1362,6 +1405,7 @@ impl IrysNode {
             block_producer_inner.clone(),
             None, // blocks_remaining_for_test
             block_producer_rx,
+            runtime_handle,
         );
 
         (block_producer_inner, tokio_service_handle)
