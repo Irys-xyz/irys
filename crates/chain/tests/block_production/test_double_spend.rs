@@ -25,7 +25,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // TEST CASE 1: create a tx for later migration to block index,
     //              testing it cannot be resumbitted back into mempool after migration
     // create and submit a data transaction
-    let tx_data = vec![1u8; 64];
+    let tx_data = vec![1_u8; 64];
     let anchor = H256::zero();
     let tx_for_migration = node.post_data_tx(anchor, tx_data, &signer).await;
     let txid = tx_for_migration.header.id;
@@ -53,7 +53,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // TEST CASE 2: create a tx for the mempool,
     //              testing it cannot be resubmitted to the mempool after mining
     // create and submit a data transaction
-    let tx_data = vec![1u8; 64];
+    let tx_data = vec![1_u8; 64];
     let anchor = txid; //chain from prior tx
     let tx_for_mempool = node.post_data_tx(anchor, tx_data, &signer).await;
     let txid = tx_for_mempool.header.id;
