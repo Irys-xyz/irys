@@ -1273,35 +1273,6 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         a_block2.system_ledgers[0].tx_ids
     ); // 0 commitments, also means 0 system ledgers
 
-    // NODE B -> Node C
-    // send full blocks to node c, this includes commitment txs for block 2
-    // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
-    // this will cause the txs that were previously canonical from C2 to become non canon
-    /*{
-        node_b.send_full_block(&node_c, &b_block2).await?;
-        tracing::error!("posted block 2: {:?}", b_block2.block_hash);
-        node_b.send_full_block(&node_c, &b_block3).await?;
-        tracing::error!("posted block 3: {:?}", b_block3.block_hash);
-
-        node_c.wait_for_block(&b_block2.block_hash, 10).await?;
-        node_c.wait_for_block(&b_block3.block_hash, 10).await?;
-        // check node A has not received blocks from B
-        assert!(
-            node_a
-                .wait_for_block(&b_block2.block_hash, 1)
-                .await
-                .is_err(),
-            "Node A should not yet have received block 2 from Node B"
-        );
-        assert!(
-            node_a
-                .wait_for_block(&b_block3.block_hash, 1)
-                .await
-                .is_err(),
-            "Node A should not yet have received block 3 from Node B"
-        );
-    }*/
-
     //
     // Stage 6: FINAL SYNC / RE-ORGs
     //
