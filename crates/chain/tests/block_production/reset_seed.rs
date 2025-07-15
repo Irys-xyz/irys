@@ -2,8 +2,8 @@ use crate::utils::{AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, IrysTransaction,
-    IrysTransactionId, NodeConfig, NodeMode,
+    irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, IrysBlockHeader,
+    IrysTransaction, IrysTransactionId, NodeConfig, NodeMode,
 };
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -18,20 +18,18 @@ use tracing::{debug, warn};
 ///    - seed = previous block's next_seed
 /// 3. Verifies non-reset blocks maintain seed continuity
 /// 4. Spins up a peer node to verify reset seeds propagate correctly during sync
-///
-/// This approach is machine-independent since we detect resets dynamically rather
-/// than trying to predict when they'll occur.
 #[test_log::test(actix_web::test)]
 async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer(
 ) -> eyre::Result<()> {
     let max_seconds = 20;
     let reset_frequency = 8; // Reset every 8 VDF steps
     let min_resets_required = 2; // Need at least 2 resets to verify behavior
+    let block_migration_depth = 1;
 
     // Setting up parameters explicitly to check that the reset seed is applied correctly
     let mut consensus_config = ConsensusConfig::testnet();
     consensus_config.vdf.reset_frequency = reset_frequency;
-    consensus_config.block_migration_depth = 1;
+    consensus_config.block_migration_depth = block_migration_depth;
     consensus_config.block_tree_depth = 200;
 
     // setup trusted peers connection data and configs for genesis and nodes
@@ -45,178 +43,44 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
 
-    // generate a txn and add it to the block...
+    // Generate a test transaction to include in blocks
     generate_test_transaction_and_add_to_block(&ctx_genesis_node, &account1).await;
 
-    // Mine blocks until we observe enough resets
-    let mut resets_found = 0;
-    let mut total_blocks_mined = 0;
-    let blocks_per_batch = 10;
-    let max_blocks = 100; // Safety limit
-    
-    let mut all_blocks = Vec::new();
-    
-    while resets_found < min_resets_required && total_blocks_mined < max_blocks {
-        // Mine a batch of blocks
-        ctx_genesis_node
-            .mine_blocks(blocks_per_batch)
-            .await
-            .expect("expected to mine blocks");
-        
-        total_blocks_mined += blocks_per_batch;
-        
-        // Wait for blocks to be indexed
-        ctx_genesis_node
-            .wait_until_height(total_blocks_mined as u64, max_seconds)
-            .await?;
-        
-        // Get all blocks mined so far
-        let blocks = ctx_genesis_node
-            .get_blocks(0, total_blocks_mined as u64)
-            .await
-            .expect("expected to get mined blocks");
-        
-        // Count resets in all blocks
-        resets_found = blocks
-            .iter()
-            .filter(|block| block.vdf_limiter_info.reset_step(reset_frequency as u64).is_some())
-            .count();
-        
-        all_blocks = blocks;
-        
-        debug!(
-            "Mined {} blocks, found {} resets so far",
-            total_blocks_mined, resets_found
-        );
-    }
-    
-    if resets_found < min_resets_required {
-        return Err(eyre::eyre!(
-            "Only found {} resets after mining {} blocks, needed at least {}",
-            resets_found,
-            total_blocks_mined,
-            min_resets_required
-        ));
-    }
-    
-    warn!(
-        "Genesis node mined {} blocks, found {} reset events",
-        total_blocks_mined, resets_found
-    );
-    
-    let genesis_node_blocks = all_blocks;
+    // Mine blocks until we observe enough VDF resets
+    let reset_frequency_u64 = reset_frequency as u64;
+    let total_blocks_mined = ctx_genesis_node
+        .mine_until_condition(
+            |blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| {
+                        block
+                            .vdf_limiter_info
+                            .reset_step(reset_frequency_u64)
+                            .is_some()
+                    })
+                    .count()
+                    >= min_resets_required
+            },
+            10,  // blocks_per_batch
+            100, // max_blocks
+            max_seconds,
+        )
+        .await?;
 
-    // Debug: Log all blocks to understand VDF step progression
-    for (index, block) in genesis_node_blocks.iter().enumerate() {
-        let first_step = block.vdf_limiter_info.first_step_number();
-        let last_step = block.vdf_limiter_info.global_step_number;
-        debug!(
-            "Block {} ({}): steps {} to {} (span: {})",
-            index,
-            block.block_hash,
-            first_step,
-            last_step,
-            last_step - first_step + 1
-        );
-    }
+    let genesis_node_blocks = ctx_genesis_node
+        .get_blocks(0, total_blocks_mined as u64)
+        .await?;
 
-    // Find all blocks that contain a reset
-    let blocks_with_resets = genesis_node_blocks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, block)| {
-            if block.vdf_limiter_info.reset_step(reset_frequency as u64).is_some() {
-                let previous_block = if index == 0 {
-                    None
-                } else {
-                    Some(&genesis_node_blocks[index - 1])
-                };
-                Some((block.clone(), previous_block.cloned()))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    // Find and verify blocks that contain VDF resets
+    let blocks_with_resets = ctx_genesis_node
+        .get_blocks_with_vdf_resets(0, total_blocks_mined as u64)
+        .await?;
 
-    for (block, previous_block) in blocks_with_resets.iter() {
-        // When performing a reset, the next reset seed is set to the block hash of the previous block,
-        // and the current reset seed is set to the next reset seed of the previous block.
-        let (expected_next_reset_seed, expected_current_reset_seed) = previous_block
-            .as_ref()
-            .map(|block| (block.block_hash, block.vdf_limiter_info.next_seed))
-            .unwrap_or_else(|| (BlockHash::zero(), BlockHash::zero()));
+    verify_reset_seeds(&blocks_with_resets, &genesis_node_blocks);
 
-        let first_step = block.vdf_limiter_info.first_step_number();
-        let last_step = block.vdf_limiter_info.global_step_number;
-
-        assert_eq!(
-            block.vdf_limiter_info.next_seed, expected_next_reset_seed,
-            "Reset seed mismatch for block {:?}: expected {:?}, got {:?}",
-            block.block_hash, expected_next_reset_seed, block.vdf_limiter_info.next_seed
-        );
-        assert_eq!(
-            block.vdf_limiter_info.seed, expected_current_reset_seed,
-            "Current reset seed mismatch for block {:?}: expected {:?}, got {:?}",
-            block.block_hash, expected_current_reset_seed, block.vdf_limiter_info.seed
-        );
-        debug!(
-            "Block with reset seed found: {}: first_step: {}, last_step: {}, next_seed: {:?}",
-            block.block_hash, first_step, last_step, block.vdf_limiter_info.next_seed
-        );
-    }
-
-    let mut resets_so_far = 0;
-    // The test above verifies that the reset seed is applied correctly at a correct block,
-    // this test ensures that the reset seed is carried over correctly on the blocks that don't
-    // have a reset step
-    for (index, block) in genesis_node_blocks.iter().enumerate() {
-        let previous_block = if index == 0 {
-            // The first block should not have a previous block
-            None
-        } else {
-            Some(&genesis_node_blocks[index - 1])
-        };
-
-        // Check that reset seeds are rotating correctly
-        if let Some(prev_block) = previous_block {
-            if block
-                .vdf_limiter_info
-                .reset_step(reset_frequency as u64)
-                .is_some()
-            {
-                if resets_so_far == 0 {
-                    // During the first reset, both seeds should be zero
-                    assert_eq!(block.vdf_limiter_info.seed, BlockHash::zero());
-                    assert_eq!(block.vdf_limiter_info.next_seed, prev_block.block_hash);
-                } else {
-                    // After that point seeds should rotate each reset block
-                    assert_eq!(
-                        block.vdf_limiter_info.seed,
-                        prev_block.vdf_limiter_info.next_seed
-                    );
-                    assert_ne!(
-                        block.vdf_limiter_info.seed,
-                        prev_block.vdf_limiter_info.seed
-                    );
-                    assert_ne!(
-                        block.vdf_limiter_info.next_seed,
-                        prev_block.vdf_limiter_info.next_seed
-                    );
-                }
-                resets_so_far += 1;
-            } else {
-                assert_eq!(
-                    block.vdf_limiter_info.seed, prev_block.vdf_limiter_info.seed,
-                    "Seed should not change for non-reset blocks at index {}",
-                    index
-                );
-            }
-        } else {
-            // The genesis block should not have a reset seed
-            assert_eq!(block.vdf_limiter_info.seed, BlockHash::zero());
-            assert_eq!(block.vdf_limiter_info.next_seed, BlockHash::zero());
-        }
-    }
+    // Verify seed continuity across all blocks
+    verify_seed_continuity(&genesis_node_blocks, reset_frequency as u64);
 
     warn!("Reset seed verification completed, starting peer node to verify that syncing works");
 
@@ -229,47 +93,22 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         .await;
     ctx_peer1_node.start_public_api().await;
 
-    // Wait for peer to sync all the blocks we mined
-    // We need to wait for a bit less than total_blocks_mined due to block_migration_depth
-    let peer_sync_height = (total_blocks_mined as u64).saturating_sub(2);
+    // Wait for peer to sync
+    let peer_sync_height = (total_blocks_mined as u64).saturating_sub(block_migration_depth as u64);
     ctx_peer1_node
         .wait_until_height(peer_sync_height, max_seconds * 3)
         .await?;
 
-    let peer_node_blocks = ctx_peer1_node
-        .get_blocks(0, peer_sync_height)
-        .await
-        .expect("expected peer 1 to be fully synced");
+    warn!("Peer node synced, verifying blocks match");
 
-    warn!("Peer node synced, shutting down the nodes as we've got all blocks");
+    ctx_genesis_node
+        .verify_blocks_match(&ctx_peer1_node, 0, peer_sync_height)
+        .await?;
+
+    warn!("Block verification completed, shutting down nodes");
 
     ctx_genesis_node.stop().await;
     ctx_peer1_node.stop().await;
-
-    // Compare only the blocks that the peer has synced
-    let blocks_to_compare = peer_node_blocks.len();
-    for index in 0..blocks_to_compare {
-        let peer_node_block = &peer_node_blocks[index];
-        let genesis_node_block = &genesis_node_blocks[index];
-        assert_eq!(
-            peer_node_block.block_hash, genesis_node_block.block_hash,
-            "Block hash mismatch at index {}: expected {:?}, got {:?}",
-            index, genesis_node_block.block_hash, peer_node_block.block_hash
-        );
-        assert_eq!(
-            peer_node_block.vdf_limiter_info.next_seed,
-            genesis_node_block.vdf_limiter_info.next_seed,
-            "Next reset seed mismatch at index {}: expected {:?}, got {:?}",
-            index,
-            genesis_node_block.vdf_limiter_info.next_seed,
-            peer_node_block.vdf_limiter_info.next_seed
-        );
-        assert_eq!(
-            peer_node_block.vdf_limiter_info.seed, genesis_node_block.vdf_limiter_info.seed,
-            "Current reset seed mismatch at index {}: expected {:?}, got {:?}",
-            index, genesis_node_block.vdf_limiter_info.seed, peer_node_block.vdf_limiter_info.seed
-        );
-    }
 
     warn!("Reset seed peer verification completed");
 
@@ -294,4 +133,82 @@ async fn generate_test_transaction_and_add_to_block(
         Err(e) => panic!("unexpected error {:?}", e),
     }
     irys_txs
+}
+
+/// Verify reset seeds are applied correctly
+fn verify_reset_seeds(blocks_with_resets: &[IrysBlockHeader], all_blocks: &[IrysBlockHeader]) {
+    for block in blocks_with_resets.iter() {
+        // Find the previous block
+        let previous_block = if block.height == 0 {
+            None
+        } else {
+            all_blocks.iter().find(|b| b.height == block.height - 1)
+        };
+
+        // When performing a reset, the next reset seed is set to the block hash of the previous block,
+        // and the current reset seed is set to the next reset seed of the previous block.
+        let (expected_next_reset_seed, expected_current_reset_seed) = previous_block
+            .map(|block| (block.block_hash, block.vdf_limiter_info.next_seed))
+            .unwrap_or_else(|| (BlockHash::zero(), BlockHash::zero()));
+
+        let first_step = block.vdf_limiter_info.first_step_number();
+        let last_step = block.vdf_limiter_info.global_step_number;
+
+        assert_eq!(
+            block.vdf_limiter_info.next_seed, expected_next_reset_seed,
+            "Reset seed mismatch for block {:?}: expected {:?}, got {:?}",
+            block.block_hash, expected_next_reset_seed, block.vdf_limiter_info.next_seed
+        );
+        assert_eq!(
+            block.vdf_limiter_info.seed, expected_current_reset_seed,
+            "Current reset seed mismatch for block {:?}: expected {:?}, got {:?}",
+            block.block_hash, expected_current_reset_seed, block.vdf_limiter_info.seed
+        );
+        debug!(
+            "Block with reset seed found: {}: first_step: {}, last_step: {}, next_seed: {:?}",
+            block.block_hash, first_step, last_step, block.vdf_limiter_info.next_seed
+        );
+    }
+}
+
+/// Verify seed continuity across all blocks
+fn verify_seed_continuity(blocks: &[IrysBlockHeader], reset_frequency: u64) {
+    let mut resets_so_far = 0;
+
+    for (index, block) in blocks.iter().enumerate() {
+        let previous_block = if index == 0 {
+            None
+        } else {
+            Some(&blocks[index - 1])
+        };
+
+        // Check that reset seeds are rotating correctly
+        if let Some(prev_block) = previous_block {
+            if block.vdf_limiter_info.reset_step(reset_frequency).is_some() {
+                // For reset blocks:
+                // - next_seed should always be the previous block's hash
+                // - seed should be the previous block's next_seed (except for genesis)
+                assert_eq!(block.vdf_limiter_info.next_seed, prev_block.block_hash);
+
+                if resets_so_far > 0 {
+                    // After the first reset, seed should come from previous block's next_seed
+                    assert_eq!(
+                        block.vdf_limiter_info.seed,
+                        prev_block.vdf_limiter_info.next_seed
+                    );
+                }
+                resets_so_far += 1;
+            } else {
+                assert_eq!(
+                    block.vdf_limiter_info.seed, prev_block.vdf_limiter_info.seed,
+                    "Seed should not change for non-reset blocks at index {}",
+                    index
+                );
+            }
+        } else {
+            // The genesis block should not have a reset seed
+            assert_eq!(block.vdf_limiter_info.seed, BlockHash::zero());
+            assert_eq!(block.vdf_limiter_info.next_seed, BlockHash::zero());
+        }
+    }
 }

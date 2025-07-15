@@ -5,7 +5,6 @@ use std::{
 };
 
 use crate::node::{eth_payload_attributes, NodeHelperType, RethNode};
-use crate::node::{RethNodeAdapter, RethNodeAddOns};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
