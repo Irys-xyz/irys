@@ -1,12 +1,6 @@
-use crate::block_pool::BlockPool;
 use crate::peer_list::PeerList;
-use crate::types::InternalGossipError;
 use crate::{GossipError, GossipResult};
-use actix::Addr;
 use base58::ToBase58 as _;
-use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::MempoolFacade;
-use irys_actors::reth_service::RethServiceActor;
 use irys_api_client::ApiClient;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
 use rand::prelude::SliceRandom as _;
@@ -222,23 +216,13 @@ impl SyncState {
     }
 }
 
-pub async fn sync_chain<P, B, M>(
+pub async fn sync_chain(
     sync_state: SyncState,
     api_client: impl ApiClient,
     peer_list: impl PeerList,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
-    // BlockPool is optional because tests are structured in a way that would require testing the
-    // payload repair functionality if BlockPool is not optional. For the sake of the speed we
-    //  don't want to do that
-    block_pool: Option<Arc<BlockPool<P, B, M>>>,
-    reth_service: Option<Addr<RethServiceActor>>,
-) -> Result<(), GossipError>
-where
-    P: PeerList,
-    B: BlockDiscoveryFacade,
-    M: MempoolFacade,
-{
+) -> Result<(), GossipError> {
     let node_mode = config.node_config.mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
@@ -326,19 +310,6 @@ where
             return Err(GossipError::Network(
                 "No trusted peers available".to_string(),
             ));
-        }
-    }
-
-    if let Some(block_pool) = block_pool {
-        // If the block pool is provided, we should repair any missing payloads
-        if sync_state.is_syncing_from_a_trusted_peer() {
-            debug!("Sync task: Repairing missing payloads in the block pool");
-            block_pool
-                .repair_missing_payloads_if_any(reth_service.clone())
-                .await
-                .map_err(InternalGossipError::PayloadRepair)?;
-        } else {
-            debug!("Sync task: Not repairing missing payloads in the block pool, as not in trusted sync mode");
         }
     }
 
@@ -517,11 +488,8 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_list::PeerListServiceWithClient;
-        use crate::PeerListServiceFacade;
         use actix::Actor as _;
         use eyre::eyre;
-        use irys_actors::block_discovery::BlockDiscoveryFacadeImpl;
-        use irys_actors::mempool_service::MempoolServiceFacadeImpl;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
@@ -623,14 +591,12 @@ mod tests {
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
-            sync_chain::<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>(
+            sync_chain(
                 sync_state.clone(),
                 api_client_stub.clone(),
                 peer_list,
                 10,
                 &config,
-                None,
-                None,
             )
             .await
             .expect("to finish catching up");
@@ -731,17 +697,15 @@ mod tests {
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
-            sync_chain::<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>(
+            sync_chain(
                 sync_state.clone(),
                 api_client_stub.clone(),
                 peer_list,
                 start_from,
                 &config,
-                None,
-                None,
             )
-                .await
-                .expect("to finish catching up");
+            .await
+            .expect("to finish catching up");
 
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
