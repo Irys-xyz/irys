@@ -15,12 +15,11 @@ use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
-    block_producer::SolutionFoundMessage,
+    block_producer::BlockProducerCommand,
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
-    SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
@@ -804,18 +803,22 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
-            .actor_addresses
+            .service_senders
             .block_producer
-            .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(
+                num_blocks as u64,
+            )))
+            .unwrap();
         let height = self.get_canonical_chain_height().await;
         self.node_ctx.start_mining().await?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
-            .actor_addresses
+            .service_senders
             .block_producer
-            .do_send(SetTestBlocksRemainingMessage(None));
+            .send(BlockProducerCommand::SetTestBlocksRemaining(None))
+            .unwrap();
         self.node_ctx.stop_mining().await
     }
 
@@ -1747,11 +1750,17 @@ pub async fn mine_block(
 ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let poa_solution = solution_context(node_ctx).await?;
 
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     node_ctx
-        .actor_addresses
+        .service_senders
         .block_producer
-        .send(SolutionFoundMessage(poa_solution.clone()))
-        .await?
+        .send(BlockProducerCommand::SolutionFound {
+            solution: poa_solution.clone(),
+            response: response_tx,
+        })
+        .unwrap();
+
+    response_rx.await?
 }
 
 pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {

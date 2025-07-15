@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use tokio::sync::oneshot;
 
 use crate::block_producer::BlockProducerCommand;
 use crate::broadcast_mining_service::{
@@ -7,6 +7,7 @@ use crate::broadcast_mining_service::{
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::PackingRequest;
+use crate::services::ServiceSenders;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr as _;
@@ -25,7 +26,7 @@ use tracing::{debug, error, info, warn, Span};
 #[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
     config: Config,
-    block_producer_tx: UnboundedSender<BlockProducerCommand>,
+    service_senders: ServiceSenders,
     packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
@@ -42,7 +43,7 @@ impl Supervised for PartitionMiningActor {}
 impl PartitionMiningActor {
     pub fn new(
         config: &Config,
-        block_producer_tx: UnboundedSender<BlockProducerCommand>,
+        service_senders: ServiceSenders,
         packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
@@ -53,7 +54,7 @@ impl PartitionMiningActor {
     ) -> Self {
         Self {
             config: config.clone(),
-            block_producer_tx,
+            service_senders,
             packing_actor,
             ranges: Ranges::new(
                 (config.consensus.num_chunks_in_partition
@@ -302,8 +303,8 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
                     solution: s,
                     response: response_tx,
                 };
-                
-                if let Err(err) = self.block_producer_tx.send(cmd) {
+
+                if let Err(err) = self.service_senders.block_producer.send(cmd) {
                     error!("Error submitting solution to block producer {:?}", err);
                 }
                 // debug!("Solution sent!");
@@ -408,7 +409,6 @@ mod tests {
         packing::PackingActor,
     };
     use actix::actors::mocker::Mocker;
-    use actix::{Addr, Recipient};
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
@@ -417,34 +417,14 @@ mod tests {
         storage::LedgerChunkRange, StorageSyncConfig, H256,
     };
     use irys_types::{
-        ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
-        NodeConfig,
+        ledger_chunk_offset_ie, ConsensusConfig, H256List, LedgerChunkOffset, NodeConfig,
     };
     use irys_vdf::state::test_helpers::mocked_vdf_service;
-    use reth::payload::EthBuiltPayload;
     use std::any::Any;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
     use tokio::time::sleep;
-
-    fn create_mocked_block_producer_channel(
-        closure_arc: Arc<RwLock<Option<SolutionContext>>>,
-    ) -> UnboundedSender<BlockProducerCommand> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        
-        let closure_arc_clone = closure_arc.clone();
-        tokio::spawn(async move {
-            while let Some(cmd) = rx.recv().await {
-                if let BlockProducerCommand::SolutionFound { solution, .. } = cmd {
-                    let mut lck = closure_arc_clone.write().unwrap();
-                    lck.replace(solution);
-                }
-            }
-        });
-        
-        tx
-    }
 
     #[test_log::test(actix_rt::test)]
     #[expect(clippy::await_holding_lock, reason = "test")]
@@ -481,7 +461,18 @@ mod tests {
         let arc_rwlock = Arc::new(rwlock);
         let closure_arc = arc_rwlock.clone();
 
-        let block_producer_tx = create_mocked_block_producer_channel(closure_arc);
+        let (service_senders, mut receivers) = ServiceSenders::new();
+
+        // Spawn task to handle block producer messages
+        let closure_arc_clone = closure_arc.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = receivers.block_producer.recv().await {
+                if let BlockProducerCommand::SolutionFound { solution, .. } = cmd {
+                    let mut lck = closure_arc_clone.write().unwrap();
+                    lck.replace(solution);
+                }
+            }
+        });
 
         let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
             Box::new(Some(())) as Box<dyn Any>
@@ -549,7 +540,7 @@ mod tests {
 
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
-            block_producer_tx,
+            service_senders,
             packing.start().recipient(),
             storage_module,
             true,
@@ -654,10 +645,7 @@ mod tests {
         let storage_module_info = &infos[0];
         let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
-        let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
-        let arc_rwlock = Arc::new(rwlock);
-        let closure_arc = arc_rwlock.clone();
-        let block_producer_tx = create_mocked_block_producer_channel(closure_arc);
+        let (service_senders, _receivers) = ServiceSenders::new();
 
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -689,7 +677,7 @@ mod tests {
 
         let mut partition_mining_actor = PartitionMiningActor::new(
             &config,
-            block_producer_tx,
+            service_senders,
             packing.start().recipient(),
             storage_module,
             false,

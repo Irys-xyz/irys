@@ -2,24 +2,17 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{
-    evm::IrysEvmConfig, payload::ShadowTxStore, IrysEthereumNode, IrysShadowTxValidator,
+    payload::ShadowTxStore, IrysEthereumNode,
 };
 use irys_storage::reth_provider::IrysRethProvider;
-use irys_types::{Address, Node as MerkleNode};
+use irys_types::Address;
 use reth::{
     args::DatabaseArgs,
-    consensus::{ConsensusError, FullConsensus},
-    network::NetworkHandle,
     payload::EthPayloadBuilderAttributes,
-    primitives::EthPrimitives,
     prometheus_exporter::install_prometheus_recorder,
     revm::primitives::B256,
     rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
-    transaction_pool::{
-        blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
-        TransactionValidationTaskExecutor,
-    },
 };
 use reth_chainspec::ChainSpec;
 use reth_db::init_db;

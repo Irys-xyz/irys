@@ -143,7 +143,7 @@ impl BlockProducerService {
                 .await
                 .expect("Block producer service encountered an irrecoverable error")
         });
-        
+
         TokioServiceHandle {
             name: "block_producer_service".to_string(),
             handle,

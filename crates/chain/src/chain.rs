@@ -1048,7 +1048,7 @@ impl IrysNode {
             &config,
             &storage_modules_guard,
             &vdf_state_readonly,
-            &service_senders.block_producer,
+            &service_senders,
             &atomic_global_step_number,
             &packing_actor_addr,
             latest_block.diff,
@@ -1077,7 +1077,6 @@ impl IrysNode {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
                 block_discovery_addr: block_discovery,
-                block_producer: service_senders.block_producer.clone(),
                 packing: packing_actor_addr,
                 block_index: block_index_service_actor,
                 reth: reth_service_actor,
@@ -1264,7 +1263,7 @@ impl IrysNode {
         config: &Config,
         storage_modules_guard: &StorageModulesReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
-        block_producer_tx: &mpsc::UnboundedSender<BlockProducerCommand>,
+        service_senders: &ServiceSenders,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
         initial_difficulty: U256,
@@ -1274,7 +1273,7 @@ impl IrysNode {
         for sm in storage_modules_guard.read().iter() {
             let partition_mining_actor = PartitionMiningActor::new(
                 config,
-                block_producer_tx.clone(),
+                service_senders.clone(),
                 packing_actor_addr.clone().recipient(),
                 sm.clone(),
                 false, // do not start mining automatically

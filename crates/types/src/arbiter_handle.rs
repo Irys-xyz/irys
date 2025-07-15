@@ -171,9 +171,7 @@ pub struct TokioServiceHandle {
 
 #[derive(Debug)]
 pub enum ArbiterEnum {
-    ActixArbiter {
-        arbiter: ArbiterHandle,
-    },
+    ActixArbiter { arbiter: ArbiterHandle },
     TokioService(TokioServiceHandle),
 }
 
