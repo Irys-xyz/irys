@@ -187,13 +187,25 @@ fn verify_seed_continuity(blocks: &[IrysBlockHeader], reset_frequency: u64) {
             if block.vdf_limiter_info.reset_step(reset_frequency).is_some() {
                 // For reset blocks:
                 // - next_seed should always be the previous block's hash
-                // - seed should be the previous block's next_seed (except for genesis)
+                // - seed should be the previous block's next_seed (except for first reset)
                 assert_eq!(block.vdf_limiter_info.next_seed, prev_block.block_hash);
 
-                if resets_so_far > 0 {
+                if resets_so_far == 0 {
+                    // During the first reset, the seed should still be zero
+                    assert_eq!(block.vdf_limiter_info.seed, BlockHash::zero());
+                } else {
                     // After the first reset, seed should come from previous block's next_seed
                     assert_eq!(
                         block.vdf_limiter_info.seed,
+                        prev_block.vdf_limiter_info.next_seed
+                    );
+                    // Verify that seeds are actually rotating (changing)
+                    assert_ne!(
+                        block.vdf_limiter_info.seed,
+                        prev_block.vdf_limiter_info.seed
+                    );
+                    assert_ne!(
+                        block.vdf_limiter_info.next_seed,
                         prev_block.vdf_limiter_info.next_seed
                     );
                 }
