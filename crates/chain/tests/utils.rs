@@ -1790,21 +1790,6 @@ impl IrysNodeTest<IrysNodeCtx> {
             .collect())
     }
 
-    /// Sync a peer node to a specific height with proper error handling
-    pub async fn sync_peer_to_height(
-        &self,
-        peer: &Self,
-        target_height: u64,
-        max_seconds: usize,
-    ) -> eyre::Result<()> {
-        // Account for block migration depth
-        let block_migration_depth = self.node_ctx.config.consensus.block_migration_depth;
-        let sync_height = target_height.saturating_sub(block_migration_depth as u64);
-
-        peer.wait_until_height(sync_height, max_seconds).await?;
-        Ok(())
-    }
-
     /// Verify that blocks match between two nodes
     pub async fn verify_blocks_match(
         &self,
