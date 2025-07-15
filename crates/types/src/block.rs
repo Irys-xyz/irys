@@ -282,7 +282,7 @@ impl IrysBlockHeader {
     /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
         let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
-        let signature_hash_matches_block_hash = self.block_hash == H256::from(id);
+        let signature_hash_matches_block_hash = self.block_hash.0 == id;
         signature_hash_matches_block_hash
             && self
                 .signature
