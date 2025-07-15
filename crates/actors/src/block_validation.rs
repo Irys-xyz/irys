@@ -719,10 +719,7 @@ mod tests {
     use irys_database::add_genesis_commitments;
     use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
-    use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransactionLedger,
-        H256List, IrysTransaction, IrysTransactionHeader, NodeConfig, Signature, H256, U256,
-    };
+    use irys_types::{irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash, DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, NodeConfig, Signature, H256, U256};
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
     use tracing::{debug, info};
@@ -901,6 +898,30 @@ mod tests {
             )
             .await;
         }
+    }
+
+    #[actix::test]
+    async fn is_seed_data_valid_should_validate_seeds() {
+        let reset_frequency = 2;
+
+        let mut parent_header = IrysBlockHeader::new_mock_header();
+        let parent_seed = BlockHash::from_slice(&[2; 32]);
+        let parent_next_seed = BlockHash::from_slice(&[3; 32]);
+        parent_header.block_hash = BlockHash::from_slice(&[4; 32]);
+        parent_header.vdf_limiter_info.seed = parent_seed;
+        parent_header.vdf_limiter_info.next_seed = parent_next_seed;
+
+        let mut header_2 = IrysBlockHeader::new_mock_header();
+        // Reset frequency is 2, so setting global_step_number to 3 and adding 2 steps
+        //  should result in the seeds being rotated
+        header_2.vdf_limiter_info.global_step_number = 3;
+        header_2.vdf_limiter_info.steps = H256List(vec![H256::zero(); 2]);
+        header_2.vdf_limiter_info.set_seeds(reset_frequency, &parent_header);
+        let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
+
+        assert_eq!(header_2.vdf_limiter_info.next_seed, parent_header.block_hash);
+        assert_eq!(header_2.vdf_limiter_info.seed, parent_next_seed);
+        assert!(matches!(is_valid, ValidationResult::Valid), "Seed data should be valid");
     }
 
     async fn poa_test(
