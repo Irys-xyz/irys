@@ -27,21 +27,20 @@ use tracing::error;
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
 
-type TmpNodeAdapter = FullNodeTypesAdapter<IrysEthereumNode, RethDbWrapper, NodeProvider>;
+type NodeTypesAdapter = FullNodeTypesAdapter<IrysEthereumNode, RethDbWrapper, NodeProvider>;
 
 /// Type alias for a `NodeAdapter`
 pub type RethNodeAdapter = NodeAdapter<
-    TmpNodeAdapter,
-    <<IrysEthereumNode as Node<TmpNodeAdapter>>::ComponentsBuilder as NodeComponentsBuilder<
-        TmpNodeAdapter,
+    NodeTypesAdapter,
+    <<IrysEthereumNode as Node<NodeTypesAdapter>>::ComponentsBuilder as NodeComponentsBuilder<
+        NodeTypesAdapter,
     >>::Components,
 >;
 
 pub type NodeProvider = BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>;
 
-/// Type alias for a type of `NodeHelper`
 pub type NodeHelperType =
-    NodeTestContext<RethNodeAdapter, <IrysEthereumNode as Node<TmpNodeAdapter>>::AddOns>;
+    NodeTestContext<RethNodeAdapter, <IrysEthereumNode as Node<NodeTypesAdapter>>::AddOns>;
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
