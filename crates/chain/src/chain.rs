@@ -1025,7 +1025,6 @@ impl IrysNode {
             price_oracle,
             reth_node_adapter.clone(),
             reth_service_actor.clone(),
-            task_exec,
             receivers.block_producer,
             reth_node.provider.clone(),
             shadow_tx_store.clone(),
@@ -1321,6 +1320,7 @@ impl IrysNode {
             PackingActor::new(task_executor.clone(), sm_ids, packing_config).start();
         (atomic_global_step_number, packing_actor_addr)
     }
+
     fn init_block_producer(
         config: &Config,
         reward_curve: Arc<HalvingCurve>,
@@ -1333,7 +1333,6 @@ impl IrysNode {
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         reth_service_actor: actix::Addr<RethServiceActor>,
-        _task_executor: &TaskExecutor,
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,

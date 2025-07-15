@@ -13,7 +13,7 @@ use tracing::{debug, error, warn};
 ///
 /// What we're testing:
 /// - Genesis node mines a bunch of blocks (about 42) with reset happening every 8 VDF steps
-/// - Since test mining produces ~1-2 steps per block, resets happen roughly every 4-8 blocks
+/// - In test mode, blocks contain varying numbers of VDF steps (often 1-2, sometimes more)
 /// - We verify the reset seed logic: when a reset happens, the new seed comes from the
 ///   previous block's hash, and the current seed rotates from the previous next_seed
 /// - Then we spin up a peer node to sync all these blocks and make sure it validates
@@ -88,6 +88,21 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
 
     // 2 steps per block, 4 reset intervals, so 8 steps in total per reset interval
     let expected_reset_steps = [8, 16, 24, 32];
+
+    // Debug: Log all blocks to understand VDF step progression
+    for (index, block) in genesis_node_blocks.iter().enumerate() {
+        let first_step = block.vdf_limiter_info.first_step_number();
+        let last_step = block.vdf_limiter_info.global_step_number;
+        debug!(
+            "Block {} ({}): steps {} to {} (span: {})",
+            index,
+            block.block_hash,
+            first_step,
+            last_step,
+            last_step - first_step + 1
+        );
+    }
+
     let blocks_with_resets = genesis_node_blocks
         .iter()
         .enumerate()

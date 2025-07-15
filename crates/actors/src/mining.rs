@@ -307,7 +307,6 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
                 if let Err(err) = self.service_senders.block_producer.send(cmd) {
                     error!("Error submitting solution to block producer {:?}", err);
                 }
-                // debug!("Solution sent!");
             }
 
             Ok(None) => {
