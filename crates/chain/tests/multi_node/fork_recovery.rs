@@ -1159,9 +1159,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 }
 
 /// Two node max block depth re-org test
-/// Gossip disabled after block 1. Peer A mines just short of the migration depth
-/// while peer B mines one additional block. This creates the longest possible
-/// fork without triggering migration. Once gossip is re-enabled peer A should
+/// Gossip disabled after block 1. Peer A mines 2 blocks of the migration depth
+/// while peer B mines one block short. This creates the longest possible
+/// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
 #[test_log::test(actix_web::test)]
 async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
