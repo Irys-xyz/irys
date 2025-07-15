@@ -53,6 +53,7 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use itertools::Itertools;
 use reth::{
     api::Block as _,
     network::{PeerInfo, Peers as _},
@@ -1800,16 +1801,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let self_blocks = self.get_blocks(start_height, end_height).await?;
         let other_blocks = other.get_blocks(start_height, end_height).await?;
 
-        if self_blocks.len() != other_blocks.len() {
-            return Err(eyre::eyre!(
-                "Block count mismatch: {} vs {}",
-                self_blocks.len(),
-                other_blocks.len()
-            ));
-        }
-
         for (index, (self_block, other_block)) in
-            self_blocks.iter().zip(other_blocks.iter()).enumerate()
+            self_blocks.iter().zip_eq(other_blocks.iter()).enumerate()
         {
             // Compare full headers for completeness and clarity
             eyre::ensure!(

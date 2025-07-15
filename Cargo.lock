@@ -4878,6 +4878,7 @@ dependencies = [
  "irys-testing-utils",
  "irys-types",
  "irys-vdf",
+ "itertools 0.13.0",
  "k256",
  "modular-bitfield",
  "rand 0.8.5",
