@@ -1164,7 +1164,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 /// This means the fork is as long as it can be prior to reorg
 /// Gossip is re-enabled, peers gossip and peer 2 will reorg to the state of peer 1.
 #[test_log::test(actix_web::test)]
-async fn heavy_reorg_upto_block_migration_depth2() -> eyre::Result<()> {
+async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
