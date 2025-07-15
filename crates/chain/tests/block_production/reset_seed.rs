@@ -1,7 +1,6 @@
 use crate::utils::{AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
-use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, IrysTransaction,
     IrysTransactionId, NodeConfig, NodeMode,
@@ -9,14 +8,27 @@ use irys_types::{
 use std::collections::HashMap;
 use tracing::{debug, error, warn};
 
-#[actix_web::test]
+/// This test checks that VDF reset seeds work correctly. The basic idea is that every N steps,
+/// the VDF needs to reset its seed to prevent miners from precomputing too far ahead.
+///
+/// What we're testing:
+/// - Genesis node mines a bunch of blocks (about 42) with reset happening every 8 VDF steps
+/// - Since test mining produces ~1-2 steps per block, resets happen roughly every 4-8 blocks
+/// - We verify the reset seed logic: when a reset happens, the new seed comes from the 
+///   previous block's hash, and the current seed rotates from the previous next_seed
+/// - Then we spin up a peer node to sync all these blocks and make sure it validates
+///   the reset seeds correctly too
+///
+/// The test can be a bit flaky because VDF step counts vary per block in test mode,
+/// but we should always find at least 2 reset points in 42 blocks.
+#[test_log::test(actix_web::test)]
 async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer(
 ) -> eyre::Result<()> {
-    initialize_tracing();
     let max_seconds = 20;
-    let approximate_steps_in_a_block = 12;
+    // We wait for only 2 VDF steps per block (see capacity_chunk_solution)
+    let approximate_steps_in_a_block = 2;
     let reset_interval_in_blocks = 4;
-    // Approximately every 4 blocks - every 48 steps
+    // Approximately every 4 blocks - every 8 steps
     let reset_frequency = approximate_steps_in_a_block * reset_interval_in_blocks;
     let required_index_blocks_height: usize = reset_interval_in_blocks * 10;
 
@@ -74,8 +86,8 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         .await
         .expect("expected to get mined blocks from genesis node");
 
-    // 12 steps per block, 4 reset intervals, so 48 steps in total per reset interval
-    let expected_reset_steps = [48, 96, 144, 192];
+    // 2 steps per block, 4 reset intervals, so 8 steps in total per reset interval
+    let expected_reset_steps = [8, 16, 24, 32];
     let blocks_with_resets = genesis_node_blocks
         .iter()
         .enumerate()
