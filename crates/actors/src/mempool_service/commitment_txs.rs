@@ -83,9 +83,10 @@ impl Inner {
                 .canonical_epoch_snapshot()
                 .is_staked(commitment_tx.signer);
 
-            match commitment_snapshot.get_commitment_status(&commitment_tx, is_staked) {
-                CommitmentSnapshotStatus::Accepted => Err(TxIngressError::Skipped)?,
-                _ => (),
+            if commitment_snapshot.get_commitment_status(&commitment_tx, is_staked)
+                == CommitmentSnapshotStatus::Accepted
+            {
+                Err(TxIngressError::Skipped)?
             }
         }
 
