@@ -7,7 +7,7 @@ use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse,
+    irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse, ConsensusConfig,
     NodeConfig, H256,
 };
 use reth_db::Database as _;
@@ -41,10 +41,9 @@ async fn test_get_tx() -> eyre::Result<()> {
     };
     info!("Generated storage_tx.id: {}", storage_tx.id);
 
-    let commitment_tx = CommitmentTransaction {
-        id: H256::random(),
-        ..Default::default()
-    };
+    let consensus = ConsensusConfig::testnet();
+    let mut commitment_tx = CommitmentTransaction::new_stake(&consensus, H256::default());
+    commitment_tx.id = H256::random();
     info!("Generated commitment_tx.id: {}", commitment_tx.id);
 
     // Insert the storage_tx and make sure it's in the database

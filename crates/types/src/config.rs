@@ -142,6 +142,20 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
+
+    /// Fee required for staking operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub stake_fee: Amount<Irys>,
+
+    /// Fee required for pledging operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub pledge_fee: Amount<Irys>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,6 +620,8 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
+            stake_fee: Amount::token(dec!(0.1)).expect("valid token amount"),
+            pledge_fee: Amount::token(dec!(0.1)).expect("valid token amount"),
         }
     }
 }
@@ -977,6 +993,9 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
+
+        stake_fee = 0.1
+        pledge_fee = 0.1
         "#;
 
         // Create the expected config

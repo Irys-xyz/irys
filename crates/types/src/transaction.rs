@@ -220,6 +220,60 @@ pub struct CommitmentTransaction {
 }
 
 impl CommitmentTransaction {
+    /// Create a new CommitmentTransaction with default values from config
+    pub fn new(config: &ConsensusConfig) -> Self {
+        Self {
+            id: H256::zero(),
+            anchor: H256::zero(),
+            signer: Address::default(),
+            commitment_type: CommitmentType::default(),
+            version: 0,
+            chain_id: config.chain_id,
+            fee: 0,
+            signature: IrysSignature::new(Signature::test_signature()),
+        }
+    }
+
+    /// Create a new stake transaction with the configured stake fee
+    pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
+        Self {
+            commitment_type: CommitmentType::Stake,
+            anchor,
+            fee: config.stake_fee.amount.as_u64(),
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new unstake transaction with a fixed fee of 1
+    pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
+        Self {
+            commitment_type: CommitmentType::Unstake,
+            anchor,
+            fee: 1,
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new pledge transaction with the configured pledge fee
+    pub fn new_pledge(config: &ConsensusConfig, anchor: H256) -> Self {
+        Self {
+            commitment_type: CommitmentType::Pledge,
+            anchor,
+            fee: config.pledge_fee.amount.as_u64(),
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new unpledge transaction with a fixed fee of 1
+    pub fn new_unpledge(config: &ConsensusConfig, anchor: H256) -> Self {
+        Self {
+            commitment_type: CommitmentType::Unpledge,
+            anchor,
+            fee: 1,
+            ..Self::new(config)
+        }
+    }
+
     /// Rely on RLP encoding for signing
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
         self.encode(out)
@@ -258,6 +312,11 @@ pub trait IrysTransactionCommon {
     fn id(&self) -> IrysTransactionId;
     fn total_fee(&self) -> u64;
     fn signer(&self) -> Address;
+    
+    /// Sign this transaction with the provided signer
+    fn sign(self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error>
+    where
+        Self: Sized;
 }
 
 impl IrysTransactionCommon for IrysTransactionHeader {
@@ -276,6 +335,26 @@ impl IrysTransactionCommon for IrysTransactionHeader {
     fn signer(&self) -> Address {
         self.signer
     }
+    
+    fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
+        use crate::Address;
+        use alloy_primitives::keccak256;
+        
+        // Store the signer address
+        self.signer = Address::from_public_key(signer.signer.verifying_key());
+        
+        // Create the signature hash and sign it
+        let prehash = self.signature_hash();
+        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+        
+        self.signature = IrysSignature::new(signature);
+        
+        // Derive the txid by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        self.id = H256::from(id);
+        
+        Ok(self)
+    }
 }
 
 impl IrysTransactionCommon for CommitmentTransaction {
@@ -290,8 +369,29 @@ impl IrysTransactionCommon for CommitmentTransaction {
     fn total_fee(&self) -> u64 {
         self.fee
     }
+    
     fn signer(&self) -> Address {
         self.signer
+    }
+    
+    fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
+        use crate::Address;
+        use alloy_primitives::keccak256;
+        
+        // Store the signer address
+        self.signer = Address::from_public_key(signer.signer.verifying_key());
+        
+        // Create the signature hash and sign it
+        let prehash = self.signature_hash();
+        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+        
+        self.signature = IrysSignature::new(signature);
+        
+        // Derive the txid by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        self.id = H256::from(id);
+        
+        Ok(self)
     }
 }
 
@@ -394,13 +494,18 @@ mod tests {
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
+        
+        // Test signing the header directly using the trait method
+        let signed_header = dec.sign(&signer).unwrap();
+        assert!(signed_header.is_signature_valid());
+        
+        // Also test the old way for IrysTransaction
         let tx = IrysTransaction {
-            header: dec,
+            header: mock_header(&config),
             ..Default::default()
         };
 
         let signed_tx = signer.sign_transaction(tx).unwrap();
-
         assert!(signed_tx.header.is_signature_valid());
     }
 
@@ -420,7 +525,8 @@ mod tests {
             chunk_size: config.chunk_size,
         };
 
-        let signed_tx = signer.sign_commitment(original_tx.clone()).unwrap();
+        // Test using the new trait method
+        let signed_tx = original_tx.clone().sign(&signer).unwrap();
 
         println!(
             "{}",
@@ -449,16 +555,11 @@ mod tests {
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
-        CommitmentTransaction {
-            id: H256::from([255_u8; 32]),
-            anchor: H256::from([1_u8; 32]),
-            signer: Address::default(),
-            commitment_type: CommitmentType::Stake,
-            version: 0,
-            fee: 1,
-            chain_id: config.chain_id,
-            signature: Signature::test_signature().into(),
-        }
+        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]));
+        tx.id = H256::from([255_u8; 32]);
+        tx.signer = Address::default();
+        tx.signature = Signature::test_signature().into();
+        tx
     }
 }
 
