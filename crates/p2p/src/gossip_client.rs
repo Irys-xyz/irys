@@ -6,10 +6,10 @@ use crate::peer_list::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use core::time::Duration;
 use irys_types::{Address, GossipData, GossipRequest, PeerListItem};
+use reqwest::Client;
 use reqwest::Response;
 use serde::Serialize;
 use tracing::error;
-use reqwest::{Client};
 
 #[derive(Debug, Clone)]
 pub struct GossipClient {
