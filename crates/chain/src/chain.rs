@@ -1047,7 +1047,6 @@ impl IrysNode {
             Self::init_packing_actor(
                 &config,
                 global_step_number,
-                task_exec,
                 &storage_modules_guard,
                 runtime_handle.clone(),
             );
@@ -1345,7 +1344,6 @@ impl IrysNode {
     fn init_packing_actor(
         config: &Config,
         global_step_number: u64,
-        task_executor: &TaskExecutor,
         storage_modules_guard: &StorageModulesReadGuard,
         runtime_handle: tokio::runtime::Handle,
     ) -> (
@@ -1356,7 +1354,7 @@ impl IrysNode {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let packing_config = PackingConfig::new(config);
-        let packing_actor = PackingActor::new(task_executor.clone(), sm_ids, packing_config);
+        let packing_actor = PackingActor::new(sm_ids, packing_config);
         let packing_controller_handles = packing_actor.spawn_packing_controllers(runtime_handle);
         let packing_actor_addr = packing_actor.start();
         (
