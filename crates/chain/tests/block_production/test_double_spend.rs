@@ -31,10 +31,8 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let txid = tx_for_migration.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
 
-    tracing::error!("we make it here");
     // mine block including tx_for_migration
     node.mine_block().await?;
-    tracing::error!("node crashes mining a block and we never get here");
     let block1 = node.get_block_by_height(1).await?;
     assert!(block1
         .get_data_ledger_tx_ids()
