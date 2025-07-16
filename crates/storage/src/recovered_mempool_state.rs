@@ -1,10 +1,10 @@
 use std::{collections::HashMap, path::Path};
 
-use irys_types::{CommitmentTransaction, IrysTransactionHeader, H256};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, H256};
 
 pub struct RecoveredMempoolState {
     pub commitment_txs: HashMap<H256, CommitmentTransaction>,
-    pub storage_txs: HashMap<H256, IrysTransactionHeader>,
+    pub storage_txs: HashMap<H256, DataTransactionHeader>,
 }
 
 impl RecoveredMempoolState {
@@ -52,7 +52,7 @@ impl RecoveredMempoolState {
                     }
 
                     match tokio::fs::read_to_string(&path).await {
-                        Ok(json) => match serde_json::from_str::<IrysTransactionHeader>(&json) {
+                        Ok(json) => match serde_json::from_str::<DataTransactionHeader>(&json) {
                             Ok(tx) => {
                                 storage_txs.insert(tx.id, tx);
                             }

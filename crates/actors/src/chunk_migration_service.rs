@@ -11,8 +11,8 @@ use irys_storage::{
     StorageModulesReadGuard,
 };
 use irys_types::{
-    app_state::DatabaseProvider, Base64, Config, DataLedger, DataRoot, DataTransactionLedger,
-    IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
+    app_state::DatabaseProvider, Base64, Config, DataLedger, DataRoot, DataTransactionHeader,
+    DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
     TxChunkOffset, UnpackedChunk, H256,
 };
 use std::sync::{Arc, RwLock};
@@ -154,7 +154,7 @@ impl Handler<Stop> for ChunkMigrationService {
 fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: DataLedger,
-    txs: &[IrysTransactionHeader],
+    txs: &[DataTransactionHeader],
     block_index: &Arc<RwLock<BlockIndex>>,
     chunk_size: usize,
     storage_modules_guard: &StorageModulesReadGuard,
@@ -272,7 +272,7 @@ fn get_block_range(
 fn get_tx_path_pairs(
     block: &IrysBlockHeader,
     ledger: DataLedger,
-    txs: &[IrysTransactionHeader],
+    txs: &[DataTransactionHeader],
 ) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
     let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(txs);
 

@@ -4,7 +4,7 @@ use actix::dev::MessageResponse;
 use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem,
+    BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerIndexItem,
     NodeConfig, H256,
 };
 use std::fs::OpenOptions;
@@ -88,12 +88,12 @@ impl BlockIndex {
     pub fn push_block(
         &mut self,
         block: &IrysBlockHeader,
-        all_txs: &[IrysTransactionHeader],
+        all_txs: &[DataTransactionHeader],
         chunk_size: u64,
     ) -> eyre::Result<()> {
         /// Inner function: Calculates the total number of full chunks needed to store transactions
         /// Each transaction's data is padded to the next full chunk boundary
-        fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) -> u64 {
+        fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
             let bytes_added = txs.iter().fold(0, |acc, tx| {
                 acc + tx.data_size.div_ceil(chunk_size) * chunk_size
             });

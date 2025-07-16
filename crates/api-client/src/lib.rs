@@ -1,7 +1,7 @@
 use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionHeader,
+    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, DataTransactionHeader,
     IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
 };
 use reqwest::{Client, StatusCode};
@@ -28,7 +28,7 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
     async fn post_transaction(
         &self,
         peer: SocketAddr,
-        transaction: IrysTransactionHeader,
+        transaction: DataTransactionHeader,
     ) -> Result<()>;
 
     /// Fetch multiple transaction headers by their IDs from a peer
@@ -132,7 +132,7 @@ impl ApiClient for IrysApiClient {
     async fn post_transaction(
         &self,
         peer: SocketAddr,
-        transaction: IrysTransactionHeader,
+        transaction: DataTransactionHeader,
     ) -> Result<()> {
         let path = "/tx";
         let response = self
@@ -268,7 +268,7 @@ pub mod test_utils {
         async fn post_transaction(
             &self,
             _peer: std::net::SocketAddr,
-            _transaction: IrysTransactionHeader,
+            _transaction: DataTransactionHeader,
         ) -> eyre::Result<()> {
             Ok(())
         }
@@ -346,7 +346,7 @@ mod tests {
         async fn post_transaction(
             &self,
             _peer: SocketAddr,
-            _tx: IrysTransactionHeader,
+            _tx: DataTransactionHeader,
         ) -> Result<()> {
             Ok(())
         }
@@ -376,7 +376,7 @@ mod tests {
     async fn test_mock_client() {
         let mut mock = MockApiClient::default();
         let tx_id = H256::random();
-        let tx_header = IrysTransactionHeader::default();
+        let tx_header = DataTransactionHeader::default();
         mock.expected_transactions
             .insert(tx_id, IrysTransactionResponse::Storage(tx_header.clone()));
 

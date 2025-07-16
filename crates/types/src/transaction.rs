@@ -27,7 +27,7 @@ pub type IrysTransactionId = H256;
 /// will decode from strings or numeric literals for u64 fields, due to JS's max safe int being 2^53-1 instead of 2^64
 /// We include the Irys prefix to differentiate from EVM transactions.
 #[serde(rename_all = "camelCase", default)]
-pub struct IrysTransactionHeader {
+pub struct DataTransactionHeader {
     /// A SHA-256 hash of the transaction signature.
     #[rlp(skip)]
     #[rlp(default)]
@@ -84,7 +84,7 @@ pub struct IrysTransactionHeader {
     pub ingress_proofs: Option<TxIngressProof>,
 }
 
-impl IrysTransactionHeader {
+impl DataTransactionHeader {
     /// RLP Encoding of Transactions for Signing
     ///
     /// When RLP encoding a transaction for signing, an extra byte is included
@@ -123,12 +123,12 @@ impl IrysTransactionHeader {
     }
 }
 
-/// Wrapper for the underlying IrysTransactionHeader fields, this wrapper
+/// Wrapper for the underlying DataTransactionHeader fields, this wrapper
 /// contains the data/chunk/proof info that is necessary for clients to seed
 /// a transactions data to the network.
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
-pub struct IrysTransaction {
-    pub header: IrysTransactionHeader,
+pub struct DataTransaction {
+    pub header: DataTransactionHeader,
     // TODO: make this compatible with stream/iterator data sources
     pub data: Option<Base64>,
     #[serde(skip)]
@@ -137,13 +137,13 @@ pub struct IrysTransaction {
     pub proofs: Vec<Proof>,
 }
 
-impl IrysTransaction {
+impl DataTransaction {
     pub fn signature_hash(&self) -> [u8; 32] {
         self.header.signature_hash()
     }
 }
 
-impl IrysTransactionHeader {
+impl DataTransactionHeader {
     pub fn new(config: &ConsensusConfig) -> Self {
         Self {
             id: H256::zero(),
@@ -260,7 +260,7 @@ pub trait IrysTransactionCommon {
     fn signer(&self) -> Address;
 }
 
-impl IrysTransactionCommon for IrysTransactionHeader {
+impl IrysTransactionCommon for DataTransactionHeader {
     fn is_signature_valid(&self) -> bool {
         self.is_signature_valid()
     }
@@ -314,7 +314,7 @@ mod tests {
         // action
         let mut buffer = vec![];
         header.encode(&mut buffer);
-        let decoded = IrysTransactionHeader::decode(&mut buffer.as_slice()).unwrap();
+        let decoded = DataTransactionHeader::decode(&mut buffer.as_slice()).unwrap();
 
         // Assert
         // zero out the id and signature, those do not get encoded
@@ -343,17 +343,17 @@ mod tests {
 
     #[test]
     fn test_irys_transaction_header_serde() {
-        // Create a sample IrysTransactionHeader
+        // Create a sample DataTransactionHeader
         let config = ConsensusConfig::testnet();
         let original_header = mock_header(&config);
 
-        // Serialize the IrysTransactionHeader to JSON
+        // Serialize the DataTransactionHeader to JSON
         let serialized =
             serde_json::to_string_pretty(&original_header).expect("Failed to serialize");
 
         println!("{}", &serialized);
-        // Deserialize the JSON back to IrysTransactionHeader
-        let deserialized: IrysTransactionHeader =
+        // Deserialize the JSON back to DataTransactionHeader
+        let deserialized: DataTransactionHeader =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 
         // Ensure the deserialized struct matches the original
@@ -385,8 +385,8 @@ mod tests {
         let original_header = mock_header(&config);
         let mut sig_data = Vec::new();
         original_header.encode(&mut sig_data);
-        let dec: IrysTransactionHeader =
-            IrysTransactionHeader::decode(&mut sig_data.as_slice()).unwrap();
+        let dec: DataTransactionHeader =
+            DataTransactionHeader::decode(&mut sig_data.as_slice()).unwrap();
 
         // action
         let signer = IrysSigner {
@@ -394,7 +394,7 @@ mod tests {
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
-        let tx = IrysTransaction {
+        let tx = DataTransaction {
             header: dec,
             ..Default::default()
         };
@@ -430,8 +430,8 @@ mod tests {
         assert!(signed_tx.is_signature_valid());
     }
 
-    fn mock_header(config: &ConsensusConfig) -> IrysTransactionHeader {
-        IrysTransactionHeader {
+    fn mock_header(config: &ConsensusConfig) -> DataTransactionHeader {
+        DataTransactionHeader {
             id: H256::from([255_u8; 32]),
             anchor: H256::from([1_u8; 32]),
             signer: Address::default(),
@@ -469,7 +469,7 @@ pub enum IrysTransactionResponse {
     Commitment(CommitmentTransaction),
 
     #[serde(rename = "storage")]
-    Storage(IrysTransactionHeader),
+    Storage(DataTransactionHeader),
 }
 
 impl From<CommitmentTransaction> for IrysTransactionResponse {
@@ -478,8 +478,8 @@ impl From<CommitmentTransaction> for IrysTransactionResponse {
     }
 }
 
-impl From<IrysTransactionHeader> for IrysTransactionResponse {
-    fn from(tx: IrysTransactionHeader) -> Self {
+impl From<DataTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: DataTransactionHeader) -> Self {
         Self::Storage(tx)
     }
 }

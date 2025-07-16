@@ -23,7 +23,7 @@
 // use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 // use irys_types::{
 //     app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
-//     IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PoaData, Signature, StorageConfig,
+//     IrysBlockHeader, DataTransaction, DataTransactionHeader, PoaData, Signature, StorageConfig,
 //     TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
 // };
 // use reth::{revm::primitives::B256, tasks::TaskManager};
@@ -103,7 +103,7 @@
 //     // Create a bunch of signed TX from the chunks
 //     // Loop though all the data_chunks and create wrapper tx for them
 //     let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
-//     let mut txs: Vec<IrysTransaction> = Vec::new();
+//     let mut txs: Vec<DataTransaction> = Vec::new();
 
 //     for chunks in data_chunks {
 //         let mut data: Vec<u8> = Vec::new();
@@ -116,7 +116,7 @@
 //     }
 
 //     // Create vectors of tx headers and txids
-//     let tx_headers: Vec<IrysTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
+//     let tx_headers: Vec<DataTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
 //     let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
 //     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 

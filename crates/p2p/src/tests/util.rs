@@ -23,8 +23,8 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    CommitmentTransaction, Config, DatabaseProvider, GossipBroadcastMessage, GossipRequest,
-    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig,
+    CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
+    GossipBroadcastMessage, GossipRequest, IrysBlockHeader, IrysTransactionResponse, NodeConfig,
     NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset,
     UnpackedChunk, VersionRequest, H256,
 };
@@ -39,7 +39,7 @@ use tracing::{debug, warn};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
-    pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
+    pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
     pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
@@ -61,7 +61,7 @@ impl MempoolStub {
 impl MempoolFacade for MempoolStub {
     async fn handle_data_transaction_ingress(
         &self,
-        tx_header: IrysTransactionHeader,
+        tx_header: DataTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
         let already_exists = self
             .txs
@@ -182,7 +182,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 
 #[derive(Clone)]
 pub(crate) struct ApiClientStub {
-    pub txs: HashMap<H256, IrysTransactionHeader>,
+    pub txs: HashMap<H256, DataTransactionHeader>,
     pub block_index_handler: Arc<
         RwLock<Box<dyn Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static>>,
     >,
@@ -225,7 +225,7 @@ impl ApiClient for ApiClientStub {
     async fn post_transaction(
         &self,
         _api_address: SocketAddr,
-        _transaction: IrysTransactionHeader,
+        _transaction: DataTransactionHeader,
     ) -> Result<()> {
         Ok(())
     }
@@ -296,7 +296,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub mining_address: Address,
     pub mempool_stub: MempoolStub,
     pub peer_list: PeerListMock,
-    pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
+    pub mempool_txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub api_client_stub: ApiClientStub,
@@ -570,7 +570,7 @@ fn random_free_port() -> u16 {
 /// # Panics
 /// Can panic
 #[must_use]
-pub(crate) fn generate_test_tx() -> IrysTransaction {
+pub(crate) fn generate_test_tx() -> DataTransaction {
     let testnet_config = NodeConfig::testnet();
     let config = Config::new(testnet_config);
     let account1 = IrysSigner::random_signer(&config.consensus);
@@ -586,7 +586,7 @@ pub(crate) fn generate_test_tx() -> IrysTransaction {
 }
 
 #[must_use]
-pub(crate) fn create_test_chunks(tx: &IrysTransaction) -> Vec<UnpackedChunk> {
+pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
     let mut chunks = Vec::new();
     for _chunk_node in &tx.chunks {
         let data_root = tx.header.data_root;
