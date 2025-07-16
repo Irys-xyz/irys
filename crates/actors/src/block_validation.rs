@@ -720,8 +720,9 @@ mod tests {
     use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransaction,
-        DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig, Signature, H256, U256,
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
+        Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
