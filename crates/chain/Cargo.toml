@@ -14,6 +14,7 @@ test-utils = []
 [dependencies]
 # Irys
 irys-database.workspace = true
+irys-domain.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
@@ -76,6 +77,7 @@ rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 semver.workspace = true
 thiserror.workspace = true
+itertools.workspace = true
 
 
 [package.metadata.cargo-machete]

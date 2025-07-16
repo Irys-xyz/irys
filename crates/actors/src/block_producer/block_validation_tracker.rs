@@ -28,30 +28,34 @@
 //! This ensures each significant change gets a fresh timeout window, preventing
 //! premature fallbacks during active network progress.
 
+use crate::{block_tree_service::BlockStateUpdated, services::ServiceSenders};
+use irys_domain::BlockTreeReadGuard;
 use irys_types::{BlockHash, U256};
 use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
-use crate::{block_producer::BlockProducerInner, block_tree_service::BlockStateUpdated};
-
 /// Tracks the state of block validation during parent block selection
-pub struct BlockValidationTracker<'a> {
+pub struct BlockValidationTracker {
     state: ValidationState,
     timer: Timer,
-    inner: &'a BlockProducerInner,
+    block_tree_guard: BlockTreeReadGuard,
     block_state_rx: Receiver<BlockStateUpdated>,
 }
 
-impl<'a> BlockValidationTracker<'a> {
+impl BlockValidationTracker {
     /// Creates a new tracker that automatically finds the highest cumulative difficulty block
-    pub fn new(inner: &'a BlockProducerInner, wait_duration: Duration) -> Self {
+    pub fn new(
+        block_tree_guard: BlockTreeReadGuard,
+        service_senders: ServiceSenders,
+        wait_duration: Duration,
+    ) -> Self {
         // Subscribe to block state updates
-        let block_state_rx = inner.service_senders.subscribe_block_state_updates();
+        let block_state_rx = service_senders.subscribe_block_state_updates();
 
         // Get initial blockchain state
-        let tree = inner.block_tree_guard.read();
+        let tree = block_tree_guard.read();
         let (max_difficulty, target_block_hash) = tree.get_max_cumulative_difficulty_block();
         let target_block_height = tree
             .get_block(&target_block_hash)
@@ -73,7 +77,7 @@ impl<'a> BlockValidationTracker<'a> {
                 fallback_block,
             ),
             timer: Timer::new(wait_duration),
-            inner,
+            block_tree_guard,
             block_state_rx,
         }
     }
@@ -220,7 +224,7 @@ impl<'a> BlockValidationTracker<'a> {
 
     /// Capture all needed blockchain state in one read lock
     fn capture_blockchain_snapshot(&self) -> eyre::Result<BlockchainSnapshot> {
-        let tree = self.inner.block_tree_guard.read();
+        let tree = self.block_tree_guard.read();
 
         let (max_diff, max_hash) = tree.get_max_cumulative_difficulty_block();
         let max_height = tree.get_block(&max_hash).map(|b| b.height).unwrap_or(0);

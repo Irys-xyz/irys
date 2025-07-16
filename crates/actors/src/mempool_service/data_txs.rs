@@ -1,4 +1,3 @@
-use crate::block_tree_service::get_optimistic_chain;
 use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use base58::ToBase58 as _;
@@ -6,6 +5,7 @@ use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::DataRootLRU, tx_header_by_txid,
 };
+use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     DataLedger, GossipBroadcastMessage, IrysTransactionCommon as _, IrysTransactionHeader,
@@ -28,12 +28,14 @@ impl Inner {
         for tx in txs {
             // if data tx exists in mempool
             if let Some(tx_header) = mempool_state_guard.valid_submit_ledger_tx.get(&tx) {
+                debug!("Got tx {} from mempool", &tx);
                 found_txs.push(Some(tx_header.clone()));
                 continue;
             }
             // if data tx exists in mdbx
             if let Ok(read_tx) = self.read_tx() {
                 if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
+                    debug!("Got tx {} from DB", &tx);
                     found_txs.push(Some(tx_header.clone()));
                     continue;
                 }
@@ -48,14 +50,15 @@ impl Inner {
 
     pub async fn handle_data_tx_ingress_message(
         &mut self,
-        tx: IrysTransactionHeader,
+        mut tx: IrysTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
             "received tx {:?} (data_root {:?})",
             &tx.id.0.to_base58(),
             &tx.data_root.0.to_base58()
         );
-
+        // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
+        tx.ingress_proofs = None;
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_read_guard = mempool_state.read().await;
 

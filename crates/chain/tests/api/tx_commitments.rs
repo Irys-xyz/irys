@@ -2,9 +2,9 @@ use crate::utils::*;
 use assert_matches::assert_matches;
 use base58::ToBase58 as _;
 use eyre::eyre;
-use irys_actors::{packing::wait_for_packing, EpochSnapshot};
+use irys_actors::packing::wait_for_packing;
 use irys_chain::IrysNodeCtx;
-use irys_database::CommitmentSnapshotStatus;
+use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
@@ -66,30 +66,27 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // ===== PHASE 1: Verify Genesis Block Initialization =====
         // Check that the genesis block producer has the expected initial pledges
-        {
-            let genesis_block = node.get_block_by_height(0).await?;
-            let commitment_state = epoch_snapshot.commitment_state.read().unwrap();
-            let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
-            let stakes = commitment_state.stake_commitments.get(&genesis_signer);
+        let genesis_block = node.get_block_by_height(0).await?;
+        let commitment_state = &epoch_snapshot.commitment_state;
+        let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
+        let stakes = commitment_state.stake_commitments.get(&genesis_signer);
 
-            if let Some(pledges) = pledges {
-                assert_eq!(
-                    pledges.len(),
-                    3,
-                    "Genesis miner should have exactly 3 pledges"
-                );
-            } else {
-                panic!("Expected genesis miner to have pledges!");
-            }
-
-            debug!(
-                "\nGenesis Block Commitments:\n{:#?}\nStake: {:#?}\nPledges:\n{:#?}",
-                genesis_block.get_commitment_ledger_tx_ids(),
-                stakes.unwrap().id,
-                pledges.unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
+        if let Some(pledges) = pledges {
+            assert_eq!(
+                pledges.len(),
+                3,
+                "Genesis miner should have exactly 3 pledges"
             );
-            drop(commitment_state); // Release lock to allow node operations
+        } else {
+            panic!("Expected genesis miner to have pledges!");
         }
+
+        debug!(
+            "\nGenesis Block Commitments:\n{:#?}\nStake: {:#?}\nPledges:\n{:#?}",
+            genesis_block.get_commitment_ledger_tx_ids(),
+            stakes.unwrap().id,
+            pledges.unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
+        );
 
         // ===== PHASE 2: First Epoch - Create Commitments =====
         // Create stake commitment for first test signer
@@ -143,35 +140,32 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         ));
 
         // Verify commitment state contains expected pledges and stakes
-        {
-            let commitment_state = epoch_snapshot.commitment_state.read().unwrap();
+        let commitment_state = &epoch_snapshot.commitment_state;
 
-            // Check genesis miner pledges
-            let pledges = commitment_state
-                .pledge_commitments
-                .get(&genesis_signer)
-                .expect("Expected genesis miner pledges!");
-            assert_eq!(
-                pledges.len(),
-                3,
-                "Genesis miner should still have 3 pledges after first epoch"
-            );
+        // Check genesis miner pledges
+        let pledges = commitment_state
+            .pledge_commitments
+            .get(&genesis_signer)
+            .expect("Expected genesis miner pledges!");
+        assert_eq!(
+            pledges.len(),
+            3,
+            "Genesis miner should still have 3 pledges after first epoch"
+        );
 
-            // Check signer1 pledges and stake
-            let pledges = commitment_state
-                .pledge_commitments
-                .get(&signer1.address())
-                .expect("Expected signer1 miner pledges!");
-            assert_eq!(
-                pledges.len(),
-                2,
-                "Signer1 should have 2 pledges after first epoch"
-            );
+        // Check signer1 pledges and stake
+        let pledges = commitment_state
+            .pledge_commitments
+            .get(&signer1.address())
+            .expect("Expected signer1 miner pledges!");
+        assert_eq!(
+            pledges.len(),
+            2,
+            "Signer1 should have 2 pledges after first epoch"
+        );
 
-            let stake = commitment_state.stake_commitments.get(&signer1.address());
-            assert_matches!(stake, Some(_), "Signer1 should have a stake commitment");
-            drop(commitment_state);
-        }
+        let stake = commitment_state.stake_commitments.get(&signer1.address());
+        assert_matches!(stake, Some(_), "Signer1 should have a stake commitment");
 
         // ===== PHASE 4: Second Epoch - Add More Commitments =====
         // Create pledge for second test signer
@@ -232,8 +226,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     assert_eq!(
         epoch_snapshot
             .commitment_state
-            .read()
-            .unwrap()
             .pledge_commitments
             .get(&genesis_signer)
             .expect("commitments for genesis miner")
@@ -245,8 +237,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     assert_eq!(
         epoch_snapshot
             .commitment_state
-            .read()
-            .unwrap()
             .pledge_commitments
             .get(&signer1.address())
             .expect("commitments for genesis miner")
@@ -258,8 +248,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     assert_eq!(
         epoch_snapshot
             .commitment_state
-            .read()
-            .unwrap()
             .pledge_commitments
             .get(&signer2.address())
             .expect("commitments for genesis miner")
@@ -507,8 +495,6 @@ fn validate_pledge_assignments(
     // Each pledge contains a partition_hash that identifies which partition the pledge is for
     let partition_hashes: Vec<Option<H256>> = epoch_snapshot
         .commitment_state
-        .read()
-        .unwrap()
         .pledge_commitments
         .get(address)
         .map(|pledges| pledges.iter().map(|pledge| pledge.partition_hash).collect())
@@ -517,7 +503,7 @@ fn validate_pledge_assignments(
     // Retrieve the full commitment state entries for this address
     // These entries contain the complete pledge information needed for validation
     // Note: mostly used for debug logging here
-    let binding = epoch_snapshot.commitment_state.read().unwrap();
+    let binding = &epoch_snapshot.commitment_state;
     let result = binding.pledge_commitments.get(address);
     let direct = match result {
         Some(entries) => entries,

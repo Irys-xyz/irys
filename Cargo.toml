@@ -37,6 +37,7 @@ authors = []
 # Irys
 irys-macros = { path = "./crates/macros" }
 irys-database = { path = "./crates/database" }
+irys-domain = { path = "./crates/domain" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
 irys-api-client = { path = "./crates/api-client" }
@@ -159,41 +160,41 @@ alloy-signer-local = { version = "1.0.9", default-features = false }
 
 # Reth crates
 
-reth = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-chainspec = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-e2e-test-utils = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-engine-local = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-ethereum-engine-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-evm-ethereum = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-node-ethereum = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-ethereum-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-evm = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-network = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-node-api = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-node-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-node-core = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-node-metrics = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-primitives-traits = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-rpc-eth-api = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-codecs = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-db-api = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-db = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-provider = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-tasks = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-tracing = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-transaction-pool = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-trie-db = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-storage-api = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-basic-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-payload-builder-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-payload-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-revm = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
-reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "61d251df85dc7bdf4cca5048c6269befbf06af54" }
+reth = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-chainspec = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-e2e-test-utils = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-engine-local = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-ethereum-engine-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-evm-ethereum = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-node-ethereum = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-ethereum-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-evm = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-network = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-node-api = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-node-builder = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-node-core = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-node-metrics = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-primitives-traits = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-rpc-eth-api = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-codecs = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-db-api = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-db = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-provider = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-tasks = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-tracing = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-transaction-pool = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-trie-db = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-cli-commands = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-storage-api = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-basic-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-payload-builder-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-payload-primitives = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-revm = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
 
 # just used (for local testing)
 

@@ -1,13 +1,11 @@
-use irys_actors::block_index_service::BlockIndexReadGuard;
-use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_types::{BlockHash, H256};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
+use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
+use tracing::debug;
 #[cfg(test)]
 use {
-    irys_actors::block_tree_service::BlockTreeCache,
-    irys_database::BlockIndex,
-    irys_types::{BlockIndexItem, IrysBlockHeader, NodeConfig},
+    irys_types::{IrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
-    tracing::{debug, warn},
+    tracing::warn,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,6 +96,67 @@ impl BlockStatusProvider {
             BlockStatus::NotProcessed
         }
     }
+
+    pub async fn wait_for_block_to_appear_in_index(&self, block_height: u64) {
+        const ATTEMPTS_PER_SECOND: u64 = 5;
+
+        loop {
+            {
+                let binding = self.block_index_read_guard.read();
+                let index_item = binding.get_item(block_height);
+                if index_item.is_some() {
+                    return;
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                1000 / ATTEMPTS_PER_SECOND,
+            ))
+            .await;
+        }
+    }
+
+    pub async fn wait_for_block_tree_to_catch_up(&self, block_height: u64) {
+        const ATTEMPTS_PER_SECOND: u64 = 5;
+        let mut attempts = 0;
+
+        loop {
+            attempts += 1;
+
+            if attempts % ATTEMPTS_PER_SECOND == 0 {
+                debug!(
+                    "Block tree did not catch up to height {} after {} seconds, waiting...",
+                    block_height,
+                    attempts / ATTEMPTS_PER_SECOND
+                );
+            }
+
+            let can_process_height = {
+                let binding = self.block_tree_read_guard.read();
+                binding.can_process_height(block_height)
+            };
+
+            if can_process_height {
+                return;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                1000 / ATTEMPTS_PER_SECOND,
+            ))
+            .await;
+        }
+    }
+
+    pub fn is_height_in_the_index(&self, block_height: u64) -> bool {
+        let binding = self.block_index_read_guard.read();
+        let index_item = binding.get_item(block_height);
+        index_item.is_some()
+    }
+
+    pub fn latest_block_in_index(&self) -> Option<BlockIndexItem> {
+        let binding = self.block_index_read_guard.read();
+        binding.get_latest_item().cloned()
+    }
 }
 
 /// Testing utilities for `BlockStatusProvider` to simulate different tree/index states.
@@ -105,13 +164,13 @@ impl BlockStatusProvider {
 impl BlockStatusProvider {
     #[cfg(test)]
     pub async fn mock(node_config: &NodeConfig) -> Self {
+        use irys_domain::{BlockIndex, BlockTree};
+
         Self {
-            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(
-                BlockTreeCache::new(
-                    &IrysBlockHeader::new_mock_header(),
-                    node_config.consensus_config(),
-                ),
-            ))),
+            block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+                &IrysBlockHeader::new_mock_header(),
+                node_config.consensus_config(),
+            )))),
             block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
                 BlockIndex::new(node_config)
                     .await
@@ -225,8 +284,7 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
-        use irys_actors::{block_tree_service::ema_snapshot::EmaSnapshot, EpochSnapshot};
-        use irys_database::CommitmentSnapshot;
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
 
         self.block_tree_read_guard
             .write()
@@ -271,5 +329,16 @@ impl BlockStatusProvider {
                 .expect("to delete block from the tree");
             debug!("Deleted block {:?} from the tree", block_hash);
         }
+    }
+}
+
+impl BlockProvider for BlockStatusProvider {
+    fn latest_canonical_vdf_info(&self) -> Option<VDFLimiterInfo> {
+        let binding = self.block_tree_read_guard.read();
+
+        let latest_canonical_hash = binding.get_latest_canonical_entry().block_hash;
+        binding
+            .get_block(&latest_canonical_hash)
+            .map(|block| block.vdf_limiter_info.clone())
     }
 }

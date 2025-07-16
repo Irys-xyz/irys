@@ -10,6 +10,8 @@ use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveryError;
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
@@ -23,9 +25,10 @@ use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DatabaseProvider, GossipBroadcastMessage, GossipRequest,
     IrysBlockHeader, IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig,
-    PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
-    VersionRequest, H256,
+    NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset,
+    UnpackedChunk, VersionRequest, H256,
 };
+use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -39,6 +42,7 @@ pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
+    pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
 }
 
 impl MempoolStub {
@@ -48,6 +52,7 @@ impl MempoolStub {
             txs: Arc::default(),
             chunks: Arc::default(),
             internal_message_bus,
+            migrated_blocks: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -128,11 +133,26 @@ impl MempoolFacade for MempoolStub {
     ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
         Ok(None)
     }
+
+    async fn migrate_block(
+        &self,
+        irys_block_header: Arc<IrysBlockHeader>,
+    ) -> std::result::Result<usize, TxIngressError> {
+        self.migrated_blocks
+            .write()
+            .expect("to unlock migrated blocks")
+            .push(irys_block_header);
+        Ok(1)
+    }
+
+    async fn insert_poa_chunk(&self, _block_hash: H256, _chunk_data: Base64) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
-    pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
 }
 
@@ -140,7 +160,7 @@ pub(crate) struct BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
-        block: IrysBlockHeader,
+        block: Arc<IrysBlockHeader>,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.blocks
             .write()
@@ -254,6 +274,10 @@ impl ApiClient for ApiClientStub {
         let handler = self.block_index_handler.read().expect("to unlock response");
         handler(block_index_query)
     }
+
+    async fn node_info(&self, _peer: SocketAddr) -> Result<NodeInfo> {
+        Ok(NodeInfo::default())
+    }
 }
 
 impl Default for ApiClientStub {
@@ -274,7 +298,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub peer_list: PeerListMock,
     pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub api_client_stub: ApiClientStub,
     // Tets need the task manager to be stored somewhere
     #[expect(dead_code)]
@@ -283,6 +307,9 @@ pub(crate) struct GossipServiceTestFixture {
     pub block_status_provider: BlockStatusProvider,
     pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
     pub config: Config,
+    pub vdf_state_stub: VdfStateReadonly,
+    pub service_senders: ServiceSenders,
+    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +348,8 @@ impl GossipServiceTestFixture {
         let mock_reth_service = MockRethServiceActor {};
         let reth_service_addr = mock_reth_service.start();
 
+        let (service_senders, service_receivers) = ServiceSenders::new();
+
         let peer_service = PeerListServiceWithClient::new_with_custom_api_client(
             db.clone(),
             &config,
@@ -329,15 +358,13 @@ impl GossipServiceTestFixture {
         );
         let peer_list = peer_service.start();
 
-        let (gossip_sender, _rx) = mpsc::unbounded_channel();
-
-        let mempool_stub = MempoolStub::new(gossip_sender.clone());
+        let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
         let mempool_txs = Arc::clone(&mempool_stub.txs);
         let mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(Vec::new())),
-            internal_message_bus: gossip_sender,
+            internal_message_bus: service_senders.gossip_broadcast.clone(),
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
@@ -353,6 +380,48 @@ impl GossipServiceTestFixture {
             peer_list.clone(),
             RethBlockProvider::Mock(mocked_execution_payloads),
         );
+
+        let vdf_state_stub =
+            VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
+
+        let vdf_state = vdf_state_stub.clone();
+        let mut vdf_receiver = service_receivers.vdf_fast_forward;
+        tokio::spawn(async move {
+            loop {
+                match vdf_receiver.recv().await {
+                    Some(step) => {
+                        debug!("Received VDF step: {:?}", step);
+                        let state = vdf_state.into_inner_cloned();
+                        let mut lock = state.write().unwrap();
+                        lock.global_step = step.global_step_number;
+                    }
+                    None => {
+                        debug!("VDF receiver channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut block_tree_receiver = service_receivers.block_tree;
+        tokio::spawn(async move {
+            while let Some(message) = block_tree_receiver.recv().await {
+                debug!("Received BlockTreeServiceMessage: {:?}", message);
+                if let BlockTreeServiceMessage::FastTrackStorageFinalized {
+                    block_header: _,
+                    response,
+                } = message
+                {
+                    // Simulate processing the block header
+                    response
+                        .send(Ok(None))
+                        .expect("to send response for FastTrackStorageFinalized");
+                } else {
+                    debug!("Received unsupported BlockTreeServiceMessage");
+                }
+            }
+            debug!("BlockTreeServiceMessage channel closed");
+        });
 
         Self {
             // temp_dir,
@@ -373,6 +442,9 @@ impl GossipServiceTestFixture {
             block_status_provider: block_status_provider_mock,
             execution_payload_provider,
             config,
+            vdf_state_stub,
+            service_senders,
+            gossip_receiver: Some(service_receivers.gossip_broadcast),
         }
     }
 
@@ -384,9 +456,10 @@ impl GossipServiceTestFixture {
         ServiceHandleWithShutdownSignal,
         mpsc::UnboundedSender<GossipBroadcastMessage>,
     ) {
-        let (internal_message_bus, rx) =
-            tokio::sync::mpsc::unbounded_channel::<GossipBroadcastMessage>();
-        let gossip_service = P2PService::new(self.mining_address, rx, internal_message_bus.clone());
+        let gossip_service = P2PService::new(
+            self.mining_address,
+            self.gossip_receiver.take().expect("to take receiver"),
+        );
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()
@@ -394,7 +467,7 @@ impl GossipServiceTestFixture {
         )
         .expect("To bind");
 
-        let mempool_stub = MempoolStub::new(internal_message_bus.clone());
+        let mempool_stub = MempoolStub::new(self.service_senders.gossip_broadcast.clone());
         self.mempool_txs = Arc::clone(&mempool_stub.txs);
         self.mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
@@ -402,14 +475,16 @@ impl GossipServiceTestFixture {
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
-            internal_message_bus: internal_message_bus.clone(),
+            internal_message_bus: self.service_senders.gossip_broadcast.clone(),
         };
 
         let peer_list = self.peer_list.clone();
         let execution_payload_provider = self.execution_payload_provider.clone();
 
+        let gossip_broadcast = self.service_senders.gossip_broadcast.clone();
+
         gossip_service.sync_state.finish_sync();
-        let service_handle = gossip_service
+        let (service_handle, _block_pool) = gossip_service
             .run(
                 mempool_stub,
                 block_discovery_stub,
@@ -420,10 +495,13 @@ impl GossipServiceTestFixture {
                 gossip_listener,
                 self.block_status_provider.clone(),
                 execution_payload_provider,
+                self.vdf_state_stub.clone(),
+                self.config.clone(),
+                self.service_senders.clone(),
             )
             .expect("failed to run gossip service");
 
-        (service_handle, internal_message_bus)
+        (service_handle, gossip_broadcast)
     }
 
     #[must_use]

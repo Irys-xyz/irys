@@ -288,10 +288,15 @@ pub fn validate_chunk(
                 }
             }
 
-            // Validate leaf: both id and data_hash are correct.
+            // Validate leaf data_hash is correct
+            if data_hash != &leaf_proof.data_hash {
+                return Err(eyre!("Invalid Leaf Proof: hash mismatch"));
+            }
+
+            // Validate leaf root id is correct
             let id = hash_all_sha256(vec![data_hash, &max_byte_range.to_note_vec()])?;
-            if (id != root_id) && (data_hash != &leaf_proof.data_hash) {
-                return Err(eyre!("Invalid Leaf Proof"));
+            if id != root_id {
+                return Err(eyre!("Invalid Leaf Proof: root mismatch"));
             }
         }
         _ => {

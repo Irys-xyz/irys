@@ -2,12 +2,13 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
+use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
-    Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
-    Proof, H256, U256,
+    Compact, Config, DataRootLeave, H256List, IngressProofsList, IrysSignature,
+    IrysTransactionHeader, Proof, H256, U256,
 };
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::{Index, IndexMut};
+use tracing::debug;
 
 pub type BlockHash = H256;
 
@@ -68,12 +70,83 @@ pub struct VDFLimiterInfo {
 }
 
 impl VDFLimiterInfo {
+    pub fn new(
+        solution: &SolutionContext,
+        prev_block_header: &IrysBlockHeader,
+        steps: H256List,
+        config: &Config,
+    ) -> Self {
+        let mut vdf_limiter_info = Self {
+            global_step_number: solution.vdf_step,
+            output: solution.seed.clone().into_inner(),
+            last_step_checkpoints: solution.checkpoints.clone(),
+            prev_output: prev_block_header.vdf_limiter_info.output,
+            steps,
+            // Next two lines are going to be overridden by `set_next_seed`.
+            seed: prev_block_header.vdf_limiter_info.seed,
+            next_seed: Default::default(),
+            ..Self::default()
+        };
+
+        let reset_frequency = config.consensus.vdf.reset_frequency;
+        vdf_limiter_info.set_seeds(reset_frequency as u64, prev_block_header);
+
+        vdf_limiter_info
+    }
+
     /// Returns the global step number for the first step in the block.
     pub fn first_step_number(&self) -> u64 {
         // It is + 1 because there's always at least one step. I.e., in case if there's only
         // one step, the first step and the last step are the same, in case if there are two
         // steps, the first step is the last step - 1, and so on.
         self.global_step_number - self.steps.len() as u64 + 1
+    }
+
+    /// Returns the reset step if the block contains one
+    pub fn reset_step(&self, reset_frequency: u64) -> Option<u64> {
+        let first_step = self.first_step_number();
+        (first_step..=self.global_step_number)
+            .find(|step_number| step_number % reset_frequency == 0)
+    }
+
+    pub fn set_seeds(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
+        let (next_seed, seed) = self.calculate_seeds(reset_frequency, parent_header);
+        debug!(
+            "Setting VDF seeds: next_seed: {}, seed: {}",
+            next_seed, seed
+        );
+        self.next_seed = next_seed;
+        self.seed = seed;
+    }
+
+    /// Returns a pair of expected seeds for the VDF limiter. The first value is the `next_seed`,
+    /// and the second value is the `seed`.
+    pub fn calculate_seeds(
+        &self,
+        reset_frequency: u64,
+        parent_header: &IrysBlockHeader,
+    ) -> (H256, H256) {
+        if let Some(step) = self.reset_step(reset_frequency) {
+            debug!(
+                "VDFInfo contains a reset step {}, switching the seeds",
+                step
+            );
+            (
+                parent_header.block_hash,
+                parent_header.vdf_limiter_info.next_seed,
+            )
+        } else {
+            debug!(
+                "Using previous VDF seeds. First step: {}, last step: {}, reset_frequency: {}",
+                self.first_step_number(),
+                self.global_step_number,
+                reset_frequency
+            );
+            (
+                parent_header.vdf_limiter_info.next_seed,
+                parent_header.vdf_limiter_info.seed,
+            )
+        }
     }
 }
 

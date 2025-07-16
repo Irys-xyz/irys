@@ -1,6 +1,3 @@
-use core::{future::Future, task::Poll, time::Duration};
-use eyre::Context as _;
-use futures::FutureExt as _;
 use irys_database::{
     db::IrysDatabaseExt as _,
     db_cache::DataRootLRUEntry,
@@ -9,23 +6,17 @@ use irys_database::{
         CachedChunks, DataRootLRU, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
     },
 };
-use irys_types::{Config, DatabaseProvider, GIGABYTE};
-use reth::{
-    network::metered_poll_nested_stream_with_budget,
-    tasks::{shutdown::GracefulShutdown, TaskExecutor},
-};
+use irys_types::{Config, DatabaseProvider, TokioServiceHandle, GIGABYTE};
+use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use tokio::{
-    sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
-        oneshot,
-    },
-    task::JoinHandle,
+use tokio::sync::{
+    mpsc::{UnboundedReceiver, UnboundedSender},
+    oneshot,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -39,31 +30,77 @@ pub struct ChunkCacheService {
     pub config: Config,
     pub db: DatabaseProvider,
     pub msg_rx: UnboundedReceiver<CacheServiceAction>,
-    pub shutdown: GracefulShutdown,
+    pub shutdown: Shutdown,
 }
 
 impl ChunkCacheService {
     pub fn spawn_service(
-        exec: &TaskExecutor,
         db: DatabaseProvider,
         rx: UnboundedReceiver<CacheServiceAction>,
         config: Config,
-    ) -> JoinHandle<()> {
-        exec.spawn_critical_with_graceful_shutdown_signal("Cache Service", |shutdown| async move {
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        info!("Spawning chunk cache service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(async move {
             let cache_service = Self {
-                shutdown,
+                shutdown: shutdown_rx,
                 db,
                 config,
                 msg_rx: rx,
             };
             cache_service
+                .start()
                 .await
-                .wrap_err("Error running cache_service")
-                .unwrap();
-        })
+                .expect("Chunk cache service encountered an irrecoverable error")
+        });
+
+        TokioServiceHandle {
+            name: "chunk_cache_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
     }
 
-    fn on_handle_message(&self, msg: CacheServiceAction) {
+    async fn start(mut self) -> eyre::Result<()> {
+        info!("Starting chunk cache service");
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for chunk cache service");
+                    break;
+                }
+                // Handle messages
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.on_handle_message(msg);
+                        }
+                        None => {
+                            warn!("Message channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.on_handle_message(msg);
+        }
+
+        info!("shutting down chunk cache service gracefully");
+        Ok(())
+    }
+
+    fn on_handle_message(&mut self, msg: CacheServiceAction) {
         match msg {
             CacheServiceAction::OnFinalizedBlock(finalized_height, sender) => {
                 let res = self.prune_cache(finalized_height);
@@ -152,53 +189,5 @@ impl ChunkCacheService {
         write_tx.commit()?;
 
         Ok(())
-    }
-}
-
-pub const DRAIN_BUDGET: u32 = 10;
-
-impl Future for ChunkCacheService {
-    type Output = eyre::Result<String>;
-
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        let this = self.get_mut();
-
-        match this.shutdown.poll_unpin(cx) {
-            Poll::Ready(guard) => {
-                debug!("Shutting down CacheService");
-                // process all remaining tasks
-                while let Poll::Ready(Some(msg)) = this.msg_rx.poll_recv(cx) {
-                    this.on_handle_message(msg);
-                }
-                drop(guard);
-                return Poll::Ready(Ok("Graceful shutdown".to_owned()));
-            }
-            Poll::Pending => {}
-        }
-
-        let mut time_taken = Duration::ZERO;
-
-        // process `DRAIN_BUDGET` messages before yielding
-        let maybe_more_handle_messages = metered_poll_nested_stream_with_budget!(
-            time_taken,
-            "cache",
-            "cache service channel",
-            DRAIN_BUDGET,
-            this.msg_rx.poll_recv(cx),
-            |msg| this.on_handle_message(msg),
-            error!("cache channel closed");
-        );
-
-        debug!("took {:?} to process cache service messages", &time_taken);
-
-        if maybe_more_handle_messages {
-            // make sure we're woken up again
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
-        Poll::Pending
     }
 }

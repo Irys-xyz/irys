@@ -1,14 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
+use crate::block_tree_service::ValidationResult;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
-    block_index_service::BlockIndexReadGuard,
-    block_tree_service::ema_snapshot::EmaSnapshot,
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
     shadow_tx_generator::ShadowTxGenerator,
-    EpochSnapshot,
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
@@ -17,6 +15,7 @@ use async_trait::async_trait;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
+use irys_domain::{BlockIndexReadGuard, EmaSnapshot, EpochSnapshot};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
 use irys_reth::shadow_tx::ShadowTransaction;
@@ -36,7 +35,7 @@ use reth::revm::primitives::B256;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_ethereum_primitives::Block;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Trait for providing execution payloads for block validation
 #[async_trait]
@@ -213,8 +212,6 @@ pub fn check_poa_data_expiration(
 ) -> eyre::Result<()> {
     let is_data_partition_assigned = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .contains_key(&poa.partition_hash);
 
@@ -688,17 +685,39 @@ fn validate_shadow_transactions_match(
     Ok(())
 }
 
+pub fn is_seed_data_valid(
+    block_header: &IrysBlockHeader,
+    previous_block_header: &IrysBlockHeader,
+    reset_frequency: u64,
+) -> ValidationResult {
+    let vdf_info = &block_header.vdf_limiter_info;
+    let expected_seed_data = vdf_info.calculate_seeds(reset_frequency, previous_block_header);
+
+    // TODO: difficulty validation adjustment is likely needs to be done here too,
+    //  but difficulty is not yet implemented
+    let are_seeds_valid =
+        expected_seed_data.0 == vdf_info.next_seed && expected_seed_data.1 == vdf_info.seed;
+    if are_seeds_valid {
+        ValidationResult::Valid
+    } else {
+        error!(
+            "Seed data is invalid. Expected: {:?}, got: {:?}",
+            expected_seed_data, vdf_info
+        );
+        ValidationResult::Invalid
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        epoch_service::EpochSnapshot,
         BlockFinalizedMessage,
     };
     use actix::{prelude::*, SystemRegistry};
-
     use irys_config::StorageSubmodulesConfig;
-    use irys_database::{add_genesis_commitments, BlockIndex};
+    use irys_database::add_genesis_commitments;
+    use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
         irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransactionLedger,

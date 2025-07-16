@@ -1,7 +1,7 @@
 use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use base58::ToBase58 as _;
-use irys_database::CommitmentSnapshotStatus;
+use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionId, H256};
 use lru::LruCache;
@@ -290,11 +290,7 @@ impl Inner {
 
         let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
 
-        let is_staked = epoch_snapshot
-            .commitment_state
-            .read()
-            .unwrap()
-            .is_staked(commitment_tx.signer);
+        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
 
         let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, is_staked);
 

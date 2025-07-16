@@ -12,13 +12,13 @@
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
-use crate::block_tree_service::{
-    BlockState, BlockTreeReadGuard, BlockTreeServiceMessage, ChainState, ValidationResult,
-};
+use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
-    poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid, PayloadProvider,
+    is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
+    PayloadProvider,
 };
 use crate::validation_service::ValidationServiceInner;
+use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
@@ -230,12 +230,31 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
             .unwrap_or(ValidationResult::Invalid)
         };
 
-        // Wait for all three tasks to complete
-        let (recall_result, poa_result, shadow_tx_result) =
-            tokio::join!(recall_task, poa_task, shadow_tx_task);
+        let vdf_reset_frequency = self.service_inner.config.consensus.vdf.reset_frequency as u64;
+        let seeds_validation_task = async move {
+            let binding = self.block_tree_guard.read();
+            let previous_block = binding
+                .get_block(&self.block.previous_block_hash)
+                .expect("previous block should exist");
+            is_seed_data_valid(&self.block, previous_block, vdf_reset_frequency)
+        };
 
-        match (recall_result, poa_result, shadow_tx_result) {
-            (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
+        // Wait for all three tasks to complete
+        let (recall_result, poa_result, shadow_tx_result, seeds_validation_result) =
+            tokio::join!(recall_task, poa_task, shadow_tx_task, seeds_validation_task);
+
+        match (
+            recall_result,
+            poa_result,
+            shadow_tx_result,
+            seeds_validation_result,
+        ) {
+            (
+                ValidationResult::Valid,
+                ValidationResult::Valid,
+                ValidationResult::Valid,
+                ValidationResult::Valid,
+            ) => {
                 tracing::debug!("block validation successful");
                 Ok(ValidationResult::Valid)
             }

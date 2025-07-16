@@ -11,12 +11,7 @@
 //! - Canonical extension detection walks parent chain to canonical tip
 //! - Lower block heights processed first within each priority tier
 //! - Completed tasks immediately removed to free resources
-
-use crate::block_tree_service::{BlockTreeCache, BlockTreeReadGuard, ChainState};
-
-#[cfg(test)]
-use crate::block_tree_service::test_utils::dummy_ema_snapshot;
-use futures::future::poll_immediate;
+use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::BlockHash;
 use priority_queue::PriorityQueue;
 use std::cmp::Reverse;
@@ -33,6 +28,8 @@ pub(crate) enum BlockPriority {
     /// Fork blocks that don't extend the canonical tip (lowest priority)
     Fork(u64),
 }
+
+use futures::future::poll_immediate;
 
 /// Wrapper around active validations with capacity management and priority ordering
 pub(crate) struct ActiveValidations {
@@ -82,7 +79,7 @@ impl ActiveValidations {
     }
 
     /// Check if a block is a canonical extension (extends from the canonical tip)
-    fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTreeCache) -> bool {
+    fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
         let canonical_tip = canonical_chain.last().unwrap().block_hash;
 
@@ -194,10 +191,9 @@ impl ActiveValidations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_tree_service::test_utils::{dummy_epoch_snapshot, genesis_tree};
-    use crate::block_tree_service::{BlockState, ChainState};
+    use crate::block_tree_service::test_utils::genesis_tree;
     use futures::future::{pending, ready};
-    use irys_database::CommitmentSnapshot;
+    use irys_domain::{dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, CommitmentSnapshot};
     use irys_types::{IrysBlockHeader, H256};
     use itertools::Itertools as _;
     use std::collections::HashMap;

@@ -1,3 +1,4 @@
+use eyre::eyre;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_primitives::CommitmentType;
 use irys_types::{
@@ -6,9 +7,10 @@ use irys_types::{
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
-
 /// Names for each of the system ledgers as well as their `ledger_id` discriminant
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
+)]
 #[repr(u32)]
 pub enum SystemLedger {
     /// The commitments ledger, for pledging and staking related transactions
@@ -42,12 +44,12 @@ impl From<SystemLedger> for u32 {
 }
 
 impl TryFrom<u32> for SystemLedger {
-    type Error = &'static str;
+    type Error = eyre::Report;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Commitment),
-            _ => Err("Invalid ledger number"),
+            _ => Err(eyre!("Invalid ledger number")),
         }
     }
 }

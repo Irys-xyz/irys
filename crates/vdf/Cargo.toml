@@ -8,6 +8,7 @@ rust-version.workspace = true
 irys-types.workspace = true
 irys-database.workspace = true
 irys-efficient-sampling.workspace = true
+irys-domain.workspace = true
 
 sha2.workspace = true
 rayon.workspace = true

@@ -119,6 +119,17 @@ impl BlockIndex {
         } else {
             let prev_block = self.get_item(block.height.saturating_sub(1));
             if let Some(prev_block) = prev_block {
+                if prev_block.block_hash != block.previous_block_hash {
+                    // Use println! here because errors and tracing are not getting propagated
+                    println!(
+                        "Panic: prev_block at index {} does not match current block's prev_block_hash",
+                        block.height.saturating_sub(1)
+                    );
+                    return Err(eyre::eyre!(
+                        "prev_block at index {} does not match current block's prev_block_hash",
+                        block.height.saturating_sub(1)
+                    ));
+                }
                 (
                     prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
                     prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,

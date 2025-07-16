@@ -1,21 +1,20 @@
-use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
+use actix::{actors::mocker::Mocker, Arbiter, SystemRegistry};
 use actix::{Actor as _, SystemService as _};
 use base58::ToBase58 as _;
+use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
 };
-use irys_actors::EpochBlockData;
 use irys_actors::{
-    block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-    epoch_service::EpochSnapshot,
-};
-use irys_actors::{
+    block_producer::BlockProducerCommand,
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
-    BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
+    services::ServiceSenders,
+    BlockFinalizedMessage,
 };
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex};
+use irys_database::{add_genesis_commitments, add_test_commitments};
+use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::PartitionChunkRange;
@@ -26,8 +25,6 @@ use irys_types::{
 use irys_types::{Config, U256};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
-use reth::payload::EthBuiltPayload;
-use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
@@ -91,7 +88,7 @@ async fn genesis_test() {
 
         // Verify data partition assignments match _PUBLISH_ ledger slots
         for (slot_idx, slot) in pub_slots.iter().enumerate() {
-            let pa = epoch_snapshot.partition_assignments.read().unwrap();
+            let pa = &epoch_snapshot.partition_assignments;
             for &partition_hash in &slot.partitions {
                 let assignment = pa
                     .data_partitions
@@ -116,7 +113,7 @@ async fn genesis_test() {
 
         // Verify data partition assignments match _SUBMIT_ledger slots
         for (slot_idx, slot) in sub_slots.iter().enumerate() {
-            let pa = epoch_snapshot.partition_assignments.read().unwrap();
+            let pa = &epoch_snapshot.partition_assignments;
             for &partition_hash in &slot.partitions {
                 let assignment = pa
                     .data_partitions
@@ -142,7 +139,7 @@ async fn genesis_test() {
 
     // Verify the correct number of genesis partitions have been activated
     {
-        let pa = epoch_snapshot.partition_assignments.read().unwrap();
+        let pa = &epoch_snapshot.partition_assignments;
         let data_partition_count = pa.data_partitions.len() as u64;
         let expected_partitions = data_partition_count
             + EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config.consensus);
@@ -338,14 +335,18 @@ async fn partition_expiration_and_repacking_test() {
     let arc_rwlock = Arc::new(rwlock);
     let closure_arc = arc_rwlock.clone();
 
-    let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |_msg, _ctx| {
-        let inner_result: eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> = Ok(None);
-        Box::new(Some(inner_result)) as Box<dyn Any>
-    }));
+    // Create ServiceSenders for testing
+    let (service_senders, mut receivers) = ServiceSenders::new();
 
-    let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
-    let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
-    let mocked_addr = MockedBlockProducerAddr(recipient);
+    // Spawn a task to handle block producer commands
+    tokio::spawn(async move {
+        while let Some(cmd) = receivers.block_producer.recv().await {
+            if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
+                // Return Ok(None) for the test
+                let _ = response.send(Ok(None));
+            }
+        }
+    });
 
     let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
         let packing_req = *msg.downcast::<PackingRequest>().unwrap();
@@ -360,12 +361,7 @@ async fn partition_expiration_and_repacking_test() {
         Box::new(Some(())) as Box<dyn Any>
     }));
 
-    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-        capacity: 10,
-        global_step: 0,
-        seeds: VecDeque::new(),
-        mining_state_sender: None,
-    })));
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
     let packing_addr = packing.start();
     let mut part_actors = Vec::new();
@@ -375,7 +371,7 @@ async fn partition_expiration_and_repacking_test() {
     for sm in &storage_modules {
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
-            mocked_addr.0.clone(),
+            service_senders.clone(),
             packing_addr.clone().recipient(),
             sm.clone(),
             true, // do not start mining automatically
@@ -397,8 +393,6 @@ async fn partition_expiration_and_repacking_test() {
     let assign_submit_partition_hash = {
         let partition_hash = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
@@ -425,8 +419,6 @@ async fn partition_expiration_and_repacking_test() {
     let capacity_partitions = {
         let capacity_partitions: Vec<H256> = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .capacity_partitions
             .keys()
             .copied()
@@ -566,20 +558,13 @@ async fn partition_expiration_and_repacking_test() {
     // check repacking request expired partition for its whole interval range, and partitions assignments are consistent
     {
         assert_eq!(
-            epoch_snapshot
-                .partition_assignments
-                .read()
-                .unwrap()
-                .data_partitions
-                .len(),
+            epoch_snapshot.partition_assignments.data_partitions.len(),
             3,
             "Should have four partitions assignments"
         );
 
         if let Some(publish_assignment) = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .get(&publish_partition)
         {
@@ -599,8 +584,6 @@ async fn partition_expiration_and_repacking_test() {
 
         if let Some(submit_assignment) = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .get(&submit_partition)
         {
@@ -620,8 +603,6 @@ async fn partition_expiration_and_repacking_test() {
 
         if let Some(submit_assignment) = epoch_snapshot
             .partition_assignments
-            .read()
-            .unwrap()
             .data_partitions
             .get(&submit_partition2)
         {
@@ -878,19 +859,13 @@ async fn partitions_assignment_determinism_test() {
         &config,
     );
 
-    epoch_snapshot
-        .partition_assignments
-        .read()
-        .unwrap()
-        .print_assignments();
+    epoch_snapshot.partition_assignments.print_assignments();
 
     // Because we aren't actually building blocks with block_producer we need to
     // stub out some block hashes, for this tests we use the capacity partition hashes
     // as the source because it doubles down on determinism.
     let test_hashes: Vec<_> = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .capacity_partitions
         .keys()
         .copied()
@@ -921,11 +896,7 @@ async fn partitions_assignment_determinism_test() {
         previous_epoch_block = new_epoch_block.clone();
     }
 
-    epoch_snapshot
-        .partition_assignments
-        .read()
-        .unwrap()
-        .print_assignments();
+    epoch_snapshot.partition_assignments.print_assignments();
 
     debug!(
         "\nAll Partitions({})\n{}",
@@ -939,8 +910,6 @@ async fn partitions_assignment_determinism_test() {
 
     if let Some(publish_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .get(&publish_slot_0)
     {
@@ -960,18 +929,12 @@ async fn partitions_assignment_determinism_test() {
 
     let publish_slot_1 = H256::from_base58("2HVmW86qVyKTw1DYJMX6NoNvVxATLNZHSAyMceEWPtLC");
 
-    epoch_snapshot
-        .partition_assignments
-        .read()
-        .unwrap()
-        .print_assignments();
+    epoch_snapshot.partition_assignments.print_assignments();
 
     debug!("expected publish[1] -> {}", publish_slot_1.0.to_base58());
 
     if let Some(publish_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .get(&publish_slot_1)
     {
@@ -993,8 +956,6 @@ async fn partitions_assignment_determinism_test() {
 
     if let Some(capacity_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .capacity_partitions
         .get(&capacity_partition)
     {
@@ -1014,8 +975,6 @@ async fn partitions_assignment_determinism_test() {
 
     if let Some(submit_assignment) = epoch_snapshot
         .partition_assignments
-        .read()
-        .unwrap()
         .data_partitions
         .get(&submit_slot_2)
     {

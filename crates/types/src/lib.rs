@@ -24,6 +24,7 @@ pub mod storage_pricing;
 pub mod transaction;
 pub mod version;
 
+pub mod block_provider;
 pub mod h256;
 
 use std::sync::{atomic::AtomicU64, Arc};

@@ -20,7 +20,7 @@ pub struct CommitmentState {
 }
 
 impl CommitmentState {
-    pub fn is_staked(&self, address: Address) -> bool {
+    pub(crate) fn is_staked(&self, address: Address) -> bool {
         if let Some(commitment) = self.stake_commitments.get(&address) {
             return commitment.commitment_status == CommitmentStatus::Active;
         }
