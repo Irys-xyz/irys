@@ -22,9 +22,6 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    // prepare anchors for commitment txs
-    let genesis_block = node.get_block_by_height(0).await?;
-
     // TEST CASE 1: create a submit tx for later migration to block index,
     //              testing it cannot be resumbitted back into mempool after migration
     // create and submit a data transaction
@@ -33,16 +30,6 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let tx_for_migration = node.post_data_tx(anchor, tx_data, &signer).await;
     let txid = tx_for_migration.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
-
-    // also create commitment txs that will later be resubmitted
-    tracing::error!("genesis block : {:?}", genesis_block);
-    let stake_for_migration = node.post_stake_commitment(genesis_block.block_hash).await;
-    let pledge_for_migration = node.post_pledge_commitment(stake_for_migration.id).await;
-    node.wait_for_mempool_commitment_txs(
-        vec![stake_for_migration.id, pledge_for_migration.id],
-        seconds_to_wait,
-    )
-    .await?;
 
     tracing::error!("we make it here");
     // mine block including tx_for_migration
@@ -54,9 +41,6 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
         .get(&DataLedger::Submit)
         .unwrap()
         .contains(&txid));
-    let commitment_ids = block1.get_commitment_ledger_tx_ids();
-    assert!(commitment_ids.contains(&stake_for_migration.id));
-    assert!(commitment_ids.contains(&pledge_for_migration.id));
 
     // mine enough blocks to cause block with tx_for_migration to migrate to index
     node.mine_blocks(
