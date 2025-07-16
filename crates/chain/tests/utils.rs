@@ -15,12 +15,11 @@ use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
-    block_producer::SolutionFoundMessage,
+    block_producer::BlockProducerCommand,
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
-    SetTestBlocksRemainingMessage,
 };
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
@@ -54,6 +53,7 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use itertools::Itertools as _;
 use reth::{
     api::Block as _,
     network::{PeerInfo, Peers as _},
@@ -416,7 +416,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to reach target height of {} after {} retries",
+                "Failed to reach target index height of {} after {} retries",
                 target_height,
                 retries
             ))
@@ -464,6 +464,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         .await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -486,13 +487,12 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(latest_block.block_hash);
             }
 
-            if retries >= max_retries {
-                return Err(eyre::eyre!(
-                    "Failed to reach target height {} after {} retries",
-                    target_height,
-                    retries
-                ));
-            }
+            eyre::ensure!(
+                retries < max_retries,
+                "Failed to reach target height {} after {} retries",
+                target_height,
+                retries
+            );
 
             sleep(Duration::from_secs(1)).await;
             retries += 1;
@@ -526,7 +526,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             if retries >= max_retries {
                 return Err(eyre::eyre!(
-                    "Failed to reach target height {} after {} retries",
+                    "Failed to reach target confirmed height {} after {} retries",
                     target_height,
                     retries
                 ));
@@ -804,18 +804,22 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
-            .actor_addresses
+            .service_senders
             .block_producer
-            .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(
+                num_blocks as u64,
+            )))
+            .unwrap();
         let height = self.get_canonical_chain_height().await;
         self.node_ctx.start_mining().await?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         self.node_ctx
-            .actor_addresses
+            .service_senders
             .block_producer
-            .do_send(SetTestBlocksRemainingMessage(None));
+            .send(BlockProducerCommand::SetTestBlocksRemaining(None))
+            .unwrap();
         self.node_ctx.stop_mining().await
     }
 
@@ -1729,6 +1733,91 @@ impl IrysNodeTest<IrysNodeCtx> {
             .read()
             .get_ema_snapshot(block_hash)
     }
+
+    /// Mine blocks until a condition is met
+    #[tracing::instrument(skip_all)]
+    pub async fn mine_until_condition<F>(
+        &self,
+        mut condition: F,
+        blocks_per_batch: usize,
+        max_blocks: usize,
+        max_seconds: usize,
+    ) -> eyre::Result<usize>
+    where
+        F: FnMut(&[IrysBlockHeader]) -> bool,
+    {
+        let mut total_blocks_mined = 0;
+
+        while total_blocks_mined < max_blocks {
+            // Mine a batch of blocks
+            self.mine_blocks(blocks_per_batch).await?;
+            total_blocks_mined += blocks_per_batch;
+
+            // Wait for blocks to be indexed
+            self.wait_until_height(total_blocks_mined as u64, max_seconds)
+                .await?;
+
+            // Get all blocks mined so far
+            let blocks = self.get_blocks(0, total_blocks_mined as u64).await?;
+
+            // Check if condition is met
+            if condition(&blocks) {
+                return Ok(total_blocks_mined);
+            }
+        }
+
+        Err(eyre::eyre!(
+            "Condition not met after mining {} blocks",
+            total_blocks_mined
+        ))
+    }
+
+    /// Get all blocks that contain VDF resets
+    pub async fn get_blocks_with_vdf_resets(
+        &self,
+        start_height: u64,
+        end_height: u64,
+    ) -> eyre::Result<Vec<IrysBlockHeader>> {
+        let blocks = self.get_blocks(start_height, end_height).await?;
+        let reset_frequency = self.node_ctx.config.consensus.vdf.reset_frequency;
+
+        Ok(blocks
+            .into_iter()
+            .filter(|block| {
+                block
+                    .vdf_limiter_info
+                    .reset_step(reset_frequency as u64)
+                    .is_some()
+            })
+            .collect())
+    }
+
+    /// Verify that blocks match between two nodes
+    pub async fn verify_blocks_match(
+        &self,
+        other: &Self,
+        start_height: u64,
+        end_height: u64,
+    ) -> eyre::Result<()> {
+        let self_blocks = self.get_blocks(start_height, end_height).await?;
+        let other_blocks = other.get_blocks(start_height, end_height).await?;
+
+        for (index, (self_block, other_block)) in
+            self_blocks.iter().zip_eq(other_blocks.iter()).enumerate()
+        {
+            // Compare full headers for completeness and clarity
+            eyre::ensure!(
+                self_block == other_block,
+                "Block mismatch at index {} (height {}): block hashes {:?} vs {:?}",
+                index,
+                self_block.height,
+                self_block.block_hash,
+                other_block.block_hash
+            );
+        }
+
+        Ok(())
+    }
 }
 
 pub async fn mine_blocks(
@@ -1747,11 +1836,17 @@ pub async fn mine_block(
 ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
     let poa_solution = solution_context(node_ctx).await?;
 
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     node_ctx
-        .actor_addresses
+        .service_senders
         .block_producer
-        .send(SolutionFoundMessage(poa_solution.clone()))
-        .await?
+        .send(BlockProducerCommand::SolutionFound {
+            solution: poa_solution.clone(),
+            response: response_tx,
+        })
+        .unwrap();
+
+    response_rx.await?
 }
 
 pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {

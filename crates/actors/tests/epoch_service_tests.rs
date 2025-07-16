@@ -1,4 +1,4 @@
-use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
+use actix::{actors::mocker::Mocker, Arbiter, SystemRegistry};
 use actix::{Actor as _, SystemService as _};
 use base58::ToBase58 as _;
 use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
@@ -6,9 +6,11 @@ use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
 };
 use irys_actors::{
+    block_producer::BlockProducerCommand,
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
-    BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
+    services::ServiceSenders,
+    BlockFinalizedMessage,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{add_genesis_commitments, add_test_commitments};
@@ -23,7 +25,6 @@ use irys_types::{
 use irys_types::{Config, U256};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
-use reth::payload::EthBuiltPayload;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
@@ -334,14 +335,18 @@ async fn partition_expiration_and_repacking_test() {
     let arc_rwlock = Arc::new(rwlock);
     let closure_arc = arc_rwlock.clone();
 
-    let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |_msg, _ctx| {
-        let inner_result: eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> = Ok(None);
-        Box::new(Some(inner_result)) as Box<dyn Any>
-    }));
+    // Create ServiceSenders for testing
+    let (service_senders, mut receivers) = ServiceSenders::new();
 
-    let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
-    let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
-    let mocked_addr = MockedBlockProducerAddr(recipient);
+    // Spawn a task to handle block producer commands
+    tokio::spawn(async move {
+        while let Some(cmd) = receivers.block_producer.recv().await {
+            if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
+                // Return Ok(None) for the test
+                let _ = response.send(Ok(None));
+            }
+        }
+    });
 
     let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
         let packing_req = *msg.downcast::<PackingRequest>().unwrap();
@@ -366,7 +371,7 @@ async fn partition_expiration_and_repacking_test() {
     for sm in &storage_modules {
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
-            mocked_addr.0.clone(),
+            service_senders.clone(),
             packing_addr.clone().recipient(),
             sm.clone(),
             true, // do not start mining automatically
