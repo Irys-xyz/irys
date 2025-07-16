@@ -1421,6 +1421,13 @@ where
                                     attempt,
                                     last_error.as_ref().unwrap()
                                 );
+                                self_addr
+                                    .send(DecreasePeerScore {
+                                        peer_miner_address: address,
+                                        reason: ScoreDecreaseReason::Offline,
+                                    })
+                                    .await
+                                    .ok();
 
                                 // Continue trying with the same peer if not the last attempt
                                 if attempt < 5 {
