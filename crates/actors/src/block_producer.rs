@@ -7,67 +7,82 @@ use crate::{
     shadow_tx_generator::ShadowTxGenerator,
 };
 use actix::prelude::*;
-use actors::mocker::Mocker;
 use alloy_consensus::{
     transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
 };
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::TxSignerSync as _;
-use alloy_rpc_types_engine::PayloadAttributes;
+use alloy_rpc_types_engine::{
+    ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, PayloadAttributes, PayloadStatusEnum,
+};
 use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{BlockTreeReadGuard, EmaSnapshot, ExponentialMarketAvgCalculation};
 use irys_price_oracle::IrysPriceOracle;
-use irys_reth::compose_shadow_tx;
-use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_reth::{
+    compose_shadow_tx,
+    payload::{DeterministicShadowTxKey, ShadowTxStore},
+    reth_node_ethereum::EthEngineTypes,
+    IrysEthereumNode,
+};
+use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, Base64, CommitmentTransaction, Config,
     DataLedger, DataTransactionLedger, GossipBroadcastMessage, H256List, IngressProofsList,
     IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, SystemTransactionLedger,
-    TxIngressProof, VDFLimiterInfo, H256, U256,
+    TokioServiceHandle, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
-    core::primitives::SealedBlock, payload::EthBuiltPayload, revm::primitives::B256,
+    api::{BeaconConsensusEngineHandle, NodeTypes, PayloadKind},
+    core::primitives::SealedBlock,
+    payload::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderHandle},
+    revm::primitives::B256,
     rpc::types::BlockId,
+    tasks::shutdown::Shutdown,
 };
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn, Instrument as _, Span};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, info, warn};
 
 mod block_validation_tracker;
 pub use block_validation_tracker::BlockValidationTracker;
 
-/// Used to mock up a `BlockProducerActor`
-pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
-
-/// A mocked [`BlockProducerActor`] only needs to implement [`SolutionFoundMessage`]
+/// Commands that can be sent to the block producer service
 #[derive(Debug)]
-pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
+pub enum BlockProducerCommand {
+    /// Announce to the node a mining solution has been found
+    SolutionFound {
+        solution: SolutionContext,
+        response: oneshot::Sender<
+            eyre::Result<Option<(Arc<irys_types::IrysBlockHeader>, EthBuiltPayload)>>,
+        >,
+    },
+    /// Set the test blocks remaining (for testing)
+    SetTestBlocksRemaining(Option<u64>),
+}
 
-/// `BlockProducerActor` creates blocks from mining solutions
-#[derive(Debug, Clone)]
-pub struct BlockProducerActor {
-    pub inner: Arc<BlockProducerInner>,
+/// Block producer service that creates blocks from mining solutions
+#[derive(Debug)]
+pub struct BlockProducerService {
+    /// Graceful shutdown handle
+    shutdown: Shutdown,
+    /// Command receiver
+    cmd_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+    /// Inner logic
+    inner: Arc<BlockProducerInner>,
     /// Enforces block production limits during testing
-    ///
-    /// Controls the exact number of blocks produced to ensure test determinism.
-    /// Since mining is probabilistic, solutions can be found nearly simultaneously
-    /// before mining can be stopped after the first solution. This guard prevents
-    /// producing extra blocks that would cause non-deterministic test behavior.
-    pub blocks_remaining_for_test: Option<u64>,
-    /// Tracing span
-    pub span: Span,
+    blocks_remaining_for_test: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -90,100 +105,167 @@ pub struct BlockProducerInner {
     pub block_tree_guard: BlockTreeReadGuard,
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
-    /// Reth node adapter
-    pub reth_node_adapter: IrysRethNodeAdapter,
+    /// Reth node payload builder
+    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes>,
+    /// Reth blockchain provider
+    pub reth_provider: NodeProvider,
+    /// Shadow tx store
+    pub shadow_tx_store: ShadowTxStore,
     /// Reth service actor
     pub reth_service: Addr<RethServiceActor>,
+    /// Reth beacon engine handle
+    pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
 }
 
-/// Actors can handle this message to learn about the `block_producer` actor at startup
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-pub struct RegisterBlockProducerMessage(pub Addr<BlockProducerActor>);
-
-impl Actor for BlockProducerActor {
-    type Context = Context<Self>;
-}
-
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-pub struct SetTestBlocksRemainingMessage(pub Option<u64>);
-
-impl Handler<SetTestBlocksRemainingMessage> for BlockProducerActor {
-    type Result = ();
-
-    fn handle(
-        &mut self,
-        msg: SetTestBlocksRemainingMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
-        self.blocks_remaining_for_test = msg.0;
-    }
-}
-
-#[derive(Message, Debug)]
-#[rtype(result = "eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>")]
-/// Announce to the node a mining solution has been found.
-pub struct SolutionFoundMessage(pub SolutionContext);
-
-impl Handler<SolutionFoundMessage> for BlockProducerActor {
-    type Result =
-        AtomicResponse<Self, eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>>;
-    #[tracing::instrument(skip_all, fields(
-        minting_address = ?msg.0.mining_address,
-        partition_hash = ?msg.0.partition_hash,
-        chunk_offset = ?msg.0.chunk_offset,
-        tx_path = ?msg.0.tx_path.is_none(),
-        chunk = ?msg.0.chunk.len(),
-    ))]
-    fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
-        let span = self.span.clone();
-        let span2 = span.clone();
-        let _span = span.enter();
-        let solution = msg.0;
+impl BlockProducerService {
+    /// Spawn a new block producer service
+    #[tracing::instrument(skip_all, fields(blocks_remaining_for_test = ?blocks_remaining_for_test))]
+    pub fn spawn_service(
+        inner: Arc<BlockProducerInner>,
+        blocks_remaining_for_test: Option<u64>,
+        rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
         info!(
-            "BlockProducerActor solution received: solution_hash={}",
-            solution.solution_hash.0.to_base58()
+            "Spawning block producer service with blocks_remaining_for_test: {:?}",
+            blocks_remaining_for_test
         );
 
-        if let Some(blocks_remaining) = self.blocks_remaining_for_test {
-            if blocks_remaining == 0 {
-                info!(
-                    "No more blocks needed for this test, skipping block production for solution_hash={}",
-                    solution.solution_hash.0.to_base58()
-                );
-                return AtomicResponse::new(Box::pin(fut::ready(Ok(None))));
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let handle = runtime_handle.spawn(async move {
+            let service = Self {
+                shutdown: shutdown_rx,
+                cmd_rx: rx,
+                inner,
+                blocks_remaining_for_test,
+            };
+            service
+                .start()
+                .await
+                .expect("Block producer service encountered an irrecoverable error")
+        });
+
+        TokioServiceHandle {
+            name: "block_producer_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn start(mut self) -> eyre::Result<()> {
+        info!("Starting block producer service");
+        debug!(
+            "Service configuration - reward_address: {}, chain_id: {}",
+            self.inner.config.node_config.reward_address, self.inner.config.consensus.chain_id
+        );
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for block producer service");
+                    break;
+                }
+                // Handle commands
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            self.handle_command(cmd).await?;
+                        }
+                        None => {
+                            warn!("Command channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
             }
         }
 
-        let inner = self.inner.clone();
-        AtomicResponse::new(Box::pin(
-            async move {
-                ProductionStrategy { inner }
-                    .fully_produce_new_block(solution)
-                    .await
-            }
-            .instrument(span2)
-            .into_actor(self)
-            .map(move |result, actor, _ctx| {
-                // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Ok(Some((_irys_block_header, _eth_built_payload))) = &result {
-                    // If blocks_remaining_for_test is Some, decrement it by 1
-                    if let Some(remaining) = actor.blocks_remaining_for_test {
-                        actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
+        info!("Shutting down block producer service gracefully");
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
+        match cmd {
+            BlockProducerCommand::SolutionFound { solution, response } => {
+                let solution_hash = solution.solution_hash.0.to_base58();
+                info!(
+                    solution_hash = %solution_hash,
+                    vdf_step = solution.vdf_step,
+                    mining_address = %solution.mining_address,
+                    "Block producer received mining solution"
+                );
+
+                if let Some(blocks_remaining) = self.blocks_remaining_for_test {
+                    if blocks_remaining == 0 {
+                        info!(
+                            solution_hash = %solution_hash,
+                            "No more blocks needed for test, skipping block production"
+                        );
+                        let _ = response.send(Ok(None));
+                        return Ok(());
                     }
+                    debug!("Test blocks remaining: {}", blocks_remaining);
                 }
-                result
-            })
-            .map_err(|e: eyre::Error, _, _| {
-                error!("Error producing a block: {}", &e);
-                std::process::abort();
-            }),
-        ))
+
+                let inner = self.inner.clone();
+                let result = Self::produce_block_inner(inner, solution).await?;
+
+                // Only decrement blocks_remaining_for_test when a block is successfully produced
+                if let Some((irys_block_header, _eth_built_payload)) = &result {
+                    info!(
+                        block_hash = %irys_block_header.block_hash.0.to_base58(),
+                        block_height = irys_block_header.height,
+                        "Block production completed successfully"
+                    );
+
+                    if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
+                        *remaining = remaining.saturating_sub(1);
+                        debug!("Test blocks remaining after production: {}", *remaining);
+                    }
+                } else {
+                    info!("Block production skipped (solution outdated or invalid)");
+                }
+
+                let _ = response.send(Ok(result));
+            }
+            BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
+                debug!(
+                    old_value = ?self.blocks_remaining_for_test,
+                    new_value = ?remaining,
+                    "Updating test blocks remaining"
+                );
+                self.blocks_remaining_for_test = remaining;
+            }
+        }
+        Ok(())
+    }
+
+    /// Internal method to produce a block without the non-Send trait
+    #[tracing::instrument(skip_all, fields(
+        solution_hash = %solution.solution_hash.0.to_base58(),
+        vdf_step = solution.vdf_step,
+        mining_address = %solution.mining_address
+    ))]
+    async fn produce_block_inner(
+        inner: Arc<BlockProducerInner>,
+        solution: SolutionContext,
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+        info!(
+            partition_hash = %solution.partition_hash.0.to_base58(),
+            chunk_offset = solution.chunk_offset,
+            "Starting block production for solution"
+        );
+
+        let production_strategy = ProductionStrategy { inner };
+        production_strategy.fully_produce_new_block(solution).await
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
@@ -350,7 +432,11 @@ pub trait BlockProdStrategy {
         .await
     }
 
-    /// Builds and submits a Reth payload with forkchoice update
+    #[tracing::instrument(skip_all, fields(
+        parent_evm_hash = %prev_block_header.evm_block_hash,
+        timestamp_sec = timestamp_ms / 1000,
+        shadow_tx_count = shadow_txs.len()
+    ))]
     async fn build_and_submit_reth_payload(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -358,8 +444,10 @@ pub trait BlockProdStrategy {
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
     ) -> eyre::Result<EthBuiltPayload> {
+        debug!("Building Reth payload attributes");
+
         // generate payload attributes
-        let payload_attrs = PayloadAttributes {
+        let attributes = PayloadAttributes {
             timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
             prev_randao: parent_mix_hash,
             suggested_fee_recipient: self.inner().config.node_config.reward_address,
@@ -367,13 +455,71 @@ pub trait BlockProdStrategy {
             parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
         };
 
-        let payload = self
-            .inner()
-            .reth_node_adapter
-            .build_submit_payload_irys(prev_block_header.evm_block_hash, payload_attrs, shadow_txs)
+        debug!(
+            timestamp_sec = attributes.timestamp,
+            fee_recipient = %attributes.suggested_fee_recipient,
+            parent_beacon_root = ?attributes.parent_beacon_block_root,
+            "Payload attributes created"
+        );
+
+        let attributes =
+            EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, attributes);
+
+        let payload_builder = &self.inner().reth_payload_builder;
+        let beacon_engine_handle = &self.inner().beacon_engine_handle;
+
+        // store shadow txs
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        debug!(
+            payload_id = %attributes.payload_id(),
+            "Storing shadow transactions"
+        );
+        self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
+
+        // send & await the payload
+        info!("Sending new payload to Reth");
+
+        let payload_id = payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .map_err(|e| eyre!("Failed to send payload to builder: {}", e))?
+            .map_err(|e| eyre!("Payload builder returned error: {}", e))?;
+
+        debug!(
+            payload_id = %payload_id,
+            "Payload accepted by builder"
+        );
+
+        let built_payload = payload_builder
+            .resolve_kind(payload_id, PayloadKind::WaitForPending)
+            .await
+            .ok_or_else(|| {
+                eyre!("Failed to resolve payload future - payload builder returned None")
+            })?
+            .map_err(|e| eyre!("Failed to build payload: {}", e))?;
+
+        let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
+        let payload = built_payload.clone().try_into_v5().unwrap();
+        let new_payload_result = beacon_engine_handle
+            .new_payload(ExecutionData {
+                payload: ExecutionPayload::V3(payload.execution_payload),
+                sidecar,
+            })
             .await?;
 
-        Ok(payload)
+        eyre::ensure!(
+            new_payload_result.status == PayloadStatusEnum::Valid,
+            "Reth has gone out of sync {:?}",
+            new_payload_result.status
+        );
+
+        info!(
+            payload_block_hash = %built_payload.block().hash(),
+            payload_tx_count = built_payload.block().body().transactions.len(),
+            "Reth payload built successfully"
+        );
+
+        Ok(built_payload)
     }
 
     async fn produce_block(
@@ -765,9 +911,7 @@ pub trait BlockProdStrategy {
                 // whereas, if we use the reth rpc, it will fetch the block from reth peers (not what we want)!
                 let result = self
                     .inner()
-                    .reth_node_adapter
-                    .inner
-                    .provider
+                    .reth_provider
                     .block(BlockHashOrNumber::Hash(prev_block_header.evm_block_hash))?;
                 match result {
                     Some(block) => {
