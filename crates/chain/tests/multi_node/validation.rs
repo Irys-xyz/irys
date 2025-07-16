@@ -6,7 +6,7 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
+    storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     NodeConfig,
 };
 use reth::payload::EthBuiltPayload;
@@ -31,7 +31,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[IrysTransactionHeader],
+            submit_txs: &[DataTransactionHeader],
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -168,7 +168,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
 async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub extra_tx: IrysTransactionHeader,
+        pub extra_tx: DataTransactionHeader,
     }
 
     #[async_trait::async_trait]
@@ -182,7 +182,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[IrysTransactionHeader],
+            submit_txs: &[DataTransactionHeader],
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -270,7 +270,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[IrysTransactionHeader],
+            submit_txs: &[DataTransactionHeader],
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {

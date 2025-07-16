@@ -11,8 +11,8 @@ use crate::tables::{
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
-    Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
+    Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
+    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -95,19 +95,19 @@ pub fn block_header_by_hash<T: DbTx>(
     Ok(block)
 }
 
-/// Inserts a [`IrysTransactionHeader`] into [`IrysTxHeaders`]
-pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &IrysTransactionHeader) -> eyre::Result<()> {
+/// Inserts a [`DataTransactionHeader`] into [`IrysTxHeaders`]
+pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
     Ok(tx.put::<IrysTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
-/// Gets a [`IrysTransactionHeader`] by it's [`IrysTransactionId`]
+/// Gets a [`DataTransactionHeader`] by it's [`IrysTransactionId`]
 pub fn tx_header_by_txid<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
-) -> eyre::Result<Option<IrysTransactionHeader>> {
+) -> eyre::Result<Option<DataTransactionHeader>> {
     Ok(tx
         .get::<IrysTxHeaders>(*txid)?
-        .map(IrysTransactionHeader::from))
+        .map(DataTransactionHeader::from))
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
@@ -128,11 +128,11 @@ pub fn commitment_tx_by_txid<T: DbTx>(
         .map(CommitmentTransaction::from))
 }
 
-/// Takes an [`IrysTransactionHeader`] and caches its `data_root` and tx.id in a
+/// Takes an [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
 pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
-    tx_header: &IrysTransactionHeader,
+    tx_header: &DataTransactionHeader,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     let key = tx_header.data_root;
 
@@ -307,7 +307,7 @@ pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseE
 
 #[cfg(test)]
 mod tests {
-    use irys_types::{CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader, H256};
+    use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
     use reth_db::Database as _;
 
     use crate::{
@@ -322,7 +322,7 @@ mod tests {
         let path = get_data_dir();
         println!("TempDir: {:?}", path);
 
-        let tx_header = IrysTransactionHeader::default();
+        let tx_header = DataTransactionHeader::default();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
@@ -396,7 +396,7 @@ mod tests {
     //     let path = get_data_dir();
     //     println!("TempDir: {:?}", path);
 
-    //     let mut tx = IrysTransactionHeader::default();
+    //     let mut tx = DataTransactionHeader::default();
     //     tx.id.0[0] = 2;
     //     let db = open_or_create_db(path).unwrap();
 

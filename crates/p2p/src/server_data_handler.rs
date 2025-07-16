@@ -16,8 +16,8 @@ use irys_actors::{
 };
 use irys_api_client::ApiClient;
 use irys_types::{
-    CommitmentTransaction, GossipCacheKey, GossipData, GossipRequest, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipRequest,
+    IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -127,7 +127,7 @@ where
 
     pub(crate) async fn handle_transaction(
         &self,
-        transaction_request: GossipRequest<IrysTransactionHeader>,
+        transaction_request: GossipRequest<DataTransactionHeader>,
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip transaction received from peer {}: {:?}",

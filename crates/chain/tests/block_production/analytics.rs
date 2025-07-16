@@ -19,7 +19,7 @@ use tracing::info;
 use irys_types::NodeConfig;
 use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
-use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG};
+use irys_types::{irys::IrysSigner, serialization::*, DataTransaction, SimpleRNG};
 
 use crate::utils::IrysNodeTest;
 
@@ -82,7 +82,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    let generate_tx = |a: &IrysSigner| -> (IrysTransaction, Vec<u8>) {
+    let generate_tx = |a: &IrysSigner| -> (DataTransaction, Vec<u8>) {
         let data_size = rand::thread_rng().gen_range(1..=100);
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
@@ -92,7 +92,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         (tx, data_bytes)
     };
 
-    let upload_header = |tx: &IrysTransaction| {
+    let upload_header = |tx: &DataTransaction| {
         client
             .post(format!("{}/v1/tx", http_url))
             .send_json(&tx.header)
