@@ -22,8 +22,8 @@ use tracing::{debug, warn};
 async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer(
 ) -> eyre::Result<()> {
     let max_seconds = 20;
-    let reset_frequency = 8; // Reset every 8 VDF steps
-    let min_resets_required = 2; // Need at least 2 resets to verify behavior
+    let reset_frequency = 48; // Reset every 48 VDF steps
+    let min_resets_required = 3; // Need at least 2 resets to verify behavior (genesis + 2 new ones)
     let block_migration_depth = 1;
 
     // Setting up parameters explicitly to check that the reset seed is applied correctly
@@ -78,6 +78,25 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
         .await?;
 
     verify_reset_seeds(&blocks_with_resets, &genesis_node_blocks);
+
+    // Verify that resets don't happen too frequently
+    let num_resets = blocks_with_resets.len();
+
+    // We expect exactly 3 resets: genesis + 2 new resets (as per min_resets_required)
+    assert_eq!(
+        num_resets, min_resets_required,
+        "Expected exactly {} resets, but found {}",
+        min_resets_required, num_resets
+    );
+
+    // Verify we have at least 2x more blocks than resets
+    assert!(
+        total_blocks_mined >= num_resets * 2,
+        "Too many reset blocks: {} resets out of {} blocks mined. Expected at least 2x more blocks than resets. \
+         This suggests VDF resets are happening too frequently (more than 50% of blocks have resets).",
+        num_resets,
+        total_blocks_mined
+    );
 
     // Verify seed continuity across all blocks
     verify_seed_continuity(&genesis_node_blocks, reset_frequency as u64);

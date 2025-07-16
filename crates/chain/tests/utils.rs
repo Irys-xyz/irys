@@ -464,6 +464,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         .await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -486,13 +487,12 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(latest_block.block_hash);
             }
 
-            if retries >= max_retries {
-                return Err(eyre::eyre!(
-                    "Failed to reach target height {} after {} retries",
-                    target_height,
-                    retries
-                ));
-            }
+            eyre::ensure!(
+                retries < max_retries,
+                "Failed to reach target height {} after {} retries",
+                target_height,
+                retries
+            );
 
             sleep(Duration::from_secs(1)).await;
             retries += 1;
@@ -1735,6 +1735,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// Mine blocks until a condition is met
+    #[tracing::instrument(skip_all)]
     pub async fn mine_until_condition<F>(
         &self,
         mut condition: F,
