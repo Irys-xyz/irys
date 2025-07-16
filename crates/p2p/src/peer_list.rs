@@ -19,7 +19,6 @@ use tracing::{debug, error, info, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
@@ -422,7 +421,7 @@ where
                 let peer_address = peer.address;
                 let client = act.gossip_client.clone();
                 // Create the future that does the health check
-                let fut = async move { check_health(peer_address, client).await }
+                let fut = async move { client.check_health(peer_address).await }
                     .into_actor(act)
                     .map(move |result, act, _ctx| match result {
                         Ok(true) => {
@@ -820,33 +819,6 @@ where
             }
         }
     }
-}
-
-async fn check_health(
-    peer: PeerAddress,
-    client: GossipClient,
-) -> Result<bool, PeerListServiceError> {
-    let url = format!("http://{}/gossip/health", peer.gossip);
-
-    let response = client
-        .internal_client()
-        .get(&url)
-        .timeout(HEALTH_CHECK_TIMEOUT)
-        .send()
-        .await
-        .map_err(|error| PeerListServiceError::HealthCheckFailed(error.to_string()))?;
-
-    if !response.status().is_success() {
-        return Err(PeerListServiceError::HealthCheckFailed(format!(
-            "Health check failed with status: {}",
-            response.status()
-        )));
-    }
-
-    response
-        .json()
-        .await
-        .map_err(|error| PeerListServiceError::HealthCheckFailed(error.to_string()))
 }
 
 impl From<eyre::Report> for PeerListServiceError {
@@ -1388,15 +1360,20 @@ where
                 // Try up to 5 peers to get the block
                 let mut last_error = None;
 
-                for (address, peer_item) in peers {
+                for peer in peers {
                     for attempt in 1..=5 {
+                        let address = &peer.0;
                         debug!(
                             "Attempting to fetch {:?} from peer {} (attempt {}/5)",
                             data_request, address, attempt
                         );
 
                         match gossip_client
-                            .get_data_request(&peer_item, data_request.clone())
+                            .make_get_data_request_and_update_the_score(
+                                &peer,
+                                data_request.clone(),
+                                &self_addr,
+                            )
                             .await
                         {
                             Ok(true) => {
@@ -1421,13 +1398,6 @@ where
                                     attempt,
                                     last_error.as_ref().unwrap()
                                 );
-                                self_addr
-                                    .send(DecreasePeerScore {
-                                        peer_miner_address: address,
-                                        reason: ScoreDecreaseReason::Offline,
-                                    })
-                                    .await
-                                    .ok();
 
                                 // Continue trying with the same peer if not the last attempt
                                 if attempt < 5 {
