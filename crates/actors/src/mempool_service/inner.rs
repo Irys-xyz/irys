@@ -16,7 +16,7 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    Address, Base64, CommitmentTransaction, DataRoot, IrysTransactionHeader, MempoolConfig,
+    Address, Base64, CommitmentTransaction, DataRoot, DataTransactionHeader, MempoolConfig,
     TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
@@ -82,9 +82,9 @@ pub enum MempoolServiceMessage {
     ),
     /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// validate and process an incoming IrysTransactionHeader
+    /// validate and process an incoming DataTransactionHeader
     IngestDataTx(
-        IrysTransactionHeader,
+        DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
@@ -96,10 +96,10 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-    /// Get IrysTransactionHeader from mempool or mdbx
+    /// Get DataTransactionHeader from mempool or mdbx
     GetDataTxs(
         Vec<IrysTransactionId>,
-        oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
+        oneshot::Sender<Vec<Option<DataTransactionHeader>>>,
     ),
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
@@ -373,8 +373,8 @@ impl Inner {
 
     pub async fn get_publish_txs_and_proofs(
         &self,
-    ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
-        let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
+    ) -> Result<(Vec<DataTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+        let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut proofs: Vec<TxIngressProof> = Vec::new();
 
         {
@@ -700,7 +700,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub struct MempoolState {
     /// valid submit txs
-    pub valid_submit_ledger_tx: BTreeMap<H256, IrysTransactionHeader>,
+    pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     pub invalid_tx: Vec<H256>,
@@ -790,6 +790,6 @@ impl TxIngressError {
 #[derive(Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
-    pub submit_tx: Vec<IrysTransactionHeader>,
-    pub publish_tx: (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
+    pub submit_tx: Vec<DataTransactionHeader>,
+    pub publish_tx: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
 }

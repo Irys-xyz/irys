@@ -5,7 +5,7 @@ use crate::mempool_service::{
 use crate::services::ServiceSenders;
 use eyre::eyre;
 use irys_types::{
-    chunk::UnpackedChunk, Base64, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
+    chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     H256,
 };
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn handle_data_transaction_ingress(
         &self,
-        tx_header: IrysTransactionHeader,
+        tx_header: DataTransactionHeader,
     ) -> Result<(), TxIngressError>;
     async fn handle_commitment_transaction_ingress(
         &self,
@@ -68,7 +68,7 @@ impl From<&ServiceSenders> for MempoolServiceFacadeImpl {
 impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_data_transaction_ingress(
         &self,
-        tx_header: IrysTransactionHeader,
+        tx_header: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
