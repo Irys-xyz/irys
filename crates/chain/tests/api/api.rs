@@ -7,7 +7,7 @@ use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_types::{
-    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
+    irys::IrysSigner, Base64, DataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
     UnpackedChunk,
 };
 use rand::Rng as _;
@@ -130,7 +130,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         let resp = test::call_service(&app, req).await;
 
         if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
+            let result: DataTransactionHeader = test::read_body_json(resp).await;
             assert_eq!(tx.header, result);
             info!("Transaction was retrieved ok after {} attempts", attempts);
             break;

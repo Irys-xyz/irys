@@ -2,8 +2,8 @@ use crate::utils::{AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, IrysBlockHeader,
-    IrysTransaction, IrysTransactionId, NodeConfig, NodeMode,
+    irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, DataTransaction,
+    IrysBlockHeader, IrysTransactionId, NodeConfig, NodeMode,
 };
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -138,9 +138,9 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
 async fn generate_test_transaction_and_add_to_block(
     node: &IrysNodeTest<IrysNodeCtx>,
     account: &IrysSigner,
-) -> HashMap<IrysTransactionId, irys_types::IrysTransaction> {
+) -> HashMap<IrysTransactionId, irys_types::DataTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
-    let mut irys_txs: HashMap<IrysTransactionId, IrysTransaction> = HashMap::new();
+    let mut irys_txs: HashMap<IrysTransactionId, DataTransaction> = HashMap::new();
     match node.create_submit_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);

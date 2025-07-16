@@ -15,7 +15,7 @@ use actix_web::{
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_types::{
-    Address, CommitmentTransaction, GossipRequest, IrysBlockHeader, IrysTransactionHeader,
+    Address, CommitmentTransaction, DataTransactionHeader, GossipRequest, IrysBlockHeader,
     PeerListItem, UnpackedChunk,
 };
 use reth::builder::Block as _;
@@ -228,7 +228,7 @@ where
 
     async fn handle_transaction(
         server: Data<Self>,
-        irys_transaction_header_json: web::Json<GossipRequest<IrysTransactionHeader>>,
+        irys_transaction_header_json: web::Json<GossipRequest<DataTransactionHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {

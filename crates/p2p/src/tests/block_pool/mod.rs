@@ -14,7 +14,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
+    Config, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionResponse,
     NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -42,7 +42,7 @@ impl ApiClient for MockApiClient {
     async fn post_transaction(
         &self,
         _peer: SocketAddr,
-        _transaction: IrysTransactionHeader,
+        _transaction: DataTransactionHeader,
     ) -> eyre::Result<()> {
         Ok(())
     }

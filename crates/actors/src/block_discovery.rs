@@ -14,8 +14,8 @@ use irys_domain::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
+    BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
+    GossipBroadcastMessage, IrysBlockHeader, IrysTransactionId,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth_db::Database as _;
@@ -124,7 +124,7 @@ pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 #[rtype(result = "eyre::Result<()>")]
 pub struct BlockPreValidatedMessage(
     pub Arc<IrysBlockHeader>,
-    pub Arc<Vec<IrysTransactionHeader>>,
+    pub Arc<Vec<DataTransactionHeader>>,
 );
 
 impl Actor for BlockDiscoveryActor {
@@ -228,7 +228,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 })?
                 .into_iter()
                 .flatten()
-                .collect::<Vec<IrysTransactionHeader>>();
+                .collect::<Vec<DataTransactionHeader>>();
 
             if submit_txs.len() != submit_tx_ids_to_check.len() {
                 return Err(BlockDiscoveryError::MissingTransactions(
@@ -273,7 +273,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 })?
                 .into_iter()
                 .flatten()
-                .collect::<Vec<IrysTransactionHeader>>();
+                .collect::<Vec<DataTransactionHeader>>();
 
             if publish_txs.len() != publish_tx_ids_to_check.len() {
                 let missing_txs = publish_tx_ids_to_check
@@ -652,7 +652,7 @@ pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<IrysTransactionHeader>> {
+) -> eyre::Result<Vec<DataTransactionHeader>> {
     get_data_tx_in_parallel_inner(
         data_tx_ids,
         |tx_ids| {
@@ -675,11 +675,11 @@ pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,
     get_data_txs: F,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<IrysTransactionHeader>>
+) -> eyre::Result<Vec<DataTransactionHeader>>
 where
     F: Fn(
         Vec<IrysTransactionId>,
-    ) -> BoxFuture<'static, eyre::Result<Vec<Option<IrysTransactionHeader>>>>,
+    ) -> BoxFuture<'static, eyre::Result<Vec<Option<DataTransactionHeader>>>>,
 {
     let tx_ids_clone = data_tx_ids.clone();
 
@@ -693,8 +693,8 @@ where
                 .into_iter()
                 .filter(Option::is_some)
                 .map(|v| (v.clone().unwrap().id, v.unwrap()))
-                .collect::<HashMap<IrysTransactionId, IrysTransactionHeader>>();
-            Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(x)
+                .collect::<HashMap<IrysTransactionId, DataTransactionHeader>>();
+            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
         }
     };
 
@@ -710,7 +710,7 @@ where
                     results.insert(*tx_id, header);
                 }
             }
-            Ok::<HashMap<IrysTransactionId, IrysTransactionHeader>, eyre::Report>(results)
+            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
         }
     };
 
