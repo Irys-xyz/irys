@@ -15,7 +15,6 @@ use tracing::error;
 pub struct GossipClient {
     pub mining_address: Address,
     client: Client,
-    timeout: Duration,
 }
 
 // TODO: Remove this when PeerList is no longer an actix service
@@ -34,7 +33,6 @@ impl GossipClient {
                 .timeout(timeout)
                 .build()
                 .expect("Failed to create reqwest client"),
-            timeout,
         }
     }
 
@@ -105,7 +103,6 @@ impl GossipClient {
         let req = self.create_request(data);
         self.client
             .post(&url)
-            .timeout(self.timeout)
             .json(&req)
             .send()
             .await
@@ -173,7 +170,6 @@ impl GossipClient {
 
         self.client
             .post(&url)
-            .timeout(self.timeout)
             .json(&get_data_request)
             .send()
             .await
