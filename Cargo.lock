@@ -5232,7 +5232,6 @@ dependencies = [
  "build-print",
  "bytemuck",
  "bytes",
- "chrono",
  "derive_more",
  "eyre",
  "fixed-hash",
