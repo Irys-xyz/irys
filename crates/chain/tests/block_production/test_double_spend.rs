@@ -6,8 +6,6 @@ use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, H256};
 /// demonstrate that duplicate txs are rejected from mempool
 /// demonstrate that duplicate txs are blocked from the mempool when tx is in database after block migration
 async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()> {
-    // enable logs for troubleshooting
-    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // basic node config
