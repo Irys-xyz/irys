@@ -9,12 +9,20 @@ use irys_types::{Address, GossipData, GossipRequest, PeerListItem};
 use reqwest::Response;
 use serde::Serialize;
 use tracing::error;
+use reqwest::{Client};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GossipClient {
     pub mining_address: Address,
-    client: reqwest::Client,
+    client: Client,
     timeout: Duration,
+}
+
+// TODO: Remove this when PeerList is no longer an actix service
+impl Default for GossipClient {
+    fn default() -> Self {
+        panic!("GossipClient must be initialized with a timeout and mining address. Default is implemented only to satisfy actix trait bounds.");
+    }
 }
 
 impl GossipClient {
@@ -22,12 +30,15 @@ impl GossipClient {
     pub fn new(timeout: Duration, mining_address: Address) -> Self {
         Self {
             mining_address,
-            client: reqwest::Client::new(),
+            client: Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("Failed to create reqwest client"),
             timeout,
         }
     }
 
-    pub fn internal_client(&self) -> &reqwest::Client {
+    pub fn internal_client(&self) -> &Client {
         &self.client
     }
 
