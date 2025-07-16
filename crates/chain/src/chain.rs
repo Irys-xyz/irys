@@ -1130,9 +1130,8 @@ impl IrysNode {
         let mut services = Vec::new();
         {
             // Services are shut down in FIFO order (first added = first to shut down)
-            // So we add them in order of least critical to most critical
 
-            // 1. Mining operations (can stop first)
+            // 1. Mining operations
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(broadcast_arbiter, "broadcast_arbiter".to_string()),
             });

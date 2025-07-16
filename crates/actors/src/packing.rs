@@ -83,7 +83,6 @@ impl PackingActor {
 
     async fn process_jobs(
         self,
-        storage_module_id: usize,
         pending_jobs: AtomicPackingJobQueue,
         runtime_handle: tokio::runtime::Handle,
     ) {
@@ -155,7 +154,7 @@ impl PackingActor {
                         let config = storage_module.config.clone();
                         let storage_module_clone = storage_module.clone();
                         let chain_id = self.config.chain_id;
-                        runtime_handle.spawn_blocking(move || {
+                        runtime_handle.clone().spawn_blocking(move || {
                             let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
                             compute_entropy_chunk(
                                 mining_address,
@@ -210,9 +209,10 @@ impl PackingActor {
                         let chain_id = self.config.chain_id;
                         let entropy_iterations =
                             storage_module.config.consensus.entropy_packing_iterations;
-                        runtime_handle.spawn(async move {
+                        let runtime_handle_clone = runtime_handle.clone();
+                        runtime_handle.clone().spawn(async move {
                             // Run the CPU-intensive packing in a blocking thread
-                            let out = runtime_handle
+                            let out = runtime_handle_clone
                                 .spawn_blocking(move || {
                                     let mut out: Vec<u8> = Vec::with_capacity(
                                         (num_chunks * chunk_size as u32).try_into().unwrap(),
@@ -294,7 +294,7 @@ impl PackingActor {
             let runtime_handle_clone = runtime_handle.clone();
             let handle = runtime_handle.spawn(async move {
                 tokio::select! {
-                    _ = Self::process_jobs(self_clone, key, pending_jobs, runtime_handle_clone) => {},
+                    _ = Self::process_jobs(self_clone, pending_jobs, runtime_handle_clone) => {},
                     _ = shutdown_rx => {
                         tracing::info!("Packing controller for SM {} received shutdown signal", key);
                     }
