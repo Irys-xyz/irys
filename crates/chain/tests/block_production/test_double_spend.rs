@@ -52,15 +52,13 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     )
     .await?;
 
-    // create commitment txs that remain in the mempool
     let block2_anchor = node.get_block_by_height(2).await?;
+    // create commitment tx that will be skipped by mempool ingress as this node is already staked
     let stake_for_mempool = node.post_stake_commitment(block2_anchor.block_hash).await;
-    let pledge_for_mempool = node.post_pledge_commitment(stake_for_mempool.id).await;
-    node.wait_for_mempool_commitment_txs(
-        vec![stake_for_mempool.id, pledge_for_mempool.id],
-        seconds_to_wait,
-    )
-    .await?;
+    // create commitment tx that will remain in the mempool
+    let pledge_for_mempool = node.post_pledge_commitment(block2_anchor.block_hash).await;
+    node.wait_for_mempool_commitment_txs(vec![pledge_for_mempool.id], seconds_to_wait)
+        .await?;
 
     // TEST CASE 2: create a tx for the mempool,
     //              testing it cannot be resubmitted to the mempool after mining
@@ -81,29 +79,31 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     node.post_data_tx_raw(&tx_for_mempool.header).await;
 
     // resubmit commitment transactions that were already seen
-    node.post_commitment_tx(&stake_for_migration).await;
-    node.post_commitment_tx(&pledge_for_migration).await;
     node.post_commitment_tx(&stake_for_mempool).await;
     node.post_commitment_tx(&pledge_for_mempool).await;
 
     // ensure mempool does not accept any duplicate tx
-    node.wait_for_mempool_shape(0, 0, 2, seconds_to_wait.try_into()?)
+    // this will have skipped new stakes, and only allowed one of the pledge txs into mempool
+    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
         .await?;
 
-    // mine another block
+    // mine another block to migrate block 2 into the index
     node.mine_block().await?;
-    let block3 = node.get_block_by_height(3).await?;
-    assert!(!block3
+    // block 2 should now be in the index
+    node.wait_until_block_index_height(2, seconds_to_wait)
+        .await?;
+    let block2 = node.get_block_by_height(2).await?;
+    assert!(!block2
         .get_data_ledger_tx_ids()
         .get(&DataLedger::Submit)
         .unwrap()
         .contains(&txid));
 
-    let commitment_ids = block3.get_commitment_ledger_tx_ids();
-    assert_eq!(
-        commitment_ids,
-        vec![stake_for_mempool.id, pledge_for_mempool.id]
-    );
+    let final_block = node
+        .get_block_by_height(config.consensus.get_mut().block_migration_depth as u64 + 2)
+        .await?;
+    let commitment_ids = final_block.get_commitment_ledger_tx_ids();
+    assert_eq!(commitment_ids, vec![pledge_for_mempool.id]);
 
     Ok(())
 }
