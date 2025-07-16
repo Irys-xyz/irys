@@ -8,7 +8,7 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    DataLedger, GossipBroadcastMessage, IrysTransactionCommon as _, IrysTransactionHeader,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
     IrysTransactionId, H256, U256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
@@ -20,7 +20,7 @@ impl Inner {
     pub async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
-    ) -> Vec<Option<IrysTransactionHeader>> {
+    ) -> Vec<Option<DataTransactionHeader>> {
         let mut found_txs = Vec::with_capacity(txs.len());
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
@@ -50,7 +50,7 @@ impl Inner {
 
     pub async fn handle_data_tx_ingress_message(
         &mut self,
-        mut tx: IrysTransactionHeader,
+        mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
             "received tx {:?} (data_root {:?})",
@@ -208,14 +208,14 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, IrysTransactionHeader> {
+    pub async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, DataTransactionHeader> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the storage transactions
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
-        // Get any IrysTransaction from the valid storage txs
+        // Get any DataTransaction from the valid storage txs
         mempool_state_guard
             .valid_submit_ledger_tx
             .values()
@@ -271,13 +271,13 @@ impl Inner {
     /// 4. Returns remaining pending Submit transactions
     ///
     /// # Returns
-    /// A vector of `IrysTransactionHeader` representing Submit ledger transactions
+    /// A vector of `DataTransactionHeader` representing Submit ledger transactions
     /// that are pending inclusion and have not been processed in recent blocks.
     ///
     /// # Notes
     /// - Only considers Submit ledger transactions (filters out Publish, etc.)
     /// - Only examines blocks within the configured `anchor_expiry_depth`
-    pub async fn get_pending_submit_ledger_txs(&self) -> Vec<IrysTransactionHeader> {
+    pub async fn get_pending_submit_ledger_txs(&self) -> Vec<DataTransactionHeader> {
         // Get the current canonical chain head to establish our starting point for block traversal
         let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())
             .await

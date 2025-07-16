@@ -24,8 +24,8 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
-    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, PoaData, H256,
+    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -637,7 +637,7 @@ async fn extract_data_txs(
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
-) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
+) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
     let txs = match &block.data_ledgers[..] {
         [publish_ledger, submit_ledger] => {
             ensure!(
@@ -721,9 +721,8 @@ mod tests {
     use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
-        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64,
-        DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, NodeConfig,
-        Signature, H256, U256,
+        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransaction,
+        DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -842,7 +841,7 @@ mod tests {
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
         let signer = IrysSigner::random_signer(&context.consensus_config);
-        let mut txs: Vec<IrysTransaction> = Vec::new();
+        let mut txs: Vec<DataTransaction> = Vec::new();
 
         for chunks in &data_chunks {
             let mut data: Vec<u8> = Vec::new();
@@ -877,7 +876,7 @@ mod tests {
 
         // Create a signed TX from the chunks
         let signer = IrysSigner::random_signer(&context.consensus_config);
-        let mut txs: Vec<IrysTransaction> = Vec::new();
+        let mut txs: Vec<DataTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
         let tx = signer.create_transaction(data.clone(), None).unwrap();
@@ -905,7 +904,7 @@ mod tests {
 
     async fn poa_test(
         context: &TestContext,
-        txs: &[IrysTransaction],
+        txs: &[DataTransaction],
         #[expect(
             clippy::ptr_arg,
             reason = "we need to clone this so it needs to be a Vec"
@@ -936,7 +935,7 @@ mod tests {
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
 
         // Create vectors of tx headers and txids
-        let tx_headers: Vec<IrysTransactionHeader> =
+        let tx_headers: Vec<DataTransactionHeader> =
             txs.iter().map(|tx| tx.header.clone()).collect();
 
         let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
