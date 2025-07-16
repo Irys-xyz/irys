@@ -1,7 +1,9 @@
 use crate::utils::IrysNodeTest;
 use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256, ConsensusConfig};
+use irys_types::{
+    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, NodeConfig, H256, U256,
+};
 
 #[actix_web::test]
 async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
@@ -68,7 +70,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: post duplicate commitment tx =====
     let consensus = ConsensusConfig::testnet();
-    let stake_tx = CommitmentTransaction::new_stake(&consensus, H256::default());
+    let stake_tx = CommitmentTransaction::new_stake(&consensus, H256::default(), 1);
 
     // Post the stake commitment and await it in the mempool
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
@@ -102,7 +104,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // ===== TEST CASE 3: post duplicate pledge tx =====
-    let pledge_tx = CommitmentTransaction::new_pledge(&consensus, anchor);
+    let pledge_tx = CommitmentTransaction::new_pledge(&consensus, anchor, 1);
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
 
     // Post pledge commitment

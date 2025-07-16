@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_primitives::CommitmentType;
-use irys_types::{CommitmentTransaction, NodeConfig, H256, ConsensusConfig};
+use irys_types::{CommitmentTransaction, ConsensusConfig, NodeConfig, H256, U256};
 use rstest::rstest;
 use tokio::task::yield_now;
 use tracing::debug;
@@ -48,9 +48,9 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     genesis_node.wait_until_height(blk.height, 10).await?;
 
     let config = ConsensusConfig::testnet();
-    
+
     if stake {
-        let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero());
+        let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero(), 1);
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
 
         genesis_node.post_commitment_tx(&stake_tx).await;
@@ -65,7 +65,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     if pledges > 0 {
         let mut anchor = H256::zero();
         for _idx in 0..pledges {
-            let pledge_tx = CommitmentTransaction::new_pledge(&config, anchor);
+            let pledge_tx = CommitmentTransaction::new_pledge(&config, anchor, 1);
             let pledge_tx = peer_signer.sign_commitment(pledge_tx)?;
             debug!("pledge: {}", &pledge_tx.id);
 

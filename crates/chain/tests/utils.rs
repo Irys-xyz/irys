@@ -1544,7 +1544,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let config = self.node_ctx.config.consensus_config();
-        let pledge_tx = CommitmentTransaction::new_pledge(&config, anchor);
+        let pledge_tx = CommitmentTransaction::new_pledge(&config, anchor, 1);
         let signer = self.cfg.signer();
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
@@ -1566,7 +1566,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let config = self.node_ctx.config.consensus_config();
-        let stake_tx = CommitmentTransaction::new_stake(&config, anchor);
+        let stake_tx = CommitmentTransaction::new_stake(&config, anchor, 1);
         let signer = self.cfg.signer();
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
@@ -2014,13 +2014,13 @@ where
 
 pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
     let config = ConsensusConfig::testnet();
-    let stake_tx = CommitmentTransaction::new_stake(&config, *anchor);
+    let stake_tx = CommitmentTransaction::new_stake(&config, *anchor, 1);
     signer.sign_commitment(stake_tx).unwrap()
 }
 
 pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
     let config = ConsensusConfig::testnet();
-    let pledge_tx = CommitmentTransaction::new_pledge(&config, *anchor);
+    let pledge_tx = CommitmentTransaction::new_pledge(&config, *anchor, 1);
     signer.sign_commitment(pledge_tx).unwrap()
 }
 

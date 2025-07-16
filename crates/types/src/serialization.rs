@@ -846,6 +846,26 @@ pub mod string_u128 {
     }
 }
 
+/// Module containing serialization/deserialization for U256 to/from a string
+pub mod string_u256 {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<U256, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        U256::from_str(&s).map_err(de::Error::custom)
+    }
+
+    pub fn serialize<S>(value: &U256, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
 fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,

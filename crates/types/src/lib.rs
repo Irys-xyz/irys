@@ -33,7 +33,7 @@ pub use block::*;
 pub use config::*;
 pub use difficulty_adjustment_config::*;
 pub use gossip::*;
-pub use serialization::*;
+pub use serialization::{string_u256, *};
 pub use signature::*;
 pub use storage::*;
 pub use transaction::*;
