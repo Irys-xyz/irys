@@ -260,9 +260,10 @@ impl Inner {
 
         // Get a list of all recently confirmed commitment txids in the canonical chain
         let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        let last_block = canonical.last().unwrap();
         debug!(
             "best_mempool_txs: current head height {}",
-            canonical.last().unwrap().height
+            last_block.height
         );
 
         // TODO: This approach should be applied to data TX and commitment TX should instead
