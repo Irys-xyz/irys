@@ -1,8 +1,7 @@
 use crate::utils::IrysNodeTest;
-use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, NodeConfig, H256, U256,
+    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, NodeConfig, H256,
 };
 
 #[actix_web::test]

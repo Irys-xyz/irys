@@ -1,6 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_primitives::CommitmentType;
-use irys_types::{CommitmentTransaction, ConsensusConfig, NodeConfig, H256, U256};
+use irys_types::{CommitmentTransaction, ConsensusConfig, NodeConfig, H256};
 use rstest::rstest;
 use tokio::task::yield_now;
 use tracing::debug;

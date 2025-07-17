@@ -5,10 +5,9 @@ use eyre::eyre;
 use irys_actors::packing::wait_for_packing;
 use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
-use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, ConsensusConfig, NodeConfig, H256, U256,
+    irys::IrysSigner, Address, CommitmentTransaction, ConsensusConfig, NodeConfig, H256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;

@@ -36,7 +36,6 @@ use irys_domain::{
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
-use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
@@ -47,7 +46,7 @@ use irys_types::{
     U256,
 };
 use irys_types::{
-    Base64, CommitmentTransaction, Config, DataTransaction, DataTransactionHeader,
+    Base64, CommitmentTransaction, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode,
     PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
@@ -1543,7 +1542,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
-        let config = self.node_ctx.config.consensus_config();
+        let config = &self.node_ctx.config.consensus;
         let pledge_tx = CommitmentTransaction::new_pledge(&config, anchor, 1);
         let signer = self.cfg.signer();
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
@@ -1565,7 +1564,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
-        let config = self.node_ctx.config.consensus_config();
+        let config = &self.node_ctx.config.consensus;
         let stake_tx = CommitmentTransaction::new_stake(&config, anchor, 1);
         let signer = self.cfg.signer();
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
