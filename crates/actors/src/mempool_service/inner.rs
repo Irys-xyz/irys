@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
-use irys_domain::BlockTreeReadGuard;
+use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
@@ -304,6 +304,35 @@ impl Inner {
                     );
                     continue; // Skip tx already confirmed in the canonical chain
                 }
+                // Validate the commitment against the current canonical snapshot
+                // to ensure we don't include commitments for addresses that are
+                // already committed on the longest chain.
+                let status = self.get_commitment_status(&tx).await;
+                if status != CommitmentSnapshotStatus::Accepted {
+                    debug!(
+                        "best_mempool_txs: skipping commitment tx {} due to status {:?}",
+                        tx.id, status
+                    );
+                    continue;
+                }
+
+                let commitment_snapshot = self
+                    .block_tree_read_guard
+                    .read()
+                    .canonical_commitment_snapshot();
+
+                let is_staked = self
+                    .block_tree_read_guard
+                    .read()
+                    .canonical_epoch_snapshot()
+                    .is_staked(tx.signer);
+
+                if commitment_snapshot.get_commitment_status(&tx, is_staked)
+                    == CommitmentSnapshotStatus::Accepted
+                {
+                    continue;
+                }
+
                 if check_funding(&tx) {
                     debug!("best_mempool_txs: adding commitment tx {}", tx.id);
                     commitment_tx.push(tx);
