@@ -18,8 +18,8 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
