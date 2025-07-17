@@ -1,12 +1,12 @@
-use bytes::Buf as _;
-use std::hash::Hash;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use crate::{decode_address, encode_address, Arbitrary, IrysSignature, RethPeerInfo, H256};
 use alloy_primitives::{keccak256, Address};
+use bytes::Buf as _;
+use reth_codecs::Compact;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::hash::Hash;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
-use reth_codecs::Compact;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
@@ -171,7 +171,8 @@ impl VersionRequest {
     }
 
     pub fn verify_signature(&self) -> bool {
-        self.signature.validate_signature(self.signature_hash(), self.mining_address)
+        self.signature
+            .validate_signature(self.signature_hash(), self.mining_address)
     }
 }
 
@@ -349,9 +350,15 @@ mod tests {
         let signer = config.irys_signer();
 
         signer.sign_p2p_handshake(&mut version_request).unwrap();
-        assert!(version_request.verify_signature(), "Signature should be valid");
+        assert!(
+            version_request.verify_signature(),
+            "Signature should be valid"
+        );
 
         version_request.signature = IrysSignature::default();
-        assert!(!version_request.verify_signature(), "Signature should be invalid after reset");
+        assert!(
+            !version_request.verify_signature(),
+            "Signature should be invalid after reset"
+        );
     }
 }

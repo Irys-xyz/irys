@@ -1,4 +1,8 @@
-use crate::{generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction, DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256};
+use crate::{
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
+    DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
+    VersionRequest, H256,
+};
 use alloy_core::primitives::keccak256;
 
 use alloy_signer::utils::secret_key_to_address;
