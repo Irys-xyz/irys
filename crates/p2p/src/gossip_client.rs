@@ -50,7 +50,7 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    pub async fn send_data_and_update_score<P>(
+    async fn send_data_and_update_score_internal<P>(
         &self,
         peer: (&Address, &PeerListItem),
         data: &GossipData,
@@ -81,7 +81,6 @@ impl GossipClient {
         let res = self
             .client
             .post(&url)
-            .timeout(self.timeout)
             .json(&get_data_request)
             .send()
             .await
