@@ -52,6 +52,7 @@ irys-types = { workspace = true, features = ["test-utils"] }
 irys-config = { workspace = true, features = ["test-utils"] }
 irys-database = { workspace = true, features = ["test-utils"] }
 irys-api-client = { workspace = true, features = ["test-utils"] }
+irys-domain = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rstest.workspace = true
 rand.workspace = true

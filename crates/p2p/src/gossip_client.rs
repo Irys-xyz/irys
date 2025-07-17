@@ -6,19 +6,27 @@ use crate::peer_list::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use core::time::Duration;
 use irys_types::{Address, GossipData, GossipRequest, PeerAddress, PeerListItem};
+use reqwest::Client;
 use reqwest::Response;
 use serde::Serialize;
+use std::sync::Arc;
 use tracing::error;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("Gossip client error: {0}")]
 pub struct GossipClientError(String);
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GossipClient {
     pub mining_address: Address,
-    client: reqwest::Client,
-    timeout: Duration,
+    client: Client,
+}
+
+// TODO: Remove this when PeerList is no longer an actix service
+impl Default for GossipClient {
+    fn default() -> Self {
+        panic!("GossipClient must be initialized with a timeout and mining address. Default is implemented only to satisfy actix trait bounds.");
+    }
 }
 
 impl GossipClient {
@@ -26,12 +34,14 @@ impl GossipClient {
     pub fn new(timeout: Duration, mining_address: Address) -> Self {
         Self {
             mining_address,
-            client: reqwest::Client::new(),
-            timeout,
+            client: Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("Failed to create reqwest client"),
         }
     }
 
-    pub fn internal_client(&self) -> &reqwest::Client {
+    pub fn internal_client(&self) -> &Client {
         &self.client
     }
 
@@ -169,7 +179,6 @@ impl GossipClient {
         let req = self.create_request(data);
         self.client
             .post(&url)
-            .timeout(self.timeout)
             .json(&req)
             .send()
             .await
@@ -201,6 +210,32 @@ impl GossipClient {
                 };
             }
         }
+    }
+
+    /// Sends data to a peer and update their score in a detached task
+    pub fn send_data_and_update_the_score_detached<P: PeerList>(
+        &self,
+        peer: (&Address, &PeerListItem),
+        data: Arc<GossipData>,
+        peer_list: &P,
+    ) {
+        let client = self.clone();
+        let peer_list = peer_list.clone();
+        let peer_miner_address = *peer.0;
+        let peer = peer.1.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .send_data_and_update_score_internal(
+                    (&peer_miner_address, &peer),
+                    &data,
+                    &peer_list,
+                )
+                .await
+            {
+                error!("Error sending data to peer: {}", e);
+            }
+        });
     }
 
     fn create_request<T>(&self, data: T) -> GossipRequest<T> {
