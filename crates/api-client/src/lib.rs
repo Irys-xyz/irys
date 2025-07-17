@@ -7,6 +7,9 @@ use irys_types::{
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
+use std::time::Duration;
+
+pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[expect(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
 enum Method {
@@ -60,15 +63,25 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct IrysApiClient {
     client: Client,
+}
+
+impl Default for IrysApiClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IrysApiClient {
     pub fn new() -> Self {
         Self {
-            client: Client::default(),
+            client: Client::builder()
+                .timeout(CLIENT_TIMEOUT)
+                .read_timeout(CLIENT_TIMEOUT)
+                .build()
+                .unwrap(),
         }
     }
 
