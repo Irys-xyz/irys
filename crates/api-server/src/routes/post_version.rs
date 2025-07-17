@@ -31,6 +31,15 @@ pub async fn post_version(
         return Ok(HttpResponse::BadRequest().json(response));
     }
 
+    if !version_request.verify_signature() {
+        let response = PeerResponse::Rejected(RejectedResponse {
+            reason: RejectionReason::InvalidCredentials,
+            message: Some("Signature verification failed".to_string()),
+            retry_after: None,
+        });
+        return Ok(HttpResponse::BadRequest().json(response));
+    }
+
     // Fetch peers and handle potential errors
     let peers = match state.get_known_peers().await {
         Ok(peers) => peers,
