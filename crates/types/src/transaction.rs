@@ -1,7 +1,6 @@
 use crate::{
-    address_base58_stringify, optional_string_u64, string_u256, string_u64, Address, Arbitrary,
-    Base64, Compact, ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
-    U256,
+    address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
@@ -215,7 +214,6 @@ pub struct CommitmentTransaction {
     pub fee: u64,
 
     /// The value being staked, pledged, unstaked or unpledged
-    #[serde(with = "string_u256")]
     pub value: U256,
 
     /// Transaction signature bytes
@@ -246,7 +244,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Stake,
             anchor,
             fee,
-            value: U256::from(config.stake_fee.amount.as_u64()),
+            value: config.stake_fee.amount,
             ..Self::new(config)
         }
     }
@@ -257,7 +255,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Unstake,
             anchor,
             fee,
-            value: U256::from(config.stake_fee.amount.as_u64()),
+            value: config.stake_fee.amount,
             ..Self::new(config)
         }
     }
@@ -268,7 +266,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Pledge,
             anchor,
             fee,
-            value: U256::from(config.pledge_fee.amount.as_u64()),
+            value: config.pledge_fee.amount,
             ..Self::new(config)
         }
     }
@@ -279,7 +277,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Unpledge,
             anchor,
             fee,
-            value: U256::from(config.pledge_fee.amount.as_u64()),
+            value: config.pledge_fee.amount,
             ..Self::new(config)
         }
     }
@@ -314,7 +312,7 @@ impl CommitmentTransaction {
 pub trait IrysTransactionCommon {
     fn is_signature_valid(&self) -> bool;
     fn id(&self) -> IrysTransactionId;
-    fn total_fee(&self) -> u64;
+    fn total_cost(&self) -> U256;
     fn signer(&self) -> Address;
 
     /// Sign this transaction with the provided signer
@@ -332,8 +330,8 @@ impl IrysTransactionCommon for DataTransactionHeader {
         self.id
     }
 
-    fn total_fee(&self) -> u64 {
-        self.perm_fee.unwrap_or(0) + self.term_fee
+    fn total_cost(&self) -> U256 {
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
     }
 
     fn signer(&self) -> Address {
@@ -370,8 +368,14 @@ impl IrysTransactionCommon for CommitmentTransaction {
         self.id
     }
 
-    fn total_fee(&self) -> u64 {
-        self.fee
+    fn total_cost(&self) -> U256 {
+        let additional_fee = match self.commitment_type {
+            CommitmentType::Stake => self.value,
+            CommitmentType::Pledge => self.value,
+            CommitmentType::Unpledge => U256::zero(),
+            CommitmentType::Unstake => U256::zero(),
+        };
+        U256::from(self.fee).saturating_add(additional_fee)
     }
 
     fn signer(&self) -> Address {
@@ -379,11 +383,10 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
-        use crate::Address;
         use alloy_primitives::keccak256;
 
         // Store the signer address
-        self.signer = Address::from_public_key(signer.signer.verifying_key());
+        self.signer = signer.address();
 
         // Create the signature hash and sign it
         let prehash = self.signature_hash();

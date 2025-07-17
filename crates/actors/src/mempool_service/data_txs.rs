@@ -9,7 +9,7 @@ use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256, U256,
+    IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
 use std::collections::HashMap;
@@ -126,8 +126,7 @@ impl Inner {
 
         // Check account balance
 
-        if self.reth_node_adapter.rpc.get_balance_irys(tx.signer, None) < U256::from(tx.total_fee())
-        {
+        if self.reth_node_adapter.rpc.get_balance_irys(tx.signer, None) < tx.total_cost() {
             error!(
                 "{:?}: unfunded balance from irys_database::get_account_balance({:?})",
                 TxIngressError::Unfunded,

@@ -108,7 +108,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         });
     assert_eq!(
         signer_balance,
-        U256::from(1000) - U256::from(tx.header.total_fee())
+        U256::from(1000) - U256::from_le_bytes(tx.header.total_cost().to_le_bytes())
     );
 
     // ensure that the block reward has increased the block reward address balance
@@ -373,7 +373,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let account1_balance = reth_context.rpc.get_balance(account1.address(), None)?;
     // Balance should be: initial (1000) - storage fees - gas costs - transfer amount (1)
     let expected_balance = account_1_balance
-        - U256::from(irys_tx.header.total_fee())
+        - U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes())
         - U256::from(21000 * 20e9 as u64) // gas_used * max_fee_per_gas
         - U256::from(1); // transfer amount
     assert_eq!(account1_balance, expected_balance);
@@ -624,7 +624,11 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .await?;
 
     // Verify the transaction was accepted (fee is 2: perm_fee=1 + term_fee=1)
-    assert_eq!(tx.header.total_fee(), 2, "Total fee should be 2");
+    assert_eq!(
+        tx.header.total_cost(),
+        irys_types::U256::from(2),
+        "Total cost should be 2"
+    );
 
     // Mine a block - should contain block reward and storage fee transactions
     let irys_block = node.mine_block().await?;
@@ -817,14 +821,27 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
             U256::ZERO
         });
 
-    // In the same block:
-    // - Stake decreases balance by (commitment_value + fee)
-    // - Pledge decreases balance by (commitment_value + fee)
-    // Both decrease balance by 2 each, so total decrease is 4
+    // Calculate expected balance change based on consensus config
+    let consensus_config = genesis_config.consensus_config();
+    let stake_fee_amount = consensus_config.stake_fee.amount; // 0.1 token = 10^17 in U256
+    let pledge_fee_amount = consensus_config.pledge_fee.amount; // 0.1 token = 10^17 in U256
+
+    // Each commitment transaction has:
+    // - fee: 1 (passed to post_stake_commitment and post_pledge_commitment)
+    // - value: stake_fee.amount or pledge_fee.amount
+    // Total cost per transaction = fee + value
+    // Convert irys_types::U256 to alloy U256
+    let stake_total_cost = U256::from(1) + U256::from_le_bytes(stake_fee_amount.to_le_bytes());
+    let pledge_total_cost = U256::from(1) + U256::from_le_bytes(pledge_fee_amount.to_le_bytes());
+    let total_decrease = stake_total_cost + pledge_total_cost;
+
     assert_eq!(
         balance_after_block1,
-        initial_balance - U256::from(4),
-        "Balance should decrease by 4 (2 for stake + 2 for pledge)"
+        initial_balance - total_decrease,
+        "Balance should decrease by {} (stake: {} + pledge: {})",
+        total_decrease,
+        stake_total_cost,
+        pledge_total_cost
     );
 
     // Mine another block to verify the system continues to work
@@ -890,7 +907,13 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
             .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
+        // Expected amount is fee(1) + stake_fee.amount (0.1 token = 10^17)
+        let expected_stake_amount =
+            U256::from(1) + U256::from_le_bytes(consensus_config.stake_fee.amount.to_le_bytes());
+        assert_eq!(
+            bd.amount, expected_stake_amount,
+            "Stake amount should be fee + stake_fee.amount"
+        );
     } else {
         panic!("Second transaction should be stake");
     }
@@ -901,7 +924,13 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
             .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
+        // Expected amount is fee(1) + pledge_fee.amount (0.1 token = 10^17)
+        let expected_pledge_amount =
+            U256::from(1) + U256::from_le_bytes(consensus_config.pledge_fee.amount.to_le_bytes());
+        assert_eq!(
+            bd.amount, expected_pledge_amount,
+            "Pledge amount should be fee + pledge_fee.amount"
+        );
     } else {
         panic!("Third transaction should be pledge");
     }

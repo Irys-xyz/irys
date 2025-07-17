@@ -6,9 +6,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, ConsensusConfig, NodeConfig, H256,
-};
+use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
@@ -335,10 +333,9 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // tracing
-    initialize_tracing();
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
     let mut config = NodeConfig::testnet();
@@ -356,9 +353,10 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
-    let consensus = ConsensusConfig::testnet();
-    let stake_tx = CommitmentTransaction::new_stake(&consensus, H256::default(), 1);
+    let consensus = &node.node_ctx.config.consensus;
+    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+
     info!("Generated stake_tx.id: {}", stake_tx.id);
 
     // Verify stake commitment starts in 'Unknown' state
@@ -377,7 +375,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address
-    let pledge_tx = CommitmentTransaction::new_pledge(&consensus, H256::default(), 1);
+    let pledge_tx = CommitmentTransaction::new_pledge(consensus, H256::default(), 1);
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -418,7 +416,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
 
     // Create a pledge for the unstaked address
-    let pledge_tx = CommitmentTransaction::new_pledge(&consensus, H256::default(), 1);
+    let pledge_tx = CommitmentTransaction::new_pledge(consensus, H256::default(), 1);
     let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -443,8 +441,14 @@ async fn post_stake_commitment(
     node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
 ) -> CommitmentTransaction {
-    let consensus = ConsensusConfig::testnet();
-    let stake_tx = CommitmentTransaction::new_stake(&consensus, H256::default(), 1);
+    let consensus = &node.node_ctx.config.consensus;
+    info!("Node consensus stake_fee: {:?}", consensus.stake_fee);
+    info!(
+        "Node consensus stake_fee amount: {}",
+        consensus.stake_fee.amount.as_u64()
+    );
+    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
+    info!("Created stake_tx with value: {:?}", stake_tx.value);
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
     info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
 
@@ -458,8 +462,8 @@ async fn post_pledge_commitment(
     signer: &IrysSigner,
     anchor: H256,
 ) -> CommitmentTransaction {
-    let consensus = ConsensusConfig::testnet();
-    let pledge_tx = CommitmentTransaction::new_pledge(&consensus, anchor, 1);
+    let consensus = &node.node_ctx.config.consensus;
+    let pledge_tx = CommitmentTransaction::new_pledge(consensus, anchor, 1);
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
