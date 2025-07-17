@@ -49,11 +49,22 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     .await?;
 
     let block2 = node.get_block_by_height(2).await?;
-    // create commitment tx that will be skipped by mempool ingress as this node is already staked
+    // check the shape of the mempool equates to empty
+    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
+    // create commitment tx that will be allowed into mempool, but not included in a block as this node is already staked
     let stake_for_mempool = node.post_stake_commitment(block2.block_hash).await;
+
     // create commitment tx that will remain in the mempool
     let pledge_for_mempool = node.post_pledge_commitment(block2.block_hash).await;
-    node.wait_for_mempool_commitment_txs(vec![pledge_for_mempool.id], seconds_to_wait)
+    node.wait_for_mempool_commitment_txs(
+        vec![stake_for_mempool.id, pledge_for_mempool.id],
+        seconds_to_wait,
+    )
+    .await?;
+
+    // check the shape of the mempool now contains two commitment txs
+    node.wait_for_mempool_shape(0, 0, 2, seconds_to_wait.try_into()?)
         .await?;
 
     // TEST CASE 2: create a tx for the mempool,
