@@ -77,7 +77,6 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // resubmit commitment transactions that were already seen
     node.post_commitment_tx(&stake_for_mempool).await;
     node.post_commitment_tx(&pledge_for_mempool).await;
-
     // ensure mempool does not accept any duplicate tx
     // this will have skipped new stakes, and only allowed one of the pledge txs into mempool
     node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
@@ -116,15 +115,21 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     )
     .await?;
 
-    // retrieve block 3 for use as a unique and previously unused anchor
-    let block3 = node.get_block_by_height(3).await?;
+    // block 8 should now be in the index and recent enough to use as an anchor
+    node.wait_until_block_index_height(8, seconds_to_wait)
+        .await?;
+
+    // retrieve block 8 for use as a unique, recent and previously unused anchor
+    let block8 = node.get_block_by_height(8).await?;
     node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
         .await?;
+
     // re post existing stake commitment, that also uses the same anchor as the previous stake tx
     // this should be rejected by the mempool and not ingress the mempool
     let _duplicate_stake_for_mempool = node.post_stake_commitment(block2.block_hash).await;
     // re post existing stake commitment tx that will be skipped by mempool ingress as this node is already staked
-    let _new_anchor_stake_for_mempool = node.post_stake_commitment(block3.block_hash).await;
+    // use a recent anchor, or we will hit an invalid anchor error due to anchor timeout
+    let _new_anchor_stake_for_mempool = node.post_stake_commitment(block8.block_hash).await;
     // ensure mempool does not accept either of the above two txs
     // i.e. mempool should have rejected both stakes as the node has been staked since epoch
     node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
