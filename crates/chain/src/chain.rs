@@ -1521,9 +1521,6 @@ fn init_peer_list_service(
 ) -> (PeerListServiceFacade, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
     let mut peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
-    peer_list_service
-        .initialize()
-        .expect("to initialize peer_list_service");
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     SystemRegistry::set(peer_list_service.clone());

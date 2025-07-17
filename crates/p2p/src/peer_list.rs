@@ -271,6 +271,59 @@ impl From<MailboxError> for PeerListFacadeError {
     }
 }
 
+// TODO: remove default, right now it's there just to make service into a ssytem service
+#[derive(Debug, Clone, Default)]
+pub struct PeerListData {
+    gossip_addr_to_mining_addr_map: HashMap<IpAddr, Address>,
+    api_addr_to_mining_addr_map: HashMap<SocketAddr, Address>,
+    peer_list_cache: HashMap<Address, PeerListItem>,
+    known_peers_cache: HashSet<PeerAddress>,
+    trusted_peers_api_addresses: HashSet<SocketAddr>,
+}
+
+impl PeerListData {
+    pub fn new(config: &Config, db: &DatabaseProvider) -> Result<Self, PeerListDataError> {
+        let mut peer_list = Self {
+            gossip_addr_to_mining_addr_map: HashMap::new(),
+            api_addr_to_mining_addr_map: HashMap::new(),
+            peer_list_cache: HashMap::new(),
+            known_peers_cache: HashSet::new(),
+            trusted_peers_api_addresses: config
+                .node_config
+                .trusted_peers
+                .iter()
+                .map(|p| p.api)
+                .collect(),
+        };
+
+        let read_tx = db.tx().map_err(PeerListDataError::from)?;
+
+        let peer_list_items =
+            walk_all::<PeerListItems, _>(&read_tx).map_err(PeerListDataError::from)?;
+
+        for (mining_addr, entry) in peer_list_items {
+            let address = entry.address;
+            peer_list.gossip_addr_to_mining_addr_map
+                .insert(entry.address.gossip.ip(), mining_addr);
+            peer_list.peer_list_cache.insert(mining_addr, entry.0);
+            peer_list.known_peers_cache.insert(address);
+            peer_list.api_addr_to_mining_addr_map
+                .insert(address.api, mining_addr);
+        }
+
+        Ok(peer_list)
+    }
+}
+
+pub struct PeerListBackgroundService {
+
+}
+
+pub struct PeerListNetworkService {
+    pub gossip_client: GossipClient,
+    pub config: Config
+}
+
 #[derive(Debug, Default)]
 pub struct PeerListServiceWithClient<A, R>
 where
@@ -280,23 +333,18 @@ where
     /// Reference to the node database
     db: Option<DatabaseProvider>,
 
-    gossip_addr_to_mining_addr_map: HashMap<IpAddr, Address>,
-    api_addr_to_mining_addr_map: HashMap<SocketAddr, Address>,
-    peer_list_cache: HashMap<Address, PeerListItem>,
-    known_peers_cache: HashSet<PeerAddress>,
+    peer_list_data: PeerListData,
 
     currently_running_announcements: HashSet<SocketAddr>,
-
     successful_announcements: HashMap<SocketAddr, AnnounceFinished>,
     failed_announcements: HashMap<SocketAddr, AnnounceFinished>,
 
+    // This is related to networking - requesting data from the network and joining the network
     gossip_client: GossipClient,
     irys_api_client: A,
 
     chain_id: u64,
     peer_address: PeerAddress,
-
-    trusted_peers_api_addresses: HashSet<SocketAddr>,
 
     reth_service_addr: Option<Addr<R>>,
 
@@ -343,12 +391,11 @@ where
         irys_api_client: A,
         reth_actor: Addr<R>,
     ) -> Self {
+        let peer_list_data = PeerListData::new(config, &db).expect("Failed to load peer list data");
+
         Self {
             db: Some(db),
-            gossip_addr_to_mining_addr_map: HashMap::new(),
-            api_addr_to_mining_addr_map: HashMap::new(),
-            peer_list_cache: HashMap::new(),
-            known_peers_cache: HashSet::new(),
+            peer_list_data,
             currently_running_announcements: HashSet::new(),
             successful_announcements: HashMap::new(),
             failed_announcements: HashMap::new(),
@@ -373,12 +420,6 @@ where
                 .expect("valid SocketAddr expected"),
                 execution: config.node_config.reth_peer_info,
             },
-            trusted_peers_api_addresses: config
-                .node_config
-                .trusted_peers
-                .iter()
-                .map(|p| p.api)
-                .collect(),
             reth_service_addr: Some(reth_actor),
             config: Some(config.clone()),
         }
@@ -405,6 +446,7 @@ where
         ctx.run_interval(INACTIVE_PEERS_HEALTH_CHECK_INTERVAL, |act, ctx| {
             // Collect inactive peers with the required fields
             let inactive_peers: Vec<(Address, PeerListItem, SocketAddr)> = act
+                .peer_list_data
                 .peer_list_cache
                 .iter()
                 .filter(|(_mining_addr, peer)| !peer.reputation_score.is_active())
@@ -444,7 +486,7 @@ where
         // Initiate the trusted peers handshake
         let trusted_peers_handshake_task = Self::trusted_peers_handshake_task(
             peer_service_address.clone(),
-            self.trusted_peers_api_addresses.clone(),
+            self.peer_list_data.trusted_peers_api_addresses.clone(),
         )
         .into_actor(self);
         ctx.spawn(trusted_peers_handshake_task);
@@ -452,7 +494,7 @@ where
         // Announce yourself to the network
         let version_request = self.create_version_request();
         let api_client = self.irys_api_client.clone();
-        let peers_cache = self.known_peers_cache.clone();
+        let peers_cache = self.peer_list_data.known_peers_cache.clone();
         let announce_fut = Self::announce_yourself_to_all_peers(
             api_client,
             version_request,
@@ -495,6 +537,24 @@ pub enum PeerListServiceError {
     FailedToRequestData(String),
 }
 
+#[derive(Debug, Clone, Error)]
+pub enum PeerListDataError {
+    #[error("Internal database error: {0}")]
+    Database(DatabaseError),
+}
+
+impl From<DatabaseError> for PeerListDataError {
+    fn from(err: DatabaseError) -> Self {
+        Self::Database(err)
+    }
+}
+
+impl From<eyre::Report> for PeerListDataError {
+    fn from(err: eyre::Report) -> Self {
+        Self::Database(DatabaseError::Other(err.to_string()))
+    }
+}
+
 impl From<MailboxError> for PeerListServiceError {
     fn from(value: MailboxError) -> Self {
         Self::InternalSendError(value)
@@ -504,6 +564,12 @@ impl From<MailboxError> for PeerListServiceError {
 impl From<DatabaseError> for PeerListServiceError {
     fn from(err: DatabaseError) -> Self {
         Self::Database(err)
+    }
+}
+
+impl From<eyre::Report> for PeerListServiceError {
+    fn from(err: eyre::Report) -> Self {
+        Self::Database(DatabaseError::Other(err.to_string()))
     }
 }
 
@@ -524,38 +590,10 @@ where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
-    /// Initialize the peer list service
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if the load from the database fails
-    pub fn initialize(&mut self) -> Result<(), PeerListServiceError> {
-        if let Some(db) = self.db.as_ref() {
-            let read_tx = db.tx().map_err(PeerListServiceError::from)?;
-
-            let peer_list_items =
-                walk_all::<PeerListItems, _>(&read_tx).map_err(PeerListServiceError::from)?;
-
-            for (mining_addr, entry) in peer_list_items {
-                let address = entry.address;
-                self.gossip_addr_to_mining_addr_map
-                    .insert(entry.address.gossip.ip(), mining_addr);
-                self.peer_list_cache.insert(mining_addr, entry.0);
-                self.known_peers_cache.insert(address);
-                self.api_addr_to_mining_addr_map
-                    .insert(address.api, mining_addr);
-            }
-        } else {
-            return Err(PeerListServiceError::DatabaseNotConnected);
-        }
-
-        Ok(())
-    }
-
     fn flush(&self) -> Result<(), PeerListServiceError> {
         if let Some(db) = &self.db {
             db.update(|tx| {
-                for (addr, peer) in self.peer_list_cache.iter() {
+                for (addr, peer) in self.peer_list_data.peer_list_cache.iter() {
                     insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
                 }
                 Ok(())
@@ -568,10 +606,10 @@ where
 
     fn peer_by_address(&self, address: SocketAddr) -> Option<PeerListItem> {
         let mining_address = self
-            .gossip_addr_to_mining_addr_map
+            .peer_list_data.gossip_addr_to_mining_addr_map
             .get(&address.ip())
             .copied()?;
-        self.peer_list_cache.get(&mining_address).cloned()
+        self.peer_list_data.peer_list_cache.get(&mining_address).cloned()
     }
 
     async fn trusted_peers_handshake_task(
@@ -597,17 +635,17 @@ where
     }
 
     fn update_peer_address(&mut self, mining_addr: Address, new_address: PeerAddress) {
-        if let Some(peer) = self.peer_list_cache.get_mut(&mining_addr) {
+        if let Some(peer) = self.peer_list_data.peer_list_cache.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;
-            self.gossip_addr_to_mining_addr_map
+            self.peer_list_data.gossip_addr_to_mining_addr_map
                 .remove(&old_address.gossip.ip());
-            self.gossip_addr_to_mining_addr_map
+            self.peer_list_data.gossip_addr_to_mining_addr_map
                 .insert(new_address.gossip.ip(), mining_addr);
-            self.known_peers_cache.remove(&old_address);
-            self.known_peers_cache.insert(old_address);
-            self.api_addr_to_mining_addr_map.remove(&old_address.api);
-            self.api_addr_to_mining_addr_map
+            self.peer_list_data.known_peers_cache.remove(&old_address);
+            self.peer_list_data.known_peers_cache.insert(old_address);
+            self.peer_list_data.api_addr_to_mining_addr_map.remove(&old_address.api);
+            self.peer_list_data.api_addr_to_mining_addr_map
                 .insert(new_address.api, mining_addr);
         }
     }
@@ -618,22 +656,22 @@ where
         let peer_address = peer.address;
 
         if let std::collections::hash_map::Entry::Vacant(peer_cache) =
-            self.peer_list_cache.entry(mining_addr)
+            self.peer_list_data.peer_list_cache.entry(mining_addr)
         {
             debug!("Adding peer {:?} to the peer list", mining_addr);
             peer_cache.insert(peer);
-            self.gossip_addr_to_mining_addr_map
+            self.peer_list_data.gossip_addr_to_mining_addr_map
                 .insert(gossip_addr.ip(), mining_addr);
-            self.api_addr_to_mining_addr_map
+            self.peer_list_data.api_addr_to_mining_addr_map
                 .insert(peer_address.api, mining_addr);
-            self.known_peers_cache.insert(peer_address);
+            self.peer_list_data.known_peers_cache.insert(peer_address);
             true
         } else {
             debug!(
                 "Peer {:?} already exists in the peer list, checking if the address needs updating",
                 mining_addr
             );
-            if let Some(existing_peer) = self.peer_list_cache.get_mut(&mining_addr) {
+            if let Some(existing_peer) = self.peer_list_data.peer_list_cache.get_mut(&mining_addr) {
                 let handshake_cooldown_expired =
                     existing_peer.last_seen + HANDSHAKE_COOLDOWN < peer.last_seen;
                 existing_peer.last_seen = peer.last_seen;
@@ -659,7 +697,7 @@ where
     }
 
     fn increase_peer_score(&mut self, mining_addr: &Address, score: ScoreIncreaseReason) {
-        if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
+        if let Some(peer_item) = self.peer_list_data.peer_list_cache.get_mut(mining_addr) {
             match score {
                 ScoreIncreaseReason::Online => {
                     peer_item.reputation_score.increase();
@@ -672,7 +710,7 @@ where
     }
 
     fn decrease_peer_score(&mut self, mining_addr: &Address, reason: ScoreDecreaseReason) {
-        if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
+        if let Some(peer_item) = self.peer_list_data.peer_list_cache.get_mut(mining_addr) {
             match reason {
                 ScoreDecreaseReason::BogusData => {
                     peer_item.reputation_score.decrease_bogus_data();
@@ -684,7 +722,7 @@ where
 
             // Don't propagate inactive peers
             if !peer_item.reputation_score.is_active() {
-                self.known_peers_cache.remove(&peer_item.address);
+                self.peer_list_data.known_peers_cache.remove(&peer_item.address);
             }
         }
     }
@@ -830,12 +868,6 @@ where
     }
 }
 
-impl From<eyre::Report> for PeerListServiceError {
-    fn from(err: eyre::Report) -> Self {
-        Self::Database(DatabaseError::Other(err.to_string()))
-    }
-}
-
 /// Request info about a specific peer
 #[derive(Message, Debug)]
 #[rtype(result = "Option<PeerListItem>")]
@@ -895,7 +927,7 @@ where
     type Result = ();
 
     fn handle(&mut self, msg: IncreasePeerScore, _ctx: &mut Self::Context) -> Self::Result {
-        if let Some(peer_item) = self.peer_list_cache.get_mut(&msg.peer_miner_address) {
+        if let Some(peer_item) = self.peer_list_data.peer_list_cache.get_mut(&msg.peer_miner_address) {
             match msg.reason {
                 ScoreIncreaseReason::Online => {
                     peer_item.reputation_score.increase();
@@ -922,13 +954,13 @@ where
 
     fn handle(&mut self, _msg: TrustedPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         let mut peers: Vec<(Address, PeerListItem)> = self
-            .peer_list_cache
+            .peer_list_data.peer_list_cache
             .iter()
             .map(|(key, value)| (*key, value.clone()))
             .collect();
 
         peers.retain(|(_miner_address, peer)| {
-            self.trusted_peers_api_addresses.contains(&peer.address.api)
+            self.peer_list_data.trusted_peers_api_addresses.contains(&peer.address.api)
         });
 
         peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
@@ -957,7 +989,7 @@ where
         let source_miner_addr = msg.peer_source_miner_address;
         let source_ip = msg.peer_source_ip_address;
 
-        let Some(peer) = self.peer_list_cache.get(&source_miner_addr) else {
+        let Some(peer) = self.peer_list_data.peer_list_cache.get(&source_miner_addr) else {
             return false;
         };
         let peer_api_ip = peer.address.api.ip();
@@ -965,7 +997,7 @@ where
 
         let ip_matches_cached_ip = source_ip == peer_gossip_ip;
         let ip_is_in_a_trusted_list = self
-            .trusted_peers_api_addresses
+            .peer_list_data.trusted_peers_api_addresses
             .iter()
             .any(|socket_addr| socket_addr.ip() == peer_api_ip);
 
@@ -990,6 +1022,7 @@ where
 
     fn handle(&mut self, msg: TopActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         let mut peers: Vec<(Address, PeerListItem)> = self
+            .peer_list_data
             .peer_list_cache
             .iter()
             .map(|(key, value)| (*key, value.clone()))
@@ -1030,7 +1063,7 @@ where
     type Result = Option<PeerListItem>;
 
     fn handle(&mut self, msg: GetPeerByMiningAddress, _ctx: &mut Self::Context) -> Self::Result {
-        self.peer_list_cache.get(&msg.mining_address).cloned()
+        self.peer_list_data.peer_list_cache.get(&msg.mining_address).cloned()
     }
 }
 
@@ -1124,7 +1157,7 @@ where
     type Result = Vec<PeerAddress>;
 
     fn handle(&mut self, _msg: KnownPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
-        self.known_peers_cache.iter().copied().collect()
+        self.peer_list_data.known_peers_cache.iter().copied().collect()
     }
 }
 
@@ -1173,7 +1206,7 @@ where
         }
 
         let already_in_cache = self
-            .api_addr_to_mining_addr_map
+            .peer_list_data.api_addr_to_mining_addr_map
             .contains_key(&msg.api_address);
         let already_announcing = self
             .currently_running_announcements
@@ -1275,7 +1308,7 @@ where
     type Result = usize;
 
     fn handle(&mut self, _msg: ActivePeersCountRequest, _ctx: &mut Self::Context) -> Self::Result {
-        self.peer_list_cache.len()
+        self.peer_list_data.peer_list_cache.len()
     }
 }
 
@@ -1292,7 +1325,7 @@ where
 
     fn handle(&mut self, _msg: WaitForActivePeer, ctx: &mut Self::Context) -> Self::Result {
         // First check if we already have active peers
-        if !self.peer_list_cache.is_empty() {
+        if !self.peer_list_data.peer_list_cache.is_empty() {
             return Box::pin(fut::ready(()));
         }
 
@@ -1955,9 +1988,6 @@ mod tests {
             mock_client,
             mock_addr,
         );
-        new_service
-            .initialize()
-            .expect("Failed to initialize service");
 
         // Verify peers were loaded correctly
         let loaded_peer1 = new_service.handle(
