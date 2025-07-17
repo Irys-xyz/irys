@@ -267,7 +267,7 @@ impl Inner {
 
         // TODO: This approach should be applied to data TX and commitment TX should instead
         // be checked for prior inclusion using the Commitment State and current Commitment Snapshot
-        for entry in canonical {
+        for entry in canonical.iter() {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
                 for tx_id in &commitment_tx_ids.0 {
@@ -305,30 +305,32 @@ impl Inner {
                     continue; // Skip tx already confirmed in the canonical chain
                 }
 
-                //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
-                let mut commitment_snapshot = self
-                    .block_tree_read_guard
-                    .read()
-                    .canonical_commitment_snapshot()
-                    .as_ref()
-                    .clone();
+                if tx.commitment_type == CommitmentType::Stake {
+                    //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+                    let mut commitment_snapshot = self
+                        .block_tree_read_guard
+                        .read()
+                        .canonical_commitment_snapshot()
+                        .as_ref()
+                        .clone();
 
-                let is_staked = self
-                    .block_tree_read_guard
-                    .read()
-                    .canonical_epoch_snapshot()
-                    .is_staked(tx.signer);
+                    let is_staked = self
+                        .block_tree_read_guard
+                        .read()
+                        .canonical_epoch_snapshot()
+                        .is_staked(tx.signer);
 
-                // skip commitments that would not be accepted
-                let simulation = commitment_snapshot.add_commitment(&tx, is_staked);
-                if simulation != CommitmentSnapshotStatus::Accepted {
-                    tracing::error!(
-                        "tx {:?}:{:?} skipped: {:?}",
-                        tx.commitment_type,
-                        tx.id,
-                        simulation
-                    );
-                    continue;
+                    // skip commitments that would not be accepted
+                    let simulation = commitment_snapshot.add_commitment(&tx, is_staked);
+                    if simulation != CommitmentSnapshotStatus::Accepted {
+                        tracing::error!(
+                            "tx {:?}:{:?} skipped: {:?}",
+                            tx.commitment_type,
+                            tx.id,
+                            simulation
+                        );
+                        continue;
+                    }
                 }
 
                 if check_funding(&tx) {
