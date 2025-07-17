@@ -304,22 +304,14 @@ impl Inner {
                     );
                     continue; // Skip tx already confirmed in the canonical chain
                 }
-                // Validate the commitment against the current canonical snapshot
-                // to ensure we don't include commitments for addresses that are
-                // already committed on the longest chain.
-                let status = self.get_commitment_status(&tx).await;
-                if status != CommitmentSnapshotStatus::Accepted {
-                    debug!(
-                        "best_mempool_txs: skipping commitment tx {} due to status {:?}",
-                        tx.id, status
-                    );
-                    continue;
-                }
 
-                let commitment_snapshot = self
+                //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+                let mut commitment_snapshot = self
                     .block_tree_read_guard
                     .read()
-                    .canonical_commitment_snapshot();
+                    .canonical_commitment_snapshot()
+                    .as_ref()
+                    .clone();
 
                 let is_staked = self
                     .block_tree_read_guard
@@ -327,9 +319,15 @@ impl Inner {
                     .canonical_epoch_snapshot()
                     .is_staked(tx.signer);
 
-                if commitment_snapshot.get_commitment_status(&tx, is_staked)
-                    == CommitmentSnapshotStatus::Accepted
-                {
+                // skip commitments that would not be accepted
+                let simulation = commitment_snapshot.add_commitment(&tx, is_staked);
+                if simulation != CommitmentSnapshotStatus::Accepted {
+                    tracing::error!(
+                        "tx {:?}:{:?} skipped: {:?}",
+                        tx.commitment_type,
+                        tx.id,
+                        simulation
+                    );
                     continue;
                 }
 
