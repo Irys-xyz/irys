@@ -956,6 +956,7 @@ mod tests {
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
+        max_pending_anchor_items = 100
 
         [difficulty_adjustment]
         block_time = 1
