@@ -420,6 +420,14 @@ pub struct MempoolConfig {
     /// Maximum number of chunks that can be cached per data root
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
     pub max_chunks_per_item: usize,
+
+    /// Maximum number of valid tx txids to keep track of
+    /// Decreasing this will increase the amount of validation the node will have to perform
+    pub max_valid_items: usize,
+
+    /// Maximum number of invalid tx txids to keep track of
+    /// Decreasing this will increase the amount of validation the node will have to perform
+    pub max_invalid_items: usize,
 }
 
 /// # Gossip Network Configuration
@@ -538,6 +546,8 @@ impl ConsensusConfig {
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
                 max_pending_anchor_items: 100,
+                max_invalid_items: 10_000,
+                max_valid_items: 10_000,
             },
             vdf: VdfConfig {
                 // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
@@ -957,6 +967,10 @@ mod tests {
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
         max_pending_anchor_items = 100
+        max_invalid_items = 10000
+        max_valid_items = 10000
+
+
 
         [difficulty_adjustment]
         block_time = 1

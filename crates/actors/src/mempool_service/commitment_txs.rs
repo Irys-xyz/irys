@@ -25,7 +25,10 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         // Early out if we already know about this transaction (invalid)
-        if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
+        if mempool_state_guard
+            .recent_invalid_tx
+            .contains(&commitment_tx.id)
+        {
             return Err(TxIngressError::Skipped);
         }
 
@@ -82,7 +85,9 @@ impl Inner {
                 .or_default()
                 .push(commitment_tx.clone());
 
-            mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
+            mempool_state_guard
+                .recent_valid_tx
+                .put(commitment_tx.id, ());
 
             // Process any pending pledges for this newly staked address
             // ------------------------------------------------------
@@ -258,7 +263,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mut mempool_state_guard = mempool_state.write().await;
 
-        mempool_state_guard.recent_valid_tx.remove(txid);
+        mempool_state_guard.recent_valid_tx.pop(txid);
 
         // Create a vector of addresses to update to avoid borrowing issues
         let addresses_to_check: Vec<Address> = mempool_state_guard

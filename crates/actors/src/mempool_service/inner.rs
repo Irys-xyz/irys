@@ -528,7 +528,7 @@ impl Inner {
                         return Ok(Some((hdr.height, tx)));
                     } else {
                         let mut mempool_state_write_guard = mempool_state.write().await;
-                        mempool_state_write_guard.invalid_tx.push(tx_id);
+                        mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
                         warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                         return Err(TxIngressError::InvalidAnchor);
                     }
@@ -540,7 +540,7 @@ impl Inner {
                         return Ok(Some((hdr.height, tx)));
                     } else {
                         let mut mempool_state_write_guard = mempool_state.write().await;
-                        mempool_state_write_guard.invalid_tx.push(tx_id);
+                        mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
                         warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                         return Err(TxIngressError::InvalidAnchor);
                     }
@@ -563,7 +563,7 @@ impl Inner {
                 return Ok(Some((hdr.height, tx)));
             } else {
                 let mut mempool_state_write_guard = mempool_state.write().await;
-                mempool_state_write_guard.invalid_tx.push(tx_id);
+                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
                 warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                 return Err(TxIngressError::InvalidAnchor);
             }
@@ -578,7 +578,7 @@ impl Inner {
                     Ok(Some((hdr.height, tx)))
                 } else {
                     let mut mempool_state_write_guard = mempool_state.write().await;
-                    mempool_state_write_guard.invalid_tx.push(tx_id);
+                    mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
                     warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
                     Err(TxIngressError::InvalidAnchor)
                 }
@@ -717,7 +717,11 @@ impl Inner {
             Ok(())
         } else {
             let mempool_state = &self.mempool_state;
-            mempool_state.write().await.invalid_tx.push(tx.id());
+            mempool_state
+                .write()
+                .await
+                .recent_invalid_tx
+                .put(tx.id(), ());
             debug!("Signature is NOT valid");
             Err(TxIngressError::InvalidSignature)
         }
@@ -822,9 +826,9 @@ pub struct MempoolState {
     pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
-    pub invalid_tx: Vec<H256>,
+    pub recent_invalid_tx: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
-    pub recent_valid_tx: HashSet<H256>,
+    pub recent_valid_tx: LruCache<H256, ()>,
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
@@ -849,8 +853,8 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         prevalidated_blocks_poa: HashMap::new(),
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
-        invalid_tx: Vec::new(),
-        recent_valid_tx: HashSet::new(),
+        recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
+        recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         pending_anchor_txs: LruCache::new(NonZeroUsize::new(max_pending_anchor_items).unwrap()),
