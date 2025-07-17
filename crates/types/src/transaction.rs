@@ -314,6 +314,7 @@ pub trait IrysTransactionCommon {
     fn id(&self) -> IrysTransactionId;
     fn total_cost(&self) -> U256;
     fn signer(&self) -> Address;
+    fn user_fee(&self) -> U256;
 
     /// Sign this transaction with the provided signer
     fn sign(self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error>
@@ -336,6 +337,10 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn user_fee(&self) -> U256 {
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -380,6 +385,10 @@ impl IrysTransactionCommon for CommitmentTransaction {
 
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn user_fee(&self) -> U256 {
+        U256::from(self.fee)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {

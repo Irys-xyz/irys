@@ -293,7 +293,7 @@ impl Inner {
                 .collect();
 
             // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.total_cost()));
+            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.user_fee()));
 
             // Select fundable commitments in fee-priority order
             for tx in sorted_commitments {
@@ -329,7 +329,7 @@ impl Inner {
 
         // Sort data transactions by fee (highest first) to maximize revenue
 
-        submit_ledger_txs.sort_by(|a, b| match b.total_cost().cmp(&a.total_cost()) {
+        submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
         });
