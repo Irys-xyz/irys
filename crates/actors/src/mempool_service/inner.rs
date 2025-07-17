@@ -276,6 +276,14 @@ impl Inner {
             }
         }
 
+        //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+        let mut simulation_commitment_snapshot = self
+            .block_tree_read_guard
+            .read()
+            .canonical_commitment_snapshot()
+            .as_ref()
+            .clone();
+
         // Process commitments in the mempool in priority order (stakes then pledges)
         // This order ensures stake transactions are processed before pledges
         let mempool_state_guard = mempool_state.read().await;
@@ -305,23 +313,22 @@ impl Inner {
                     continue; // Skip tx already confirmed in the canonical chain
                 }
 
-                if tx.commitment_type == CommitmentType::Stake {
-                    //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
-                    let mut commitment_snapshot = self
-                        .block_tree_read_guard
-                        .read()
-                        .canonical_commitment_snapshot()
-                        .as_ref()
-                        .clone();
+                // Check funding before simulation so we don't mutate the snapshot unnecessarily
+                if !check_funding(&tx) {
+                    continue;
+                }
 
+                // simulation check
+                {
                     let is_staked = self
                         .block_tree_read_guard
                         .read()
                         .canonical_epoch_snapshot()
                         .is_staked(tx.signer);
 
+                    let simulation = simulation_commitment_snapshot.add_commitment(&tx, is_staked);
+
                     // skip commitments that would not be accepted
-                    let simulation = commitment_snapshot.add_commitment(&tx, is_staked);
                     if simulation != CommitmentSnapshotStatus::Accepted {
                         tracing::error!(
                             "tx {:?}:{:?} skipped: {:?}",
@@ -333,10 +340,8 @@ impl Inner {
                     }
                 }
 
-                if check_funding(&tx) {
-                    debug!("best_mempool_txs: adding commitment tx {}", tx.id);
-                    commitment_tx.push(tx);
-                }
+                debug!("best_mempool_txs: adding commitment tx {}", tx.id);
+                commitment_tx.push(tx);
             }
         }
         drop(mempool_state_guard);
