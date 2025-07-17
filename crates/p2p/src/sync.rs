@@ -575,7 +575,7 @@ mod tests {
             );
             let peer_list = peer_list_service.start();
             peer_list
-                .add_peer(
+                .add_or_update_peer(
                     Address::repeat_byte(2),
                     PeerListItem {
                         reputation_score: PeerScore::new(100),
@@ -681,7 +681,7 @@ mod tests {
 
             let peer_list = peer_list_service.start();
             peer_list
-                .add_peer(
+                .add_or_update_peer(
                     Address::repeat_byte(2),
                     PeerListItem {
                         reputation_score: PeerScore::new(100),

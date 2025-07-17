@@ -19,8 +19,8 @@ use irys_domain::{
     BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    Address, BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, H256List,
-    IrysBlockHeader, IrysTransactionHeader, TokioServiceHandle, H256,
+    Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DatabaseProvider, H256List, IrysBlockHeader, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -895,7 +895,7 @@ impl BlockTreeServiceInner {
         &self,
         block_header: &IrysBlockHeader,
         ledger: DataLedger,
-    ) -> eyre::Result<Vec<IrysTransactionHeader>> {
+    ) -> eyre::Result<Vec<DataTransactionHeader>> {
         // Explicitly cast enum to index
         let ledger_index = ledger as usize;
 
@@ -918,7 +918,7 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
             .into_iter()
             .flatten()
-            .collect::<Vec<IrysTransactionHeader>>();
+            .collect::<Vec<DataTransactionHeader>>();
 
         if received.len() != data_tx_ids.len() {
             return Err(eyre::eyre!(

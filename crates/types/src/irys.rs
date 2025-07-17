@@ -1,6 +1,6 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
-    IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256,
+    DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature, H256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -42,7 +42,7 @@ impl IrysSigner {
         &self,
         data: Vec<u8>,
         anchor: Option<H256>, //TODO!: more parameters as they are implemented
-    ) -> Result<IrysTransaction> {
+    ) -> Result<DataTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size as usize)?;
 
         // TODO: These should be calculated from some pricing params passed in
@@ -64,7 +64,7 @@ impl IrysSigner {
     }
 
     /// signs and sets signature and id.
-    pub fn sign_transaction(&self, mut transaction: IrysTransaction) -> Result<IrysTransaction> {
+    pub fn sign_transaction(&self, mut transaction: DataTransaction) -> Result<DataTransaction> {
         // Store the signer address
         transaction.header.signer = Address::from_public_key(self.signer.verifying_key());
 
@@ -117,7 +117,7 @@ impl IrysSigner {
 
     /// Builds a merkle tree, with a root, including all the proofs for each
     /// chunk.
-    fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<IrysTransaction> {
+    fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<DataTransaction> {
         // TODO: fix the `data` field so we can use "streaming" data sources & remove the clone
         let chunks = generate_leaves(vec![data.clone()].into_iter().map(Ok), chunk_size)?;
         let root = generate_data_root(chunks.clone())?;
@@ -130,8 +130,8 @@ impl IrysSigner {
             return Err(eyre::eyre!("Last chunk cannot be zero length"));
         }
 
-        Ok(IrysTransaction {
-            header: IrysTransactionHeader {
+        Ok(DataTransaction {
+            header: DataTransactionHeader {
                 data_size: data.len() as u64,
                 data_root,
                 ..Default::default()

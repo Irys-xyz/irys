@@ -21,7 +21,7 @@ use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_primitives::range_specifier::ChunkRangeSpecifier;
 use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
 use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 
@@ -170,7 +170,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             };
 
             if response.status() == StatusCode::OK {
-                let result: IrysTransactionHeader = response.json().await.unwrap();
+                let result: DataTransactionHeader = response.json().await.unwrap();
                 assert_eq!(&tx.header, &result);
                 info!("Transaction was retrieved ok after {} attempts", attempt);
                 break;

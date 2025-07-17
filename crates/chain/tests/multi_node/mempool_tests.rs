@@ -12,8 +12,8 @@ use irys_reth_node_bridge::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, IngressProofsList, IrysBlockHeader,
-    IrysTransaction, NodeConfig, TxIngressProof, H256,
+    irys::IrysSigner, CommitmentTransaction, DataLedger, DataTransaction, IngressProofsList,
+    IrysBlockHeader, NodeConfig, TxIngressProof, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -490,7 +490,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Determine which peer lost the fork race and extend the other peer's chain
     // to trigger a reorganization. The losing peer's transaction will be evicted
     // and returned to the mempool.
-    let reorg_tx: IrysTransaction;
+    let reorg_tx: DataTransaction;
     let _reorg_block_hash: H256;
     let reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
         debug!(

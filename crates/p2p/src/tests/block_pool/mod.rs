@@ -14,7 +14,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
+    Config, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionResponse,
     NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -42,7 +42,7 @@ impl ApiClient for MockApiClient {
     async fn post_transaction(
         &self,
         _peer: SocketAddr,
-        _transaction: IrysTransactionHeader,
+        _transaction: DataTransactionHeader,
     ) -> eyre::Result<()> {
         Ok(())
     }
@@ -333,7 +333,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Set the mock client to return block2 when requested
     // Adding a peer so we can send a request to the mock client
     peer_addr
-        .add_peer(
+        .add_or_update_peer(
             Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
             PeerListItem {
                 reputation_score: PeerScore::new(100),
@@ -507,7 +507,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     // Adding a peer so we can send a request to the mock client
     peer_addr
-        .add_peer(
+        .add_or_update_peer(
             Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
             PeerListItem {
                 reputation_score: PeerScore::new(100),

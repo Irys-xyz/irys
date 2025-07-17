@@ -17,6 +17,13 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
+const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
+pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
+
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
 where
     T: Message<Result = R> + Send + 'static,
@@ -33,11 +40,6 @@ where
         }
     }
 }
-
-const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
-const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub type PeerListService = PeerListServiceWithClient<IrysApiClient, RethServiceActor>;
 pub type PeerListServiceFacade = Addr<PeerListServiceWithClient<IrysApiClient, RethServiceActor>>;
@@ -84,7 +86,7 @@ pub trait PeerList: Send + Sync + Clone + Unpin + 'static {
     async fn peer_count(&self) -> Result<usize, PeerListFacadeError>;
 
     /// IMPORTANT! DO NOT USE THIS METHOD DIRECTLY; IT'S MEANT TO BE USED ONLY BY THE API SERVER.
-    async fn add_peer(
+    async fn add_or_update_peer(
         &self,
         mining_address: Address,
         peer: PeerListItem,
@@ -194,7 +196,7 @@ where
     }
 
     /// IMPORTANT! DO NOT USE THIS METHOD DIRECTLY; IT'S MEANT TO BE USED ONLY BY THE API SERVER.
-    async fn add_peer(
+    async fn add_or_update_peer(
         &self,
         mining_address: Address,
         peer: PeerListItem,
@@ -611,15 +613,15 @@ where
     }
 
     /// Add a peer to the peer list. Returns true if the peer was added, false if it already exists.
-    fn add_peer(&mut self, mining_addr: Address, peer: PeerListItem) -> bool {
+    fn add_or_update_peer(&mut self, mining_addr: Address, peer: PeerListItem) -> bool {
         let gossip_addr = peer.address.gossip;
         let peer_address = peer.address;
 
-        if let std::collections::hash_map::Entry::Vacant(e) =
+        if let std::collections::hash_map::Entry::Vacant(peer_cache) =
             self.peer_list_cache.entry(mining_addr)
         {
             debug!("Adding peer {:?} to the peer list", mining_addr);
-            e.insert(peer);
+            peer_cache.insert(peer);
             self.gossip_addr_to_mining_addr_map
                 .insert(gossip_addr.ip(), mining_addr);
             self.api_addr_to_mining_addr_map
@@ -632,12 +634,18 @@ where
                 mining_addr
             );
             if let Some(existing_peer) = self.peer_list_cache.get_mut(&mining_addr) {
+                let handshake_cooldown_expired =
+                    existing_peer.last_seen + HANDSHAKE_COOLDOWN < peer.last_seen;
+                existing_peer.last_seen = peer.last_seen;
                 if existing_peer.address != peer_address {
                     debug!("Peer address mismatch, updating to new address");
                     self.update_peer_address(mining_addr, peer_address);
                     true
+                } else if handshake_cooldown_expired {
+                    debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
+                    true
                 } else {
-                    debug!("Peer does not need updating");
+                    debug!("Peer address is the same, no update needed");
                     false
                 }
             } else {
@@ -1081,7 +1089,7 @@ where
         debug!("AddPeer message received: {:?}", msg.peer);
         let peer_api_addr = msg.peer.address.api;
         let reth_peer_info = msg.peer.address.execution;
-        let is_updated = self.add_peer(msg.mining_addr, msg.peer);
+        let is_updated = self.add_or_update_peer(msg.mining_addr, msg.peer);
         let peer_service_addr = ctx.address();
 
         if is_updated {

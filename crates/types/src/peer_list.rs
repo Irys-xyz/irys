@@ -2,9 +2,9 @@ use crate::{Compact, PeerAddress};
 use actix::Message;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Arbitrary, PartialEq, Hash)]
 pub struct PeerScore(u16);
@@ -59,7 +59,10 @@ impl Default for PeerListItem {
                 api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 execution: RethPeerInfo::default(),
             },
-            last_seen: Utc::now().timestamp_millis() as u64,
+            last_seen: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             is_online: true,
         }
     }

@@ -3,8 +3,8 @@ use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
 };
 use irys_types::{
-    Address, CommitmentTransaction, IrysBlockHeader, IrysTransactionCommon as _,
-    IrysTransactionHeader,
+    Address, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
+    IrysTransactionCommon as _,
 };
 use reth::revm::primitives::ruint::Uint;
 
@@ -33,7 +33,7 @@ impl<'a> ShadowTxGenerator<'a> {
     pub fn generate_all(
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
-        submit_txs: &'a [IrysTransactionHeader],
+        submit_txs: &'a [DataTransactionHeader],
     ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
         self.generate_shadow_tx_header()
             .chain(self.generate_commitment_shadow_transactions(commitment_txs))
@@ -55,7 +55,7 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Generates the expected data shadow transactions for a given block
     pub fn generate_data_storage_shadow_transactions(
         &'a self,
-        submit_txs: &'a [IrysTransactionHeader],
+        submit_txs: &'a [DataTransactionHeader],
     ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
         // create a storage fee shadow txs
         submit_txs.iter().map(move |tx| {

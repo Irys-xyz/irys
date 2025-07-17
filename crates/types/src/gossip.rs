@@ -1,5 +1,5 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     IrysTransactionId, UnpackedChunk,
 };
 use alloy_primitives::{Address, B256};
@@ -41,8 +41,8 @@ impl From<UnpackedChunk> for GossipBroadcastMessage {
     }
 }
 
-impl From<IrysTransactionHeader> for GossipBroadcastMessage {
-    fn from(transaction: IrysTransactionHeader) -> Self {
+impl From<DataTransactionHeader> for GossipBroadcastMessage {
+    fn from(transaction: DataTransactionHeader) -> Self {
         let key = GossipCacheKey::transaction(&transaction);
         let value = GossipData::Transaction(transaction);
         Self::new(key, value)
@@ -78,7 +78,7 @@ impl GossipCacheKey {
         Self::Chunk(chunk.chunk_path_hash())
     }
 
-    pub fn transaction(transaction: &IrysTransactionHeader) -> Self {
+    pub fn transaction(transaction: &DataTransactionHeader) -> Self {
         Self::Transaction(transaction.id)
     }
 
@@ -98,7 +98,7 @@ impl GossipCacheKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipData {
     Chunk(UnpackedChunk),
-    Transaction(IrysTransactionHeader),
+    Transaction(DataTransactionHeader),
     CommitmentTransaction(CommitmentTransaction),
     Block(Arc<IrysBlockHeader>),
     ExecutionPayload(Block),

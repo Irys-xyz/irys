@@ -171,7 +171,7 @@ impl alloy_rlp::Decodable for IrysSignature {
 mod tests {
     use super::*;
 
-    use crate::{irys::IrysSigner, ConsensusConfig, IrysTransaction, IrysTransactionHeader, H256};
+    use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
     use alloy_primitives::Address;
     use alloy_rlp::{Decodable as _, Encodable as _};
@@ -201,7 +201,7 @@ mod tests {
             chunk_size: testnet_config.chunk_size,
         };
 
-        let original_header = IrysTransactionHeader {
+        let original_header = DataTransactionHeader {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,
@@ -216,7 +216,7 @@ mod tests {
             ingress_proofs: None,
             signature: Default::default(),
         };
-        let transaction = IrysTransaction {
+        let transaction = DataTransaction {
             header: original_header,
             ..Default::default()
         };
