@@ -295,12 +295,13 @@ where
     irys_api_client: A,
 
     chain_id: u64,
-    mining_address: Address,
     peer_address: PeerAddress,
 
     trusted_peers_api_addresses: HashSet<SocketAddr>,
 
     reth_service_addr: Option<Addr<R>>,
+
+    config: Option<Config>,
 }
 
 impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
@@ -358,7 +359,6 @@ where
             ),
             irys_api_client,
             chain_id: config.consensus.chain_id,
-            mining_address: config.node_config.miner_address(),
             peer_address: PeerAddress {
                 gossip: format!(
                     "{}:{}",
@@ -381,6 +381,7 @@ where
                 .map(|p| p.api)
                 .collect(),
             reth_service_addr: Some(reth_actor),
+            config: Some(config.clone()),
         }
     }
 }
@@ -690,13 +691,21 @@ where
     }
 
     fn create_version_request(&self) -> VersionRequest {
-        VersionRequest {
-            mining_address: self.mining_address,
+        let signer = self
+            .config
+            .as_ref()
+            .expect("Config must exist")
+            .irys_signer();
+        let mut version_request = VersionRequest {
             address: self.peer_address,
             chain_id: self.chain_id,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
             ..VersionRequest::default()
-        }
+        };
+        signer
+            .sign_p2p_handshake(&mut version_request)
+            .expect("Failed to sign version request");
+        version_request
     }
 
     async fn announce_yourself_to_address(
