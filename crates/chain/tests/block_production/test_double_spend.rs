@@ -82,18 +82,30 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let txid = tx_for_mempool.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
 
-    // ensure block with tx_for_migration is now in index
+    // mempool should still have 2 commitments txs
+    // it will not yet return the submit tx as it has not received the txs corresponding data
+    node.wait_for_mempool_shape(0, 0, 2, seconds_to_wait.try_into()?)
+        .await?;
+
+    // ensure block with tx_for_migration is now in index (from TEST CASE 1)
     node.wait_until_block_index_height(block1.height, seconds_to_wait)
         .await?;
 
-    // resubmit tx header that already exists in the database
+    // resubmit tx header that already exists in the database (as it has migrated)
     node.post_data_tx_raw(&tx_for_migration.header).await;
     // resubmit tx header that already exists in the mempool
     node.post_data_tx_raw(&tx_for_mempool.header).await;
 
+    // mempool should not provide the submit as part of best txs
+    node.wait_for_mempool_shape(0, 0, 2, seconds_to_wait.try_into()?)
+        .await?;
+
     // resubmit commitment transactions that were already seen
     node.post_commitment_tx(&stake_for_mempool).await;
     node.post_commitment_tx(&pledge_for_mempool).await;
+    node.wait_for_mempool_shape(0, 0, 2, seconds_to_wait.try_into()?)
+        .await?;
+
     // ensure mempool does not accept any duplicate tx
     // this will have skipped new stakes, and only allowed one of the pledge txs into mempool
     node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
