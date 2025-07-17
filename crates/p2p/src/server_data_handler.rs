@@ -491,20 +491,12 @@ where
 
                 match maybe_block {
                     Some(block) => {
-                        match self
-                            .gossip_client
-                            .send_data_and_update_score(
-                                (&request.miner_address, peer_info),
-                                &GossipData::Block(block),
-                                &self.peer_list,
-                            )
-                            .await
-                        {
-                            Ok(()) => {}
-                            Err(error) => {
-                                error!("Failed to send block to peer: {}", error);
-                            }
-                        }
+                        let data = Arc::new(GossipData::Block(block));
+                        self.gossip_client.send_data_and_update_the_score_detached(
+                            (&request.miner_address, peer_info),
+                            data,
+                            &self.peer_list,
+                        );
                         Ok(true)
                     }
                     None => Ok(false),
@@ -522,19 +514,15 @@ where
                     .await;
 
                 match maybe_evm_block {
-                    Some(evm_block) => self
-                        .gossip_client
-                        .send_data_and_update_score(
+                    Some(evm_block) => {
+                        let data = Arc::new(GossipData::ExecutionPayload(evm_block));
+                        self.gossip_client.send_data_and_update_the_score_detached(
                             (&request.miner_address, peer_info),
-                            &GossipData::ExecutionPayload(evm_block),
+                            data,
                             &self.peer_list,
-                        )
-                        .await
-                        .map(|()| true)
-                        .map_err(|error| {
-                            error!("Failed to send execution payload to peer: {}", error);
-                            error
-                        }),
+                        );
+                        Ok(true)
+                    }
                     None => Ok(false),
                 }
             }
