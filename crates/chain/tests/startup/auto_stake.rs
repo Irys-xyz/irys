@@ -93,11 +93,11 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         }
     }
 
+    // mine block 2
     let blk = genesis_node.mine_block().await?;
     genesis_node.wait_until_height(blk.height, 10).await?;
 
     // Start the peer
-
     let peer_node = IrysNodeTest::new(peer_config.clone())
         .start_with_name("PEER")
         .await;
