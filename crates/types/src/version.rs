@@ -1,10 +1,12 @@
+use bytes::Buf as _;
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-use crate::{Arbitrary, RethPeerInfo, H256};
-use alloy_primitives::Address;
+use crate::{decode_address, encode_address, Arbitrary, IrysSignature, RethPeerInfo, H256};
+use alloy_primitives::{keccak256, Address};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use reth_codecs::Compact;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
@@ -17,6 +19,7 @@ pub enum PeerResponse {
 
 // Explicit integer protocol versions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(u32)]
 pub enum ProtocolVersion {
     V1 = 1,
     // V2 = 2,
@@ -123,6 +126,7 @@ pub struct VersionRequest {
     pub address: PeerAddress,
     pub timestamp: u64,
     pub user_agent: Option<String>,
+    pub signature: IrysSignature,
 }
 
 impl Default for VersionRequest {
@@ -138,8 +142,50 @@ impl Default for VersionRequest {
             chain_id: 0,
             address: PeerAddress::default(),
             user_agent: None,
+            signature: IrysSignature::default(),
         }
     }
+}
+
+impl VersionRequest {
+    fn encode_for_signing<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let mut size = 0;
+        size += encode_version_for_signing(&self.version, buf);
+        size += (self.protocol_version as u32).to_compact(buf);
+        size += self.mining_address.to_compact(buf);
+        size += self.chain_id.to_compact(buf);
+        size += self.address.to_compact(buf);
+        size += self.timestamp.to_compact(buf);
+        size += self.user_agent.to_compact(buf);
+        size
+    }
+
+    pub fn signature_hash(&self) -> [u8; 32] {
+        let mut bytes = Vec::new();
+        self.encode_for_signing(&mut bytes);
+
+        keccak256(&bytes).0
+    }
+
+    pub fn verify_signature(&self) -> bool {
+        self.signature.validate_signature(self.signature_hash(), self.mining_address)
+    }
+}
+
+pub fn encode_version_for_signing<B>(version: &Version, buf: &mut B) -> usize
+where
+    B: bytes::BufMut + AsMut<[u8]>,
+{
+    let mut size = 0;
+    size += version.major.to_compact(buf);
+    size += version.minor.to_compact(buf);
+    size += version.patch.to_compact(buf);
+    // size += version.pre.to_string().to_compact(buf);
+    // size += version.build.to_string().to_compact(buf);
+    size
 }
 
 #[derive(
@@ -158,6 +204,36 @@ impl Default for PeerAddress {
             api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081),
             execution: RethPeerInfo::default(),
         }
+    }
+}
+
+impl Compact for PeerAddress {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let mut size = 0;
+        size += encode_address(&self.gossip, buf);
+        size += encode_address(&self.api, buf);
+        size += self.execution.to_compact(buf);
+        size
+    }
+
+    fn from_compact(buf: &[u8], _: usize) -> (Self, &[u8]) {
+        let mut buf = buf;
+        let (gossip, consumed) = decode_address(buf);
+        buf.advance(consumed);
+        let (api, consumed) = decode_address(buf);
+        buf.advance(consumed);
+        let (execution, buf) = RethPeerInfo::from_compact(buf, buf.len());
+        (
+            Self {
+                gossip,
+                api,
+                execution,
+            },
+            buf,
+        )
     }
 }
 
@@ -259,4 +335,23 @@ pub struct NodeInfo {
     pub blocks: u64,
     pub is_syncing: bool,
     pub current_sync_height: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Config, IrysSignature, NodeConfig, VersionRequest};
+
+    #[test]
+    fn should_sign_and_verify_signature() {
+        let mut version_request = VersionRequest::default();
+        let testnet_config = NodeConfig::testnet();
+        let config = Config::new(testnet_config);
+        let signer = config.irys_signer();
+
+        signer.sign_p2p_handshake(&mut version_request).unwrap();
+        assert!(version_request.verify_signature(), "Signature should be valid");
+
+        version_request.signature = IrysSignature::default();
+        assert!(!version_request.verify_signature(), "Signature should be invalid after reset");
+    }
 }

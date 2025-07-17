@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
@@ -1388,7 +1388,7 @@ where
                 // Try up to 5 peers to get the block
                 let mut last_error = None;
 
-                for (address, peer_item) in peers {
+                for (address, peer_list_item) in peers {
                     for attempt in 1..=5 {
                         debug!(
                             "Attempting to fetch {:?} from peer {} (attempt {}/5)",
@@ -1396,7 +1396,10 @@ where
                         );
 
                         match gossip_client
-                            .get_data_request(&peer_item, data_request.clone())
+                            .get_data_request(
+                                &peer_list_item,
+                                data_request.clone(),
+                            )
                             .await
                         {
                             Ok(true) => {

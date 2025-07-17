@@ -1,7 +1,4 @@
-use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
-    DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature, H256,
-};
+use crate::{generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction, DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256};
 use alloy_core::primitives::keccak256;
 
 use alloy_signer::utils::secret_key_to_address;
@@ -112,6 +109,18 @@ impl IrysSigner {
         // Derive the block hash by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         block_header.block_hash = H256::from(id);
+        Ok(())
+    }
+
+    pub fn sign_p2p_handshake(&self, handshake_message: &mut VersionRequest) -> Result<()> {
+        // Store the signer address
+        handshake_message.mining_address = self.address();
+
+        // Create the signature hash and sign it
+        let prehash = handshake_message.signature_hash();
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
+        handshake_message.signature = IrysSignature::new(signature);
+
         Ok(())
     }
 
