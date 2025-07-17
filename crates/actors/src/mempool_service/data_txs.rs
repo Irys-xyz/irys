@@ -78,17 +78,19 @@ impl Inner {
         drop(mempool_state_read_guard);
 
         // Validate anchor
-        let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
-            Err(e) => {
-                error!(
-                    "Validation failed: {:?} - mapped to: {:?}",
-                    e,
-                    TxIngressError::DatabaseError
-                );
-                return Ok(());
-            }
-            Ok(v) => v,
-        };
+        let (anchor_height, tx): (u64, DataTransactionHeader) =
+            match self.validate_anchor(tx.into()).await {
+                Err(e) => {
+                    error!(
+                        "Validation failed: {:?} - mapped to: {:?}",
+                        e,
+                        TxIngressError::DatabaseError
+                    );
+                    return Ok(());
+                }
+                Ok(Some((h, tx))) => (h, tx.try_into().unwrap()), // should be impossible to panic
+                Ok(None) => return Ok(()),                        // TODO: plumb success context
+            };
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
@@ -100,7 +102,7 @@ impl Inner {
                 .consensus_config()
                 .mempool
                 .anchor_expiry_depth as u64;
-            let new_expiry = hdr.height + anchor_expiry_depth;
+            let new_expiry = anchor_height + anchor_expiry_depth;
             debug!(
                 "Updating ingress proof for data root {} expiry from {} -> {}",
                 &tx.data_root, &old_expiry.last_height, &new_expiry
@@ -194,6 +196,9 @@ impl Inner {
                 }
             }
         }
+
+        // notify that we've accepted this tx
+        self.notify_anchor(tx.id).await;
 
         // Gossip transaction
         let gossip_broadcast_message = GossipBroadcastMessage::from(tx.clone());

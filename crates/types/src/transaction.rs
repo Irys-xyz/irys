@@ -258,6 +258,7 @@ pub trait IrysTransactionCommon {
     fn id(&self) -> IrysTransactionId;
     fn total_fee(&self) -> u64;
     fn signer(&self) -> Address;
+    fn anchor(&self) -> H256;
 }
 
 impl IrysTransactionCommon for DataTransactionHeader {
@@ -276,6 +277,10 @@ impl IrysTransactionCommon for DataTransactionHeader {
     fn signer(&self) -> Address {
         self.signer
     }
+
+    fn anchor(&self) -> H256 {
+        self.anchor
+    }
 }
 
 impl IrysTransactionCommon for CommitmentTransaction {
@@ -292,6 +297,111 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
     fn signer(&self) -> Address {
         self.signer
+    }
+    fn anchor(&self) -> H256 {
+        self.anchor
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum IrysTransaction {
+    Data(DataTransactionHeader),
+    Commitment(CommitmentTransaction),
+}
+
+impl TryInto<DataTransactionHeader> for IrysTransaction {
+    type Error = eyre::Report;
+
+    fn try_into(self) -> Result<DataTransactionHeader, Self::Error> {
+        match self {
+            Self::Data(tx) => Ok(tx),
+            Self::Commitment(_) => Err(eyre::eyre!("This is a commitment tx")),
+        }
+    }
+}
+
+impl TryInto<CommitmentTransaction> for IrysTransaction {
+    type Error = eyre::Report;
+
+    fn try_into(self) -> Result<CommitmentTransaction, Self::Error> {
+        match self {
+            Self::Data(_) => Err(eyre::eyre!("This is a data tx")),
+            Self::Commitment(tx) => Ok(tx),
+        }
+    }
+}
+
+// route to IrysTransactionCommon impl
+// TODO: a better way to do this?
+impl IrysTransactionCommon for IrysTransaction {
+    fn is_signature_valid(&self) -> bool {
+        match self {
+            Self::Data(tx) => tx.is_signature_valid(),
+            Self::Commitment(tx) => tx.is_signature_valid(),
+        }
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        match self {
+            Self::Data(tx) => tx.id(),
+            Self::Commitment(tx) => tx.id(),
+        }
+    }
+
+    fn total_fee(&self) -> u64 {
+        match self {
+            Self::Data(tx) => tx.total_fee(),
+            Self::Commitment(tx) => tx.total_fee(),
+        }
+    }
+
+    fn signer(&self) -> Address {
+        match self {
+            Self::Data(tx) => tx.signer(),
+            Self::Commitment(tx) => tx.signer(),
+        }
+    }
+
+    fn anchor(&self) -> H256 {
+        match self {
+            Self::Data(tx) => tx.anchor(),
+            Self::Commitment(tx) => tx.anchor(),
+        }
+    }
+}
+
+impl From<DataTransactionHeader> for IrysTransaction {
+    fn from(tx: DataTransactionHeader) -> Self {
+        Self::Data(tx)
+    }
+}
+
+impl From<CommitmentTransaction> for IrysTransaction {
+    fn from(tx: CommitmentTransaction) -> Self {
+        Self::Commitment(tx)
+    }
+}
+
+// API variant (extra serialisation logic)
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum IrysTransactionResponse {
+    #[serde(rename = "commitment")]
+    Commitment(CommitmentTransaction),
+
+    #[serde(rename = "storage")]
+    Storage(DataTransactionHeader),
+}
+
+impl From<CommitmentTransaction> for IrysTransactionResponse {
+    fn from(tx: CommitmentTransaction) -> Self {
+        Self::Commitment(tx)
+    }
+}
+
+impl From<DataTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: DataTransactionHeader) -> Self {
+        Self::Storage(tx)
     }
 }
 
@@ -459,27 +569,5 @@ mod tests {
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
         }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum IrysTransactionResponse {
-    #[serde(rename = "commitment")]
-    Commitment(CommitmentTransaction),
-
-    #[serde(rename = "storage")]
-    Storage(DataTransactionHeader),
-}
-
-impl From<CommitmentTransaction> for IrysTransactionResponse {
-    fn from(tx: CommitmentTransaction) -> Self {
-        Self::Commitment(tx)
-    }
-}
-
-impl From<DataTransactionHeader> for IrysTransactionResponse {
-    fn from(tx: DataTransactionHeader) -> Self {
-        Self::Storage(tx)
     }
 }
