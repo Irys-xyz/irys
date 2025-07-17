@@ -935,7 +935,8 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        genesis_peer_discovery_timeout_millis = 10000
+        stake_fee = 0.1
+        pledge_fee = 0.1
 
         [reth]
         chain = 1270
@@ -993,9 +994,6 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
-
-        stake_fee = 0.1
-        pledge_fee = 0.1
         "#;
 
         // Create the expected config
