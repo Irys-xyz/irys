@@ -512,41 +512,31 @@ impl Inner {
             .mempool
             .anchor_expiry_depth as u64;
 
+        // try to find the anchor tx in the block tree
         {
-            let mempool_state_read_guard = mempool_state.read().await;
-            // Allow transactions to use the txid of a transaction in the mempool
-            if mempool_state_read_guard.recent_valid_tx.contains(&anchor) {
-                let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
-                let latest = canonical_blocks.last().unwrap();
-                // Just provide the most recent block as an anchor
-                if let Some(hdr) = mempool_state_read_guard
-                    .prevalidated_blocks
-                    .get(&latest.block_hash)
+            let canonical_chain = {
+                let block_tree_read_guard = self.block_tree_read_guard.read();
+                let (canonical_chain, _) = block_tree_read_guard.get_canonical_chain();
+                canonical_chain
+            };
+
+            let canonical_slice = &canonical_chain
+            // usize coercion safe as it's actually a u8
+                [(canonical_chain.len().saturating_sub(anchor_expiry_depth as usize))..canonical_chain.len()];
+
+            for blk_entry in canonical_slice.iter().rev() {
+                // go from newest block to oldest
+
+                for txs in blk_entry
+                    .data_ledgers
+                    .values()
+                    .chain(blk_entry.system_ledgers.values())
                 {
-                    if hdr.height + anchor_expiry_depth >= latest_height {
-                        debug!("valid txid anchor {} for tx {}", anchor, tx_id);
-                        return Ok(Some((hdr.height, tx)));
-                    } else {
-                        let mut mempool_state_write_guard = mempool_state.write().await;
-                        mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                        warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
-                        return Err(TxIngressError::InvalidAnchor);
-                    }
-                } else if let Ok(Some(hdr)) =
-                    irys_database::block_header_by_hash(&read_tx, &latest.block_hash, false)
-                {
-                    if hdr.height + anchor_expiry_depth >= latest_height {
-                        debug!("valid txid anchor {} for tx {}", anchor, tx_id);
-                        return Ok(Some((hdr.height, tx)));
-                    } else {
-                        let mut mempool_state_write_guard = mempool_state.write().await;
-                        mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                        warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
-                        return Err(TxIngressError::InvalidAnchor);
+                    if txs.contains(&anchor) {
+                        return Ok(Some((blk_entry.height, tx)));
                     }
                 }
             }
-            drop(mempool_state_read_guard); // Release read lock before acquiring write lock
         }
 
         // check tree / mempool for block header
@@ -584,16 +574,9 @@ impl Inner {
                 }
             }
             _ => {
-                // TODO: add logic to actually determine if an anchor is "invalid" (i.e known value, but beyond the acceptable anchor range)
-
-                // let mut mempool_state_write_guard = mempool_state.write().await;
-                // mempool_state_write_guard.invalid_tx.push(*tx_id);
-                // warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
-                // Err(TxIngressError::InvalidAnchor)
-
                 // we mark the tx as pending it's anchor,
                 // given it passed through all our checks and we couldn't find what the anchor value was referring to
-                // TODO: plumb success context
+                // TODO: plumb success context (the tx being marked as "pending anchor" isn't an error case, but we don't have a way of signaling that yet)
                 self.mark_tx_pending_anchor(tx)
                     .await
                     .map_err(|_e| TxIngressError::InvalidAnchor)
