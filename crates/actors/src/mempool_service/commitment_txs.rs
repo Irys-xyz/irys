@@ -55,41 +55,6 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
-        // Early out if this is a stake tx from an address that is already
-        // staked for the current epoch or the address has another pending stake tx
-        if commitment_tx.commitment_type == CommitmentType::Stake {
-            let mempool_state_guard = mempool_state.read().await;
-            // check mempool commitment stake txs
-            if mempool_state_guard
-                .valid_commitment_tx
-                .get(&commitment_tx.signer)
-                .is_some_and(|txs| {
-                    txs.iter()
-                        .any(|c| c.commitment_type == CommitmentType::Stake)
-                })
-            {
-                return Err(TxIngressError::Skipped);
-            }
-
-            // check commitments in epochs
-            let commitment_snapshot = self
-                .block_tree_read_guard
-                .read()
-                .canonical_commitment_snapshot();
-
-            let is_staked = self
-                .block_tree_read_guard
-                .read()
-                .canonical_epoch_snapshot()
-                .is_staked(commitment_tx.signer);
-
-            if commitment_snapshot.get_commitment_status(&commitment_tx, is_staked)
-                == CommitmentSnapshotStatus::Accepted
-            {
-                Err(TxIngressError::Skipped)?
-            }
-        }
-
         // Validate the tx anchor
         if let Err(e) = self
             .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
