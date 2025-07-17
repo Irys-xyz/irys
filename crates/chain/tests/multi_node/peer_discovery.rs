@@ -167,7 +167,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         "user_agent": build_user_agent("miner2", "0.1.0"),
         "timestamp": timestamp,
         // Signature from another signer, should fail verification
-        "signature": "7vAD7AoznW7zzFuyxnT4ghhX3i7jAZbR3i2tt8Pe8L6nCdNdDJHFA4N5qEvRMNyvkUHEDZShiXzjLniBet6rrPwtN"
+        "signature": "7vAD7AoznW7zzFuyxnT4ghhX3i7jAZbR3i2tt8Pe8L6nCdNpDJHFA4N5qEvRMNyvkUHEDZShiXzjLniBet6rrPwtN"
     });
 
     let req = TestRequest::post()
