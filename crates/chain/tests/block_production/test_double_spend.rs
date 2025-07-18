@@ -101,13 +101,13 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
         .await?;
     // resubmit commitment transactions that were already seen
-    //node.post_commitment_tx(&stake_for_mempool).await; // <--- FIXME: this is one copy that causes block error
+    node.post_commitment_tx(&stake_for_mempool).await;
     node.post_commitment_tx(&pledge_for_mempool).await;
     node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
         .await?;
 
     // ensure mempool does not accept any duplicate tx
-    // this will have skipped new stakes, and only allowed one of the pledge txs into mempool
+    // mempool will have skipped new stake and the duplicate pledge
     node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
         .await?;
 
