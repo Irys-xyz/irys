@@ -1,5 +1,5 @@
 use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
-use crate::peer_list::{GetPeerListGuard, PeerListServiceWithClient};
+use crate::peer_list_service::{GetPeerListGuard, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};

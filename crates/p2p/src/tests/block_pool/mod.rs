@@ -1,6 +1,6 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
-use crate::peer_list::PeerListServiceWithClient;
+use crate::peer_list_service::PeerListServiceWithClient;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
 use crate::{BlockStatusProvider, GetPeerListGuard, SyncState};
 use actix::{Actor as _, Addr};

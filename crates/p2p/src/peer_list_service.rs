@@ -601,23 +601,6 @@ where
     }
 }
 
-/// Flush the peer list to the database
-#[derive(Message, Debug)]
-#[rtype(result = "Result<(), PeerListServiceError>")]
-struct FlushRequest;
-
-impl<A, R> Handler<FlushRequest> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = Result<(), PeerListServiceError>;
-
-    fn handle(&mut self, _msg: FlushRequest, _ctx: &mut Self::Context) -> Self::Result {
-        self.flush()
-    }
-}
-
 /// Add peer to the peer list
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
@@ -1334,13 +1317,12 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         // Create first service instance and add some peers
-        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
             db.clone(),
             &config,
             mock_client,
             mock_addr,
         );
-        let ctx = &mut Context::new();
 
         // Add multiple test peers
         let (mining_addr1, peer1) = create_test_peer(
@@ -1363,10 +1345,8 @@ mod tests {
             .peer_list_data_guard
             .add_or_update_peer(mining_addr2, peer2.clone());
 
-        // Manually flush data to database
-        service
-            .handle(FlushRequest, ctx)
-            .expect("Failed to flush data");
+        // Wait for the data to be flushed to the database
+        tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
 
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
