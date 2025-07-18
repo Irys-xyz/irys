@@ -1543,8 +1543,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
-            .await?;
-        Ok(())
+            .await
     }
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
