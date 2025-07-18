@@ -41,17 +41,7 @@ pub async fn post_version(
     }
 
     // Fetch peers and handle potential errors
-    let peers = match state.get_known_peers().await {
-        Ok(peers) => peers,
-        Err(e) => {
-            let response = PeerResponse::Rejected(RejectedResponse {
-                reason: RejectionReason::InternalError,
-                message: Some(format!("Failed to fetch peers: {}", e)),
-                retry_after: Some(5000),
-            });
-            return Ok(HttpResponse::ServiceUnavailable().json(response));
-        }
-    };
+    let peers = state.get_known_peers();
 
     let peer_address = version_request.address;
     let mining_addr = version_request.mining_address;
@@ -60,20 +50,7 @@ pub async fn post_version(
         ..Default::default()
     };
 
-    // Only update if it's a new peer
-    if let Err(err) = state
-        .peer_list
-        .add_or_update_peer(mining_addr, peer_list_entry)
-        .await
-    {
-        error!("Failed to update peer list: {}", err);
-        let response = PeerResponse::Rejected(RejectedResponse {
-            reason: RejectionReason::InternalError,
-            message: Some("Could not update peer list".to_string()),
-            retry_after: Some(5000),
-        });
-        return Ok(HttpResponse::ServiceUnavailable().json(response));
-    }
+    state.peer_list.add_or_update_peer(mining_addr, peer_list_entry);
 
     let node_name = version_request
         .user_agent

@@ -1,7 +1,7 @@
 use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
-use crate::peer_list::{AddPeer, PeerListServiceWithClient};
+use crate::peer_list::{GetPeerListGuard, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
-use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
+use crate::{BlockStatusProvider, P2PService, PeerList, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
@@ -529,11 +529,7 @@ impl GossipServiceTestFixture {
             other.mining_address, peer, self.gossip_port
         );
 
-        self.peer_list
-            .send(AddPeer {
-                mining_addr: other.mining_address,
-                peer: peer.clone(),
-            })
+        self.peer_list.add_or_update_peer()
             .await
             .expect("Adding peer failed");
     }
@@ -551,13 +547,8 @@ impl GossipServiceTestFixture {
             is_online: true,
             ..PeerListItem::default()
         };
-        self.peer_list
-            .send(AddPeer {
-                mining_addr: other.mining_address,
-                peer: peer.clone(),
-            })
-            .await
-            .expect("Adding peer failed");
+        let peer_list_guard = self.peer_list.send(GetPeerListGuard).await.expect("Failed to get peer list guard").expect("Failed to get peer list guard");
+        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone());
     }
 }
 

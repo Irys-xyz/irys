@@ -30,10 +30,7 @@ use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData};
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
-use irys_p2p::{
-    BlockPool, BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
-    ServiceHandleWithShutdownSignal, SyncState,
-};
+use irys_p2p::{BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListGuard, PeerListService, PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
@@ -97,7 +94,7 @@ pub struct IrysNodeCtx {
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
-    pub peer_list: PeerListServiceFacade,
+    pub peer_list: PeerListGuard,
     pub sync_state: SyncState,
     pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
@@ -913,6 +910,7 @@ impl IrysNode {
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) =
             init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
+        let peer_list_guard = peer_list_service.send(GetPeerListGuard).await?.expect("to get peer list guard");
 
         let execution_payload_provider = ExecutionPayloadProvider::new(
             peer_list_service.clone(),
@@ -1184,7 +1182,7 @@ impl IrysNode {
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
                 chunk_provider: chunk_provider.clone(),
-                peer_list: peer_list_service,
+                peer_list: peer_list_guard,
                 db: irys_db,
                 reth_provider: reth_node.clone(),
                 block_tree: block_tree_guard,

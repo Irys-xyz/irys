@@ -1,5 +1,5 @@
 use crate::peer_list::PeerList;
-use crate::{GossipError, GossipResult};
+use crate::{GossipError, GossipResult, PeerListGuard};
 use base58::ToBase58 as _;
 use irys_api_client::ApiClient;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
@@ -219,7 +219,7 @@ impl SyncState {
 pub async fn sync_chain(
     sync_state: SyncState,
     api_client: impl ApiClient,
-    peer_list: impl PeerList,
+    peer_list: PeerListGuard,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
 ) -> Result<(), GossipError> {
@@ -268,9 +268,7 @@ pub async fn sync_chain(
         )
         .await
         {
-            Ok(peer_list_result) => {
-                peer_list_result?;
-            }
+            Ok(()) => {}
             Err(elapsed) => {
                 warn!("Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task", elapsed);
                 sync_state.finish_sync();
@@ -278,7 +276,7 @@ pub async fn sync_chain(
             }
         };
     } else {
-        peer_list.wait_for_active_peers().await?;
+        peer_list.wait_for_active_peers().await;
     }
 
     debug!("Sync task: Syncing started");

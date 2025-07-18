@@ -16,7 +16,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
 
     let node_info = NodeInfo {
         version: "0.0.1".into(),
-        peer_count: state.peer_list.peer_count().await.unwrap_or(0),
+        peer_count: state.peer_list.peer_count(),
         chain_id: state.config.consensus.chain_id,
         height: latest.height,
         block_hash: latest.block_hash,
