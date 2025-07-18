@@ -1,6 +1,5 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::{PeerList, PeerListFacadeError};
 use crate::SyncState;
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
@@ -9,6 +8,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::{PeerListDataError, PeerListGuard};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
     IrysBlockHeader,
@@ -52,16 +52,15 @@ pub enum BlockPoolError {
     PreviousBlockNotFound(BlockHash),
 }
 
-impl From<PeerListFacadeError> for BlockPoolError {
-    fn from(err: PeerListFacadeError) -> Self {
+impl From<PeerListDataError> for BlockPoolError {
+    fn from(err: PeerListDataError) -> Self {
         Self::OtherInternal(format!("Peer list error: {:?}", err))
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct BlockPool<P, B, M>
+pub struct BlockPool<B, M>
 where
-    P: PeerList,
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
@@ -72,12 +71,12 @@ where
 
     block_discovery: B,
     mempool: M,
-    peer_list: P,
+    peer_list: PeerListGuard,
 
     sync_state: SyncState,
 
     block_status_provider: BlockStatusProvider,
-    execution_payload_provider: ExecutionPayloadProvider<P>,
+    execution_payload_provider: ExecutionPayloadProvider,
 
     vdf_state: VdfStateReadonly,
 
@@ -218,20 +217,19 @@ impl BlockCacheInner {
     }
 }
 
-impl<P, B, M> BlockPool<P, B, M>
+impl<B, M> BlockPool<B, M>
 where
-    P: PeerList,
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
     pub(crate) fn new(
         db: DatabaseProvider,
-        peer_list: P,
+        peer_list: PeerListGuard,
         block_discovery: B,
         mempool: M,
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
-        execution_payload_provider: ExecutionPayloadProvider<P>,
+        execution_payload_provider: ExecutionPayloadProvider,
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,

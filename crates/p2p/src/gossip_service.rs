@@ -9,7 +9,6 @@
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::PeerList;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -24,7 +23,8 @@ use core::time::Duration;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
+use irys_domain::PeerListGuard;
+use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
 use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -151,26 +151,25 @@ impl P2PService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, B, A, P>(
+    pub fn run<M, B, A>(
         mut self,
         mempool: M,
         block_discovery: B,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: P,
+        peer_list: PeerListGuard,
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
-        execution_payload_provider: ExecutionPayloadProvider<P>,
+        execution_payload_provider: ExecutionPayloadProvider,
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
-    ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<P, B, M>>)>
+    ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<B, M>>)>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
         A: ApiClient,
-        P: PeerList,
     {
         debug!("Staring gossip service");
 
@@ -230,30 +229,25 @@ impl P2PService {
         Ok((gossip_service_handle, arc_pool))
     }
 
-    async fn broadcast_data<P>(
+    async fn broadcast_data(
         &self,
-        broadcast_message: &GossipBroadcastMessage,
-        peer_list: &P,
-    ) -> GossipResult<()>
-    where
-        P: PeerList,
-    {
+        broadcast_message: GossipBroadcastMessage,
+        peer_list: &PeerListGuard,
+    ) -> GossipResult<()> {
         // Check if gossip broadcast is enabled
         if !self.sync_state.is_gossip_broadcast_enabled() {
             debug!("Gossip broadcast is disabled, skipping broadcast");
             return Ok(());
         }
 
-        debug!(
-            "Broadcasting data to peers: {}",
-            broadcast_message.data_type_and_id()
-        );
+        let message_type_and_id = broadcast_message.data_type_and_id();
+        let GossipBroadcastMessage { key, data } = broadcast_message;
+        let broadcast_data = Arc::new(data);
+
+        debug!("Broadcasting data to peers: {}", message_type_and_id);
 
         // Get all active peers except the source
-        let mut peers: Vec<(Address, PeerListItem)> = peer_list
-            .top_active_peers(None, None)
-            .await
-            .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
+        let mut peers = peer_list.top_active_peers(None, None);
 
         debug!(
             "Node {:?}: Peers selected for broadcast: {:?}",
@@ -264,7 +258,7 @@ impl P2PService {
 
         while !peers.is_empty() {
             // Remove peers that seen the data since the last iteration
-            let peers_that_seen_data = self.cache.peers_that_have_seen(&broadcast_message.key)?;
+            let peers_that_seen_data = self.cache.peers_that_have_seen(&key)?;
             peers.retain(|(peer_miner_address, _peer)| {
                 !peers_that_seen_data.contains(peer_miner_address)
             });
@@ -287,26 +281,14 @@ impl P2PService {
                 );
                 // Send data to selected peers
                 for (peer_miner_address, peer_entry) in selected_peers {
-                    if let Err(error) = self
-                        .client
-                        .send_data_and_update_score(
-                            (peer_miner_address, peer_entry),
-                            &broadcast_message.data,
-                            peer_list,
-                        )
-                        .await
-                    {
-                        warn!(
-                            "Node {:?}: Failed to send data to peer {}: {}",
-                            self.client.mining_address, peer_miner_address, error
-                        );
-                    }
+                    self.client.send_data_and_update_the_score_detached(
+                        (peer_miner_address, peer_entry),
+                        Arc::clone(&broadcast_data),
+                        peer_list,
+                    );
 
                     // Record as seen anyway, so we don't rebroadcast to them
-                    if let Err(error) = self
-                        .cache
-                        .record_seen(*peer_miner_address, broadcast_message.key)
-                    {
+                    if let Err(error) = self.cache.record_seen(*peer_miner_address, key) {
                         error!(
                             "Failed to record data in cache for peer {}: {}",
                             peer_miner_address, error
@@ -359,15 +341,12 @@ fn spawn_cache_pruning_task(
     )
 }
 
-fn spawn_broadcast_task<P>(
+fn spawn_broadcast_task(
     mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     service: P2PService,
     task_executor: &TaskExecutor,
-    peer_list: P,
-) -> ServiceHandleWithShutdownSignal
-where
-    P: PeerList,
-{
+    peer_list: PeerListGuard,
+) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
         move |mut shutdown_rx| async move {
@@ -376,8 +355,8 @@ where
                 tokio::select! {
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
-                            Some(data) => {
-                                if let Err(error) = service.broadcast_data(&data, &peer_list).await {
+                            Some(broadcast_message) => {
+                                if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
                                     warn!("Failed to broadcast data: {}", error);
                                 };
                             },

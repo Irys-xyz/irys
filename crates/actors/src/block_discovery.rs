@@ -483,7 +483,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             match status {
                                 CommitmentSnapshotStatus::Accepted => {
                                     return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        "Commitment tx included in prior block".to_string(),
+                                        format!(
+                                            "{:?} Commitment tx {:?} included in prior block",
+                                            commitment_tx.commitment_type, commitment_tx.id
+                                        ),
                                     ));
                                 }
                                 CommitmentSnapshotStatus::Unsupported => {

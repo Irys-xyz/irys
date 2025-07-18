@@ -59,7 +59,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
     let miner_signer_1 = IrysSigner::random_signer(&config.consensus_config());
-    let version_request = VersionRequest {
+    let mut version_request = VersionRequest {
         chain_id: miner_signer_1.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
@@ -73,6 +73,9 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
     };
+    miner_signer_1
+        .sign_p2p_handshake(&mut version_request)
+        .expect("sign p2p handshake");
 
     let req = TestRequest::post()
         .uri("/v1/version")
@@ -98,11 +101,10 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .unwrap_or_default()
         .as_millis() as u64;
 
-    // Example of Define the JSON directly like you would from javascript
     let version_json = serde_json::json!({
         "version": "0.1.0",
         "protocol_version": "V1",
-        "chain_id": miner_signer_2.chain_id,
+        "chain_id": 1270,
         "address": {
             "gossip": "127.0.0.2:8080",
             "api": "127.0.0.2:8081",
@@ -110,11 +112,11 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 "peering_tcp_addr": "127.0.0.2:8082",
                 "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
             },
-            "mining_address": miner_signer_2.address(),
         },
-        "mining_address": miner_signer_2.address(),
-        "user_agent": build_user_agent("miner2", "0.1.0"),
-        "timestamp": timestamp
+        "mining_address": "0x050e7a06903a4a7af956efc2842d224775e52b59",
+        "user_agent": "miner2/0.1.0 (macos/aarch64)",
+        "timestamp": 0,
+        "signature": "6npXVuBZ7oCyjPUPamZikc3txKCFvmhM3GX9yWDmBQ4dtbdjSmtqNsq6DpGegiw8ENkfkZ1K797L2VHCeb6rfkiFt"
     });
 
     let req = TestRequest::post()
@@ -149,8 +151,55 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         PeerResponse::Rejected(_) => panic!("Expected Accepted response, got Rejected"),
     }
 
+    let version_json = serde_json::json!({
+        "version": "0.1.0",
+        "protocol_version": "V1",
+        "chain_id": miner_signer_2.chain_id,
+        "address": {
+            "gossip": "127.0.0.2:8080",
+            "api": "127.0.0.2:8081",
+            "execution": {
+                "peering_tcp_addr": "127.0.0.2:8082",
+                "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            },
+        },
+        "mining_address": miner_signer_2.address(),
+        "user_agent": build_user_agent("miner2", "0.1.0"),
+        "timestamp": timestamp,
+        // Signature from another signer, should fail verification
+        "signature": "7vAD7AoznW7zzFuyxnT4ghhX3i7jAZbR3i2tt8Pe8L6nCdNpDJHFA4N5qEvRMNyvkUHEDZShiXzjLniBet6rrPwtN"
+    });
+
+    let req = TestRequest::post()
+        .uri("/v1/version")
+        .set_json(&version_json) // Pass the JSON value directly
+        .to_request();
+    let resp = call_service(&app, req).await;
+    let body = read_body(resp).await;
+    let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
+    let peer_response: PeerResponse =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
+    debug!("\nParsed Response:");
+    debug!("{}", serde_json::to_string_pretty(&peer_response).unwrap());
+
+    // Verify the version response body contains the previously discovered peers
+    match peer_response {
+        PeerResponse::Accepted(_) => panic!("Expected Rejected response, got Accepted"),
+        PeerResponse::Rejected(response) => {
+            assert!(matches!(
+                response.reason,
+                irys_types::RejectionReason::InvalidCredentials
+            ));
+            assert_eq!(
+                response.message,
+                Some("Signature verification failed".to_string())
+            );
+            assert!(response.retry_after.is_none(), "Expected no retry after");
+        }
+    }
+
     let miner_signer_3 = IrysSigner::random_signer(&config.consensus_config());
-    let version_request = VersionRequest {
+    let mut version_request = VersionRequest {
         chain_id: miner_signer_3.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
@@ -164,6 +213,9 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
     };
+    miner_signer_3
+        .sign_p2p_handshake(&mut version_request)
+        .expect("sign p2p handshake");
 
     let req = TestRequest::post()
         .uri("/v1/version")

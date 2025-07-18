@@ -1,5 +1,5 @@
 use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
-use crate::peer_list::{AddPeer, PeerListServiceWithClient};
+use crate::peer_list::{GetPeerListGuard, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
@@ -305,7 +305,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
-    pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
+    pub execution_payload_provider: ExecutionPayloadProvider,
     pub config: Config,
     pub vdf_state_stub: VdfStateReadonly,
     pub service_senders: ServiceSenders,
@@ -356,6 +356,7 @@ impl GossipServiceTestFixture {
             ApiClientStub::new(),
             reth_service_addr,
         );
+        let peer_list_data_guard = peer_service.peer_list_data_guard.clone();
         let peer_list = peer_service.start();
 
         let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
@@ -377,7 +378,7 @@ impl GossipServiceTestFixture {
 
         let mocked_execution_payloads = Arc::new(RwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list.clone(),
+            peer_list_data_guard,
             RethBlockProvider::Mock(mocked_execution_payloads),
         );
 
@@ -450,7 +451,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub(crate) fn run_service(
+    pub(crate) async fn run_service(
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
@@ -478,7 +479,12 @@ impl GossipServiceTestFixture {
             internal_message_bus: self.service_senders.gossip_broadcast.clone(),
         };
 
-        let peer_list = self.peer_list.clone();
+        let peer_list = self
+            .peer_list
+            .send(GetPeerListGuard)
+            .await
+            .expect("to get peer list guard")
+            .expect("to get peer list guard");
         let execution_payload_provider = self.execution_payload_provider.clone();
 
         let gossip_broadcast = self.service_senders.gossip_broadcast.clone();
@@ -529,13 +535,14 @@ impl GossipServiceTestFixture {
             other.mining_address, peer, self.gossip_port
         );
 
-        self.peer_list
-            .send(AddPeer {
-                mining_addr: other.mining_address,
-                peer: peer.clone(),
-            })
+        let peer_list_guard = self
+            .peer_list
+            .send(GetPeerListGuard)
             .await
-            .expect("Adding peer failed");
+            .expect("to get peer list guard")
+            .expect("to get peer list guard");
+
+        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone());
     }
 
     /// # Panics
@@ -551,13 +558,13 @@ impl GossipServiceTestFixture {
             is_online: true,
             ..PeerListItem::default()
         };
-        self.peer_list
-            .send(AddPeer {
-                mining_addr: other.mining_address,
-                peer: peer.clone(),
-            })
+        let peer_list_guard = self
+            .peer_list
+            .send(GetPeerListGuard)
             .await
-            .expect("Adding peer failed");
+            .expect("Failed to get peer list guard")
+            .expect("Failed to get peer list guard");
+        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone());
     }
 }
 

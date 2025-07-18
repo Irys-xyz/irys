@@ -28,10 +28,12 @@ use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
-use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData};
+use irys_domain::{
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, PeerListGuard,
+};
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
+    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListService,
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -97,12 +99,11 @@ pub struct IrysNodeCtx {
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
-    pub peer_list: PeerListServiceFacade,
+    pub peer_list: PeerListGuard,
     pub sync_state: SyncState,
     pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
-    pub block_pool:
-        Arc<BlockPool<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
+    pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
 }
 
@@ -607,7 +608,7 @@ impl IrysNode {
         irys_p2p::sync_chain(
             ctx.sync_state.clone(),
             irys_api_client::IrysApiClient::new(),
-            ctx.peer_list.clone(),
+            &ctx.peer_list,
             latest_known_block_height as usize,
             &ctx.config,
         )
@@ -913,9 +914,13 @@ impl IrysNode {
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) =
             init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
+        let peer_list_guard = peer_list_service
+            .send(GetPeerListGuard)
+            .await?
+            .expect("to get peer list guard");
 
         let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list_service.clone(),
+            peer_list_guard.clone(),
             reth_node_adapter.clone().into(),
         );
 
@@ -991,7 +996,7 @@ impl IrysNode {
             block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
             task_exec,
-            peer_list_service.clone(),
+            peer_list_guard.clone(),
             irys_db.clone(),
             gossip_listener,
             block_status_provider.clone(),
@@ -1102,7 +1107,7 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             config: config.clone(),
             stop_guard: StopGuard::new(),
-            peer_list: peer_list_service.clone(),
+            peer_list: peer_list_guard.clone(),
             sync_state: sync_state.clone(),
             shadow_tx_store,
             reth_node_adapter,
@@ -1184,7 +1189,7 @@ impl IrysNode {
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
                 chunk_provider: chunk_provider.clone(),
-                peer_list: peer_list_service,
+                peer_list: peer_list_guard,
                 db: irys_db,
                 reth_provider: reth_node.clone(),
                 block_tree: block_tree_guard,
@@ -1518,12 +1523,9 @@ fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
-) -> (PeerListServiceFacade, Arbiter) {
+) -> (Addr<PeerListService>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
-    let mut peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
-    peer_list_service
-        .initialize()
-        .expect("to initialize peer_list_service");
+    let peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     SystemRegistry::set(peer_list_service.clone());
