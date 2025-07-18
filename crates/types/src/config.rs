@@ -627,8 +627,8 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
-            stake_fee: Amount::token(dec!(0.1)).expect("valid token amount"),
-            pledge_base_fee: Amount::token(dec!(0.1)).expect("valid token amount"),
+            stake_fee: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_fee: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
         }
     }

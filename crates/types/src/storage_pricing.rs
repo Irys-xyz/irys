@@ -25,6 +25,10 @@ const TOKEN_SCALE_NATIVE: u64 = 1_000_000_000_000_000_000_u64;
 pub const BPS_SCALE: U256 = U256([BPS_SCALE_NATIVE, 0, 0, 0]);
 const BPS_SCALE_NATIVE: u64 = 1_000_000;
 
+/// ln(2) in 18-decimal fixed-point:
+/// Approximately 0.693147180559945309 * 1e18 = 693147180559945309
+pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
+
 /// `Amount<T>` represents a value stored as a U256.
 ///
 /// The actual scale is defined by the usage: pr
@@ -531,8 +535,6 @@ fn ln_fp18(x: U256) -> Result<U256> {
         return Err(eyre!("ln(0) is undefined"));
     }
 
-    // ln(2) in 18-decimal fixed-point
-    const LN2: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
     const TWO_FP18: U256 = U256([2_000_000_000_000_000_000_u64, 0, 0, 0]);
 
     // Find k such that x / 2^k is in range [1, 2)
@@ -574,7 +576,7 @@ fn ln_fp18(x: U256) -> Result<U256> {
     }
 
     // Result = k * ln(2) + ln(m)
-    let k_ln2 = safe_mul(U256::from(k), LN2)?;
+    let k_ln2 = safe_mul(U256::from(k), LN2_FP18)?;
     let result = safe_add(k_ln2, sum)?;
 
     Ok(result)
@@ -594,6 +596,29 @@ fn exp_fp18(x: U256) -> Result<U256> {
         sum = safe_add(sum, term)?;
     }
 
+    Ok(sum)
+}
+
+/// Computes exp(-x) in 18-decimal fixed-point using Taylor series
+/// Input x must be in TOKEN_SCALE (1e18 = 1.0)
+/// Uses the expansion: exp(-x) = 1 - x + x²/2! - x³/3! + x⁴/4! - ...
+pub fn exp_neg_fp18(x: U256) -> Result<U256> {
+    const TAYLOR_TERMS: u32 = 20;
+
+    let mut term = TOKEN_SCALE; // first term is 1
+    let mut sum = TOKEN_SCALE; // accumulated sum
+
+    for i in 1..=TAYLOR_TERMS {
+        term = mul_div(term, x, TOKEN_SCALE)?; // multiply by x
+        term = safe_div(term, U256::from(i))?; // divide by i
+        sum = if i & 1 == 1 {
+            // subtract on odd steps
+            safe_sub(sum, term)?
+        } else {
+            // add on even steps
+            safe_add(sum, term)?
+        };
+    }
     Ok(sum)
 }
 
@@ -960,6 +985,76 @@ mod tests {
 
             let result = original.sub_multiplier(above_one);
             assert!(result.is_err(), "Expected error for sub > 100%");
+        }
+    }
+
+    mod transcendental_functions {
+        use super::*;
+        use rust_decimal_macros::dec;
+
+        #[test]
+        fn test_exp_neg_fp18_zero() -> Result<()> {
+            // exp(-0) = 1
+            let result = exp_neg_fp18(U256::zero())?;
+            assert_eq!(result, TOKEN_SCALE);
+            Ok(())
+        }
+
+        #[test]
+        fn test_exp_neg_fp18_small_value() -> Result<()> {
+            // Test exp(-0.1) ≈ 0.9048374180359595
+            let x = Amount::<()>::token(dec!(0.1))?.amount;
+            let result = exp_neg_fp18(x)?;
+            let result_dec = Amount::<()>::new(result).token_to_decimal()?;
+            
+            let expected = dec!(0.9048374180359595);
+            let diff = (result_dec - expected).abs();
+            assert!(
+                diff < dec!(0.0001),
+                "exp(-0.1) = {}, expected {}",
+                result_dec,
+                expected
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn test_exp_neg_fp18_one() -> Result<()> {
+            // Test exp(-1) ≈ 0.36787944117144233
+            let x = TOKEN_SCALE;
+            let result = exp_neg_fp18(x)?;
+            let result_dec = Amount::<()>::new(result).token_to_decimal()?;
+            
+            let expected = dec!(0.36787944117144233);
+            let diff = (result_dec - expected).abs();
+            assert!(
+                diff < dec!(0.0001),
+                "exp(-1) = {}, expected {}",
+                result_dec,
+                expected
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn test_exp_neg_fp18_consistency_with_exp() -> Result<()> {
+            // Test that exp(-x) * exp(x) ≈ 1
+            let x = Amount::<()>::token(dec!(0.5))?.amount;
+            
+            let exp_neg_x = exp_neg_fp18(x)?;
+            let exp_x = exp_fp18(x)?;
+            
+            // exp(-x) * exp(x) should equal 1
+            let product = mul_div(exp_neg_x, exp_x, TOKEN_SCALE)?;
+            let product_dec = Amount::<()>::new(product).token_to_decimal()?;
+            
+            let diff = (product_dec - dec!(1.0)).abs();
+            assert!(
+                diff < dec!(0.001),
+                "exp(-x) * exp(x) = {}, expected 1.0",
+                product_dec
+            );
+            Ok(())
         }
     }
 }
