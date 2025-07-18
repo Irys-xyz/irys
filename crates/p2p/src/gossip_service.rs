@@ -232,7 +232,7 @@ impl P2PService {
 
     async fn broadcast_data<P>(
         &self,
-        broadcast_message: &GossipBroadcastMessage,
+        broadcast_message: GossipBroadcastMessage,
         peer_list: &P,
     ) -> GossipResult<()>
     where
@@ -244,10 +244,11 @@ impl P2PService {
             return Ok(());
         }
 
-        debug!(
-            "Broadcasting data to peers: {}",
-            broadcast_message.data_type_and_id()
-        );
+        let message_type_and_id = broadcast_message.data_type_and_id();
+        let GossipBroadcastMessage { key, data } = broadcast_message;
+        let broadcast_data = Arc::new(data);
+
+        debug!("Broadcasting data to peers: {}", message_type_and_id);
 
         // Get all active peers except the source
         let mut peers: Vec<(Address, PeerListItem)> = peer_list
@@ -264,7 +265,7 @@ impl P2PService {
 
         while !peers.is_empty() {
             // Remove peers that seen the data since the last iteration
-            let peers_that_seen_data = self.cache.peers_that_have_seen(&broadcast_message.key)?;
+            let peers_that_seen_data = self.cache.peers_that_have_seen(&key)?;
             peers.retain(|(peer_miner_address, _peer)| {
                 !peers_that_seen_data.contains(peer_miner_address)
             });
@@ -287,26 +288,14 @@ impl P2PService {
                 );
                 // Send data to selected peers
                 for (peer_miner_address, peer_entry) in selected_peers {
-                    if let Err(error) = self
-                        .client
-                        .send_data_and_update_score(
-                            (peer_miner_address, peer_entry),
-                            &broadcast_message.data,
-                            peer_list,
-                        )
-                        .await
-                    {
-                        warn!(
-                            "Node {:?}: Failed to send data to peer {}: {}",
-                            self.client.mining_address, peer_miner_address, error
-                        );
-                    }
+                    self.client.send_data_and_update_the_score_detached(
+                        (peer_miner_address, peer_entry),
+                        Arc::clone(&broadcast_data),
+                        peer_list,
+                    );
 
                     // Record as seen anyway, so we don't rebroadcast to them
-                    if let Err(error) = self
-                        .cache
-                        .record_seen(*peer_miner_address, broadcast_message.key)
-                    {
+                    if let Err(error) = self.cache.record_seen(*peer_miner_address, key) {
                         error!(
                             "Failed to record data in cache for peer {}: {}",
                             peer_miner_address, error
@@ -376,8 +365,8 @@ where
                 tokio::select! {
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
-                            Some(data) => {
-                                if let Err(error) = service.broadcast_data(&data, &peer_list).await {
+                            Some(broadcast_message) => {
+                                if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
                                     warn!("Failed to broadcast data: {}", error);
                                 };
                             },

@@ -19,7 +19,6 @@ use tracing::{debug, error, info, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
@@ -295,12 +294,13 @@ where
     irys_api_client: A,
 
     chain_id: u64,
-    mining_address: Address,
     peer_address: PeerAddress,
 
     trusted_peers_api_addresses: HashSet<SocketAddr>,
 
     reth_service_addr: Option<Addr<R>>,
+
+    config: Option<Config>,
 }
 
 impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
@@ -358,7 +358,6 @@ where
             ),
             irys_api_client,
             chain_id: config.consensus.chain_id,
-            mining_address: config.node_config.miner_address(),
             peer_address: PeerAddress {
                 gossip: format!(
                     "{}:{}",
@@ -381,6 +380,7 @@ where
                 .map(|p| p.api)
                 .collect(),
             reth_service_addr: Some(reth_actor),
+            config: Some(config.clone()),
         }
     }
 }
@@ -422,7 +422,7 @@ where
                 let peer_address = peer.address;
                 let client = act.gossip_client.clone();
                 // Create the future that does the health check
-                let fut = async move { check_health(peer_address, client).await }
+                let fut = async move { client.check_health(peer_address).await }
                     .into_actor(act)
                     .map(move |result, act, _ctx| match result {
                         Ok(true) => {
@@ -690,13 +690,21 @@ where
     }
 
     fn create_version_request(&self) -> VersionRequest {
-        VersionRequest {
-            mining_address: self.mining_address,
+        let signer = self
+            .config
+            .as_ref()
+            .expect("Config must exist")
+            .irys_signer();
+        let mut version_request = VersionRequest {
             address: self.peer_address,
             chain_id: self.chain_id,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
             ..VersionRequest::default()
-        }
+        };
+        signer
+            .sign_p2p_handshake(&mut version_request)
+            .expect("Failed to sign version request");
+        version_request
     }
 
     async fn announce_yourself_to_address(
@@ -820,33 +828,6 @@ where
             }
         }
     }
-}
-
-async fn check_health(
-    peer: PeerAddress,
-    client: GossipClient,
-) -> Result<bool, PeerListServiceError> {
-    let url = format!("http://{}/gossip/health", peer.gossip);
-
-    let response = client
-        .internal_client()
-        .get(&url)
-        .timeout(HEALTH_CHECK_TIMEOUT)
-        .send()
-        .await
-        .map_err(|error| PeerListServiceError::HealthCheckFailed(error.to_string()))?;
-
-    if !response.status().is_success() {
-        return Err(PeerListServiceError::HealthCheckFailed(format!(
-            "Health check failed with status: {}",
-            response.status()
-        )));
-    }
-
-    response
-        .json()
-        .await
-        .map_err(|error| PeerListServiceError::HealthCheckFailed(error.to_string()))
 }
 
 impl From<eyre::Report> for PeerListServiceError {
@@ -1388,15 +1369,20 @@ where
                 // Try up to 5 peers to get the block
                 let mut last_error = None;
 
-                for (address, peer_item) in peers {
+                for peer in peers {
                     for attempt in 1..=5 {
+                        let address = &peer.0;
                         debug!(
                             "Attempting to fetch {:?} from peer {} (attempt {}/5)",
                             data_request, address, attempt
                         );
 
                         match gossip_client
-                            .get_data_request(&peer_item, data_request.clone())
+                            .make_get_data_request_and_update_the_score(
+                                &peer,
+                                data_request.clone(),
+                                &self_addr,
+                            )
                             .await
                         {
                             Ok(true) => {
