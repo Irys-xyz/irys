@@ -56,15 +56,12 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
         .await?;
     // create commitment tx that will be allowed into mempool, but not included in a block as this node is already staked
-    //let stake_for_mempool = node.post_stake_commitment(block2.block_hash).await; // <--- FIXME: this is one copy that causes block error
+    let stake_for_mempool = node.post_stake_commitment(block2.block_hash).await;
 
     // create commitment tx that will remain in the mempool
     let pledge_for_mempool = node.post_pledge_commitment(block2.block_hash).await;
     node.wait_for_mempool_commitment_txs(
-        vec![
-            //stake_for_mempool.id,
-            pledge_for_mempool.id,
-        ],
+        vec![stake_for_mempool.id, pledge_for_mempool.id],
         seconds_to_wait,
     )
     .await?;
@@ -159,6 +156,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // re post existing stake commitment, that also uses the same anchor as the previous stake tx
     // this should be rejected by the mempool and not ingress the mempool
     //let _duplicate_stake_for_mempool = node.post_stake_commitment(block2.block_hash).await; // <-- FIXME: this needs to bubble up the expected 400 error and not panic
+
     // re post existing stake commitment tx that will be skipped by mempool ingress as this node is already staked
     // use a recent anchor, or we will hit an invalid anchor error due to anchor timeout
     let _new_anchor_stake_for_mempool = node.post_stake_commitment(block8.block_hash).await;
