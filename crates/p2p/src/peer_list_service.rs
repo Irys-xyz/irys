@@ -1323,6 +1323,9 @@ mod tests {
             mock_client,
             mock_addr,
         );
+        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        service.start();
+
 
         // Add multiple test peers
         let (mining_addr1, peer1) = create_test_peer(
@@ -1338,12 +1341,8 @@ mod tests {
             Some(IpAddr::from_str("127.0.0.3").expect("Invalid IP")),
         );
 
-        service
-            .peer_list_data_guard
-            .add_or_update_peer(mining_addr1, peer1.clone());
-        service
-            .peer_list_data_guard
-            .add_or_update_peer(mining_addr2, peer2.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr1, peer1.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr2, peer2.clone());
 
         // Wait for the data to be flushed to the database
         tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
@@ -1388,7 +1387,7 @@ mod tests {
         );
 
         // Verify internal maps are populated correctly
-        let known_peers = service.peer_list_data_guard.all_known_peers();
+        let known_peers = peer_list_data_guard.all_known_peers();
         assert_eq!(known_peers.len(), 2, "Should have loaded 2 known peers");
         assert!(
             known_peers.contains(&peer1.address),
