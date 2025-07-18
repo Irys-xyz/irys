@@ -5098,6 +5098,8 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "arbitrary",
+ "borsh",
+ "borsh-derive",
  "bytes",
  "eyre",
  "futures",
