@@ -17,14 +17,14 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    SyncState,
+    PeerListGuard, SyncState,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, PeerListItem};
+use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
 use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -157,7 +157,7 @@ impl P2PService {
         block_discovery: B,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: P,
+        peer_list: PeerListGuard,
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
@@ -230,14 +230,11 @@ impl P2PService {
         Ok((gossip_service_handle, arc_pool))
     }
 
-    async fn broadcast_data<P>(
+    async fn broadcast_data(
         &self,
         broadcast_message: GossipBroadcastMessage,
-        peer_list: &P,
-    ) -> GossipResult<()>
-    where
-        P: PeerList,
-    {
+        peer_list: &PeerListGuard,
+    ) -> GossipResult<()> {
         // Check if gossip broadcast is enabled
         if !self.sync_state.is_gossip_broadcast_enabled() {
             debug!("Gossip broadcast is disabled, skipping broadcast");
@@ -251,10 +248,7 @@ impl P2PService {
         debug!("Broadcasting data to peers: {}", message_type_and_id);
 
         // Get all active peers except the source
-        let mut peers: Vec<(Address, PeerListItem)> = peer_list
-            .top_active_peers(None, None)
-            .await
-            .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
+        let mut peers = peer_list.top_active_peers(None, None);
 
         debug!(
             "Node {:?}: Peers selected for broadcast: {:?}",
@@ -348,15 +342,12 @@ fn spawn_cache_pruning_task(
     )
 }
 
-fn spawn_broadcast_task<P>(
+fn spawn_broadcast_task(
     mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     service: P2PService,
     task_executor: &TaskExecutor,
-    peer_list: P,
-) -> ServiceHandleWithShutdownSignal
-where
-    P: PeerList,
-{
+    peer_list: PeerListGuard,
+) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
         move |mut shutdown_rx| async move {

@@ -1,7 +1,7 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::{PeerList, PeerListFacadeError};
-use crate::SyncState;
+use crate::peer_list::{PeerList, PeerListDataError, PeerListFacadeError};
+use crate::{PeerListGuard, SyncState};
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
@@ -58,6 +58,12 @@ impl From<PeerListFacadeError> for BlockPoolError {
     }
 }
 
+impl From<PeerListDataError> for BlockPoolError {
+    fn from(err: PeerListDataError) -> Self {
+        Self::OtherInternal(format!("Peer list error: {:?}", err))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockPool<P, B, M>
 where
@@ -72,7 +78,7 @@ where
 
     block_discovery: B,
     mempool: M,
-    peer_list: P,
+    peer_list: PeerListGuard,
 
     sync_state: SyncState,
 
@@ -226,7 +232,7 @@ where
 {
     pub(crate) fn new(
         db: DatabaseProvider,
-        peer_list: P,
+        peer_list: PeerListGuard,
         block_discovery: B,
         mempool: M,
         sync_state: SyncState,

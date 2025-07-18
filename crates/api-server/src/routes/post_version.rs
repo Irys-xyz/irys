@@ -7,13 +7,11 @@ use actix_web::{
     HttpResponse,
 };
 
-use irys_p2p::PeerList as _;
 use irys_types::{
     parse_user_agent, AcceptedResponse, PeerListItem, PeerResponse, ProtocolVersion,
     RejectedResponse, RejectionReason, VersionRequest,
 };
 use semver::Version;
-use tracing::error;
 
 pub async fn post_version(
     state: web::Data<ApiState>,
@@ -50,7 +48,9 @@ pub async fn post_version(
         ..Default::default()
     };
 
-    state.peer_list.add_or_update_peer(mining_addr, peer_list_entry);
+    state
+        .peer_list
+        .add_or_update_peer(mining_addr, peer_list_entry);
 
     let node_name = version_request
         .user_agent

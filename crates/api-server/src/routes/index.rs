@@ -5,7 +5,6 @@ use actix_web::{
     HttpResponse,
 };
 use irys_domain::get_canonical_chain;
-use irys_p2p::PeerList as _;
 use irys_types::NodeInfo;
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {

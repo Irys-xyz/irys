@@ -5,7 +5,7 @@ use crate::{
     cache::GossipCache,
     sync::SyncState,
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},
-    GossipClient, GossipError, GossipResult,
+    GossipClient, GossipError, GossipResult, PeerListGuard,
 };
 use alloy_core::primitives::keccak256;
 use base58::ToBase58 as _;
@@ -39,7 +39,7 @@ where
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
-    pub peer_list: TPeerList,
+    pub peer_list: PeerListGuard,
     pub sync_state: SyncState,
     /// Tracing span
     pub span: Span,
@@ -307,13 +307,9 @@ where
                 self.gossip_client.mining_address,
                 block_header.block_hash.0.to_base58()
             );
-            if let Err(peer_list_err) = self
-                .peer_list
-                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData)
-                .await
-            {
-                error!("Failed to decrease peer score: {:?}", peer_list_err);
-            }
+            self.peer_list
+                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
+
             return Err(GossipError::InvalidData(
                 InvalidDataError::InvalidBlockSignature,
             ));
@@ -416,8 +412,7 @@ where
             && is_in_the_trusted_sync_range
             && self
                 .peer_list
-                .is_a_trusted_peer(source_miner_address, data_source_ip.ip())
-                .await?;
+                .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
         self.block_pool
             .process_block(Arc::new(block_header), skip_block_validation)
