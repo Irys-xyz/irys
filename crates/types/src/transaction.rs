@@ -217,6 +217,9 @@ pub struct CommitmentTransaction {
     #[serde(with = "string_u64")]
     pub fee: u64,
 
+    /// The value being staked, pledged, unstaked or unpledged
+    pub value: U256,
+
     /// Transaction signature bytes
     #[rlp(skip)]
     #[rlp(default)]
@@ -224,6 +227,96 @@ pub struct CommitmentTransaction {
 }
 
 impl CommitmentTransaction {
+    /// Create a new CommitmentTransaction with default values from config
+    pub fn new(config: &ConsensusConfig) -> Self {
+        Self {
+            id: H256::zero(),
+            anchor: H256::zero(),
+            signer: Address::default(),
+            commitment_type: CommitmentType::default(),
+            version: 0,
+            chain_id: config.chain_id,
+            fee: 0,
+            value: U256::zero(),
+            signature: IrysSignature::new(Signature::test_signature()),
+        }
+    }
+
+    /// Create a new stake transaction with the configured stake fee as value
+    pub fn new_stake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+        Self {
+            commitment_type: CommitmentType::Stake,
+            anchor,
+            fee,
+            value: config.stake_fee.amount,
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new unstake transaction with the configured stake fee as value
+    pub fn new_unstake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+        Self {
+            commitment_type: CommitmentType::Unstake,
+            anchor,
+            fee,
+            value: config.stake_fee.amount,
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new pledge transaction with dynamic fee based on existing pledge count
+    pub fn new_pledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        fee: u64,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        let count = provider.pledge_count(signer_address);
+
+        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
+        let value = config
+            .pledge_base_fee
+            .apply_pledge_decay(count, config.pledge_decay)
+            .map(|a| a.amount)
+            .unwrap_or(config.pledge_base_fee.amount);
+
+        Self {
+            commitment_type: CommitmentType::Pledge,
+            anchor,
+            fee,
+            value,
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new unpledge transaction with dynamic fee based on existing pledge count
+    pub fn new_unpledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        fee: u64,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        let count = provider.pledge_count(signer_address);
+
+        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
+        // Note: for unpledge, we use count to match the fee of the most recent pledge
+        let value = config
+            .pledge_base_fee
+            .apply_pledge_decay(count, config.pledge_decay)
+            .map(|a| a.amount)
+            .unwrap_or(config.pledge_base_fee.amount);
+
+        Self {
+            commitment_type: CommitmentType::Unpledge,
+            anchor,
+            fee,
+            value,
+            ..Self::new(config)
+        }
+    }
+
     /// Rely on RLP encoding for signing
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
         self.encode(out)
@@ -236,15 +329,9 @@ impl CommitmentTransaction {
         keccak256(&bytes).0
     }
 
-    /// TODO: assume that staking, pledging, etc just work with +/1 IRYS increments
-    /// This should be a proper implementation in the future
+    /// Returns the value stored in the transaction
     pub fn commitment_value(&self) -> U256 {
-        match self.commitment_type {
-            CommitmentType::Stake => U256::one(),
-            CommitmentType::Pledge => U256::one(),
-            CommitmentType::Unpledge => U256::one(),
-            CommitmentType::Unstake => U256::one(),
-        }
+        self.value
     }
 
     /// Validates the transaction signature by:
@@ -264,8 +351,14 @@ impl CommitmentTransaction {
 pub trait IrysTransactionCommon {
     fn is_signature_valid(&self) -> bool;
     fn id(&self) -> IrysTransactionId;
-    fn total_fee(&self) -> u64;
+    fn total_cost(&self) -> U256;
     fn signer(&self) -> Address;
+    fn user_fee(&self) -> U256;
+
+    /// Sign this transaction with the provided signer
+    fn sign(self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error>
+    where
+        Self: Sized;
 }
 
 impl IrysTransactionCommon for DataTransactionHeader {
@@ -277,12 +370,36 @@ impl IrysTransactionCommon for DataTransactionHeader {
         self.id
     }
 
-    fn total_fee(&self) -> u64 {
-        self.perm_fee.unwrap_or(0) + self.term_fee
+    fn total_cost(&self) -> U256 {
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
     }
 
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn user_fee(&self) -> U256 {
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+    }
+
+    fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
+        use crate::Address;
+        use alloy_primitives::keccak256;
+
+        // Store the signer address
+        self.signer = Address::from_public_key(signer.signer.verifying_key());
+
+        // Create the signature hash and sign it
+        let prehash = self.signature_hash();
+        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+
+        self.signature = IrysSignature::new(signature);
+
+        // Derive the txid by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        self.id = H256::from(id);
+
+        Ok(self)
     }
 }
 
@@ -295,16 +412,82 @@ impl IrysTransactionCommon for CommitmentTransaction {
         self.id
     }
 
-    fn total_fee(&self) -> u64 {
-        self.fee
+    fn total_cost(&self) -> U256 {
+        let additional_fee = match self.commitment_type {
+            CommitmentType::Stake => self.value,
+            CommitmentType::Pledge => self.value,
+            CommitmentType::Unpledge => U256::zero(),
+            CommitmentType::Unstake => U256::zero(),
+        };
+        U256::from(self.fee).saturating_add(additional_fee)
     }
+
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn user_fee(&self) -> U256 {
+        U256::from(self.fee)
+    }
+
+    fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
+        use alloy_primitives::keccak256;
+
+        // Store the signer address
+        self.signer = signer.address();
+
+        // Create the signature hash and sign it
+        let prehash = self.signature_hash();
+        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+
+        self.signature = IrysSignature::new(signature);
+
+        // Derive the txid by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        self.id = H256::from(id);
+
+        Ok(self)
+    }
+}
+
+/// Trait for providing pledge count information for dynamic fee calculation
+pub trait PledgeDataProvider {
+    /// Returns the number of existing pledges for a given user address
+    fn pledge_count(&self, user_address: Address) -> usize;
+}
+
+#[cfg(test)]
+mod test_helpers {
+    use super::*;
+    use std::collections::HashMap;
+
+    pub(super) struct MockPledgeProvider {
+        pub pledge_counts: HashMap<Address, usize>,
+    }
+
+    impl MockPledgeProvider {
+        pub(super) fn new() -> Self {
+            Self {
+                pledge_counts: HashMap::new(),
+            }
+        }
+
+        pub(super) fn with_pledge_count(mut self, address: Address, count: usize) -> Self {
+            self.pledge_counts.insert(address, count);
+            self
+        }
+    }
+
+    impl PledgeDataProvider for MockPledgeProvider {
+        fn pledge_count(&self, user_address: Address) -> usize {
+            self.pledge_counts.get(&user_address).copied().unwrap_or(0)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_helpers::MockPledgeProvider;
     use super::*;
     use crate::irys::IrysSigner;
 
@@ -402,13 +585,18 @@ mod tests {
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
+
+        // Test signing the header directly using the trait method
+        let signed_header = dec.sign(&signer).unwrap();
+        assert!(signed_header.is_signature_valid());
+
+        // Also test the old way for IrysTransaction
         let tx = DataTransaction {
-            header: dec,
+            header: mock_header(&config),
             ..Default::default()
         };
 
         let signed_tx = signer.sign_transaction(tx).unwrap();
-
         assert!(signed_tx.header.is_signature_valid());
     }
 
@@ -428,7 +616,8 @@ mod tests {
             chunk_size: config.chunk_size,
         };
 
-        let signed_tx = signer.sign_commitment(original_tx.clone()).unwrap();
+        // Test using the new trait method
+        let signed_tx = original_tx.clone().sign(&signer).unwrap();
 
         println!(
             "{}",
@@ -457,16 +646,134 @@ mod tests {
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
-        CommitmentTransaction {
-            id: H256::from([255_u8; 32]),
-            anchor: H256::from([1_u8; 32]),
-            signer: Address::default(),
-            commitment_type: CommitmentType::Stake,
-            version: 0,
-            fee: 1,
-            chain_id: config.chain_id,
-            signature: Signature::test_signature().into(),
-        }
+        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]), 1);
+        tx.id = H256::from([255_u8; 32]);
+        tx.signer = Address::default();
+        tx.signature = Signature::test_signature().into();
+        tx
+    }
+
+    #[test]
+    fn test_pledge_decay_first_pledge() {
+        let mut config = ConsensusConfig::testnet();
+        config.pledge_base_fee =
+            crate::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0)).unwrap();
+        config.pledge_decay =
+            crate::storage_pricing::Amount::percentage(rust_decimal_macros::dec!(0.9)).unwrap();
+
+        let provider = MockPledgeProvider::new();
+        let signer_address = Address::default();
+
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+
+        // First pledge should be at base fee
+        assert_eq!(pledge_tx.value, config.pledge_base_fee.amount);
+    }
+
+    #[test]
+    fn test_pledge_decay_multiple_pledges() {
+        let mut config = ConsensusConfig::testnet();
+        config.pledge_base_fee =
+            crate::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0)).unwrap();
+        config.pledge_decay =
+            crate::storage_pricing::Amount::percentage(rust_decimal_macros::dec!(0.3)).unwrap(); // 30% decay rate
+
+        let signer_address = Address::default();
+
+        // Test with 0 existing pledges (first pledge)
+        let provider = MockPledgeProvider::new();
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+        let first_pledge_value = pledge_tx.value;
+
+        // Test with 1 existing pledge (second pledge)
+        let provider = MockPledgeProvider::new().with_pledge_count(signer_address, 1);
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+        let second_pledge_value = pledge_tx.value;
+
+        // Test with 2 existing pledges (third pledge)
+        let provider = MockPledgeProvider::new().with_pledge_count(signer_address, 2);
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+        let third_pledge_value = pledge_tx.value;
+
+        // Each subsequent pledge should be cheaper
+        assert!(
+            first_pledge_value > second_pledge_value,
+            "First pledge should be more expensive than second"
+        );
+        assert!(
+            second_pledge_value > third_pledge_value,
+            "Second pledge should be more expensive than third"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pledge_decay_parametrized_tests {
+    use super::*;
+    use rstest::rstest;
+    use rust_decimal_macros::dec;
+
+    #[rstest]
+    #[case(0, 20000.0)] // Pledge 1
+    #[case(1, 10718.0)] // Pledge 2
+    #[case(2, 7441.0)] // Pledge 3
+    #[case(3, 5743.0)] // Pledge 4
+    #[case(4, 4698.0)] // Pledge 5
+    #[case(5, 3987.0)] // Pledge 6
+    #[case(6, 3471.0)] // Pledge 7
+    #[case(7, 3078.0)] // Pledge 8
+    #[case(8, 2768.0)] // Pledge 9
+    #[case(9, 2518.0)] // Pledge 10
+    #[case(10, 2311.0)] // Pledge 11
+    #[case(11, 2137.0)] // Pledge 12
+    #[case(12, 1988.0)] // Pledge 13
+    #[case(13, 1860.0)] // Pledge 14
+    #[case(14, 1748.0)] // Pledge 15
+    #[case(15, 1649.0)] // Pledge 16
+    #[case(16, 1562.0)] // Pledge 17
+    #[case(17, 1483.0)] // Pledge 18
+    #[case(18, 1413.0)] // Pledge 19
+    #[case(19, 1349.0)] // Pledge 20
+    #[case(20, 1291.0)] // Pledge 21
+    #[case(21, 1238.0)] // Pledge 22
+    #[case(22, 1190.0)] // Pledge 23
+    #[case(23, 1145.0)] // Pledge 24
+    #[case(24, 1104.0)] // Pledge 25
+    fn test_pledge_cost_with_decay(#[case] existing_pledges: usize, #[case] expected_cost: f64) {
+        use super::test_helpers::MockPledgeProvider;
+
+        // Setup config with $20,000 base fee and 0.9 decay rate
+        let mut config = ConsensusConfig::testnet();
+        config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
+
+        // Create provider with existing pledge count
+        let signer_address = Address::default();
+        let provider =
+            MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
+
+        // Create a new pledge transaction
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+
+        // Convert the value back to a dollar amount for comparison
+        // Value is in wei (10^18), so divide by 10^18 to get token amount
+        let actual_cost_tokens = pledge_tx.value.to_string().parse::<f64>().unwrap() / 1e18;
+
+        // Allow for small rounding differences (0.5% tolerance)
+        let tolerance = expected_cost * 0.005;
+        assert!(
+            (actual_cost_tokens - expected_cost).abs() < tolerance,
+            "Pledge {} cost mismatch: expected ${:.2}, got ${:.2} (tolerance: ${:.2})",
+            existing_pledges + 1,
+            expected_cost,
+            actual_cost_tokens,
+            tolerance
+        );
     }
 }
 

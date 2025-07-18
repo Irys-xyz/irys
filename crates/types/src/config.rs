@@ -142,6 +142,27 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
+
+    /// Fee required for staking operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub stake_fee: Amount<Irys>,
+
+    /// Base fee required for pledging operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub pledge_base_fee: Amount<Irys>,
+
+    /// Decay rate for pledge fees - subsequent pledges become cheaper
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
+    pub pledge_decay: Amount<Percentage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,6 +627,9 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
+            stake_fee: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_fee: Amount::token(dec!(950)).expect("valid token amount"),
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
         }
     }
 }
@@ -919,7 +943,9 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        genesis_peer_discovery_timeout_millis = 10000
+        stake_fee = 0.1
+        pledge_base_fee = 0.1
+        pledge_decay = 0.9
 
         [reth]
         chain = 1270

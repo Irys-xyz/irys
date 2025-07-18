@@ -1638,13 +1638,7 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction {
-            commitment_type: irys_primitives::CommitmentType::Stake,
-            // TODO: real staking amounts
-            fee: 1,
-            anchor: latest_hash,
-            ..Default::default()
-        };
+        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_hash, 1);
         let stake_tx = signer.sign_commitment(stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
@@ -1676,13 +1670,13 @@ async fn stake_and_pledge(
 
     for idx in 0..to_pledge_count {
         // post a pledge tx
-        let pledge_tx = CommitmentTransaction {
-            commitment_type: irys_primitives::CommitmentType::Pledge,
-            // TODO: real pledge amounts
-            fee: 1,
-            anchor: last_tx_id, // use a cascading anchor so we don't have duplicate txids
-            ..Default::default()
-        };
+        let pledge_tx = CommitmentTransaction::new_pledge(
+            &config.consensus,
+            last_tx_id,
+            1,
+            commitment_snapshot.as_ref(),
+            address,
+        );
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();

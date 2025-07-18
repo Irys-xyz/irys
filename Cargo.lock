@@ -4947,7 +4947,6 @@ dependencies = [
  "bytes",
  "eyre",
  "irys-config",
- "irys-primitives",
  "irys-testing-utils",
  "irys-types",
  "modular-bitfield",
