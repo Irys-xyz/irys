@@ -68,8 +68,8 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 1);
 
     // ===== TEST CASE 2: post duplicate commitment tx =====
-    let consensus = ConsensusConfig::testnet();
-    let stake_tx = CommitmentTransaction::new_stake(&consensus, H256::default(), 1);
+    let consensus = &node.node_ctx.config.consensus;
+    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
 
     // Post the stake commitment and await it in the mempool
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
@@ -103,10 +103,14 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // ===== TEST CASE 3: post duplicate pledge tx =====
-    use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
-    let empty_snapshot = CommitmentSnapshot::default();
+    // Get the CommitmentSnapshot from the latest canonical block
+    let commitment_snapshot = node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_commitment_snapshot();
     let pledge_tx =
-        CommitmentTransaction::new_pledge(&consensus, anchor, 1, &empty_snapshot, signer.address());
+        CommitmentTransaction::new_pledge(consensus, anchor, 1, &commitment_snapshot, signer.address());
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
 
     // Post pledge commitment

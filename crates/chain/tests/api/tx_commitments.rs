@@ -459,7 +459,7 @@ async fn post_stake_commitment(
     info!("Node consensus stake_fee: {:?}", consensus.stake_fee);
     info!(
         "Node consensus stake_fee amount: {}",
-        consensus.stake_fee.amount.as_u64()
+        consensus.stake_fee.amount
     );
     let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
     info!("Created stake_tx with value: {:?}", stake_tx.value);
@@ -479,11 +479,14 @@ async fn post_pledge_commitment(
     anchor: H256,
 ) -> CommitmentTransaction {
     let consensus = &node.node_ctx.config.consensus;
-    // For tests, use empty provider
-    use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
-    let empty_snapshot = CommitmentSnapshot::default();
+    // Get the CommitmentSnapshot from the latest canonical block
+    let commitment_snapshot = node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_commitment_snapshot();
     let pledge_tx =
-        CommitmentTransaction::new_pledge(consensus, anchor, 1, &empty_snapshot, signer.address());
+        CommitmentTransaction::new_pledge(consensus, anchor, 1, &commitment_snapshot, signer.address());
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 

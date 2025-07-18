@@ -56,7 +56,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         .get_commitment_snapshot(&blk.block_hash)?;
 
     if stake {
-        let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero(), 1);
+        let stake_tx = CommitmentTransaction::new_stake(&config, blk.block_hash, 1);
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
 
         genesis_node.post_commitment_tx(&stake_tx).await?;

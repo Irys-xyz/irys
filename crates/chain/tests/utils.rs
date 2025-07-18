@@ -2037,18 +2037,19 @@ where
     assert_eq!(status, StatusCode::OK);
 }
 
-pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
-    let config = ConsensusConfig::testnet();
-    let stake_tx = CommitmentTransaction::new_stake(&config, *anchor, 1);
+pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner, config: &ConsensusConfig) -> CommitmentTransaction {
+    let stake_tx = CommitmentTransaction::new_stake(config, *anchor, 1);
     signer.sign_commitment(stake_tx).unwrap()
 }
 
-pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
-    let config = ConsensusConfig::testnet();
-    // For tests, use empty commitment snapshot
-    let empty_snapshot = irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot::default();
+pub fn new_pledge_tx(
+    anchor: &H256,
+    signer: &IrysSigner,
+    config: &ConsensusConfig,
+    commitment_snapshot: &irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot,
+) -> CommitmentTransaction {
     let pledge_tx =
-        CommitmentTransaction::new_pledge(&config, *anchor, 1, &empty_snapshot, signer.address());
+        CommitmentTransaction::new_pledge(config, *anchor, 1, commitment_snapshot, signer.address());
     signer.sign_commitment(pledge_tx).unwrap()
 }
 
