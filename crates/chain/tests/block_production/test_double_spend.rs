@@ -9,7 +9,8 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     initialize_tracing();
 
     // basic node config
-    let seconds_to_wait = 10;
+    let seconds_to_wait: usize = 10;
+    let seconds_to_wait_u32: u32 = seconds_to_wait.try_into()?;
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
     let signer = IrysSigner::random_signer(&config.consensus_config());
@@ -53,7 +54,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     let block2 = node.get_block_by_height(2).await?;
     // check the shape of the mempool equates to empty
-    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
     // create commitment tx that will be allowed into mempool, but not included in a block as this node is already staked
     let stake_for_mempool = node.post_stake_commitment(block2.block_hash).await;
@@ -67,7 +68,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     .await?;
 
     // check the shape of the mempool now contains one commitment txs
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
 
     //
@@ -84,7 +85,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     // mempool should still have 2 commitments txs
     // it will not yet return the submit tx as it has not received the txs corresponding data
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
 
     // ensure block with tx_for_migration is now in index (from TEST CASE 1)
@@ -98,17 +99,17 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     node.post_data_tx_raw(&tx_for_mempool.header).await;
 
     // mempool should not provide the submit as part of best txs
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
     // resubmit commitment transactions that were already seen
     node.post_commitment_tx(&stake_for_mempool).await?;
     node.post_commitment_tx(&pledge_for_mempool).await?;
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
 
     // ensure mempool does not accept any duplicate tx
     // mempool will have skipped new stake and the duplicate pledge
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
 
     // mine another block to migrate block 2 into the index
@@ -150,7 +151,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     // retrieve block 8 for use as a unique, recent and previously unused anchor
     let block8 = node.get_block_by_height(8).await?;
-    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
 
     // re post existing stake commitment, that also uses the same anchor as the previous stake tx
@@ -162,7 +163,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let _new_anchor_stake_for_mempool = node.post_stake_commitment(block8.block_hash).await;
     // ensure mempool does not accept either of the above two txs
     // i.e. mempool should have rejected both stakes as the node has been staked since epoch
-    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
 
     // finally, mine block to ensure block is valid
