@@ -1654,10 +1654,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                 body_str,
                 serde_json::to_string_pretty(&commitment_tx).unwrap(),
             );
-            return Err(eyre::eyre!(
+            Err(eyre::eyre!(
                 "Posted commitment transaction but got HTTP response code: {:?}",
                 response.status()
-            ));
+            ))
         } else {
             info!(
                 "Response status: {}\n{}",
