@@ -1,6 +1,7 @@
 use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::prelude::*;
+use alloy_core::primitives::B256;
 use irys_actors::reth_service::RethServiceActor;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database as _, DatabaseError};
@@ -40,132 +41,6 @@ where
                 mailbox_error
             );
         }
-    }
-}
-
-pub type PeerListService = PeerListServiceWithClient<IrysApiClient, RethServiceActor>;
-pub type PeerListServiceFacade = Addr<PeerListServiceWithClient<IrysApiClient, RethServiceActor>>;
-
-#[async_trait::async_trait]
-pub trait PeerList: Send + Sync + Clone + Unpin + 'static {
-    /// Returns n most active peers
-    async fn top_active_peers(
-        &self,
-        limit: Option<usize>,
-        exclude_peers: Option<HashSet<Address>>,
-    ) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError>;
-
-    /// Gets the top trusted peer
-    async fn top_trusted_peer(&self) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError>;
-
-    /// Waits for at least one active connection to appear
-    async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError>;
-
-    async fn all_known_peers(&self) -> Result<Vec<PeerAddress>, PeerListFacadeError>;
-
-    async fn peer_count(&self) -> Result<usize, PeerListFacadeError>;
-
-    /// Requests the data to be gossiped over the network. Returns when the data is successfully
-    /// requested, not when it is received.
-    async fn request_data_from_the_network(
-        &self,
-        gossip_data_request: GossipDataRequest,
-        use_trusted_peers_only: bool,
-    ) -> Result<(), PeerListFacadeError>;
-
-    /// Requests the block to be gossiped over the network. Returns when the block is successfully
-    /// requested, not when it is received.
-    async fn request_block_from_the_network(
-        &self,
-        block_hash: BlockHash,
-        use_trusted_peers_only: bool,
-    ) -> Result<(), PeerListFacadeError>;
-
-    async fn is_a_trusted_peer(
-        &self,
-        miner_address: Address,
-        source_ip: IpAddr,
-    ) -> Result<bool, PeerListFacadeError>;
-}
-
-#[async_trait::async_trait]
-impl<A, R> PeerList for Addr<PeerListServiceWithClient<A, R>>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    /// Returns n most active peers
-    async fn top_active_peers(
-        &self,
-        limit: Option<usize>,
-        exclude_peers: Option<HashSet<Address>>,
-    ) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError> {
-        Ok(self
-            .send(TopActivePeersRequest {
-                truncate: limit,
-                exclude_peers,
-            })
-            .await?)
-    }
-
-    /// Gets the top trusted peer
-    async fn top_trusted_peer(&self) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError> {
-        Ok(self.send(TrustedPeersRequest).await?)
-    }
-
-    /// Waits for at least one active connection to appear
-    async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError> {
-        Ok(self.send(WaitForActivePeer).await?)
-    }
-
-    async fn all_known_peers(&self) -> Result<Vec<PeerAddress>, PeerListFacadeError> {
-        Ok(self.send(KnownPeersRequest).await?)
-    }
-
-    async fn peer_count(&self) -> Result<usize, PeerListFacadeError> {
-        Ok(self.send(ActivePeersCountRequest).await?)
-    }
-
-    /// Requests the data to be gossiped over the network. Returns when the data is successfully
-    /// requested, not when it is received.
-    async fn request_data_from_the_network(
-        &self,
-        gossip_data_request: GossipDataRequest,
-        use_trusted_peers_only: bool,
-    ) -> Result<(), PeerListFacadeError> {
-        Ok(self
-            .send(RequestDataFromTheNetwork {
-                data_request: gossip_data_request,
-                use_trusted_peers_only,
-            })
-            .await??)
-    }
-
-    /// Requests the block to be gossiped over the network. Returns when the block is successfully
-    /// requested, not when it is received.
-    async fn request_block_from_the_network(
-        &self,
-        block_hash: BlockHash,
-        use_trusted_peers_only: bool,
-    ) -> Result<(), PeerListFacadeError> {
-        self.request_data_from_the_network(
-            GossipDataRequest::Block(block_hash),
-            use_trusted_peers_only,
-        )
-        .await
-    }
-
-    async fn is_a_trusted_peer(
-        &self,
-        miner_address: Address,
-        source_ip: IpAddr,
-    ) -> Result<bool, PeerListFacadeError> {
-        self.send(IsATrustedPeerRequest {
-            peer_source_miner_address: miner_address,
-            peer_source_ip_address: source_ip,
-        })
-        .await
-        .map_err(PeerListFacadeError::from)
     }
 }
 
@@ -373,6 +248,31 @@ impl PeerListGuard {
         })?
     }
 
+    pub async fn request_payload_from_the_network(
+        &self,
+        evm_payload_hash: B256,
+        use_trusted_peers_only: bool,
+    ) -> Result<(), PeerListDataError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let message = PeerListDataMessage::RequestPayloadFromNetwork {
+            payload_hash: evm_payload_hash,
+            use_trusted_peers_only,
+            response: sender,
+        };
+        self.0
+            .write()
+            .expect("PeerListDataInner lock poisoned")
+            .peer_list_service_sender
+            .send(message)?;
+
+        receiver.await.map_err(|recv_error| {
+            PeerListDataError::OtherInternalError(format!(
+                "Failed to receive response: {:?}",
+                recv_error
+            ))
+        })?
+    }
+
     pub fn read(&self) -> std::sync::RwLockReadGuard<'_, PeerListDataInner> {
         self.0.read().expect("PeerListDataInner lock poisoned")
     }
@@ -388,6 +288,11 @@ pub enum PeerListDataMessage {
     PeerUpdated(PeerListItem),
     RequestBlockFromNetwork {
         block_hash: BlockHash,
+        use_trusted_peers_only: bool,
+        response: tokio::sync::oneshot::Sender<Result<(), PeerListDataError>>,
+    },
+    RequestPayloadFromNetwork {
+        payload_hash: B256,
         use_trusted_peers_only: bool,
         response: tokio::sync::oneshot::Sender<Result<(), PeerListDataError>>,
     },
@@ -558,7 +463,7 @@ where
     /// Reference to the node database
     db: Option<DatabaseProvider>,
 
-    peer_list_data_guard: PeerListGuard,
+    pub peer_list_data_guard: PeerListGuard,
 
     currently_running_announcements: HashSet<SocketAddr>,
     successful_announcements: HashMap<SocketAddr, AnnounceFinished>,
@@ -578,6 +483,8 @@ where
     peer_list_service_receiver: Option<UnboundedReceiver<PeerListDataMessage>>,
 }
 
+pub type PeerListService = PeerListServiceWithClient<IrysApiClient, RethServiceActor>;
+
 impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
     /// reference to a `DatabaseEnv`
@@ -591,20 +498,6 @@ impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
     }
 }
 
-impl<R> PeerListServiceWithClient<IrysApiClient, R>
-where
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    pub fn new_with_custom_reth_service(
-        db: DatabaseProvider,
-        config: &Config,
-        reth_service_addr: Addr<R>,
-    ) -> Self {
-        info!("service started: peer_list");
-        Self::new_with_custom_api_client(db, config, IrysApiClient::new(), reth_service_addr)
-    }
-}
-
 impl<A, R> PeerListServiceWithClient<A, R>
 where
     A: ApiClient,
@@ -612,7 +505,7 @@ where
 {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
     /// reference to a `DatabaseEnv`
-    pub fn new_with_custom_api_client(
+    pub(crate) fn new_with_custom_api_client(
         db: DatabaseProvider,
         config: &Config,
         irys_api_client: A,
@@ -689,6 +582,51 @@ where
                         match address
                             .send(RequestDataFromTheNetwork {
                                 data_request: GossipDataRequest::Block(block_hash),
+                                use_trusted_peers_only,
+                            })
+                            .await
+                        {
+                            Ok(res) => {
+                                response
+                                    .send(res.map_err(|err| {
+                                        PeerListDataError::OtherInternalError(format!("{:?}", err))
+                                    }))
+                                    .unwrap_or_else(|e| {
+                                        error!(
+                                            "Failed to send response for block request: {:?}",
+                                            e
+                                        );
+                                    });
+                            }
+                            Err(e) => {
+                                error!("Failed to request block from network: {:?}", e);
+                                response
+                                    .send(Err(PeerListDataError::OtherInternalError(format!(
+                                        "{:?}",
+                                        e
+                                    ))))
+                                    .unwrap_or_else(|e| {
+                                        error!(
+                                            "Failed to send response for block request: {:?}",
+                                            e
+                                        );
+                                    });
+                            }
+                        }
+                    }
+                    .into_actor(self),
+                );
+            }
+            PeerListDataMessage::RequestPayloadFromNetwork {
+                payload_hash,
+                use_trusted_peers_only,
+                response,
+            } => {
+                ctx.spawn(
+                    async move {
+                        match address
+                            .send(RequestDataFromTheNetwork {
+                                data_request: GossipDataRequest::ExecutionPayload(payload_hash),
                                 use_trusted_peers_only,
                             })
                             .await
@@ -1128,165 +1066,10 @@ where
     }
 }
 
-/// Decrease the score of a peer
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct DecreasePeerScore {
-    pub peer_miner_address: Address,
-    pub reason: ScoreDecreaseReason,
-}
-
-impl<T, R> Handler<DecreasePeerScore> for PeerListServiceWithClient<T, R>
-where
-    T: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = ();
-
-    fn handle(&mut self, msg: DecreasePeerScore, _ctx: &mut Self::Context) -> Self::Result {
-        self.decrease_peer_score(&msg.peer_miner_address, msg.reason);
-    }
-}
-
-/// Increase the score of a peer
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct IncreasePeerScore {
-    pub peer_miner_address: Address,
-    pub reason: ScoreIncreaseReason,
-}
-
-impl<A, R> Handler<IncreasePeerScore> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = ();
-
-    fn handle(&mut self, msg: IncreasePeerScore, _ctx: &mut Self::Context) -> Self::Result {
-        self.increase_peer_score(&msg.peer_miner_address, msg.reason);
-    }
-}
-
-/// Get the list of active trusted peers
-#[derive(Message, Debug)]
-#[rtype(result = "Vec<(Address, PeerListItem)>")]
-pub struct TrustedPeersRequest;
-
-impl<A, R> Handler<TrustedPeersRequest> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = Vec<(Address, PeerListItem)>;
-
-    fn handle(&mut self, _msg: TrustedPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
-        let mut peers: Vec<(Address, PeerListItem)> = self
-            .peer_list_data_guard
-            .read()
-            .peer_list_cache
-            .iter()
-            .map(|(key, value)| (*key, value.clone()))
-            .collect();
-
-        peers.retain(|(_miner_address, peer)| {
-            self.peer_list_data_guard
-                .read()
-                .trusted_peers_api_addresses
-                .contains(&peer.address.api)
-        });
-
-        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
-        peers.reverse();
-
-        peers
-    }
-}
-
-/// Get the list of active trusted peers
-#[derive(Message, Debug)]
-#[rtype(result = "bool")]
-pub struct IsATrustedPeerRequest {
-    pub peer_source_miner_address: Address,
-    pub peer_source_ip_address: IpAddr,
-}
-
-impl<A, R> Handler<IsATrustedPeerRequest> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = bool;
-
-    fn handle(&mut self, msg: IsATrustedPeerRequest, _ctx: &mut Self::Context) -> Self::Result {
-        let source_miner_addr = msg.peer_source_miner_address;
-        let source_ip = msg.peer_source_ip_address;
-        let guard = self.peer_list_data_guard.read();
-
-        let Some(peer) = guard.peer_list_cache.get(&source_miner_addr) else {
-            return false;
-        };
-        let peer_api_ip = peer.address.api.ip();
-        let peer_gossip_ip = peer.address.gossip.ip();
-
-        let ip_matches_cached_ip = source_ip == peer_gossip_ip;
-        let ip_is_in_a_trusted_list = guard
-            .trusted_peers_api_addresses
-            .iter()
-            .any(|socket_addr| socket_addr.ip() == peer_api_ip);
-
-        ip_matches_cached_ip && ip_is_in_a_trusted_list
-    }
-}
-
-/// Get the list of active peers
-#[derive(Message, Debug)]
-#[rtype(result = "Vec<(Address, PeerListItem)>")]
-pub struct TopActivePeersRequest {
-    pub truncate: Option<usize>,
-    pub exclude_peers: Option<HashSet<Address>>,
-}
-
-impl<A, R> Handler<TopActivePeersRequest> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = Vec<(Address, PeerListItem)>;
-
-    fn handle(&mut self, msg: TopActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
-        let mut peers: Vec<(Address, PeerListItem)> = self
-            .peer_list_data_guard
-            .read()
-            .peer_list_cache
-            .iter()
-            .map(|(key, value)| (*key, value.clone()))
-            .collect();
-
-        peers.retain(|(miner_address, peer)| {
-            let exclude = if let Some(exclude_peers) = &msg.exclude_peers {
-                exclude_peers.contains(miner_address)
-            } else {
-                false
-            };
-            !exclude && peer.reputation_score.is_active() && peer.is_online
-        });
-
-        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
-        peers.reverse();
-
-        if let Some(truncate) = msg.truncate {
-            peers.truncate(truncate);
-        }
-
-        peers
-    }
-}
-
 /// Flush the peer list to the database
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), PeerListServiceError>")]
-pub struct FlushRequest;
+struct FlushRequest;
 
 impl<A, R> Handler<FlushRequest> for PeerListServiceWithClient<A, R>
 where
@@ -1353,45 +1136,23 @@ where
     }
 }
 
-/// Request a list of peers
-#[derive(Message, Debug)]
-#[rtype(result = "Vec<PeerAddress>")]
-pub struct KnownPeersRequest;
-
-impl<A, R> Handler<KnownPeersRequest> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = Vec<PeerAddress>;
-
-    fn handle(&mut self, _msg: KnownPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
-        self.peer_list_data_guard
-            .read()
-            .known_peers_cache
-            .iter()
-            .copied()
-            .collect()
-    }
-}
-
 /// Handle potential new peer
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
-pub struct NewPotentialPeer {
+struct NewPotentialPeer {
     pub api_address: SocketAddr,
     pub force_announce: bool,
 }
 
 impl NewPotentialPeer {
-    pub fn new(api_address: SocketAddr) -> Self {
+    fn new(api_address: SocketAddr) -> Self {
         Self {
             api_address,
             force_announce: false,
         }
     }
 
-    pub fn force_announce(api_address: SocketAddr) -> Self {
+    fn force_announce(api_address: SocketAddr) -> Self {
         Self {
             api_address,
             force_announce: true,
@@ -1453,14 +1214,14 @@ where
 /// Handle potential new peer
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
-pub struct AnnounceFinished {
+struct AnnounceFinished {
     pub peer_api_address: SocketAddr,
     pub success: bool,
     pub retry: bool,
 }
 
 impl AnnounceFinished {
-    pub fn retry(api_address: SocketAddr) -> Self {
+    fn retry(api_address: SocketAddr) -> Self {
         Self {
             peer_api_address: api_address,
             success: false,
@@ -1468,7 +1229,7 @@ impl AnnounceFinished {
         }
     }
 
-    pub fn success(api_address: SocketAddr) -> Self {
+    fn success(api_address: SocketAddr) -> Self {
         Self {
             peer_api_address: api_address,
             success: true,
@@ -1512,69 +1273,10 @@ where
     }
 }
 
-/// Handle potential new peer
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "usize")]
-pub struct ActivePeersCountRequest;
-impl<A, R> Handler<ActivePeersCountRequest> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = usize;
-
-    fn handle(&mut self, _msg: ActivePeersCountRequest, _ctx: &mut Self::Context) -> Self::Result {
-        self.peer_list_data_guard.read().peer_list_cache.len()
-    }
-}
-
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct WaitForActivePeer;
-
-impl<A, R> Handler<WaitForActivePeer> for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-    type Result = ResponseActFuture<Self, ()>;
-
-    fn handle(&mut self, _msg: WaitForActivePeer, ctx: &mut Self::Context) -> Self::Result {
-        // First check if we already have active peers
-        if !self.peer_list_data_guard.read().peer_list_cache.is_empty() {
-            return Box::pin(fut::ready(()));
-        }
-
-        // If not, create a future that will complete when a peer becomes available
-        let addr = ctx.address();
-        Box::pin(
-            async move {
-                loop {
-                    // Check for active peers every second
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-
-                    let active_peers = addr
-                        .send(TopActivePeersRequest {
-                            truncate: None,
-                            exclude_peers: None,
-                        })
-                        .await
-                        .unwrap_or_default();
-
-                    if !active_peers.is_empty() {
-                        break;
-                    }
-                }
-            }
-            .into_actor(self),
-        )
-    }
-}
-
 /// Flush the peer list to the database
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), PeerListServiceError>")]
-pub struct RequestDataFromTheNetwork {
+struct RequestDataFromTheNetwork {
     data_request: GossipDataRequest,
     use_trusted_peers_only: bool,
 }
@@ -1793,13 +1495,12 @@ mod tests {
         let mock_api_client = CountingMockClient::default();
 
         // Create service with our mocks
-        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
             db,
             &config,
             mock_api_client,
             reth_actor,
         );
-        let ctx = &mut Context::new();
 
         // Test adding a new peer
         let (mining_addr, peer) = create_test_peer(
@@ -1823,7 +1524,7 @@ mod tests {
         assert_eq!(result.expect("get peer"), peer);
 
         // Verify known peers using KnownPeersRequest
-        let known_peers = service.handle(KnownPeersRequest, ctx);
+        let known_peers = service.peer_list_data_guard.all_known_peers();
         assert!(known_peers.contains(&peer.address));
     }
 
@@ -1893,13 +1594,12 @@ mod tests {
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
-        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
             db,
             &config,
             mock_client,
             mock_addr,
         );
-        let ctx = &mut Context::new();
 
         // Add multiple peers with different states
         let (mining_addr1, mut peer1) = create_test_peer(
@@ -1939,13 +1639,9 @@ mod tests {
 
         // Test active peers request using message handler
         let exclude_peers = HashSet::new();
-        let active_peers = service.handle(
-            TopActivePeersRequest {
-                truncate: Some(2),
-                exclude_peers: Some(exclude_peers),
-            },
-            ctx,
-        );
+        let active_peers = service
+            .peer_list_data_guard
+            .top_active_peers(Some(2), Some(exclude_peers));
 
         assert_eq!(active_peers.len(), 2);
         assert_eq!(active_peers[0].1, peer1); // Higher score should be first
@@ -1963,13 +1659,12 @@ mod tests {
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
-        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
             db,
             &config,
             mock_client,
             mock_addr,
         );
-        let ctx = &mut Context::new();
 
         // Test adding duplicate peer
         let (mining_addr, peer) = create_test_peer(
@@ -1988,7 +1683,7 @@ mod tests {
             .add_or_update_peer(mining_addr, peer);
 
         // Verify only one entry exists using KnownPeersRequest
-        let known_peers = service.handle(KnownPeersRequest, ctx);
+        let known_peers = service.peer_list_data_guard.all_known_peers();
         assert_eq!(known_peers.len(), 1);
 
         // Test peer lookup with non-existent address
@@ -2002,20 +1697,12 @@ mod tests {
         assert!(result.is_none());
 
         // Test score manipulation for non-existent peer using message handlers
-        service.handle(
-            IncreasePeerScore {
-                peer_miner_address: non_existent_addr,
-                reason: ScoreIncreaseReason::Online,
-            },
-            ctx,
-        );
-        service.handle(
-            DecreasePeerScore {
-                peer_miner_address: non_existent_addr,
-                reason: ScoreDecreaseReason::Offline,
-            },
-            ctx,
-        );
+        service
+            .peer_list_data_guard
+            .increase_peer_score(&non_existent_addr, ScoreIncreaseReason::Online);
+        service
+            .peer_list_data_guard
+            .decrease_peer_score(&non_existent_addr, ScoreDecreaseReason::Offline);
 
         // Test active peers with empty list
         let new_temp_dir = setup_tracing_and_temp_dir(None, false);
@@ -2151,7 +1838,7 @@ mod tests {
         let mock_addr = mock_actor.start();
 
         // Create new service instance that should load from database
-        let mut new_service = PeerListServiceWithClient::new_with_custom_api_client(
+        let new_service = PeerListServiceWithClient::new_with_custom_api_client(
             db,
             &config,
             mock_client,
@@ -2186,7 +1873,7 @@ mod tests {
         );
 
         // Verify internal maps are populated correctly
-        let known_peers = new_service.handle(KnownPeersRequest, ctx);
+        let known_peers = service.peer_list_data_guard.all_known_peers();
         assert_eq!(known_peers.len(), 2, "Should have loaded 2 known peers");
         assert!(
             known_peers.contains(&peer1.address),
@@ -2608,16 +2295,10 @@ mod tests {
             mock_addr,
         );
         let peer_list_data_guard = service.peer_list_data_guard.clone();
-        let service_addr = service.start();
+        service.start();
 
         // Verify we don't have any peers
-        let active_peers = service_addr
-            .send(TopActivePeersRequest {
-                truncate: None,
-                exclude_peers: None,
-            })
-            .await
-            .expect("send active peers request");
+        let active_peers = peer_list_data_guard.top_active_peers(None, None);
 
         assert!(active_peers.is_empty(), "Should start with no active peers");
 
@@ -2632,13 +2313,10 @@ mod tests {
         // Start two tasks in parallel
         // 1. Send WaitForActivePeer and await the result
         let wait_task = tokio::spawn({
-            let service_addr = service_addr.clone();
+            let peer_list_data_guard = peer_list_data_guard.clone();
             async move {
                 // Send WaitForActivePeer message which should only resolve when a peer becomes available
-                service_addr
-                    .send(WaitForActivePeer)
-                    .await
-                    .expect("send wait message");
+                peer_list_data_guard.wait_for_active_peers().await;
                 debug!("WaitForActivePeer message resolved");
             }
         });
@@ -2659,13 +2337,7 @@ mod tests {
         tokio::try_join!(wait_task, add_task).expect("tasks should complete successfully");
 
         // Verify we now have a peer
-        let active_peers = service_addr
-            .send(TopActivePeersRequest {
-                truncate: None,
-                exclude_peers: None,
-            })
-            .await
-            .expect("send active peers request");
+        let active_peers = peer_list_data_guard.top_active_peers(None, None);
 
         assert_eq!(active_peers.len(), 1, "Should have one active peer");
         assert_eq!(active_peers[0].1, peer, "Should be the peer we added");
@@ -2693,27 +2365,22 @@ mod tests {
             mock_client,
             mock_addr,
         );
-        let service_addr = service.start();
+        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        service.start();
 
         // Verify we don't have any peers
-        let active_peers = service_addr
-            .send(TopActivePeersRequest {
-                truncate: None,
-                exclude_peers: None,
-            })
-            .await
-            .expect("send active peers request");
+        let active_peers = peer_list_data_guard.top_active_peers(None, None);
 
         assert!(active_peers.is_empty(), "Should start with no active peers");
 
         // Use a short timeout to verify that WaitForActivePeer doesn't resolve
         // We expect this task to timeout since no peers will be added
         let wait_task = tokio::spawn({
-            let service_addr = service_addr.clone();
+            let peer_list_data_guard = peer_list_data_guard.clone();
             async move {
                 let wait_result = tokio::time::timeout(
                     Duration::from_millis(500),
-                    service_addr.send(WaitForActivePeer),
+                    peer_list_data_guard.wait_for_active_peers(),
                 )
                 .await;
 
@@ -2731,13 +2398,7 @@ mod tests {
         wait_task.await.expect("wait task should complete");
 
         // Verify we still have no peers
-        let active_peers = service_addr
-            .send(TopActivePeersRequest {
-                truncate: None,
-                exclude_peers: None,
-            })
-            .await
-            .expect("send active peers request");
+        let active_peers = peer_list_data_guard.top_active_peers(None, None);
 
         assert!(active_peers.is_empty(), "Should still have no active peers");
     }

@@ -9,7 +9,6 @@
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::PeerList;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -151,7 +150,7 @@ impl P2PService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, B, A, P>(
+    pub fn run<M, B, A>(
         mut self,
         mempool: M,
         block_discovery: B,
@@ -161,16 +160,15 @@ impl P2PService {
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
-        execution_payload_provider: ExecutionPayloadProvider<P>,
+        execution_payload_provider: ExecutionPayloadProvider,
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
-    ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<P, B, M>>)>
+    ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<B, M>>)>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
         A: ApiClient,
-        P: PeerList,
     {
         debug!("Staring gossip service");
 

@@ -122,9 +122,7 @@ struct MockedServices {
     block_discovery_stub: BlockDiscoveryStub,
     peer_list_service_addr: Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
     db: DatabaseProvider,
-    execution_payload_provider: ExecutionPayloadProvider<
-        Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
-    >,
+    execution_payload_provider: ExecutionPayloadProvider,
     mempool_stub: MempoolStub,
     vdf_state_stub: VdfStateReadonly,
     service_senders: ServiceSenders,
@@ -155,9 +153,10 @@ impl MockedServices {
             mock_client.clone(),
             reth_addr,
         );
+        let peer_list_data_guard = peer_list_service.peer_list_data_guard.clone();
         let peer_addr = peer_list_service.start();
         let execution_payload_provider =
-            ExecutionPayloadProvider::new(peer_addr.clone(), RethBlockProvider::new_mock());
+            ExecutionPayloadProvider::new(peer_list_data_guard, RethBlockProvider::new_mock());
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);

@@ -18,9 +18,10 @@ pub use gossip_client::GossipClient;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
+pub use peer_list::PeerListServiceError;
 pub use peer_list::{
-    GetPeerListGuard, PeerList, PeerListFacadeError, PeerListGuard, PeerListServiceFacade,
+    GetPeerListGuard, PeerListFacadeError, PeerListGuard, PeerListService,
+    PeerListServiceWithClient,
 };
-pub use peer_list::{PeerListService, PeerListServiceError};
 pub use sync::{sync_chain, SyncState};
 pub use types::{GossipError, GossipResult};

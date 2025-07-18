@@ -1,5 +1,5 @@
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::{PeerList, ScoreDecreaseReason};
+use crate::peer_list::ScoreDecreaseReason;
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
@@ -27,15 +27,14 @@ use tracing::{debug, error, Span};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, TPeerList>
+pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
     TApiClient: ApiClient,
-    TPeerList: PeerList,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: Arc<BlockPool<TPeerList, TBlockDiscovery, TMempoolFacade>>,
+    pub block_pool: Arc<BlockPool<TBlockDiscovery, TMempoolFacade>>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
@@ -43,15 +42,14 @@ where
     pub sync_state: SyncState,
     /// Tracing span
     pub span: Span,
-    pub execution_payload_provider: ExecutionPayloadProvider<TPeerList>,
+    pub execution_payload_provider: ExecutionPayloadProvider,
 }
 
-impl<M, B, A, P> Clone for GossipServerDataHandler<M, B, A, P>
+impl<M, B, A> Clone for GossipServerDataHandler<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     fn clone(&self) -> Self {
         Self {
@@ -68,12 +66,11 @@ where
     }
 }
 
-impl<M, B, A, P> GossipServerDataHandler<M, B, A, P>
+impl<M, B, A> GossipServerDataHandler<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     pub(crate) async fn handle_chunk(
         &self,

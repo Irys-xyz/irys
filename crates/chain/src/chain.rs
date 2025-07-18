@@ -32,7 +32,7 @@ use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochRepl
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
     BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListGuard, PeerListService,
-    PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
+    ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -101,8 +101,7 @@ pub struct IrysNodeCtx {
     pub sync_state: SyncState,
     pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
-    pub block_pool:
-        Arc<BlockPool<PeerListServiceFacade, BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
+    pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
 }
 
@@ -919,7 +918,7 @@ impl IrysNode {
             .expect("to get peer list guard");
 
         let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list_service.clone(),
+            peer_list_guard.clone(),
             reth_node_adapter.clone().into(),
         );
 
@@ -1522,7 +1521,7 @@ fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
-) -> (PeerListServiceFacade, Arbiter) {
+) -> (Addr<PeerListService>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
     let peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
     let peer_list_service =

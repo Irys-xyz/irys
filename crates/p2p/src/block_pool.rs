@@ -1,6 +1,6 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::{PeerList, PeerListDataError, PeerListFacadeError};
+use crate::peer_list::{PeerListDataError, PeerListFacadeError};
 use crate::{PeerListGuard, SyncState};
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
@@ -65,9 +65,8 @@ impl From<PeerListDataError> for BlockPoolError {
 }
 
 #[derive(Debug, Clone)]
-pub struct BlockPool<P, B, M>
+pub struct BlockPool<B, M>
 where
-    P: PeerList,
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
@@ -83,7 +82,7 @@ where
     sync_state: SyncState,
 
     block_status_provider: BlockStatusProvider,
-    execution_payload_provider: ExecutionPayloadProvider<P>,
+    execution_payload_provider: ExecutionPayloadProvider,
 
     vdf_state: VdfStateReadonly,
 
@@ -224,9 +223,8 @@ impl BlockCacheInner {
     }
 }
 
-impl<P, B, M> BlockPool<P, B, M>
+impl<B, M> BlockPool<B, M>
 where
-    P: PeerList,
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
@@ -237,7 +235,7 @@ where
         mempool: M,
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
-        execution_payload_provider: ExecutionPayloadProvider<P>,
+        execution_payload_provider: ExecutionPayloadProvider,
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,

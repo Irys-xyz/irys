@@ -305,7 +305,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
-    pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
+    pub execution_payload_provider: ExecutionPayloadProvider,
     pub config: Config,
     pub vdf_state_stub: VdfStateReadonly,
     pub service_senders: ServiceSenders,
@@ -356,6 +356,7 @@ impl GossipServiceTestFixture {
             ApiClientStub::new(),
             reth_service_addr,
         );
+        let peer_list_data_guard = peer_service.peer_list_data_guard.clone();
         let peer_list = peer_service.start();
 
         let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
@@ -377,7 +378,7 @@ impl GossipServiceTestFixture {
 
         let mocked_execution_payloads = Arc::new(RwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list.clone(),
+            peer_list_data_guard,
             RethBlockProvider::Mock(mocked_execution_payloads),
         );
 

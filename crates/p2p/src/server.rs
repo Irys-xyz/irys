@@ -2,7 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list::{PeerList, ScoreDecreaseReason};
+use crate::peer_list::ScoreDecreaseReason;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
@@ -25,23 +25,21 @@ use std::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B, A, P>
+pub(crate) struct GossipServer<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
-    data_handler: GossipServerDataHandler<M, B, A, P>,
+    data_handler: GossipServerDataHandler<M, B, A>,
     peer_list: PeerListGuard,
 }
 
-impl<M, B, A, P> Clone for GossipServer<M, B, A, P>
+impl<M, B, A> Clone for GossipServer<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     fn clone(&self) -> Self {
         Self {
@@ -51,15 +49,14 @@ where
     }
 }
 
-impl<M, B, A, P> GossipServer<M, B, A, P>
+impl<M, B, A> GossipServer<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, B, A, P>,
+        gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
         peer_list: PeerListGuard,
     ) -> Self {
         Self {
