@@ -152,9 +152,9 @@ where
     ) -> Result<Option<u64>, BlockExecutionError> {
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
-        let rlp_decoded_shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..]);
+        let decoded_shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..]);
 
-        let Ok(shadow_tx) = rlp_decoded_shadow_tx else {
+        let Ok(shadow_tx) = decoded_shadow_tx else {
             // if the tx is not a shadow tx, execute it as a regular transaction
             return self
                 .inner

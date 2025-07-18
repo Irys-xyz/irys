@@ -17,7 +17,6 @@ use alloy_consensus::TxLegacy;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, TxKind, U256};
 pub use alloy_rlp;
-use alloy_rlp::{Decodable as _, Encodable as _};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
@@ -72,9 +71,9 @@ pub mod shadow_tx;
 
 #[must_use]
 pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLegacy {
-    // allocate 512 bytes for the shadow tx rlp, misc optimisation
-    let mut shadow_tx_rlp = Vec::with_capacity(512);
-    shadow_tx.encode(&mut shadow_tx_rlp);
+    // allocate 512 bytes for the shadow tx encoding, misc optimisation
+    let mut shadow_tx_buf = Vec::with_capacity(512);
+    shadow_tx.encode(&mut shadow_tx_buf).expect("encode shadow tx");
     TxLegacy {
         // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
@@ -85,7 +84,7 @@ pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLega
         gas_price: DEFAULT_TX_FEE_CAP_WEI,
         chain_id: Some(chain_id),
         to: TxKind::Call(Address::ZERO),
-        input: shadow_tx_rlp.into(),
+        input: shadow_tx_buf.into(),
     }
 }
 
