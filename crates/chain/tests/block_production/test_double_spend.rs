@@ -164,7 +164,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let _new_anchor_stake_for_mempool = node.post_stake_commitment(block8.block_hash).await;
     // ensure mempool does not accept either of the above two txs
     // i.e. mempool should have rejected both stakes as the node has been staked since epoch
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait.try_into()?)
+    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait.try_into()?)
         .await?;
 
     // finally, mine block to ensure block is valid
