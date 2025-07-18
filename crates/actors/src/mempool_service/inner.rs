@@ -266,8 +266,6 @@ impl Inner {
             last_block.height
         );
 
-        // TODO: This approach should be applied to data TX and commitment TX should instead
-        // be checked for prior inclusion using the Commitment State and current Commitment Snapshot
         for entry in canonical.iter() {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
@@ -319,6 +317,25 @@ impl Inner {
                     continue;
                 }
 
+                // signer stake status check
+                if tx.commitment_type == CommitmentType::Stake {
+                    let epoch_snapshot = self
+                        .block_tree_read_guard
+                        .read()
+                        .get_epoch_snapshot(&last_block.block_hash)
+                        .expect("parent blocks epoch_snapshot should be retrievable");
+                    let is_staked = epoch_snapshot.is_staked(tx.signer);
+                    tracing::error!(
+                        "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
+                        tx.id,
+                        tx.signer,
+                        is_staked
+                    );
+                    if is_staked {
+                        // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
+                        continue;
+                    }
+                }
                 // simulation check
                 {
                     let is_staked = self
