@@ -155,7 +155,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     // re post existing stake commitment, that also uses the same anchor as the previous stake tx
     // this should be rejected by the mempool and not ingress the mempool
-    //let _duplicate_stake_for_mempool = node.post_stake_commitment(block2.block_hash).await; // <-- FIXME: this needs to bubble up the expected 400 error and not panic
+    //let _duplicate_stake_for_mempool = node.post_stake_commitment(block2.block_hash).await; // <-- todo: this needs to bubble up the expected 400 error and not panic
 
     // re post existing stake commitment tx that will be skipped by mempool ingress as this node is already staked
     // use a recent anchor, or we will hit an invalid anchor error due to anchor timeout
