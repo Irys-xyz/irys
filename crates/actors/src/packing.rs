@@ -25,7 +25,7 @@ pub struct PackingRequest {
 }
 
 pub type AtomicPackingJobQueue = Arc<RwLock<VecDeque<PackingRequest>>>;
-pub type PackingJobsBySM = HashMap<usize, AtomicPackingJobQueue>;
+pub type PackingJobsBySM = Arc<HashMap<usize, AtomicPackingJobQueue>>;
 
 pub type PackingSemaphore = Arc<Semaphore>;
 
@@ -69,10 +69,12 @@ impl PackingActor {
     /// creates a new packing actor
     pub fn new(storage_module_ids: Vec<usize>, config: PackingConfig) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.concurrency.into()));
-        let pending_jobs = storage_module_ids
-            .iter()
-            .map(|s| (*s, Arc::new(RwLock::new(VecDeque::with_capacity(32)))))
-            .collect();
+        let pending_jobs = Arc::new(
+            storage_module_ids
+                .iter()
+                .map(|s| (*s, Arc::new(RwLock::new(VecDeque::with_capacity(32)))))
+                .collect(),
+        );
 
         Self {
             pending_jobs,
@@ -346,9 +348,9 @@ pub struct GetInternals();
 
 #[derive(Debug, MessageResponse, Clone)]
 pub struct Internals {
-    pending_jobs: PackingJobsBySM,
-    semaphore: PackingSemaphore,
-    config: PackingConfig,
+    pub pending_jobs: PackingJobsBySM,
+    pub semaphore: PackingSemaphore,
+    pub config: PackingConfig,
 }
 
 impl Handler<GetInternals> for PackingActor {
