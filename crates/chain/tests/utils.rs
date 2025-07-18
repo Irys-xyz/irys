@@ -1631,7 +1631,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             Ok(r) => r,
             Err(e) => {
                 error!("Failed to post commitment transaction: {e}");
-                return Err(eyre::eyre!("Failed to post commitment transaction: {e}"));
+                return Err(eyre::eyre!(
+                    "Failed to post commitment transaction {}: {e}",
+                    &commitment_tx.id
+                ));
             }
         };
 
