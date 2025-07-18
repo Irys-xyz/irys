@@ -3,7 +3,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, H256};
 
 #[actix_web::test]
-/// demonstrate that duplicate txs are allowed into mempool, to allwo for forks, but not returned by handle_get_best_mempool_txs()
+/// demonstrate that duplicate txs are allowed into mempool, to allow for forks, but not returned by handle_get_best_mempool_txs()
 /// demonstrate that duplicate txs are blocked from mempool ingress when tx is in database after block migration
 async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()> {
     initialize_tracing();
