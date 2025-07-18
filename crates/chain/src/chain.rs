@@ -1668,7 +1668,13 @@ async fn stake_and_pledge(
 
     for idx in 0..to_pledge_count {
         // post a pledge tx
-        let pledge_tx = CommitmentTransaction::new_pledge(&config.consensus, last_tx_id, 1);
+        let pledge_tx = CommitmentTransaction::new_pledge(
+            &config.consensus,
+            last_tx_id,
+            1,
+            commitment_snapshot.as_ref(),
+            address,
+        );
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();

@@ -103,7 +103,10 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // ===== TEST CASE 3: post duplicate pledge tx =====
-    let pledge_tx = CommitmentTransaction::new_pledge(&consensus, anchor, 1);
+    use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
+    let empty_snapshot = CommitmentSnapshot::default();
+    let pledge_tx =
+        CommitmentTransaction::new_pledge(&consensus, anchor, 1, &empty_snapshot, signer.address());
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
 
     // Post pledge commitment

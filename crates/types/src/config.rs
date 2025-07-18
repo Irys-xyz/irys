@@ -150,12 +150,19 @@ pub struct ConsensusConfig {
     )]
     pub stake_fee: Amount<Irys>,
 
-    /// Fee required for pledging operations in Irys tokens
+    /// Base fee required for pledging operations in Irys tokens
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
     )]
-    pub pledge_fee: Amount<Irys>,
+    pub pledge_base_fee: Amount<Irys>,
+
+    /// Decay rate for pledge fees - subsequent pledges become cheaper
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
+    pub pledge_decay: Amount<Percentage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -621,7 +628,8 @@ impl ConsensusConfig {
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
             stake_fee: Amount::token(dec!(0.1)).expect("valid token amount"),
-            pledge_fee: Amount::token(dec!(0.1)).expect("valid token amount"),
+            pledge_base_fee: Amount::token(dec!(0.1)).expect("valid token amount"),
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
         }
     }
 }
@@ -936,7 +944,8 @@ mod tests {
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
         stake_fee = 0.1
-        pledge_fee = 0.1
+        pledge_base_fee = 0.1
+        pledge_decay = 0.9
 
         [reth]
         chain = 1270

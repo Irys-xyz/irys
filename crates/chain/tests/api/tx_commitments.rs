@@ -375,7 +375,15 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address
-    let pledge_tx = CommitmentTransaction::new_pledge(consensus, H256::default(), 1);
+    use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
+    let empty_snapshot = CommitmentSnapshot::default();
+    let pledge_tx = CommitmentTransaction::new_pledge(
+        consensus,
+        H256::default(),
+        1,
+        &empty_snapshot,
+        signer.address(),
+    );
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -416,7 +424,13 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
 
     // Create a pledge for the unstaked address
-    let pledge_tx = CommitmentTransaction::new_pledge(consensus, H256::default(), 1);
+    let pledge_tx = CommitmentTransaction::new_pledge(
+        consensus,
+        H256::default(),
+        1,
+        &empty_snapshot,
+        signer2.address(),
+    );
     let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -463,7 +477,11 @@ async fn post_pledge_commitment(
     anchor: H256,
 ) -> CommitmentTransaction {
     let consensus = &node.node_ctx.config.consensus;
-    let pledge_tx = CommitmentTransaction::new_pledge(consensus, anchor, 1);
+    // For tests, use empty provider
+    use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
+    let empty_snapshot = CommitmentSnapshot::default();
+    let pledge_tx =
+        CommitmentTransaction::new_pledge(consensus, anchor, 1, &empty_snapshot, signer.address());
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 

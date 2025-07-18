@@ -1543,8 +1543,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let config = &self.node_ctx.config.consensus;
-        let pledge_tx = CommitmentTransaction::new_pledge(config, anchor, 1);
         let signer = self.cfg.signer();
+        // For tests, use empty commitment snapshot
+        let empty_snapshot =
+            irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot::default();
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(config, anchor, 1, &empty_snapshot, signer.address());
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
@@ -2019,7 +2023,10 @@ pub fn new_stake_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction
 
 pub fn new_pledge_tx(anchor: &H256, signer: &IrysSigner) -> CommitmentTransaction {
     let config = ConsensusConfig::testnet();
-    let pledge_tx = CommitmentTransaction::new_pledge(&config, *anchor, 1);
+    // For tests, use empty commitment snapshot
+    let empty_snapshot = irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot::default();
+    let pledge_tx =
+        CommitmentTransaction::new_pledge(&config, *anchor, 1, &empty_snapshot, signer.address());
     signer.sign_commitment(pledge_tx).unwrap()
 }
 

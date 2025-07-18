@@ -1,11 +1,21 @@
 use eyre::eyre;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, Compact, Config, H256List, IrysBlockHeader,
-    SystemTransactionLedger, H256,
+    irys::IrysSigner, transaction::PledgeDataProvider, Address, CommitmentTransaction, Compact,
+    Config, H256List, IrysBlockHeader, SystemTransactionLedger, H256,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
+
+/// Empty pledge data provider for genesis block creation
+struct EmptyPledgeProvider;
+
+impl PledgeDataProvider for EmptyPledgeProvider {
+    fn pledge_count(&self, _user_address: Address) -> usize {
+        0
+    }
+}
+
 /// Names for each of the system ledgers as well as their `ledger_id` discriminant
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
@@ -102,7 +112,15 @@ fn create_pledge_commitment_transaction(
     anchor: H256,
     config: &Config,
 ) -> CommitmentTransaction {
-    let pledge_commitment = CommitmentTransaction::new_pledge(&config.consensus, anchor, 1);
+    // For genesis block, use empty provider
+    let empty_provider = EmptyPledgeProvider;
+    let pledge_commitment = CommitmentTransaction::new_pledge(
+        &config.consensus,
+        anchor,
+        1,
+        &empty_provider,
+        signer.address(),
+    );
 
     signer
         .sign_commitment(pledge_commitment)

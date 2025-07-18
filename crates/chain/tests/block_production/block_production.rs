@@ -834,7 +834,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Calculate expected balance change based on consensus config
     let consensus_config = genesis_config.consensus_config();
     let stake_fee_amount = consensus_config.stake_fee.amount; // 0.1 token = 10^17 in U256
-    let pledge_fee_amount = consensus_config.pledge_fee.amount; // 0.1 token = 10^17 in U256
+    let pledge_fee_amount = consensus_config.pledge_base_fee.amount; // 0.1 token = 10^17 in U256
 
     // Each commitment transaction has:
     // - fee: DEFAULT_TX_FEE (passed to post_stake_commitment and post_pledge_commitment)
@@ -940,8 +940,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         // Expected amount is DEFAULT_TX_FEE + pledge_fee.amount (0.1 token = 10^17)
-        let expected_pledge_amount =
-            DEFAULT_TX_FEE + U256::from_le_bytes(consensus_config.pledge_fee.amount.to_le_bytes());
+        let expected_pledge_amount = DEFAULT_TX_FEE
+            + U256::from_le_bytes(consensus_config.pledge_base_fee.amount.to_le_bytes());
         assert_eq!(
             bd.amount, expected_pledge_amount,
             "Pledge amount should be fee + pledge_fee.amount"

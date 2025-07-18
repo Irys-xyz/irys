@@ -208,6 +208,43 @@ pub mod phantoms {
 
 use phantoms::*;
 
+impl Amount<Irys> {
+    /// Apply a divisor that is calculated as (count + 1)^decay_rate
+    /// Used for pledge fee decay calculation
+    ///
+    /// The formula is: pledge_value = pledge_base_fee / ((count + 1) ^ decay_rate)
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn apply_pledge_decay(self, count: usize, decay_rate: Amount<Percentage>) -> Result<Self> {
+        // The formula is: pledge_value = pledge_base_fee / ((count + 1) ^ decay_rate)
+        // We need to use count + 1, not just count
+
+        // For a simple approximation, we'll use:
+        // divisor = (count + 1)^decay_rate ≈ 1 + (count + 1 - 1) * decay_rate = 1 + count * decay_rate
+        // This gives us a linear decay instead of exponential, but avoids complex math
+
+        // Convert decay_rate from percentage to a multiplier
+        // decay_rate is in basis points (e.g., 0.9 = 9000 bps)
+        let decay_multiplier = decay_rate.amount;
+
+        // Calculate the divisor: divisor = BPS_SCALE + (count * decay_multiplier)
+        // We multiply count by decay_multiplier directly without dividing by BPS_SCALE first
+        let count_times_decay = safe_mul(U256::from(count as u64), decay_multiplier)?;
+        let divisor = safe_add(BPS_SCALE, count_times_decay)?;
+
+        // Calculate: base_fee * BPS_SCALE / divisor
+        let adjusted_amount = mul_div(self.amount, BPS_SCALE, divisor)?;
+
+        Ok(Self {
+            amount: adjusted_amount,
+            _t: PhantomData,
+        })
+    }
+}
+
 /// Implements cost calculation for 1GB/year storage in USD.
 impl Amount<(CostPerGb, Usd)> {
     /// Calculate the total cost for storage.

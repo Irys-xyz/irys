@@ -62,9 +62,17 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     }
 
     if pledges > 0 {
+        use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
+        let empty_snapshot = CommitmentSnapshot::default();
         let mut anchor = H256::zero();
         for _idx in 0..pledges {
-            let pledge_tx = CommitmentTransaction::new_pledge(&config, anchor, 1);
+            let pledge_tx = CommitmentTransaction::new_pledge(
+                &config,
+                anchor,
+                1,
+                &empty_snapshot,
+                peer_signer.address(),
+            );
             let pledge_tx = peer_signer.sign_commitment(pledge_tx)?;
             debug!("pledge: {}", &pledge_tx.id);
 

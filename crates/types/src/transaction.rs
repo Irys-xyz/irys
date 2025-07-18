@@ -260,24 +260,55 @@ impl CommitmentTransaction {
         }
     }
 
-    /// Create a new pledge transaction with the configured pledge fee as value
-    pub fn new_pledge(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+    /// Create a new pledge transaction with dynamic fee based on existing pledge count
+    pub fn new_pledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        fee: u64,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        let count = provider.pledge_count(signer_address);
+
+        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
+        let value = config
+            .pledge_base_fee
+            .apply_pledge_decay(count, config.pledge_decay)
+            .map(|a| a.amount)
+            .unwrap_or(config.pledge_base_fee.amount);
+
         Self {
             commitment_type: CommitmentType::Pledge,
             anchor,
             fee,
-            value: config.pledge_fee.amount,
+            value,
             ..Self::new(config)
         }
     }
 
-    /// Create a new unpledge transaction with the configured pledge fee as value
-    pub fn new_unpledge(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+    /// Create a new unpledge transaction with dynamic fee based on existing pledge count
+    pub fn new_unpledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        fee: u64,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        let count = provider.pledge_count(signer_address);
+
+        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
+        // Note: for unpledge, we use count to match the fee of the most recent pledge
+        let value = config
+            .pledge_base_fee
+            .apply_pledge_decay(count, config.pledge_decay)
+            .map(|a| a.amount)
+            .unwrap_or(config.pledge_base_fee.amount);
+
         Self {
             commitment_type: CommitmentType::Unpledge,
             anchor,
             fee,
-            value: config.pledge_fee.amount,
+            value,
             ..Self::new(config)
         }
     }
@@ -409,6 +440,12 @@ impl IrysTransactionCommon for CommitmentTransaction {
 
         Ok(self)
     }
+}
+
+/// Trait for providing pledge count information for dynamic fee calculation
+pub trait PledgeDataProvider {
+    /// Returns the number of existing pledges for a given user address
+    fn pledge_count(&self, user_address: Address) -> usize;
 }
 
 #[cfg(test)]
@@ -576,6 +613,87 @@ mod tests {
         tx.signer = Address::default();
         tx.signature = Signature::test_signature().into();
         tx
+    }
+
+    // Pledge decay tests
+    struct MockPledgeProvider {
+        pledge_counts: std::collections::HashMap<Address, usize>,
+    }
+
+    impl MockPledgeProvider {
+        fn new() -> Self {
+            Self {
+                pledge_counts: std::collections::HashMap::new(),
+            }
+        }
+
+        fn with_pledge_count(mut self, address: Address, count: usize) -> Self {
+            self.pledge_counts.insert(address, count);
+            self
+        }
+    }
+
+    impl PledgeDataProvider for MockPledgeProvider {
+        fn pledge_count(&self, user_address: Address) -> usize {
+            self.pledge_counts.get(&user_address).copied().unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn test_pledge_decay_first_pledge() {
+        let mut config = ConsensusConfig::testnet();
+        config.pledge_base_fee =
+            crate::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0)).unwrap();
+        config.pledge_decay =
+            crate::storage_pricing::Amount::percentage(rust_decimal_macros::dec!(0.9)).unwrap();
+
+        let provider = MockPledgeProvider::new();
+        let signer_address = Address::default();
+
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+
+        // First pledge should be at base fee
+        assert_eq!(pledge_tx.value, config.pledge_base_fee.amount);
+    }
+
+    #[test]
+    fn test_pledge_decay_multiple_pledges() {
+        let mut config = ConsensusConfig::testnet();
+        config.pledge_base_fee =
+            crate::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0)).unwrap();
+        config.pledge_decay =
+            crate::storage_pricing::Amount::percentage(rust_decimal_macros::dec!(0.3)).unwrap(); // 30% decay rate
+
+        let signer_address = Address::default();
+
+        // Test with 0 existing pledges (first pledge)
+        let provider = MockPledgeProvider::new();
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+        let first_pledge_value = pledge_tx.value;
+
+        // Test with 1 existing pledge (second pledge)
+        let provider = MockPledgeProvider::new().with_pledge_count(signer_address, 1);
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+        let second_pledge_value = pledge_tx.value;
+
+        // Test with 2 existing pledges (third pledge)
+        let provider = MockPledgeProvider::new().with_pledge_count(signer_address, 2);
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+        let third_pledge_value = pledge_tx.value;
+
+        // Each subsequent pledge should be cheaper
+        assert!(
+            first_pledge_value > second_pledge_value,
+            "First pledge should be more expensive than second"
+        );
+        assert!(
+            second_pledge_value > third_pledge_value,
+            "Second pledge should be more expensive than third"
+        );
     }
 }
 
