@@ -1,5 +1,4 @@
 use crate::block_pool::BlockPoolError;
-use crate::peer_list::PeerListFacadeError;
 use irys_actors::mempool_service::TxIngressError;
 use irys_types::{BlockHash, H256};
 use reth::revm::primitives::B256;
@@ -23,19 +22,6 @@ pub enum GossipError {
     BlockPool(BlockPoolError),
     #[error("Transaction has already been handled")]
     TransactionIsAlreadyHandled,
-}
-
-impl From<PeerListFacadeError> for GossipError {
-    fn from(error: PeerListFacadeError) -> Self {
-        match error {
-            PeerListFacadeError::InternalError(err) => {
-                Self::Internal(InternalGossipError::Unknown(err))
-            }
-            PeerListFacadeError::ServiceError(err) => {
-                Self::Internal(InternalGossipError::Unknown(format!("{:?}", err)))
-            }
-        }
-    }
 }
 
 impl From<InternalGossipError> for GossipError {

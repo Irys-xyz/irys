@@ -9,8 +9,8 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
-use irys_p2p::{PeerListGuard, SyncState};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerListGuard};
+use irys_p2p::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};

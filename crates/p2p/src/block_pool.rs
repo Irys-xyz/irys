@@ -1,7 +1,6 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::{PeerListDataError, PeerListFacadeError};
-use crate::{PeerListGuard, SyncState};
+use crate::SyncState;
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
@@ -9,6 +8,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::{PeerListDataError, PeerListGuard};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
     IrysBlockHeader,
@@ -50,12 +50,6 @@ pub enum BlockPoolError {
     ForkChoiceFailed(String),
     #[error("Previous block {0:?} not found")]
     PreviousBlockNotFound(BlockHash),
-}
-
-impl From<PeerListFacadeError> for BlockPoolError {
-    fn from(err: PeerListFacadeError) -> Self {
-        Self::OtherInternal(format!("Peer list error: {:?}", err))
-    }
 }
 
 impl From<PeerListDataError> for BlockPoolError {

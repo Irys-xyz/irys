@@ -1,6 +1,7 @@
-use crate::{GossipError, GossipResult, PeerListGuard};
+use crate::{GossipError, GossipResult};
 use base58::ToBase58 as _;
 use irys_api_client::ApiClient;
+use irys_domain::PeerListGuard;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
 use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;

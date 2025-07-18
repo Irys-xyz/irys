@@ -1,11 +1,10 @@
 use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::ScoreDecreaseReason;
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     sync::SyncState,
     types::{GossipDataRequest, InternalGossipError, InvalidDataError},
-    GossipClient, GossipError, GossipResult, PeerListGuard,
+    GossipClient, GossipError, GossipResult,
 };
 use alloy_core::primitives::keccak256;
 use base58::ToBase58 as _;
@@ -15,6 +14,7 @@ use irys_actors::{
     mempool_service::{ChunkIngressError, MempoolFacade},
 };
 use irys_api_client::ApiClient;
+use irys_domain::{PeerListGuard, ScoreDecreaseReason};
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipRequest,
     IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,

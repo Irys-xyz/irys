@@ -28,10 +28,12 @@ use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
-use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData};
+use irys_domain::{
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, PeerListGuard,
+};
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListGuard, PeerListService,
+    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListService,
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};

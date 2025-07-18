@@ -1,8 +1,8 @@
-use crate::PeerListGuard;
 use alloy_rpc_types::engine::ExecutionData;
 use async_trait::async_trait;
 use irys_actors::block_validation::{shadow_transactions_are_valid, PayloadProvider};
 use irys_actors::services::ServiceSenders;
+use irys_domain::PeerListGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{Config, DatabaseProvider, IrysBlockHeader};
 use lru::LruCache;

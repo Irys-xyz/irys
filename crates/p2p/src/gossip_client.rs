@@ -2,10 +2,9 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list::{ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
-use crate::PeerListGuard;
 use core::time::Duration;
+use irys_domain::{PeerListGuard, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{Address, GossipData, GossipRequest, PeerAddress, PeerListItem};
 use reqwest::Client;
 use reqwest::Response;

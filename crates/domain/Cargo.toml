@@ -21,6 +21,8 @@ base58.workspace = true
 reth-db.workspace = true
 rust_decimal.workspace = true
 tokio.workspace = true
+thiserror.workspace = true
+alloy-core.workspace = true
 
 [dev-dependencies]
 test-log.workspace = true

@@ -16,13 +16,14 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    PeerListGuard, SyncState,
+    SyncState,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
+use irys_domain::PeerListGuard;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
 use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
