@@ -13,10 +13,7 @@ use alloy_primitives::keccak256;
 use alloy_primitives::Address;
 use alloy_primitives::FixedBytes;
 use alloy_primitives::U256;
-use alloy_rlp::Decodable;
-use alloy_rlp::Encodable;
-use alloy_rlp::{RlpDecodable, RlpEncodable};
-use bytes;
+use std::io::Write;
 use std::sync::LazyLock;
 
 /// Version constants for ShadowTransaction
@@ -127,138 +124,80 @@ pub const STORAGE_FEES_ID: u8 = 0x04;
 pub const PLEDGE_ID: u8 = 0x05;
 pub const UNPLEDGE_ID: u8 = 0x06;
 
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "length calculation is safe for small values"
-)]
-impl Encodable for ShadowTransaction {
-    fn length(&self) -> usize {
-        1 + // version byte
-        match self {
-            Self::V1 { packet } => packet.length()
-        }
-    }
-
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
+impl ShadowTransaction {
+    pub fn encode<W: Write>(&self, mut w: W) -> std::io::Result<()> {
         match self {
             Self::V1 { packet } => {
-                out.put_u8(SHADOW_TX_VERSION_V1);
-                packet.encode(out);
+                w.write_all(&[SHADOW_TX_VERSION_V1])?;
+                packet.encode(&mut w)
             }
         }
     }
-}
 
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "length calculation is safe for small values"
-)]
-impl Encodable for TransactionPacket {
-    fn length(&self) -> usize {
-        1 + match self {
-            Self::Unstake(bi) | Self::Unpledge(bi) => bi.length(),
-            Self::BlockReward(br) => br.length(),
-            Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => bd.length(),
+    pub fn decode(input: &mut &[u8]) -> std::io::Result<Self> {
+        if input.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "empty"));
         }
-    }
-
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        match self {
-            Self::Unstake(inner) => {
-                out.put_u8(UNSTAKE_ID);
-                inner.encode(out);
-            }
-            Self::BlockReward(inner) => {
-                out.put_u8(BLOCK_REWARD_ID);
-                inner.encode(out);
-            }
-            Self::Stake(inner) => {
-                out.put_u8(STAKE_ID);
-                inner.encode(out);
-            }
-            Self::StorageFees(inner) => {
-                out.put_u8(STORAGE_FEES_ID);
-                inner.encode(out);
-            }
-            Self::Pledge(inner) => {
-                out.put_u8(PLEDGE_ID);
-                inner.encode(out);
-            }
-            Self::Unpledge(inner) => {
-                out.put_u8(UNPLEDGE_ID);
-                inner.encode(out);
-            }
-        }
-    }
-}
-
-#[expect(
-    clippy::indexing_slicing,
-    reason = "buffer bounds are checked before indexing"
-)]
-impl Decodable for ShadowTransaction {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::InputTooShort);
-        }
-        let version = buf[0];
-        *buf = &buf[1..]; // advance past the version byte
-
+        let version = input[0];
+        *input = &input[1..];
         match version {
             SHADOW_TX_VERSION_V1 => {
-                let packet = TransactionPacket::decode(buf)?;
+                let packet = TransactionPacket::decode(input)?;
                 Ok(Self::V1 { packet })
             }
-            _ => Err(alloy_rlp::Error::Custom(
-                "Unknown shadow transaction version",
-            )),
+            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unknown version")),
         }
     }
 }
 
-#[expect(
-    clippy::indexing_slicing,
-    reason = "buffer bounds are checked before indexing"
-)]
-impl Decodable for TransactionPacket {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::InputTooShort);
+impl TransactionPacket {
+    fn encode<W: Write>(&self, mut w: W) -> std::io::Result<()> {
+        match self {
+            Self::Unstake(inner) => {
+                w.write_all(&[UNSTAKE_ID])?;
+                inner.encode(&mut w)
+            }
+            Self::BlockReward(inner) => {
+                w.write_all(&[BLOCK_REWARD_ID])?;
+                inner.encode(&mut w)
+            }
+            Self::Stake(inner) => {
+                w.write_all(&[STAKE_ID])?;
+                inner.encode(&mut w)
+            }
+            Self::StorageFees(inner) => {
+                w.write_all(&[STORAGE_FEES_ID])?;
+                inner.encode(&mut w)
+            }
+            Self::Pledge(inner) => {
+                w.write_all(&[PLEDGE_ID])?;
+                inner.encode(&mut w)
+            }
+            Self::Unpledge(inner) => {
+                w.write_all(&[UNPLEDGE_ID])?;
+                inner.encode(&mut w)
+            }
         }
-        let disc = buf[0];
-        *buf = &buf[1..]; // advance past the discriminant byte
+    }
 
+    fn decode(input: &mut &[u8]) -> std::io::Result<Self> {
+        if input.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "empty"));
+        }
+        let disc = input[0];
+        *input = &input[1..];
         match disc {
-            UNSTAKE_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
-                Ok(Self::Unstake(inner))
-            }
-            BLOCK_REWARD_ID => {
-                let inner = BlockRewardIncrement::decode(buf)?;
-                Ok(Self::BlockReward(inner))
-            }
-            STAKE_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(Self::Stake(inner))
-            }
-            STORAGE_FEES_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(Self::StorageFees(inner))
-            }
-            PLEDGE_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(Self::Pledge(inner))
-            }
-            UNPLEDGE_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
-                Ok(Self::Unpledge(inner))
-            }
-            _ => Err(alloy_rlp::Error::Custom(
-                "Unknown shadow transaction discriminant",
-            )),
+            UNSTAKE_ID => Ok(Self::Unstake(BalanceIncrement::decode(input)?)),
+            BLOCK_REWARD_ID => Ok(Self::BlockReward(BlockRewardIncrement::decode(input)?)),
+            STAKE_ID => Ok(Self::Stake(BalanceDecrement::decode(input)?)),
+            STORAGE_FEES_ID => Ok(Self::StorageFees(BalanceDecrement::decode(input)?)),
+            PLEDGE_ID => Ok(Self::Pledge(BalanceDecrement::decode(input)?)),
+            UNPLEDGE_ID => Ok(Self::Unpledge(BalanceIncrement::decode(input)?)),
+            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unknown packet")),
         }
     }
 }
+
 
 #[expect(
     clippy::unimplemented,
@@ -291,8 +230,6 @@ impl Default for TransactionPacket {
     PartialOrd,
     Ord,
     Default,
-    RlpEncodable,
-    RlpDecodable,
     arbitrary::Arbitrary,
 )]
 pub struct BalanceDecrement {
@@ -315,8 +252,6 @@ pub struct BalanceDecrement {
     PartialOrd,
     Ord,
     Default,
-    RlpEncodable,
-    RlpDecodable,
     arbitrary::Arbitrary,
 )]
 pub struct BalanceIncrement {
@@ -339,8 +274,6 @@ pub struct BalanceIncrement {
     PartialOrd,
     Ord,
     Default,
-    RlpEncodable,
-    RlpDecodable,
     arbitrary::Arbitrary,
 )]
 pub struct BlockRewardIncrement {
@@ -348,4 +281,91 @@ pub struct BlockRewardIncrement {
     pub amount: U256,
     /// Target account address.
     pub target: Address,
+}
+
+impl BalanceDecrement {
+    fn encode<W: Write>(&self, mut w: W) -> std::io::Result<()> {
+        w.write_all(&self.amount.to_le_bytes::<32>())?;
+        w.write_all(self.target.as_slice())?;
+        w.write_all(self.irys_ref.as_slice())?;
+        Ok(())
+    }
+
+    fn decode(input: &mut &[u8]) -> std::io::Result<Self> {
+        if input.len() < 84 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short"));
+        }
+        let mut amount_bytes = [0u8; 32];
+        amount_bytes.copy_from_slice(&input[..32]);
+        *input = &input[32..];
+        let amount = U256::from_le_bytes(amount_bytes);
+
+        let mut addr_bytes = [0u8; 20];
+        addr_bytes.copy_from_slice(&input[..20]);
+        *input = &input[20..];
+        let target = Address(FixedBytes::from_slice(&addr_bytes));
+
+        let mut ref_bytes = [0u8; 32];
+        ref_bytes.copy_from_slice(&input[..32]);
+        *input = &input[32..];
+        let irys_ref = FixedBytes::from_slice(&ref_bytes);
+
+        Ok(Self { amount, target, irys_ref })
+    }
+}
+
+impl BalanceIncrement {
+    fn encode<W: Write>(&self, mut w: W) -> std::io::Result<()> {
+        w.write_all(&self.amount.to_le_bytes::<32>())?;
+        w.write_all(self.target.as_slice())?;
+        w.write_all(self.irys_ref.as_slice())?;
+        Ok(())
+    }
+
+    fn decode(input: &mut &[u8]) -> std::io::Result<Self> {
+        if input.len() < 84 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short"));
+        }
+        let mut amount_bytes = [0u8; 32];
+        amount_bytes.copy_from_slice(&input[..32]);
+        *input = &input[32..];
+        let amount = U256::from_le_bytes(amount_bytes);
+
+        let mut addr_bytes = [0u8; 20];
+        addr_bytes.copy_from_slice(&input[..20]);
+        *input = &input[20..];
+        let target = Address(FixedBytes::from_slice(&addr_bytes));
+
+        let mut ref_bytes = [0u8; 32];
+        ref_bytes.copy_from_slice(&input[..32]);
+        *input = &input[32..];
+        let irys_ref = FixedBytes::from_slice(&ref_bytes);
+
+        Ok(Self { amount, target, irys_ref })
+    }
+}
+
+impl BlockRewardIncrement {
+    fn encode<W: Write>(&self, mut w: W) -> std::io::Result<()> {
+        w.write_all(&self.amount.to_le_bytes::<32>())?;
+        w.write_all(self.target.as_slice())?;
+        Ok(())
+    }
+
+    fn decode(input: &mut &[u8]) -> std::io::Result<Self> {
+        if input.len() < 52 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short"));
+        }
+        let mut amount_bytes = [0u8; 32];
+        amount_bytes.copy_from_slice(&input[..32]);
+        *input = &input[32..];
+        let amount = U256::from_le_bytes(amount_bytes);
+
+        let mut addr_bytes = [0u8; 20];
+        addr_bytes.copy_from_slice(&input[..20]);
+        *input = &input[20..];
+        let target = Address(FixedBytes::from_slice(&addr_bytes));
+
+        Ok(Self { amount, target })
+    }
 }
