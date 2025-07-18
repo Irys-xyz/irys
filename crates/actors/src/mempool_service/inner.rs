@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
-use irys_domain::BlockTreeReadGuard;
+use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
@@ -260,14 +260,13 @@ impl Inner {
 
         // Get a list of all recently confirmed commitment txids in the canonical chain
         let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        let last_block = canonical.last().unwrap();
         debug!(
             "best_mempool_txs: current head height {}",
-            canonical.last().unwrap().height
+            last_block.height
         );
 
-        // TODO: This approach should be applied to data TX and commitment TX should instead
-        // be checked for prior inclusion using the Commitment State and current Commitment Snapshot
-        for entry in canonical {
+        for entry in canonical.iter() {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
                 for tx_id in &commitment_tx_ids.0 {
@@ -275,6 +274,14 @@ impl Inner {
                 }
             }
         }
+
+        //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+        let mut simulation_commitment_snapshot = self
+            .block_tree_read_guard
+            .read()
+            .canonical_commitment_snapshot()
+            .as_ref()
+            .clone();
 
         // Process commitments in the mempool in priority order (stakes then pledges)
         // This order ensures stake transactions are processed before pledges
@@ -304,10 +311,55 @@ impl Inner {
                     );
                     continue; // Skip tx already confirmed in the canonical chain
                 }
-                if check_funding(&tx) {
-                    debug!("best_mempool_txs: adding commitment tx {}", tx.id);
-                    commitment_tx.push(tx);
+
+                // Check funding before simulation so we don't mutate the snapshot unnecessarily
+                if !check_funding(&tx) {
+                    continue;
                 }
+
+                // signer stake status check
+                if tx.commitment_type == CommitmentType::Stake {
+                    let epoch_snapshot = self
+                        .block_tree_read_guard
+                        .read()
+                        .get_epoch_snapshot(&last_block.block_hash)
+                        .expect("parent blocks epoch_snapshot should be retrievable");
+                    let is_staked = epoch_snapshot.is_staked(tx.signer);
+                    tracing::error!(
+                        "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
+                        tx.id,
+                        tx.signer,
+                        is_staked
+                    );
+                    if is_staked {
+                        // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
+                        continue;
+                    }
+                }
+                // simulation check
+                {
+                    let is_staked = self
+                        .block_tree_read_guard
+                        .read()
+                        .canonical_epoch_snapshot()
+                        .is_staked(tx.signer);
+
+                    let simulation = simulation_commitment_snapshot.add_commitment(&tx, is_staked);
+
+                    // skip commitments that would not be accepted
+                    if simulation != CommitmentSnapshotStatus::Accepted {
+                        tracing::error!(
+                            "tx {:?}:{:?} skipped: {:?}",
+                            tx.commitment_type,
+                            tx.id,
+                            simulation
+                        );
+                        continue;
+                    }
+                }
+
+                debug!("best_mempool_txs: adding commitment tx {}", tx.id);
+                commitment_tx.push(tx);
             }
         }
         drop(mempool_state_guard);

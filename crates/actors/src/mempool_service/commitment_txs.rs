@@ -1,6 +1,6 @@
-use crate::mempool_service::{Inner, TxReadError};
-use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
+use crate::mempool_service::{Inner, MempoolServiceMessage, TxIngressError, TxReadError};
 use base58::ToBase58 as _;
+use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionId, H256};
@@ -21,20 +21,37 @@ impl Inner {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
 
-        // Early out if we already know about this transaction (invalid)
+        // Early out if we already know about this transaction in mempool (invalid)
         if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
             return Err(TxIngressError::Skipped);
         }
 
-        // Check if the transaction already exists in valid transactions
-        let tx_exists = mempool_state_guard
+        // Early out if we already know about this transaction in mempool (recent valid)
+        if mempool_state_guard
+            .recent_valid_tx
+            .contains(&commitment_tx.id)
+        {
+            return Err(TxIngressError::Skipped);
+        }
+
+        //  Early out if the transaction already exists in valid_commitment_tx
+        if mempool_state_guard
             .valid_commitment_tx
             .get(&commitment_tx.signer)
-            .is_some_and(|txs| txs.iter().any(|c| c.id == commitment_tx.id));
+            .is_some_and(|txs| txs.iter().any(|c| c.id == commitment_tx.id))
+        {
+            return Err(TxIngressError::Skipped);
+        }
 
         drop(mempool_state_guard);
 
-        if tx_exists {
+        // Early out if we already know about this transaction in index / database
+        if self
+            .irys_db
+            .view_eyre(|dbtx| commitment_tx_by_txid(dbtx, &commitment_tx.id))
+            .map_err(|_| TxIngressError::DatabaseError)?
+            .is_some()
+        {
             return Err(TxIngressError::Skipped);
         }
 
