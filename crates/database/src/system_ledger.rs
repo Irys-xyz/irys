@@ -106,13 +106,8 @@ fn create_pledge_commitment_transaction(
     config: &Config,
     provider: &impl PledgeDataProvider,
 ) -> CommitmentTransaction {
-    let pledge_commitment = CommitmentTransaction::new_pledge(
-        &config.consensus,
-        anchor,
-        1,
-        provider,
-        signer.address(),
-    );
+    let pledge_commitment =
+        CommitmentTransaction::new_pledge(&config.consensus, anchor, 1, provider, signer.address());
 
     signer
         .sign_commitment(pledge_commitment)
@@ -180,7 +175,8 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     let mut anchor = stake_tx.id;
     let empty_provider = EmptyPledgeProvider;
     for _i in 0..num_submodules {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
+        let pledge_tx =
+            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
@@ -296,7 +292,8 @@ pub fn add_test_commitments(
 
     let empty_provider = EmptyPledgeProvider;
     for _i in 0..pledge_count {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
+        let pledge_tx =
+            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;

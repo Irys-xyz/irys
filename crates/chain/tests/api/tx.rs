@@ -7,8 +7,8 @@ use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataTransactionHeader,
-    IrysTransactionResponse, NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IrysTransactionResponse,
+    NodeConfig, H256,
 };
 use reth_db::Database as _;
 use tokio::time::Duration;

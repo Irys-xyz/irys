@@ -1,8 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, NodeConfig, H256,
-};
+use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 
 #[actix_web::test]
 async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
@@ -109,8 +107,13 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
         .block_tree_guard
         .read()
         .canonical_commitment_snapshot();
-    let pledge_tx =
-        CommitmentTransaction::new_pledge(consensus, anchor, 1, &commitment_snapshot, signer.address());
+    let pledge_tx = CommitmentTransaction::new_pledge(
+        consensus,
+        anchor,
+        1,
+        &*commitment_snapshot,
+        signer.address(),
+    );
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
 
     // Post pledge commitment

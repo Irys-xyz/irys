@@ -1006,7 +1006,7 @@ mod tests {
             let x = Amount::<()>::token(dec!(0.1))?.amount;
             let result = exp_neg_fp18(x)?;
             let result_dec = Amount::<()>::new(result).token_to_decimal()?;
-            
+
             let expected = dec!(0.9048374180359595);
             let diff = (result_dec - expected).abs();
             assert!(
@@ -1024,7 +1024,7 @@ mod tests {
             let x = TOKEN_SCALE;
             let result = exp_neg_fp18(x)?;
             let result_dec = Amount::<()>::new(result).token_to_decimal()?;
-            
+
             let expected = dec!(0.36787944117144233);
             let diff = (result_dec - expected).abs();
             assert!(
@@ -1040,14 +1040,14 @@ mod tests {
         fn test_exp_neg_fp18_consistency_with_exp() -> Result<()> {
             // Test that exp(-x) * exp(x) ≈ 1
             let x = Amount::<()>::token(dec!(0.5))?.amount;
-            
+
             let exp_neg_x = exp_neg_fp18(x)?;
             let exp_x = exp_fp18(x)?;
-            
+
             // exp(-x) * exp(x) should equal 1
             let product = mul_div(exp_neg_x, exp_x, TOKEN_SCALE)?;
             let product_dec = Amount::<()>::new(product).token_to_decimal()?;
-            
+
             let diff = (product_dec - dec!(1.0)).abs();
             assert!(
                 diff < dec!(0.001),

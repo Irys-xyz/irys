@@ -192,7 +192,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .block_tree_guard
         .read()
         .canonical_commitment_snapshot();
-    let pledge_tx = new_pledge_tx(&H256::zero(), &signer, &config, &commitment_snapshot);
+    let pledge_tx = new_pledge_tx(&H256::zero(), &signer, config, &commitment_snapshot);
     genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     // test storage data

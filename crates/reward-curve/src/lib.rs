@@ -5,8 +5,8 @@
 //! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
 
 use eyre::{eyre, Result};
+use irys_types::storage_pricing::{exp_neg_fp18, phantoms::Irys, Amount, LN2_FP18};
 use irys_types::storage_pricing::{mul_div, safe_div, safe_sub, TOKEN_SCALE};
-use irys_types::storage_pricing::{phantoms::Irys, Amount, exp_neg_fp18, LN2_FP18};
 use irys_types::U256;
 
 /// Continuous halving emission curve
@@ -86,7 +86,6 @@ fn decay_factor(t_secs: u128, half_life: u128) -> Result<U256> {
     // Final decay = 2^-q * 2^-f
     mul_div(decay_q_fp18, decay_f_fp18, TOKEN_SCALE)
 }
-
 
 #[cfg(test)]
 mod tests {

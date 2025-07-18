@@ -485,8 +485,13 @@ async fn post_pledge_commitment(
         .block_tree_guard
         .read()
         .canonical_commitment_snapshot();
-    let pledge_tx =
-        CommitmentTransaction::new_pledge(consensus, anchor, 1, &commitment_snapshot, signer.address());
+    let pledge_tx = CommitmentTransaction::new_pledge(
+        consensus,
+        anchor,
+        1,
+        &*commitment_snapshot,
+        signer.address(),
+    );
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
