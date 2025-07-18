@@ -7,15 +7,6 @@ use irys_types::{
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 
-/// Empty pledge data provider for genesis block creation
-struct EmptyPledgeProvider;
-
-impl PledgeDataProvider for EmptyPledgeProvider {
-    fn pledge_count(&self, _user_address: Address) -> usize {
-        0
-    }
-}
-
 /// Names for each of the system ledgers as well as their `ledger_id` discriminant
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
@@ -101,6 +92,8 @@ impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
 /// # Arguments
 /// * `signer` - The signer to use for transaction signing
 /// * `anchor` - The anchor value to include in the commitment
+/// * `config` - The configuration containing consensus parameters
+/// * `provider` - The pledge data provider for fee calculation
 ///
 /// # Returns
 /// The signed commitment transaction
@@ -111,14 +104,13 @@ fn create_pledge_commitment_transaction(
     signer: &IrysSigner,
     anchor: H256,
     config: &Config,
+    provider: &impl PledgeDataProvider,
 ) -> CommitmentTransaction {
-    // For genesis block, use empty provider
-    let empty_provider = EmptyPledgeProvider;
     let pledge_commitment = CommitmentTransaction::new_pledge(
         &config.consensus,
         anchor,
         1,
-        &empty_provider,
+        provider,
         signer.address(),
     );
 
@@ -148,6 +140,15 @@ fn create_pledge_commitment_transaction(
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
 pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
+    // Empty pledge data provider for genesis block creation
+    struct EmptyPledgeProvider;
+
+    impl PledgeDataProvider for EmptyPledgeProvider {
+        fn pledge_count(&self, _user_address: Address) -> usize {
+            0
+        }
+    }
+
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
@@ -177,8 +178,9 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
     // will have to be updated.
     let mut anchor = stake_tx.id;
+    let empty_provider = EmptyPledgeProvider;
     for _i in 0..num_submodules {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config);
+        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
@@ -266,6 +268,15 @@ pub fn add_test_commitments(
     pledge_count: u8,
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
+    // Empty pledge data provider for test commitments
+    struct EmptyPledgeProvider;
+
+    impl PledgeDataProvider for EmptyPledgeProvider {
+        fn pledge_count(&self, _user_address: Address) -> usize {
+            0
+        }
+    }
+
     let signer = config.irys_signer();
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
@@ -283,8 +294,9 @@ pub fn add_test_commitments(
         commitments.push(stake_tx);
     }
 
+    let empty_provider = EmptyPledgeProvider;
     for _i in 0..pledge_count {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config);
+        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;
