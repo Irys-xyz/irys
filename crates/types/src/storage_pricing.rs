@@ -209,34 +209,41 @@ pub mod phantoms {
 use phantoms::*;
 
 impl Amount<Irys> {
-    /// Apply a divisor that is calculated as (count + 1)^decay_rate
     /// Used for pledge fee decay calculation
     ///
-    /// The formula is: pledge_value = pledge_base_fee / ((count + 1) ^ decay_rate)
+    /// The formula is: pledge_value = pledge_base_fee / ((current_pledge_count + 1) ^ decay_rate)
     ///
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
     #[tracing::instrument(err)]
-    pub fn apply_pledge_decay(self, count: usize, decay_rate: Amount<Percentage>) -> Result<Self> {
+    pub fn apply_pledge_decay(
+        self,
+        current_pledge_count: usize,
+        decay_rate: Amount<Percentage>,
+    ) -> Result<Self> {
         // The formula is: pledge_value = pledge_base_fee / ((count + 1) ^ decay_rate)
-        // We need to use count + 1, not just count
+        // We use the identity: x^y = exp(y * ln(x))
+        let count_plus_one = current_pledge_count + 1;
 
-        // For a simple approximation, we'll use:
-        // divisor = (count + 1)^decay_rate ≈ 1 + (count + 1 - 1) * decay_rate = 1 + count * decay_rate
-        // This gives us a linear decay instead of exponential, but avoids complex math
+        // Convert count+1 to fixed-point
+        let count_fp18 = safe_mul(U256::from(count_plus_one), TOKEN_SCALE)?;
 
-        // Convert decay_rate from percentage to a multiplier
-        // decay_rate is in basis points (e.g., 0.9 = 9000 bps)
-        let decay_multiplier = decay_rate.amount;
+        // Calculate ln(count+1) in fixed-point
+        let ln_count = ln_fp18(count_fp18)?;
 
-        // Calculate the divisor: divisor = BPS_SCALE + (count * decay_multiplier)
-        // We multiply count by decay_multiplier directly without dividing by BPS_SCALE first
-        let count_times_decay = safe_mul(U256::from(count as u64), decay_multiplier)?;
-        let divisor = safe_add(BPS_SCALE, count_times_decay)?;
+        // Convert decay_rate from basis points to TOKEN_SCALE
+        // decay_rate is in BPS_SCALE (1e6), we need it in TOKEN_SCALE (1e18)
+        let decay_rate_fp18 = mul_div(decay_rate.amount, TOKEN_SCALE, BPS_SCALE)?;
 
-        // Calculate: base_fee * BPS_SCALE / divisor
-        let adjusted_amount = mul_div(self.amount, BPS_SCALE, divisor)?;
+        // Calculate decay_rate * ln(count+1)
+        let exponent = mul_div(decay_rate_fp18, ln_count, TOKEN_SCALE)?;
+
+        // Calculate exp(decay_rate * ln(count+1)) = (count+1)^decay_rate
+        let divisor = exp_fp18(exponent)?;
+
+        // Calculate pledge_base_fee / divisor
+        let adjusted_amount = mul_div(self.amount, TOKEN_SCALE, divisor)?;
 
         Ok(Self {
             amount: adjusted_amount,
@@ -512,6 +519,82 @@ pub fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
 pub fn mul_div(mul_lhs: U256, mul_rhs: U256, div: U256) -> Result<U256> {
     let prod = safe_mul(mul_lhs, mul_rhs)?;
     safe_div(prod, div)
+}
+
+/// Computes the natural logarithm ln(x) in 18-decimal fixed-point
+/// Input x must be in TOKEN_SCALE (1e18 = 1.0)
+/// Uses the Taylor series: ln(1+y) = y - y²/2 + y³/3 - y⁴/4 + ...
+/// For better convergence, we use: ln(x) = ln(2^k * m) = k*ln(2) + ln(m)
+/// where m is in range [1, 2)
+fn ln_fp18(x: U256) -> Result<U256> {
+    if x.is_zero() {
+        return Err(eyre!("ln(0) is undefined"));
+    }
+
+    // ln(2) in 18-decimal fixed-point
+    const LN2: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
+    const TWO_FP18: U256 = U256([2_000_000_000_000_000_000_u64, 0, 0, 0]);
+
+    // Find k such that x / 2^k is in range [1, 2)
+    let mut k = 0_u32;
+    let mut m = x;
+
+    // Scale down by powers of 2 until m < 2
+    while m >= TWO_FP18 {
+        m = safe_div(m, U256::from(2))?;
+        k += 1;
+    }
+
+    // Scale up by powers of 2 until m >= 1
+    while m < TOKEN_SCALE {
+        m = safe_mul(m, U256::from(2))?;
+        k = k.saturating_sub(1);
+    }
+
+    // Now m is in [1, 2), compute ln(m) using Taylor series
+    // Convert to y = m - 1, so y is in [0, 1)
+    let y = safe_sub(m, TOKEN_SCALE)?;
+
+    // Taylor series: ln(1+y) = y - y²/2 + y³/3 - y⁴/4 + ...
+    const TAYLOR_TERMS: u32 = 20;
+    let mut sum = U256::zero();
+    let mut y_power = y; // y^i
+
+    for i in 1..=TAYLOR_TERMS {
+        let term = safe_div(y_power, U256::from(i))?;
+
+        if i % 2 == 1 {
+            sum = safe_add(sum, term)?;
+        } else {
+            sum = safe_sub(sum, term)?;
+        }
+
+        // Update y_power for next iteration
+        y_power = mul_div(y_power, y, TOKEN_SCALE)?;
+    }
+
+    // Result = k * ln(2) + ln(m)
+    let k_ln2 = safe_mul(U256::from(k), LN2)?;
+    let result = safe_add(k_ln2, sum)?;
+
+    Ok(result)
+}
+
+/// Computes exp(x) in 18-decimal fixed-point using Taylor series
+/// Input x must be in TOKEN_SCALE (1e18 = 1.0)
+fn exp_fp18(x: U256) -> Result<U256> {
+    const TAYLOR_TERMS: u32 = 20;
+
+    let mut term = TOKEN_SCALE; // first term is 1
+    let mut sum = TOKEN_SCALE; // accumulated sum
+
+    for i in 1..=TAYLOR_TERMS {
+        term = mul_div(term, x, TOKEN_SCALE)?; // multiply by x
+        term = safe_div(term, U256::from(i))?; // divide by i
+        sum = safe_add(sum, term)?;
+    }
+
+    Ok(sum)
 }
 
 #[cfg(test)]

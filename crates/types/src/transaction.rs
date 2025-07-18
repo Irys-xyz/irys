@@ -449,7 +449,37 @@ pub trait PledgeDataProvider {
 }
 
 #[cfg(test)]
+mod test_helpers {
+    use super::*;
+    use std::collections::HashMap;
+
+    pub(super) struct MockPledgeProvider {
+        pub pledge_counts: HashMap<Address, usize>,
+    }
+
+    impl MockPledgeProvider {
+        pub(super) fn new() -> Self {
+            Self {
+                pledge_counts: HashMap::new(),
+            }
+        }
+
+        pub(super) fn with_pledge_count(mut self, address: Address, count: usize) -> Self {
+            self.pledge_counts.insert(address, count);
+            self
+        }
+    }
+
+    impl PledgeDataProvider for MockPledgeProvider {
+        fn pledge_count(&self, user_address: Address) -> usize {
+            self.pledge_counts.get(&user_address).copied().unwrap_or(0)
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_helpers::MockPledgeProvider;
     use super::*;
     use crate::irys::IrysSigner;
 
@@ -615,30 +645,6 @@ mod tests {
         tx
     }
 
-    // Pledge decay tests
-    struct MockPledgeProvider {
-        pledge_counts: std::collections::HashMap<Address, usize>,
-    }
-
-    impl MockPledgeProvider {
-        fn new() -> Self {
-            Self {
-                pledge_counts: std::collections::HashMap::new(),
-            }
-        }
-
-        fn with_pledge_count(mut self, address: Address, count: usize) -> Self {
-            self.pledge_counts.insert(address, count);
-            self
-        }
-    }
-
-    impl PledgeDataProvider for MockPledgeProvider {
-        fn pledge_count(&self, user_address: Address) -> usize {
-            self.pledge_counts.get(&user_address).copied().unwrap_or(0)
-        }
-    }
-
     #[test]
     fn test_pledge_decay_first_pledge() {
         let mut config = ConsensusConfig::testnet();
@@ -693,6 +699,72 @@ mod tests {
         assert!(
             second_pledge_value > third_pledge_value,
             "Second pledge should be more expensive than third"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pledge_decay_parametrized_tests {
+    use super::*;
+    use rstest::rstest;
+    use rust_decimal_macros::dec;
+
+    #[rstest]
+    #[case(0, 20000.0)] // Pledge 1
+    #[case(1, 10718.0)] // Pledge 2
+    #[case(2, 7441.0)] // Pledge 3
+    #[case(3, 5743.0)] // Pledge 4
+    #[case(4, 4698.0)] // Pledge 5
+    #[case(5, 3987.0)] // Pledge 6
+    #[case(6, 3471.0)] // Pledge 7
+    #[case(7, 3078.0)] // Pledge 8
+    #[case(8, 2768.0)] // Pledge 9
+    #[case(9, 2518.0)] // Pledge 10
+    #[case(10, 2311.0)] // Pledge 11
+    #[case(11, 2137.0)] // Pledge 12
+    #[case(12, 1988.0)] // Pledge 13
+    #[case(13, 1860.0)] // Pledge 14
+    #[case(14, 1748.0)] // Pledge 15
+    #[case(15, 1649.0)] // Pledge 16
+    #[case(16, 1562.0)] // Pledge 17
+    #[case(17, 1483.0)] // Pledge 18
+    #[case(18, 1413.0)] // Pledge 19
+    #[case(19, 1349.0)] // Pledge 20
+    #[case(20, 1291.0)] // Pledge 21
+    #[case(21, 1238.0)] // Pledge 22
+    #[case(22, 1190.0)] // Pledge 23
+    #[case(23, 1145.0)] // Pledge 24
+    #[case(24, 1104.0)] // Pledge 25
+    fn test_pledge_cost_with_decay(#[case] existing_pledges: usize, #[case] expected_cost: f64) {
+        use super::test_helpers::MockPledgeProvider;
+
+        // Setup config with $20,000 base fee and 0.9 decay rate
+        let mut config = ConsensusConfig::testnet();
+        config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
+
+        // Create provider with existing pledge count
+        let signer_address = Address::default();
+        let provider =
+            MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
+
+        // Create a new pledge transaction
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+
+        // Convert the value back to a dollar amount for comparison
+        // Value is in wei (10^18), so divide by 10^18 to get token amount
+        let actual_cost_tokens = pledge_tx.value.to_string().parse::<f64>().unwrap() / 1e18;
+
+        // Allow for small rounding differences (0.5% tolerance)
+        let tolerance = expected_cost * 0.005;
+        assert!(
+            (actual_cost_tokens - expected_cost).abs() < tolerance,
+            "Pledge {} cost mismatch: expected ${:.2}, got ${:.2} (tolerance: ${:.2})",
+            existing_pledges + 1,
+            expected_cost,
+            actual_cost_tokens,
+            tolerance
         );
     }
 }
