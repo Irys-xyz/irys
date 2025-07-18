@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
-use irys_domain::BlockTreeReadGuard;
+use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
@@ -16,7 +16,7 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    Address, Base64, CommitmentTransaction, DataRoot, IrysTransactionHeader, MempoolConfig,
+    Address, Base64, CommitmentTransaction, DataRoot, DataTransactionHeader, MempoolConfig,
     TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
@@ -82,9 +82,9 @@ pub enum MempoolServiceMessage {
     ),
     /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// validate and process an incoming IrysTransactionHeader
+    /// validate and process an incoming DataTransactionHeader
     IngestDataTx(
-        IrysTransactionHeader,
+        DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
@@ -96,10 +96,10 @@ pub enum MempoolServiceMessage {
         commitment_tx_ids: Vec<IrysTransactionId>,
         response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
     },
-    /// Get IrysTransactionHeader from mempool or mdbx
+    /// Get DataTransactionHeader from mempool or mdbx
     GetDataTxs(
         Vec<IrysTransactionId>,
-        oneshot::Sender<Vec<Option<IrysTransactionHeader>>>,
+        oneshot::Sender<Vec<Option<DataTransactionHeader>>>,
     ),
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
@@ -260,14 +260,13 @@ impl Inner {
 
         // Get a list of all recently confirmed commitment txids in the canonical chain
         let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        let last_block = canonical.last().unwrap();
         debug!(
             "best_mempool_txs: current head height {}",
-            canonical.last().unwrap().height
+            last_block.height
         );
 
-        // TODO: This approach should be applied to data TX and commitment TX should instead
-        // be checked for prior inclusion using the Commitment State and current Commitment Snapshot
-        for entry in canonical {
+        for entry in canonical.iter() {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
                 for tx_id in &commitment_tx_ids.0 {
@@ -275,6 +274,14 @@ impl Inner {
                 }
             }
         }
+
+        //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+        let mut simulation_commitment_snapshot = self
+            .block_tree_read_guard
+            .read()
+            .canonical_commitment_snapshot()
+            .as_ref()
+            .clone();
 
         // Process commitments in the mempool in priority order (stakes then pledges)
         // This order ensures stake transactions are processed before pledges
@@ -304,10 +311,55 @@ impl Inner {
                     );
                     continue; // Skip tx already confirmed in the canonical chain
                 }
-                if check_funding(&tx) {
-                    debug!("best_mempool_txs: adding commitment tx {}", tx.id);
-                    commitment_tx.push(tx);
+
+                // Check funding before simulation so we don't mutate the snapshot unnecessarily
+                if !check_funding(&tx) {
+                    continue;
                 }
+
+                // signer stake status check
+                if tx.commitment_type == CommitmentType::Stake {
+                    let epoch_snapshot = self
+                        .block_tree_read_guard
+                        .read()
+                        .get_epoch_snapshot(&last_block.block_hash)
+                        .expect("parent blocks epoch_snapshot should be retrievable");
+                    let is_staked = epoch_snapshot.is_staked(tx.signer);
+                    tracing::error!(
+                        "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
+                        tx.id,
+                        tx.signer,
+                        is_staked
+                    );
+                    if is_staked {
+                        // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
+                        continue;
+                    }
+                }
+                // simulation check
+                {
+                    let is_staked = self
+                        .block_tree_read_guard
+                        .read()
+                        .canonical_epoch_snapshot()
+                        .is_staked(tx.signer);
+
+                    let simulation = simulation_commitment_snapshot.add_commitment(&tx, is_staked);
+
+                    // skip commitments that would not be accepted
+                    if simulation != CommitmentSnapshotStatus::Accepted {
+                        tracing::error!(
+                            "tx {:?}:{:?} skipped: {:?}",
+                            tx.commitment_type,
+                            tx.id,
+                            simulation
+                        );
+                        continue;
+                    }
+                }
+
+                debug!("best_mempool_txs: adding commitment tx {}", tx.id);
+                commitment_tx.push(tx);
             }
         }
         drop(mempool_state_guard);
@@ -373,8 +425,8 @@ impl Inner {
 
     pub async fn get_publish_txs_and_proofs(
         &self,
-    ) -> Result<(Vec<IrysTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
-        let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
+    ) -> Result<(Vec<DataTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+        let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut proofs: Vec<TxIngressProof> = Vec::new();
 
         {
@@ -700,7 +752,7 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub struct MempoolState {
     /// valid submit txs
-    pub valid_submit_ledger_tx: BTreeMap<H256, IrysTransactionHeader>,
+    pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     pub invalid_tx: Vec<H256>,
@@ -790,6 +842,6 @@ impl TxIngressError {
 #[derive(Debug)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
-    pub submit_tx: Vec<IrysTransactionHeader>,
-    pub publish_tx: (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
+    pub submit_tx: Vec<DataTransactionHeader>,
+    pub publish_tx: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
 }

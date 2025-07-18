@@ -7,7 +7,7 @@ use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse,
+    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IrysTransactionResponse,
     NodeConfig, H256,
 };
 use reth_db::Database as _;
@@ -35,7 +35,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     node.node_ctx.start_mining().await.unwrap();
     let db = node.node_ctx.db.clone();
 
-    let storage_tx = IrysTransactionHeader {
+    let storage_tx = DataTransactionHeader {
         id: H256::random(),
         ..Default::default()
     };

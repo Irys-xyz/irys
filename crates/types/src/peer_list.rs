@@ -124,7 +124,7 @@ impl Compact for RethPeerInfo {
     }
 }
 
-fn encode_address<B>(address: &SocketAddr, buf: &mut B) -> usize
+pub fn encode_address<B>(address: &SocketAddr, buf: &mut B) -> usize
 where
     B: bytes::BufMut + AsMut<[u8]>,
 {
@@ -146,7 +146,7 @@ where
     size
 }
 
-fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
+pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
     let tag = buf[0];
     let address = match tag {
         0 => {

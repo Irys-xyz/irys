@@ -32,8 +32,8 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, Base64, CommitmentTransaction, Config,
-    DataLedger, DataTransactionLedger, GossipBroadcastMessage, H256List, IngressProofsList,
-    IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, SystemTransactionLedger,
+    DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
+    IngressProofsList, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
     TokioServiceHandle, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -394,7 +394,7 @@ pub trait BlockProdStrategy {
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
         commitment_txs_to_bill: &[CommitmentTransaction],
-        submit_txs: &[IrysTransactionHeader],
+        submit_txs: &[DataTransactionHeader],
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
     ) -> eyre::Result<EthBuiltPayload> {
@@ -526,8 +526,8 @@ pub trait BlockProdStrategy {
         &self,
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
-        submit_txs: Vec<IrysTransactionHeader>,
-        publish_txs: (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
+        submit_txs: Vec<DataTransactionHeader>,
+        publish_txs: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
@@ -800,8 +800,8 @@ pub trait BlockProdStrategy {
     ) -> eyre::Result<(
         Vec<SystemTransactionLedger>,
         Vec<CommitmentTransaction>,
-        Vec<IrysTransactionHeader>,
-        (Vec<IrysTransactionHeader>, Vec<TxIngressProof>),
+        Vec<DataTransactionHeader>,
+        (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
     )> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()
@@ -987,7 +987,7 @@ pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
 ///
 /// # Returns
 /// Total number of chunks needed, including padding for partial chunks
-pub fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) -> u64 {
+pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
     let bytes_added = txs.iter().fold(0, |acc, tx| {
         acc + tx.data_size.div_ceil(chunk_size) * chunk_size
     });
@@ -1002,7 +1002,7 @@ pub fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) ->
 #[rtype(result = "eyre::Result<()>")]
 pub struct BlockConfirmedMessage(
     pub Arc<IrysBlockHeader>,
-    pub Arc<Vec<IrysTransactionHeader>>,
+    pub Arc<Vec<DataTransactionHeader>>,
 );
 
 /// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
@@ -1016,5 +1016,5 @@ pub struct BlockFinalizedMessage {
     /// Block being finalized
     pub block_header: Arc<IrysBlockHeader>,
     /// Include all the blocks transaction headers [Submit, Publish]
-    pub all_txs: Arc<Vec<IrysTransactionHeader>>,
+    pub all_txs: Arc<Vec<DataTransactionHeader>>,
 }

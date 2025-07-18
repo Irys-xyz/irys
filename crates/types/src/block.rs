@@ -7,8 +7,8 @@ use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
-    Compact, Config, DataRootLeave, H256List, IngressProofsList, IrysSignature,
-    IrysTransactionHeader, Proof, H256, U256,
+    Compact, Config, DataRootLeave, DataTransactionHeader, H256List, IngressProofsList,
+    IrysSignature, Proof, H256, U256,
 };
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
@@ -281,8 +281,12 @@ impl IrysBlockHeader {
     /// 1.) generating the prehash
     /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
-        self.signature
-            .validate_signature(self.signature_hash(), self.miner_address)
+        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
+        let signature_hash_matches_block_hash = self.block_hash.0 == id;
+        signature_hash_matches_block_hash
+            && self
+                .signature
+                .validate_signature(self.signature_hash(), self.miner_address)
     }
 
     // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
@@ -449,7 +453,7 @@ pub struct DataTransactionLedger {
 impl DataTransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
     /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
-    pub fn merklize_tx_root(data_txs: &[IrysTransactionHeader]) -> (H256, Vec<Proof>) {
+    pub fn merklize_tx_root(data_txs: &[DataTransactionHeader]) -> (H256, Vec<Proof>) {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
@@ -1014,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_validate_tx_path() {
-        let mut txs: Vec<IrysTransactionHeader> = vec![IrysTransactionHeader::default(); 10];
+        let mut txs: Vec<DataTransactionHeader> = vec![DataTransactionHeader::default(); 10];
         for tx in txs.iter_mut() {
             tx.data_root = H256::from([3_u8; 32]);
             tx.data_size = 64
@@ -1070,9 +1074,9 @@ mod tests {
             assert!(!header_clone.is_signature_valid());
         }
 
-        // assert that changing the block hash, the signature is still valid (because the validation does not validate )
+        // assert that changing the block hash changes the validation result to invalid
         header.block_hash = H256::random();
-        assert!(header.is_signature_valid());
+        assert!(!header.is_signature_valid());
     }
 
     fn mock_header() -> IrysBlockHeader {

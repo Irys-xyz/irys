@@ -24,8 +24,8 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
-    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, PoaData, H256,
+    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -637,7 +637,7 @@ async fn extract_data_txs(
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
-) -> Result<Vec<IrysTransactionHeader>, eyre::Error> {
+) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
     let txs = match &block.data_ledgers[..] {
         [publish_ledger, submit_ledger] => {
             ensure!(
@@ -710,6 +710,7 @@ pub fn is_seed_data_valid(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
         BlockFinalizedMessage,
@@ -720,14 +721,13 @@ mod tests {
     use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransactionLedger,
-        H256List, IrysTransaction, IrysTransactionHeader, NodeConfig, Signature, H256, U256,
+        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
+        Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
     use tracing::{debug, info};
-
-    use super::*;
 
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
@@ -842,7 +842,7 @@ mod tests {
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
         let signer = IrysSigner::random_signer(&context.consensus_config);
-        let mut txs: Vec<IrysTransaction> = Vec::new();
+        let mut txs: Vec<DataTransaction> = Vec::new();
 
         for chunks in &data_chunks {
             let mut data: Vec<u8> = Vec::new();
@@ -877,7 +877,7 @@ mod tests {
 
         // Create a signed TX from the chunks
         let signer = IrysSigner::random_signer(&context.consensus_config);
-        let mut txs: Vec<IrysTransaction> = Vec::new();
+        let mut txs: Vec<DataTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
         let tx = signer.create_transaction(data.clone(), None).unwrap();
@@ -903,9 +903,60 @@ mod tests {
         }
     }
 
+    #[actix::test]
+    async fn is_seed_data_valid_should_validate_seeds() {
+        let reset_frequency = 2;
+
+        let mut parent_header = IrysBlockHeader::new_mock_header();
+        let parent_seed = BlockHash::from_slice(&[2; 32]);
+        let parent_next_seed = BlockHash::from_slice(&[3; 32]);
+        parent_header.block_hash = BlockHash::from_slice(&[4; 32]);
+        parent_header.vdf_limiter_info.seed = parent_seed;
+        parent_header.vdf_limiter_info.next_seed = parent_next_seed;
+
+        let mut header_2 = IrysBlockHeader::new_mock_header();
+        // Reset frequency is 2, so setting global_step_number to 3 and adding 2 steps
+        //  should result in the seeds being rotated
+        header_2.vdf_limiter_info.global_step_number = 3;
+        header_2.vdf_limiter_info.steps = H256List(vec![H256::zero(); 2]);
+        header_2
+            .vdf_limiter_info
+            .set_seeds(reset_frequency, &parent_header);
+        let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
+
+        assert_eq!(
+            header_2.vdf_limiter_info.next_seed,
+            parent_header.block_hash
+        );
+        assert_eq!(header_2.vdf_limiter_info.seed, parent_next_seed);
+        assert!(
+            matches!(is_valid, ValidationResult::Valid),
+            "Seed data should be valid"
+        );
+
+        // Now let's try to rotate the seeds when no rotation is needed by increasing the
+        // reset frequency
+        let large_reset_frequency = 100;
+        let is_valid = is_seed_data_valid(&header_2, &parent_header, large_reset_frequency);
+        assert!(
+            matches!(is_valid, ValidationResult::Invalid),
+            "Seed data should still be valid"
+        );
+
+        // Now let's try to set some random seeds that are not valid
+        header_2.vdf_limiter_info.seed = BlockHash::from_slice(&[5; 32]);
+        header_2.vdf_limiter_info.next_seed = BlockHash::from_slice(&[6; 32]);
+        let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
+
+        assert!(
+            matches!(is_valid, ValidationResult::Invalid),
+            "Seed data should be invalid"
+        );
+    }
+
     async fn poa_test(
         context: &TestContext,
-        txs: &[IrysTransaction],
+        txs: &[DataTransaction],
         #[expect(
             clippy::ptr_arg,
             reason = "we need to clone this so it needs to be a Vec"
@@ -936,7 +987,7 @@ mod tests {
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
 
         // Create vectors of tx headers and txids
-        let tx_headers: Vec<IrysTransactionHeader> =
+        let tx_headers: Vec<DataTransactionHeader> =
             txs.iter().map(|tx| tx.header.clone()).collect();
 
         let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
@@ -1043,6 +1094,247 @@ mod tests {
             &context.miner_address,
         );
 
+        debug!("PoA validation result: {:?}", poa_valid);
         assert!(poa_valid.is_ok(), "PoA should be valid");
+    }
+
+    #[actix::test]
+    async fn poa_does_not_allow_modified_leaves() {
+        let (_tmp, context) = init().await;
+        // Create a bunch of TX chunks
+        let data_chunks = vec![
+            vec![[0; 32], [1; 32], [2; 32]], // tx0
+            vec![[3; 32], [4; 32], [5; 32]], // tx1
+            vec![[6; 32], [7; 32], [8; 32]], // tx2
+        ];
+
+        // Create a bunch of signed TX from the chunks
+        // Loop though all the data_chunks and create wrapper tx for them
+        let signer = IrysSigner::random_signer(&context.consensus_config);
+        let mut txs: Vec<DataTransaction> = Vec::new();
+
+        for chunks in &data_chunks {
+            let mut data: Vec<u8> = Vec::new();
+            for chunk in chunks {
+                data.extend_from_slice(chunk);
+            }
+            let tx = signer.create_transaction(data, None).unwrap();
+            let tx = signer.sign_transaction(tx).unwrap();
+            txs.push(tx);
+        }
+
+        for poa_tx_num in 0..3 {
+            for poa_chunk_num in 0..3 {
+                let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
+                test_poa_with_malicious_merkle_data(
+                    &context,
+                    &txs,
+                    &mut poa_chunk,
+                    poa_tx_num,
+                    poa_chunk_num,
+                    9,
+                    context.consensus_config.chunk_size as usize,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn test_poa_with_malicious_merkle_data(
+        context: &TestContext,
+        txs: &[DataTransaction],
+        #[expect(
+            clippy::ptr_arg,
+            reason = "we need to clone this so it needs to be a Vec"
+        )]
+        poa_chunk: &mut Vec<u8>,
+        poa_tx_num: usize,
+        poa_chunk_num: usize,
+        total_chunks_in_tx: usize,
+        chunk_size: usize,
+    ) {
+        // Initialize genesis block at height 0
+        let height: u64;
+        {
+            height = context.block_index.read().unwrap().num_blocks();
+        }
+
+        let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+        compute_entropy_chunk(
+            context.miner_address,
+            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
+            context.partition_hash.into(),
+            context.consensus_config.entropy_packing_iterations,
+            chunk_size,
+            &mut entropy_chunk,
+            context.consensus_config.chain_id,
+        );
+
+        xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
+
+        // Create vectors of tx headers and txids
+        let tx_headers: Vec<DataTransactionHeader> =
+            txs.iter().map(|tx| tx.header.clone()).collect();
+
+        let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
+
+        let (tx_root, tx_path) = DataTransactionLedger::merklize_tx_root(&tx_headers);
+
+        // Hacked data: DEADBEEF (but padded to chunk_size for proper entropy packing)
+        let mut hacked_data = vec![0xde, 0xad, 0xbe, 0xef];
+        hacked_data.resize(chunk_size, 0); // Pad to chunk_size like normal chunks
+
+        // Calculate what the hash SHOULD BE after entropy packing
+        let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+        compute_entropy_chunk(
+            context.miner_address,
+            (poa_tx_num * 3 + poa_chunk_num) as u64,
+            context.partition_hash.into(),
+            context.consensus_config.entropy_packing_iterations,
+            chunk_size,
+            &mut entropy_chunk,
+            context.consensus_config.chain_id,
+        );
+
+        // Apply entropy packing to our hacked data to see what it becomes
+        let mut entropy_packed_hacked = hacked_data.clone();
+        xor_vec_u8_arrays_in_place(&mut entropy_packed_hacked, &entropy_chunk);
+
+        // Trim to actual data size for hash calculation (chunk_size might be larger)
+        let trimmed_hacked = &entropy_packed_hacked[0..hacked_data.len().min(chunk_size)];
+        let entropy_packed_hash = hash_sha256(trimmed_hacked).unwrap();
+
+        // Calculate the correct offset for this chunk position
+        let chunk_start_offset = poa_tx_num * 3 * 32 + poa_chunk_num * 32; // Each chunk is 32 bytes
+        let chunk_end_offset = chunk_start_offset + hacked_data.len().min(32); // This chunk's end
+
+        // Create fake leaf proof with the entropy-packed hash and correct offset
+        let mut hacked_data_path = txs[poa_tx_num].proofs[poa_chunk_num].proof.clone();
+        let hacked_data_path_len = hacked_data_path.len();
+        if hacked_data_path_len < 64 {
+            hacked_data_path.resize(64, 0);
+        }
+
+        // Overwrite last 64 bytes (LeafProof structure)
+        let start = hacked_data_path.len() - 64;
+
+        // 32 bytes: entropy-packed hash (what PoA validation expects to see)
+        hacked_data_path[start..start + 32].copy_from_slice(&entropy_packed_hash);
+
+        // 24 bytes: notepad (NOTE_SIZE - 8 = 32 - 8 = 24)
+        for i in 0..24 {
+            hacked_data_path[start + 32 + i] = 0;
+        }
+
+        // 8 bytes: offset as big-endian u64
+        let offset_bytes = (chunk_end_offset as u64).to_be_bytes();
+        hacked_data_path[start + 56..start + 64].copy_from_slice(&offset_bytes);
+
+        debug!("Hacked attack:");
+        debug!("  Original data: {:?}", &hacked_data[0..4]);
+        debug!("  Entropy-packed hash: {:?}", &entropy_packed_hash[..4]);
+        debug!("  Chunk offset: {}", chunk_end_offset);
+
+        let poa = PoaData {
+            tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
+            data_path: Some(Base64(hacked_data_path.clone())),
+            chunk: Some(Base64(hacked_data.clone())), // Use RAW data, PoA validation will entropy-pack it
+            ledger_id: Some(1),
+            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
+                .try_into()
+                .expect("Value exceeds u32::MAX"),
+            recall_chunk_index: 0,
+            partition_hash: context.partition_hash,
+        };
+
+        // Create a block from the tx
+        let irys_block = IrysBlockHeader {
+            height,
+            reward_address: context.miner_address,
+            poa: poa.clone(),
+            block_hash: H256::zero(),
+            previous_block_hash: H256::zero(),
+            previous_cumulative_diff: U256::from(4000),
+            miner_address: context.miner_address,
+            signature: Signature::test_signature().into(),
+            timestamp: 1000,
+            data_ledgers: vec![
+                // Permanent Publish Ledger
+                DataTransactionLedger {
+                    ledger_id: DataLedger::Publish.into(),
+                    tx_root: H256::zero(),
+                    tx_ids: H256List(Vec::new()),
+                    max_chunk_offset: 0,
+                    expires: None,
+                    proofs: None,
+                },
+                // Term Submit Ledger
+                DataTransactionLedger {
+                    ledger_id: DataLedger::Submit.into(),
+                    tx_root,
+                    tx_ids: H256List(data_tx_ids.clone()),
+                    max_chunk_offset: 9,
+                    expires: Some(1622543200),
+                    proofs: None,
+                },
+            ],
+            ..IrysBlockHeader::default()
+        };
+
+        // Send the block confirmed message
+        let block = Arc::new(irys_block);
+        let txs = Arc::new(tx_headers);
+        let block_finalized_message = BlockFinalizedMessage {
+            block_header: block.clone(),
+            all_txs: Arc::clone(&txs),
+        };
+
+        match context
+            .block_index_actor
+            .send(block_finalized_message.clone())
+            .await
+        {
+            Ok(_) => info!("Second block indexed"),
+            Err(_) => panic!("Failed to index second block"),
+        };
+
+        let block_index_guard = context
+            .block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+            * context.consensus_config.num_partitions_per_slot
+            * context.consensus_config.num_chunks_in_partition
+            + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
+
+        assert_eq!(
+            ledger_chunk_offset,
+            (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64,
+            "ledger_chunk_offset mismatch"
+        );
+
+        // ledger data -> block
+        let bb = block_index_guard
+            .read()
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
+        info!("block bounds: {:?}", bb);
+
+        assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
+        assert_eq!(
+            bb.end_chunk_offset, total_chunks_in_tx as u64,
+            "end_chunk_offset should be 9, tx has 9 chunks"
+        );
+
+        let poa_valid = poa_is_valid(
+            &poa,
+            &block_index_guard,
+            &context.epoch_snapshot,
+            &context.consensus_config,
+            &context.miner_address,
+        );
+
+        assert!(poa_valid.is_err(), "PoA should be invalid");
     }
 }

@@ -75,7 +75,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Post the stake commitment and await it in the mempool
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
-    node.post_commitment_tx(&stake_tx).await;
+    node.post_commitment_tx(&stake_tx).await?;
     node.wait_for_mempool_commitment_txs(vec![stake_tx.id], seconds_to_wait)
         .await?;
 
@@ -90,7 +90,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // Post the stake commitment again
-    node.post_commitment_tx(&stake_tx).await;
+    node.post_commitment_tx(&stake_tx).await?;
     node.wait_for_mempool_commitment_txs(vec![stake_tx.id], seconds_to_wait)
         .await?;
 
@@ -114,7 +114,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
 
     // Post pledge commitment
-    node.post_commitment_tx(&pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx).await?;
     node.wait_for_mempool_commitment_txs(vec![pledge_tx.id], seconds_to_wait)
         .await?;
 
@@ -129,7 +129,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // Post the pledge commitment again
-    node.post_commitment_tx(&pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx).await?;
     node.wait_for_mempool_commitment_txs(vec![pledge_tx.id], seconds_to_wait)
         .await?;
 
@@ -157,8 +157,8 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Post all the transactions again
     node.post_data_tx_raw(&tx).await;
-    node.post_commitment_tx(&stake_tx).await;
-    node.post_commitment_tx(&pledge_tx).await;
+    node.post_commitment_tx(&stake_tx).await?;
+    node.post_commitment_tx(&pledge_tx).await?;
     node.wait_for_mempool(tx.id, seconds_to_wait).await?;
     node.wait_for_mempool_commitment_txs(vec![stake_tx.id, pledge_tx.id], seconds_to_wait)
         .await?;

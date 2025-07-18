@@ -6,7 +6,7 @@ use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
 use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
-use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
+use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
 use tracing::debug;
@@ -50,7 +50,7 @@ async fn heavy_data_promotion_test() {
     // Create a bunch of signed TX from the chunks
     // Loop though all the data_chunks and create wrapper tx for them
 
-    let mut txs: Vec<IrysTransaction> = Vec::new();
+    let mut txs: Vec<DataTransaction> = Vec::new();
 
     for (i, chunks) in data_chunks.iter().enumerate() {
         let mut data: Vec<u8> = Vec::new();
@@ -64,7 +64,7 @@ async fn heavy_data_promotion_test() {
     }
 
     // Post the 3 transactions & initialize some state to track their confirmation
-    let mut unconfirmed_tx: Vec<IrysTransactionHeader> = Vec::new();
+    let mut unconfirmed_tx: Vec<DataTransactionHeader> = Vec::new();
     for tx in txs.iter() {
         let header = &tx.header;
         unconfirmed_tx.push(header.clone());

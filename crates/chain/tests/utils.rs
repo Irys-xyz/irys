@@ -47,9 +47,9 @@ use irys_types::{
     U256,
 };
 use irys_types::{
-    Base64, CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, IrysTransaction,
-    IrysTransactionHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk,
-    PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    Base64, CommitmentTransaction, Config, DataTransaction, DataTransactionHeader,
+    DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode,
+    PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -602,7 +602,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// mine blocks until the txs are found in the block index, i.e. mdbx
     pub async fn wait_for_migrated_txs(
         &self,
-        mut unconfirmed_txs: Vec<IrysTransactionHeader>,
+        mut unconfirmed_txs: Vec<DataTransactionHeader>,
         seconds: usize,
     ) -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
@@ -1063,7 +1063,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         account: &IrysSigner,
         data: Vec<u8>,
-    ) -> Result<IrysTransaction, AddTxError> {
+    ) -> Result<DataTransaction, AddTxError> {
         let tx = account
             .create_transaction(data, None)
             .map_err(AddTxError::CreateTx)?;
@@ -1093,7 +1093,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         account: &IrysSigner,
         data: Vec<u8>,
-    ) -> Result<IrysTransaction, AddTxError> {
+    ) -> Result<DataTransaction, AddTxError> {
         let tx = account
             .create_transaction(data, None)
             .map_err(AddTxError::CreateTx)?;
@@ -1101,7 +1101,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// read storage tx from mbdx i.e. block index
-    pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
+    pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<DataTransactionHeader> {
         match self
             .node_ctx
             .db
@@ -1117,7 +1117,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn get_storage_tx_header_from_mempool(
         &self,
         tx_id: &H256,
-    ) -> eyre::Result<IrysTransactionHeader> {
+    ) -> eyre::Result<DataTransactionHeader> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx);
         if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
@@ -1395,7 +1395,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         anchor: H256,
         data: Vec<u8>,
         signer: &IrysSigner,
-    ) -> IrysTransaction {
+    ) -> DataTransaction {
         self.with_gossip_disabled(self.post_data_tx(anchor, data, signer))
             .await
     }
@@ -1405,7 +1405,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         anchor: H256,
         data: Vec<u8>,
         signer: &IrysSigner,
-    ) -> IrysTransaction {
+    ) -> DataTransaction {
         let tx = signer
             .create_transaction(data, Some(anchor))
             .expect("Expect to create a storage transaction from the data");
@@ -1443,7 +1443,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx
     }
 
-    pub async fn post_data_tx_raw(&self, tx: &IrysTransactionHeader) {
+    pub async fn post_data_tx_raw(&self, tx: &DataTransactionHeader) {
         let client = awc::Client::default();
         let api_uri = self.node_ctx.config.node_config.api_uri();
         let url = format!("{}/v1/tx", api_uri);
@@ -1475,7 +1475,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_chunk_32b(
         &self,
-        tx: &IrysTransaction,
+        tx: &DataTransaction,
         chunk_index: usize,
         chunks: &[[u8; 32]],
     ) {
@@ -1500,7 +1500,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    pub async fn upload_chunks(&self, tx: &IrysTransaction) -> eyre::Result<()> {
+    pub async fn upload_chunks(&self, tx: &DataTransaction) -> eyre::Result<()> {
         let data = tx.data.clone().unwrap().0;
 
         let client = awc::Client::default();
@@ -1527,19 +1527,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
-    pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {
+    pub async fn post_commitment_tx(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
-            .await;
+            .await
     }
 
     pub async fn post_commitment_tx_raw_without_gossip(
         &self,
         commitment_tx: &CommitmentTransaction,
-    ) {
+    ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
-            .await;
+            .await
     }
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1555,7 +1558,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Submit pledge commitment via API
         let api_uri = self.node_ctx.config.node_config.api_uri();
-        self.post_commitment_tx_request(&api_uri, &pledge_tx).await;
+        self.post_commitment_tx_request(&api_uri, &pledge_tx)
+            .await
+            .expect("posted commitment tx");
 
         pledge_tx
     }
@@ -1583,7 +1588,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Submit stake commitment via public API
         let api_uri = self.node_ctx.config.node_config.api_uri();
-        self.post_commitment_tx_request(&api_uri, &stake_tx).await;
+        self.post_commitment_tx_request(&api_uri, &stake_tx)
+            .await
+            .expect("posted commitment tx");
 
         stake_tx
     }
@@ -1610,7 +1617,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         api_uri: &str,
         commitment_tx: &CommitmentTransaction,
-    ) {
+    ) -> eyre::Result<()> {
         info!("Posting Commitment TX: {}", commitment_tx.id.0.to_base58());
 
         let client = awc::Client::default();
@@ -1624,27 +1631,42 @@ impl IrysNodeTest<IrysNodeCtx> {
             Ok(r) => r,
             Err(e) => {
                 error!("Failed to post commitment transaction: {e}");
-                return;
+                return Err(eyre::eyre!(
+                    "Failed to post commitment transaction {}: {e}",
+                    &commitment_tx.id
+                ));
             }
         };
 
         if response.status() != StatusCode::OK {
-            // Read the response body
-            let body_bytes = response.body().await.expect("Failed to read response body");
+            // Read the response body for logging
+            let body_bytes = match response.body().await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error!("Failed to read error response body: {e}");
+                    Default::default()
+                }
+            };
             let body_str = String::from_utf8_lossy(&body_bytes);
 
-            panic!(
+            error!(
                 "Response status: {} - {}\nRequest Body: {}",
                 response.status(),
                 body_str,
                 serde_json::to_string_pretty(&commitment_tx).unwrap(),
             );
+            Err(eyre::eyre!(
+                "Posted commitment transaction {} but got HTTP response code: {:?}",
+                response.status(),
+                &commitment_tx.id
+            ))
         } else {
             info!(
                 "Response status: {}\n{}",
                 response.status(),
                 serde_json::to_string_pretty(&commitment_tx).unwrap()
             );
+            Ok(())
         }
     }
 
@@ -1950,7 +1972,7 @@ where
 /// to the /v1/chunk endpoint and verifies successful response.
 pub async fn post_chunk<T, B>(
     app: &T,
-    tx: &IrysTransaction,
+    tx: &DataTransaction,
     chunk_index: usize,
     chunks: &[[u8; 32]],
 ) where
@@ -1988,7 +2010,7 @@ pub async fn post_chunk<T, B>(
 ///
 /// # Panics
 /// Panics if the response status is not HTTP 200 OK.
-pub async fn post_data_tx<T, B>(app: &T, tx: &IrysTransaction)
+pub async fn post_data_tx<T, B>(app: &T, tx: &DataTransaction)
 where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody + Unpin,

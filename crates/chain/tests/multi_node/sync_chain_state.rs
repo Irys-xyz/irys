@@ -8,7 +8,7 @@ use irys_chain::{
 };
 use irys_database::block_header_by_hash;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, IrysTransaction, IrysTransactionId, NodeConfig, NodeInfo,
+    irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
     NodeMode, PeerAddress, H256,
 };
 use reth::rpc::eth::EthApiServer as _;
@@ -509,9 +509,9 @@ fn local_test_url(port: &u16) -> String {
 async fn generate_test_transaction_and_add_to_block(
     node: &IrysNodeTest<IrysNodeCtx>,
     account: &IrysSigner,
-) -> HashMap<IrysTransactionId, irys_types::IrysTransaction> {
+) -> HashMap<IrysTransactionId, irys_types::DataTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
-    let mut irys_txs: HashMap<IrysTransactionId, IrysTransaction> = HashMap::new();
+    let mut irys_txs: HashMap<IrysTransactionId, DataTransaction> = HashMap::new();
     match node.create_submit_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);

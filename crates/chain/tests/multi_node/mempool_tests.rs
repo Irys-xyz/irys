@@ -12,8 +12,8 @@ use irys_reth_node_bridge::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, IngressProofsList, IrysBlockHeader,
-    IrysTransaction, NodeConfig, TxIngressProof, H256,
+    irys::IrysSigner, CommitmentTransaction, DataLedger, DataTransaction, IngressProofsList,
+    IrysBlockHeader, NodeConfig, TxIngressProof, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -123,8 +123,8 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     let pledge_tx = new_pledge_tx(&H256::zero(), &signer);
 
     // Post the pledge before the stake
-    genesis_node.post_commitment_tx(&pledge_tx).await;
-    genesis_node.post_commitment_tx(&stake_tx).await;
+    genesis_node.post_commitment_tx(&pledge_tx).await?;
+    genesis_node.post_commitment_tx(&stake_tx).await?;
 
     // Mine a block to confirm the commitments
     genesis_node.mine_block().await.unwrap();
@@ -170,7 +170,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 
     // Create and post stake commitment for the signer
     let stake_tx = new_stake_tx(&H256::zero(), &signer);
-    genesis_node.post_commitment_tx(&stake_tx).await;
+    genesis_node.post_commitment_tx(&stake_tx).await?;
     genesis_node.mine_block().await.unwrap();
 
     let expected_txs = vec![stake_tx.id];
@@ -181,7 +181,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 
     //create and post pledge commitment for the signer
     let pledge_tx = new_pledge_tx(&H256::zero(), &signer);
-    genesis_node.post_commitment_tx(&pledge_tx).await;
+    genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     // test storage data
     let chunks = [[10; 32], [20; 32], [30; 32]];
@@ -490,7 +490,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Determine which peer lost the fork race and extend the other peer's chain
     // to trigger a reorganization. The losing peer's transaction will be evicted
     // and returned to the mempool.
-    let reorg_tx: IrysTransaction;
+    let reorg_tx: DataTransaction;
     let _reorg_block_hash: H256;
     let reorg_block = if genesis_block.block_hash == peer1_block.block_hash {
         debug!(
@@ -1208,11 +1208,9 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     );
 
     // gossip A's orphaned tx to B
-
-    b_node.post_commitment_tx(&a_blk1_tx1).await;
+    b_node.post_commitment_tx(&a_blk1_tx1).await?;
 
     // B: Mine B3
-
     b_node.mine_block().await?;
     network_height += 1;
 

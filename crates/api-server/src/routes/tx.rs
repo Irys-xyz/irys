@@ -11,20 +11,20 @@ use irys_actors::{
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    u64_stringify, CommitmentTransaction, DataLedger, IrysTransactionHeader,
+    u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
     IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
-/// This function takes in a JSON payload of a `IrysTransactionHeader` type,
+/// This function takes in a JSON payload of a `DataTransactionHeader` type,
 /// encapsulates it into a `TxIngressMessage` for further processing by the
 /// mempool actor, and manages error handling based on the results of message
 /// delivery and transaction validation.
 pub async fn post_tx(
     state: web::Data<ApiState>,
-    body: Json<IrysTransactionHeader>,
+    body: Json<DataTransactionHeader>,
 ) -> actix_web::Result<HttpResponse> {
     let tx = body.into_inner();
 
@@ -88,11 +88,11 @@ pub async fn get_transaction_api(
     info!("Get tx by tx_id: {}", tx_id);
     get_transaction(&state, tx_id).await.map(web::Json)
 }
-/// Helper function to retrieve IrysTransactionHeader from mdbx
+/// Helper function to retrieve DataTransactionHeader from mdbx
 pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
-) -> Result<IrysTransactionHeader, ApiError> {
+) -> Result<DataTransactionHeader, ApiError> {
     let opt = state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
