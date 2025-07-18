@@ -1533,8 +1533,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
-            .await?;
-        Ok(())
+            .await
     }
 
     pub async fn post_commitment_tx_raw_without_gossip(
