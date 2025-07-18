@@ -370,7 +370,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Unknown);
 
     // Submit stake commitment via API
-    node.post_commitment_tx(&stake_tx).await;
+    node.post_commitment_tx(&stake_tx).await?;
 
     // Mine a block to include the commitment
     node.mine_blocks(1).await?;
@@ -394,7 +394,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Unknown);
 
     // Submit pledge via API
-    node.post_commitment_tx(&pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx).await?;
 
     // Verify pledge is still 'Unknown' before mining
     let status = node.get_commitment_snapshot_status(&pledge_tx);
@@ -414,7 +414,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // Re-submit the same stake commitment
-    node.post_commitment_tx(&stake_tx).await;
+    node.post_commitment_tx(&stake_tx).await?;
     node.mine_blocks(1).await?;
 
     // Verify stake is still 'Accepted' (idempotent operation)
@@ -439,7 +439,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
     // Submit pledge via API
-    node.post_commitment_tx(&pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx).await?;
     node.mine_blocks(1).await?;
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
@@ -464,7 +464,9 @@ async fn post_stake_commitment(
     info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
 
     // Submit stake commitment via API
-    node.post_commitment_tx(&stake_tx).await;
+    node.post_commitment_tx(&stake_tx)
+        .await
+        .expect("posted commitment tx");
     stake_tx
 }
 
@@ -483,7 +485,9 @@ async fn post_pledge_commitment(
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
     // Submit pledge commitment via API
-    node.post_commitment_tx(&pledge_tx).await;
+    node.post_commitment_tx(&pledge_tx)
+        .await
+        .expect("posted commitment tx");
 
     pledge_tx
 }

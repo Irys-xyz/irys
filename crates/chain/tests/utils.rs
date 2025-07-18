@@ -1527,19 +1527,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
-    pub async fn post_commitment_tx(&self, commitment_tx: &CommitmentTransaction) {
+    pub async fn post_commitment_tx(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
-            .await;
+            .await
     }
 
     pub async fn post_commitment_tx_raw_without_gossip(
         &self,
         commitment_tx: &CommitmentTransaction,
-    ) {
+    ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
-            .await;
+            .await
     }
 
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
@@ -1555,7 +1558,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Submit pledge commitment via API
         let api_uri = self.node_ctx.config.node_config.api_uri();
-        self.post_commitment_tx_request(&api_uri, &pledge_tx).await;
+        self.post_commitment_tx_request(&api_uri, &pledge_tx)
+            .await
+            .expect("posted commitment tx");
 
         pledge_tx
     }
@@ -1583,7 +1588,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Submit stake commitment via public API
         let api_uri = self.node_ctx.config.node_config.api_uri();
-        self.post_commitment_tx_request(&api_uri, &stake_tx).await;
+        self.post_commitment_tx_request(&api_uri, &stake_tx)
+            .await
+            .expect("posted commitment tx");
 
         stake_tx
     }
@@ -1610,7 +1617,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         api_uri: &str,
         commitment_tx: &CommitmentTransaction,
-    ) {
+    ) -> eyre::Result<()> {
         info!("Posting Commitment TX: {}", commitment_tx.id.0.to_base58());
 
         let client = awc::Client::default();
@@ -1624,27 +1631,42 @@ impl IrysNodeTest<IrysNodeCtx> {
             Ok(r) => r,
             Err(e) => {
                 error!("Failed to post commitment transaction: {e}");
-                return;
+                return Err(eyre::eyre!(
+                    "Failed to post commitment transaction {}: {e}",
+                    &commitment_tx.id
+                ));
             }
         };
 
         if response.status() != StatusCode::OK {
-            // Read the response body
-            let body_bytes = response.body().await.expect("Failed to read response body");
+            // Read the response body for logging
+            let body_bytes = match response.body().await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error!("Failed to read error response body: {e}");
+                    Default::default()
+                }
+            };
             let body_str = String::from_utf8_lossy(&body_bytes);
 
-            panic!(
+            error!(
                 "Response status: {} - {}\nRequest Body: {}",
                 response.status(),
                 body_str,
                 serde_json::to_string_pretty(&commitment_tx).unwrap(),
             );
+            Err(eyre::eyre!(
+                "Posted commitment transaction {} but got HTTP response code: {:?}",
+                response.status(),
+                &commitment_tx.id
+            ))
         } else {
             info!(
                 "Response status: {}\n{}",
                 response.status(),
                 serde_json::to_string_pretty(&commitment_tx).unwrap()
             );
+            Ok(())
         }
     }
 

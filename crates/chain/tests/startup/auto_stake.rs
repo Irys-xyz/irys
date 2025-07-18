@@ -57,7 +57,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         };
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
 
-        genesis_node.post_commitment_tx(&stake_tx).await;
+        genesis_node.post_commitment_tx(&stake_tx).await?;
         debug!("stake: {}", &stake_tx.id);
         // just the stake
         already_processed_count += 1;
@@ -79,7 +79,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
             let pledge_tx = peer_signer.sign_commitment(stake_tx)?;
             debug!("pledge: {}", &pledge_tx.id);
 
-            genesis_node.post_commitment_tx(&pledge_tx).await;
+            genesis_node.post_commitment_tx(&pledge_tx).await?;
             anchor = pledge_tx.id;
             already_processed_count += 1;
             // don't wait if we haven't posted a stake (stuck in the LRU)
@@ -93,11 +93,11 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         }
     }
 
+    // mine block 2
     let blk = genesis_node.mine_block().await?;
     genesis_node.wait_until_height(blk.height, 10).await?;
 
     // Start the peer
-
     let peer_node = IrysNodeTest::new(peer_config.clone())
         .start_with_name("PEER")
         .await;
