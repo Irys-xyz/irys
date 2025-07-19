@@ -22,8 +22,7 @@ impl Inner {
         txs: Vec<H256>,
     ) -> Vec<Option<DataTransactionHeader>> {
         let mut found_txs = Vec::with_capacity(txs.len());
-        let mempool_state = &self.mempool_state.clone();
-        let mempool_state_guard = mempool_state.read().await;
+        let mempool_state_guard = self.mempool_state.write().await;
 
         for tx in txs {
             // if data tx exists in mempool
@@ -59,12 +58,11 @@ impl Inner {
         );
         // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
         tx.ingress_proofs = None;
-        let mempool_state = &self.mempool_state.clone();
-        let mempool_state_read_guard = mempool_state.read().await;
+        let mempool_state_read_guard = self.mempool_state.read().await;
 
         // Early out if we already know about this transaction in
         // the mempool or the index
-        if mempool_state_read_guard.invalid_tx.contains(&tx.id)
+        if mempool_state_read_guard.recent_invalid_tx.contains(&tx.id)
             || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
             || self
                 .irys_db
@@ -78,17 +76,19 @@ impl Inner {
         drop(mempool_state_read_guard);
 
         // Validate anchor
-        let hdr = match self.validate_anchor(&tx.id, &tx.anchor).await {
-            Err(e) => {
-                error!(
-                    "Validation failed: {:?} - mapped to: {:?}",
-                    e,
-                    TxIngressError::DatabaseError
-                );
-                return Ok(());
-            }
-            Ok(v) => v,
-        };
+        let (anchor_height, tx): (u64, DataTransactionHeader) =
+            match self.validate_anchor(tx.into()).await {
+                Err(e) => {
+                    error!(
+                        "Validation failed: {:?} - mapped to: {:?}",
+                        e,
+                        TxIngressError::DatabaseError
+                    );
+                    return Ok(());
+                }
+                Ok(Some((h, tx))) => (h, tx.try_into().unwrap()), // should be impossible to panic
+                Ok(None) => return Ok(()),                        // TODO: plumb success context
+            };
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
@@ -100,7 +100,7 @@ impl Inner {
                 .consensus_config()
                 .mempool
                 .anchor_expiry_depth as u64;
-            let new_expiry = hdr.height + anchor_expiry_depth;
+            let new_expiry = anchor_height + anchor_expiry_depth;
             debug!(
                 "Updating ingress proof for data root {} expiry from {} -> {}",
                 &tx.data_root, &old_expiry.last_height, &new_expiry
@@ -140,11 +140,11 @@ impl Inner {
         // check the result and error handle
         self.validate_signature(&tx).await?;
 
-        let mut mempool_state_write_guard = mempool_state.write().await;
+        let mut mempool_state_write_guard = self.mempool_state.write().await;
         mempool_state_write_guard
             .valid_submit_ledger_tx
             .insert(tx.id, tx.clone());
-        mempool_state_write_guard.recent_valid_tx.insert(tx.id);
+        mempool_state_write_guard.recent_valid_tx.put(tx.id, ());
         drop(mempool_state_write_guard);
 
         // Cache the data_root in the database
@@ -171,9 +171,10 @@ impl Inner {
 
         // Process any chunks that arrived before their parent transaction
         // These were temporarily stored in the pending_chunks cache
-        let mut mempool_state_write_guard = mempool_state.write().await;
+        let mut mempool_state_write_guard = self.mempool_state.write().await;
         let option_chunks_map = mempool_state_write_guard.pending_chunks.pop(&tx.data_root);
         drop(mempool_state_write_guard);
+
         if let Some(chunks_map) = option_chunks_map {
             // Extract owned chunks from the map to process them
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
@@ -194,6 +195,9 @@ impl Inner {
                 }
             }
         }
+
+        // // notify that we've accepted this tx
+        // self.notify_anchor(tx.id).await;
 
         // Gossip transaction
         let gossip_broadcast_message = GossipBroadcastMessage::from(tx.clone());
@@ -239,7 +243,7 @@ impl Inner {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
             Ok(true)
-        } else if mempool_state_guard.invalid_tx.contains(&txid) {
+        } else if mempool_state_guard.recent_invalid_tx.contains(&txid) {
             // Still has it, just invalid
             Ok(true)
         } else {

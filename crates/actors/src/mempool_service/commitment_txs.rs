@@ -3,7 +3,10 @@ use base58::ToBase58 as _;
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
-use irys_types::{Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionId, H256};
+use irys_types::{
+    Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransaction, IrysTransactionId,
+    H256,
+};
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -21,8 +24,11 @@ impl Inner {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
 
-        // Early out if we already know about this transaction in mempool (invalid)
-        if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
+        // Early out if we already know about this transaction (invalid)
+        if mempool_state_guard
+            .recent_invalid_tx
+            .contains(&commitment_tx.id)
+        {
             return Err(TxIngressError::Skipped);
         }
 
@@ -56,18 +62,24 @@ impl Inner {
         }
 
         // Validate the tx anchor
-        if let Err(e) = self
-            .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
+        // if let Err(e) =  {
+        //     tracing::warn!(
+        //         "Anchor {:?} for tx {:?} failure with error: {:?}",
+        //         &commitment_tx.anchor,
+        //         commitment_tx.id,
+        //         e
+        //     );
+        //     return Err(TxIngressError::InvalidAnchor);
+        // }
+
+        let (_anchor_height, commitment_tx) = match self
+            .validate_anchor(IrysTransaction::Commitment(commitment_tx))
             .await
         {
-            tracing::warn!(
-                "Anchor {:?} for tx {:?} failure with error: {:?}",
-                &commitment_tx.anchor,
-                commitment_tx.id,
-                e
-            );
-            return Err(TxIngressError::InvalidAnchor);
-        }
+            Ok(Some((height, tx))) => (height, tx.try_into().unwrap()), // should never error
+            Ok(None) => return Ok(()), // TODO: plumb success context
+            Err(err) => return Err(err),
+        };
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
@@ -90,7 +102,9 @@ impl Inner {
                 .or_default()
                 .push(commitment_tx.clone());
 
-            mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
+            mempool_state_guard
+                .recent_valid_tx
+                .put(commitment_tx.id, ());
 
             // Process any pending pledges for this newly staked address
             // ------------------------------------------------------
@@ -160,6 +174,10 @@ impl Inner {
         } else {
             return Err(TxIngressError::Skipped);
         }
+
+        // notify that we've accepted this tx
+        self.notify_anchor(commitment_tx.id).await;
+
         Ok(())
     }
 
@@ -262,7 +280,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mut mempool_state_guard = mempool_state.write().await;
 
-        mempool_state_guard.recent_valid_tx.remove(txid);
+        mempool_state_guard.recent_valid_tx.pop(txid);
 
         // Create a vector of addresses to update to avoid borrowing issues
         let addresses_to_check: Vec<Address> = mempool_state_guard
