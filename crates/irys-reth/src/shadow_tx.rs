@@ -349,3 +349,45 @@ pub struct BlockRewardIncrement {
     /// Target account address.
     pub target: Address,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::TxLegacy;
+    use alloy_primitives::TxKind;
+    use alloy_rlp::Encodable as _;
+
+    #[derive(alloy_rlp::RlpEncodable)]
+    struct LegacyBalanceIncrement {
+        amount: U256,
+        target: Address,
+        irys_ref: FixedBytes<32>,
+    }
+
+    #[test]
+    fn rlp_payload_rejected() {
+        let legacy = LegacyBalanceIncrement {
+            amount: U256::from(1),
+            target: Address::ZERO,
+            irys_ref: FixedBytes::ZERO,
+        };
+
+        let mut rlp = Vec::new();
+        rlp.push(SHADOW_TX_VERSION_V1);
+        rlp.push(UNSTAKE_ID);
+        legacy.encode(&mut rlp);
+
+        // normal EVM transaction carrying arbitrary input data
+        let tx = TxLegacy {
+            gas_limit: 21_000,
+            value: U256::ZERO,
+            nonce: 0,
+            gas_price: 1,
+            chain_id: Some(1),
+            to: TxKind::Call(Address::ZERO),
+            input: rlp.clone().into(),
+        };
+
+        assert!(ShadowTransaction::decode(&mut &tx.input[..]).is_err());
+    }
+}
