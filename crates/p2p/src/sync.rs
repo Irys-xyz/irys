@@ -182,6 +182,7 @@ impl SyncState {
     pub async fn wait_for_processed_block_to_reach_target(&self) {
         // If already synced, return immediately
         if !self.is_syncing() {
+            debug!("JESSEDEBUG2 SYNC already syncing");
             return;
         }
 
@@ -201,6 +202,7 @@ impl SyncState {
         })
         .await
         .expect("Sync checking task failed");
+        debug!("JESSEDEBUG2 SYNC {:?}", &self.sync_target_height);
     }
 
     pub fn set_trusted_sync(&self, is_trusted_sync: bool) {
@@ -412,7 +414,7 @@ pub async fn sync_chain(
 
     // If no new blocks were added to the index, nothing is going to mark
     //  the tip as processed
-    if !no_new_blocks_to_process {
+    if no_new_blocks_to_process {
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
     }

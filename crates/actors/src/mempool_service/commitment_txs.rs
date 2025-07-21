@@ -9,17 +9,15 @@ use irys_types::{
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 impl Inner {
+    #[instrument(skip_all,/*  fields(tx_id = %commitment_tx.id) */)]
     pub async fn handle_ingress_commitment_tx_message(
         &mut self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        debug!(
-            "received commitment tx {:?}",
-            &commitment_tx.id.0.to_base58()
-        );
+        debug!("received commitment tx {:?}", &commitment_tx.id);
 
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
@@ -61,17 +59,6 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
-        // Validate the tx anchor
-        // if let Err(e) =  {
-        //     tracing::warn!(
-        //         "Anchor {:?} for tx {:?} failure with error: {:?}",
-        //         &commitment_tx.anchor,
-        //         commitment_tx.id,
-        //         e
-        //     );
-        //     return Err(TxIngressError::InvalidAnchor);
-        // }
-
         let (_anchor_height, commitment_tx) = match self
             .validate_anchor(IrysTransaction::Commitment(commitment_tx))
             .await
@@ -83,6 +70,10 @@ impl Inner {
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
+        debug!(
+            "JESSEDEBUG2 COMMITMENT tx {} status {:?}",
+            &commitment_tx.id, &commitment_status
+        );
         if commitment_status == CommitmentSnapshotStatus::Accepted {
             // Validate tx signature
             if let Err(e) = self.validate_signature(&commitment_tx).await {
@@ -96,6 +87,10 @@ impl Inner {
 
             let mut mempool_state_guard = mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
+            debug!(
+                "JESSEDEBUG2 COMMITMENT pushing to valid_commitment_tx {:?}",
+                &commitment_tx.id
+            );
             mempool_state_guard
                 .valid_commitment_tx
                 .entry(commitment_tx.signer)
@@ -175,9 +170,6 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
-        // notify that we've accepted this tx
-        self.notify_anchor(commitment_tx.id).await;
-
         Ok(())
     }
 
@@ -204,8 +196,9 @@ impl Inner {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
-        let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
+        let mut mempool_state_guard = self.mempool_state.write().await;
+
+        // TODO: what the heck is this, this needs to be optimised at least a little bit
 
         // Get any CommitmentTransactions from the valid commitments Map
         mempool_state_guard
@@ -229,6 +222,32 @@ impl Inner {
             "handle_get_commitment_transactions_message: {:?}",
             hash_map.iter().map(|x| x.0).collect::<Vec<_>>()
         );
+
+        // if data tx exists in anchor_pending
+
+        for tx_id in commitment_tx_ids.iter() {
+            debug!("JESSEDEBUG2 COMMITMENTS checking {:?}", &tx_id);
+            if hash_map.contains_key(tx_id) {
+                debug!("JESSEDEBUG2 COMMITMENTS in map {:?}", &tx_id);
+
+                continue;
+            }
+            if let Some(tx_header) = mempool_state_guard.pending_anchor_txs.get(tx_id) {
+                debug!("JESSEDEBUG2 COMMITMENTS in pending_anchor_txs {:?}", &tx_id);
+
+                match tx_header {
+                    IrysTransaction::Data(_) => {}
+                    IrysTransaction::Commitment(tx_header) => {
+                        debug!(
+                            "JESSEDEBUG2 COMMITMENTS Got tx {:?} from pending_anchor_txs/mempool",
+                            &tx_id
+                        );
+                        hash_map.insert(*tx_id, tx_header.clone());
+                    }
+                }
+                continue;
+            }
+        }
 
         // Attempt to locate and retain only the requested tx_ids
         let mut filtered_map = HashMap::with_capacity(commitment_tx_ids.len());

@@ -112,7 +112,7 @@ impl Inner {
 
         self.revalidate_all_txs().await?;
 
-        tracing::info!("Reorg handled, new tip: {}", &new_tip);
+        tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
     }
 
@@ -126,7 +126,6 @@ impl Inner {
         let (valid_submit_ledger_tx, valid_commitment_tx) = {
             let mut state = self.mempool_state.write().await;
             state.recent_valid_tx.clear();
-
             (
                 std::mem::take(&mut state.valid_submit_ledger_tx),
                 std::mem::take(&mut state.valid_commitment_tx),
@@ -134,17 +133,20 @@ impl Inner {
         };
         for (id, tx) in valid_submit_ledger_tx {
             match self.handle_data_tx_ingress_message(tx).await {
-                Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
-                Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
+                Ok(_) => debug!("resubmitted data tx {:?} to mempool", &id),
+                Err(err) => debug!(
+                    "failed to resubmit data tx {:?} to mempool: {:?}",
+                    &id, &err
+                ),
             }
         }
         for (_address, txs) in valid_commitment_tx {
             for tx in txs {
                 let id = tx.id;
                 match self.handle_ingress_commitment_tx_message(tx).await {
-                    Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
+                    Ok(_) => debug!("resubmitted commitment tx {:?} to mempool", &id),
                     Err(err) => debug!(
-                        "failed to resubmit commitment tx {} to mempool: {:?}",
+                        "failed to resubmit commitment tx {:?} to mempool: {:?}",
                         &id, &err
                     ),
                 }

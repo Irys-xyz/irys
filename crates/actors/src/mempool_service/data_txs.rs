@@ -8,8 +8,8 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256, U256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransaction,
+    IrysTransactionCommon as _, IrysTransactionId, H256, U256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
 use std::collections::HashMap;
@@ -17,18 +17,30 @@ use tracing::{debug, error, info, warn};
 
 impl Inner {
     /// check the mempool and mdbx for data transaction
+    /// TODO: align the logic with handle_get_commitment_tx_message (specifically HashMap output)
     pub async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
     ) -> Vec<Option<DataTransactionHeader>> {
         let mut found_txs = Vec::with_capacity(txs.len());
-        let mempool_state_guard = self.mempool_state.write().await;
+        let mut mempool_state_guard = self.mempool_state.write().await;
 
         for tx in txs {
             // if data tx exists in mempool
             if let Some(tx_header) = mempool_state_guard.valid_submit_ledger_tx.get(&tx) {
                 debug!("Got tx {} from mempool", &tx);
                 found_txs.push(Some(tx_header.clone()));
+                continue;
+            }
+            // if data tx exists in anchor_pending
+            if let Some(tx_header) = mempool_state_guard.pending_anchor_txs.get(&tx) {
+                match tx_header {
+                    IrysTransaction::Data(tx_header) => {
+                        debug!("Got tx {:?} from mempool", &tx);
+                        found_txs.push(Some(tx_header.clone()));
+                    }
+                    IrysTransaction::Commitment(_) => {}
+                }
                 continue;
             }
             // if data tx exists in mdbx

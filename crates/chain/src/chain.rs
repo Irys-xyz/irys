@@ -23,6 +23,7 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{ActorAddresses, BlockValidationTracker, StorageModuleService};
+use irys_api_client::ApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -31,8 +32,8 @@ use irys_database::{add_genesis_commitments, database, get_genesis_commitments, 
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData};
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
-    ServiceHandleWithShutdownSignal, SyncState,
+    BlockPool, BlockStatusProvider, P2PService, PeerList as _, PeerListService,
+    PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -47,6 +48,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
+use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
     CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
@@ -612,19 +614,48 @@ impl IrysNode {
             &ctx.config,
         )
         .await?;
+        // let top_peer = ctx.peer_list.top_trusted_peer().await?.first();
+        // match top_peer {
+        //     Some(tp) => {
+        //         let client =  irys_api_client::IrysApiClient::new();
+        //         let latest_block =         self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
+        //     .await
+
+        //     },
+        //     None => todo!(),
+        // }
 
         if config.node_config.stake_pledge_drives {
+            {
+                let btrg = ctx.block_tree_guard.read();
+                debug!(
+                    "JESSEDEBUG2 LATEST HEIGHT {}",
+                    btrg.get_canonical_chain().0.last().unwrap().height
+                );
+            };
             const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-            let validation_tracker = BlockValidationTracker::new(
+            let mut validation_tracker = BlockValidationTracker::new(
                 ctx.block_tree_guard.clone(),
                 ctx.service_senders.clone(),
                 MAX_WAIT_TIME,
             );
+            // wait for any pending blocks to finish validating
+            let latest_hash = validation_tracker.wait_for_validation().await?;
+
+            {
+                let btrg = ctx.block_tree_guard.read();
+                debug!(
+                    "JESSEDEBUG2 LATEST HEIGHT {}, latest hash: {}",
+                    btrg.get_canonical_chain().0.last().unwrap().height,
+                    &latest_hash
+                );
+            };
+
             stake_and_pledge(
                 config,
                 ctx.block_tree_guard.clone(),
                 ctx.storage_modules_guard.clone(),
-                validation_tracker,
+                latest_hash,
             )
             .await?;
         }
@@ -1590,7 +1621,8 @@ async fn stake_and_pledge(
     config: &Config,
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
-    mut validation_tracker: BlockValidationTracker,
+    // mut validation_tracker: BlockValidationTracker,
+    latest_hash: BlockHash,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
@@ -1607,8 +1639,6 @@ async fn stake_and_pledge(
         client.post(url).send_json(commitment_tx).await
     };
 
-    // wait for any pending blocks to finish validating
-    let latest_hash = validation_tracker.wait_for_validation().await?;
     // now check the canonical state
 
     let (is_historically_staked, commitment_snapshot) = {

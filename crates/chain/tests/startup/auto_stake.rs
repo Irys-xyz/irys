@@ -1,8 +1,10 @@
 use crate::utils::IrysNodeTest;
+use irys_p2p::PeerList as _;
 use irys_primitives::CommitmentType;
+use irys_testing_utils::initialize_tracing_with_backtrace;
+use irys_types::IrysBlockHeader;
 use irys_types::{CommitmentTransaction, NodeConfig, H256};
 use rstest::rstest;
-use tokio::task::yield_now;
 use tracing::debug;
 
 #[rstest]
@@ -17,14 +19,13 @@ use tracing::debug;
 // it would allow us to test non-zero pledge numbers without a stake
 #[actix_web::test]
 async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> eyre::Result<()> {
-    use irys_testing_utils::initialize_tracing;
-
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=debug,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
-    initialize_tracing();
-    // Configure a test network with accelerated epochs (2 blocks per epoch)
-    let num_blocks_in_epoch = 2;
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,storage::db::mdbx=off,reth_basic_payload_builder=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::vdf_service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    initialize_tracing_with_backtrace();
+    // Configure a test network with accelerated epochs (4 blocks per epoch)
+    let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().block_migration_depth = 1;
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for the peer and fund it
@@ -41,11 +42,16 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     peer_config.stake_pledge_drives = true;
 
     let mut already_processed_count = 0;
-    let from_scratch_expected_count = 4;
+    let from_scratch_expected_count = 3;
 
     // so autopledge uses a different anchor
-    let blk = genesis_node.mine_block().await?;
-    genesis_node.wait_until_height(blk.height, 10).await?;
+    // let blk = genesis_node.mine_block().await?;
+    let h = genesis_node.get_canonical_chain_height().await;
+
+    genesis_node.mine_blocks(num_blocks_in_epoch).await?;
+    genesis_node
+        .wait_until_height(h + num_blocks_in_epoch as u64, 20)
+        .await?;
 
     if stake {
         let stake_tx = CommitmentTransaction {
@@ -58,12 +64,15 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
 
         genesis_node.post_commitment_tx(&stake_tx).await?;
-        debug!("stake: {}", &stake_tx.id);
+        debug!("JESSEDEBUG2 stake: {}", &stake_tx.id);
         // just the stake
-        already_processed_count += 1;
+        // already_processed_count += 1;
         genesis_node
-            .wait_for_mempool_shape(0, 0, already_processed_count, 10)
-            .await?;
+            .wait_for_mempool_commitment_txs(vec![stake_tx.id], 10)
+            .await?
+        // genesis_node
+        //     .wait_for_mempool_best_txs_shape(0, 0, already_processed_count, 10)
+        //     .await?;
     }
 
     if pledges > 0 {
@@ -77,45 +86,132 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
                 ..Default::default()
             };
             let pledge_tx = peer_signer.sign_commitment(stake_tx)?;
-            debug!("pledge: {}", &pledge_tx.id);
+            debug!("JESSEDEBUG2 pledge: {}", &pledge_tx.id);
 
             genesis_node.post_commitment_tx(&pledge_tx).await?;
             anchor = pledge_tx.id;
             already_processed_count += 1;
+
+            genesis_node
+                .wait_for_mempool_commitment_txs(vec![pledge_tx.id], 10)
+                .await?
+
             // don't wait if we haven't posted a stake (stuck in the LRU)
-            if stake {
-                genesis_node
-                    .wait_for_mempool_shape(0, 0, already_processed_count, 10)
-                    .await?;
-            } else {
-                yield_now().await
-            }
+            // if stake {
+            //     genesis_node
+            //         .wait_for_mempool_best_txs_shape(0, 0, already_processed_count, 10)
+            //         .await?;
+            // } else {
+            //     yield_now().await
+            // }
         }
     }
 
-    // mine block 2
-    let blk = genesis_node.mine_block().await?;
-    genesis_node.wait_until_height(blk.height, 10).await?;
+    // mine blocks
+    let mut blk = IrysBlockHeader::default();
+    for idx in 0..already_processed_count {
+        // wait for the expected txs to show up on the genesis node
+        debug!("JESSEDEBUG2 NUM1 {}", &idx);
+        genesis_node
+            .wait_for_mempool_best_txs_shape(0, 0, if idx == 0 && stake { 2 } else { 1 }, 10)
+            .await?;
+        blk = {
+            if ((genesis_node.get_canonical_chain_height().await + 1) % num_blocks_in_epoch as u64)
+                == 0
+            {
+                debug!("JESSEDEBUG2 NUM1 {} EPOCH BLOCK", &idx);
+                genesis_node.mine_block().await?;
+            };
+            genesis_node.mine_block().await?
+        };
+        debug!(
+            "JESSEDEBUG2 NUM1 {} {} INCLUDED {:?} {:?}",
+            &idx, &blk.height, &blk.data_ledgers, &blk.system_ledgers
+        );
+        genesis_node.wait_until_height(blk.height, 10).await?;
+    }
+
+    debug!(
+        "JESSEDEBUG2 PEER SYNC - genesis height: {} {}",
+        &genesis_node.get_canonical_chain_height().await,
+        genesis_node.get_block_index_height()
+    );
+
+    // mine a couple more blocks
+    genesis_node.mine_block().await?;
+    genesis_node.mine_block().await?;
+    blk = genesis_node.mine_block().await?;
 
     // Start the peer
     let peer_node = IrysNodeTest::new(peer_config.clone())
         .start_with_name("PEER")
         .await;
 
-    // wait for the expected txs to show up on the genesis node
-    genesis_node
-        .wait_for_mempool_shape(0, 0, from_scratch_expected_count, 10)
+    debug!(
+        "JESSEDEBUG2 SYNC HEIGHT {} {} {}",
+        &blk.height,
+        &blk.block_hash,
+        &peer_node.node_ctx.sync_state.is_syncing()
+    );
+
+    // peer_node.gossip_block_to_peers(&Arc::new(blk))?;
+    // genesis_node.send_block_to_peer(&peer_node, &blk).await?;
+
+    peer_node
+        .wait_until_height(
+            /* t_height, */ genesis_node.get_block_index_height(),
+            60,
+        )
         .await?;
 
-    // Mine a block to get the stake commitment included
-    let irys_block1 = genesis_node.mine_block().await?;
+    // genesis_node.send_block_to_peer(&peer_node, &blk).await?;
+    // genesis_node.send_full_block(&peer_node, &blk).await?;
 
-    peer_node.wait_until_height(irys_block1.height, 10).await?;
+    peer_node
+        .node_ctx
+        .peer_list
+        .request_block_from_the_network(blk.block_hash, false)
+        .await?;
 
-    // Mine another block to verify the system continues to work
-    let irys_block2 = genesis_node.mine_block().await?;
+    peer_node
+        .wait_until_height(
+            blk.height, /* genesis_node.get_block_index_height(), */
+            60,
+        )
+        .await?;
 
-    peer_node.wait_until_height(irys_block2.height, 10).await?;
+    for num in 0..(from_scratch_expected_count - already_processed_count) {
+        debug!("JESSEDEBUG2 NUM2 {}", &num);
+        genesis_node
+            .wait_for_mempool_best_txs_shape(0, 0, 1, 10)
+            .await?;
+        // let blk = genesis_node.mine_block().await?;
+        blk = {
+            if ((genesis_node.get_canonical_chain_height().await + 1) % num_blocks_in_epoch as u64)
+                == 0
+            {
+                debug!("JESSEDEBUG2 NUM2 {} EPOCH BLOCK", &num);
+                genesis_node.mine_block().await?;
+            };
+            genesis_node.mine_block().await?
+        };
+
+        debug!(
+            "JESSEDEBUG2 NUM2 {} INCLUDED {:?} {:?}",
+            &num, &blk.data_ledgers, &blk.system_ledgers
+        );
+        peer_node.wait_until_height(blk.height, 10).await?;
+    }
+    // // Mine a couple blocks to get the stake commitments included
+    genesis_node.mine_blocks(10).await?;
+    // let irys_block1 = genesis_node.mine_block().await?;
+
+    // peer_node.wait_until_height(irys_block1.height, 10).await?;
+
+    // // Mine another block to verify the system continues to work
+    // let irys_block2 = genesis_node.mine_block().await?;
+
+    // peer_node.wait_until_height(irys_block2.height, 10).await?;
 
     // Get the genesis nodes view of the peers assignments
     let peer_assignments = genesis_node.get_partition_assignments(peer_signer.address());

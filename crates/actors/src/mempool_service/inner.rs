@@ -104,6 +104,7 @@ pub enum MempoolServiceMessage {
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
     InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
+    GetState(oneshot::Sender<AtomicMempoolState>),
 }
 
 impl Inner {
@@ -199,6 +200,11 @@ impl Inner {
                     if let Err(e) = response.send(()) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
+                }
+                MempoolServiceMessage::GetState(response) => {
+                    let _ = response
+                        .send(Arc::clone(&self.mempool_state))
+                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
                 }
             }
             Ok(())
@@ -772,17 +778,22 @@ impl Inner {
         Ok(latest.height)
     }
 
-    #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
+    #[instrument(skip_all /*,  fields(tx_id = %tx.id(), anchor = %tx.anchor()) */)]
     /// Mark the provided tx as waiting for it's anchor to be valid
     pub async fn mark_tx_pending_anchor(&self, tx: IrysTransaction) -> eyre::Result<()> {
+        let tx_id = tx.id();
+        debug!(tx_id = ?tx_id, anchor = ?tx.anchor(), "Tx is pending anchor");
         let mut state_rw = self.mempool_state.write().await;
         let anchor = tx.anchor();
-        match state_rw.pending_anchor_txs.push(anchor, tx) {
+        match state_rw.pending_anchor_txs.push(tx.id(), tx) {
             // if we have removed an old entry, and not updated an existing one
             Some((k, _v)) if k != anchor => {
                 // remove this entry from the pending_anchor_map
                 match state_rw.pending_anchor_txids.get_mut(&k) {
-                    Some(hs) => hs.remove(&k),
+                    Some(hs) => {
+                        debug!("Evicting {:?} from pending_anchor_txs LRUs", &k);
+                        hs.remove(&k)
+                    }
                     None => false,
                 };
             }
@@ -795,7 +806,7 @@ impl Inner {
             .pending_anchor_txids
             .entry(anchor)
             .or_default()
-            .insert(anchor);
+            .insert(tx_id); //one wrong line lmao
 
         Ok(())
     }
@@ -803,8 +814,9 @@ impl Inner {
     #[instrument(skip_all)]
     // notify the pending_anchor_txs cache of a new anchor value
     pub async fn notify_anchor(&mut self, anchor: H256) {
+        debug!("New anchor {:?}", &anchor);
         // check if we have any pending txs waiting for this anchor
-        let waiting_for_anchor = {
+        let waiting_for_anchor: HashSet<H256> = {
             let mut state_rw = self.mempool_state.write().await;
             // only continue if we get some pending ids
             // (also remove the entry from pending_anchor_map)
@@ -813,6 +825,10 @@ impl Inner {
                 Some(_) | None => return,
             }
         };
+        debug!(
+            "JESSEDEBUG2 WAITING FOR ANCHOR {} {:?}",
+            &anchor, &waiting_for_anchor
+        );
         // throw all pending txs back to the mempool for re-validation
         for id in waiting_for_anchor {
             let tx = {
@@ -823,22 +839,21 @@ impl Inner {
             };
             let tx = match tx {
                 Some(tx) => tx,
-                None => continue,
+                None => {
+                    warn!("JESSEDEBUG2 UNABLE TO RESUBMIT TX {} due to ANCHOR {} - NOT FOUND IN PENDING", &id, &anchor);
+                    continue;
+                }
             };
-            // TODO: make the channel sender Option, so we don't cause error logs
-            let (os_tx, _os_rx) = oneshot::channel();
-            // use these to break recursion
-            match match tx {
-                IrysTransaction::Data(tx) => self
-                    .service_senders
-                    .mempool
-                    .send(MempoolServiceMessage::IngestDataTx(tx, os_tx)), /* self.handle_data_tx_ingress_message(tx).await, */
-                IrysTransaction::Commitment(tx) => {
-                    // self.handle_ingress_commitment_tx_message(tx).await
 
-                    self.service_senders
-                        .mempool
-                        .send(MempoolServiceMessage::IngestCommitmentTx(tx, os_tx))
+            debug!(
+                "Re-validating pending tx {:?} due to anchor {:?}",
+                &id, &anchor
+            );
+
+            match match tx {
+                IrysTransaction::Data(tx) => self.handle_data_tx_ingress_message(tx).await,
+                IrysTransaction::Commitment(tx) => {
+                    self.handle_ingress_commitment_tx_message(tx).await
                 }
             } {
                 Ok(_) => debug!(
@@ -955,7 +970,7 @@ impl TxIngressError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
