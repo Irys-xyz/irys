@@ -1348,6 +1348,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     assert_eq!(epoch_tx_ids, tx_ids[..max_commitments_per_epoch as usize]);
 
     // some blocks after epoch should contain commitment txs
+    // this will be a few blocks, as we posted enough txs above to populate two more blocks
     for h in 6..=7 {
         let block_n = genesis_node.get_block_by_height(h).await?;
         assert_eq!(
