@@ -20,7 +20,7 @@ use tracing::debug;
 // but it works if you run each case separately
 #[actix_web::test]
 async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,storage::db::mdbx=off,reth_basic_payload_builder=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::vdf_service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,storage::db::mdbx=off,reth_basic_payload_builder=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::vdf_service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off,irys_p2p::peer_list=error");
     initialize_tracing_with_backtrace();
     // Configure a test network with accelerated epochs (4 blocks per epoch)
     // this number is higher than usual as epoch blocks cannot include new commitments
@@ -118,7 +118,8 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         genesis_node.get_block_index_height()
     );
 
-    // mine another block (as sync_chain doesn't proactively sync unmigrated blocks)
+    // mine a couple blocks (as sync_chain doesn't proactively sync unmigrated blocks, and we need to make sure all our commitments are in migrated blocks)
+    genesis_node.mine_blocks(2).await?;
     let block = genesis_node.mine_block().await?;
 
     // Start the peer
@@ -154,7 +155,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         peer_node.wait_until_height(block.height, 10).await?;
     }
     // // Mine a couple blocks to get the stake commitments included
-    genesis_node.mine_blocks(2).await?;
+    genesis_node.mine_blocks(num_blocks_in_epoch + 1).await?;
 
     // Get the genesis nodes view of the peers assignments
     let peer_assignments = genesis_node.get_partition_assignments(peer_signer.address());
