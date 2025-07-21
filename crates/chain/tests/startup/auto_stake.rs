@@ -85,7 +85,6 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
                 ..Default::default()
             };
             let pledge_tx = peer_signer.sign_commitment(stake_tx)?;
-            debug!("JESSEDEBUG2 pledge: {}", &pledge_tx.id);
 
             genesis_node.post_commitment_tx(&pledge_tx).await?;
             anchor = pledge_tx.id;
