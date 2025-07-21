@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use irys_p2p::PeerList as _;
 use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing_with_backtrace;
 use irys_types::{CommitmentTransaction, NodeConfig, H256};
