@@ -247,6 +247,7 @@ async fn start_reth_node(
                 random_ports,
                 shadow_tx_store,
             )
+            .in_current_span()
             .await
             .expect("expected reth node to have started")
         }
@@ -795,7 +796,8 @@ impl IrysNode {
                     node_handle.node
                 };
 
-                let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
+                let reth_node =
+                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal().in_current_span());
 
                 reth_node.provider.database.db.close();
                 irys_storage::reth_provider::cleanup_provider(&irys_provider);
