@@ -1251,10 +1251,15 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
 /// for 1 stake + 4 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 1
 async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let seconds_to_wait = 10;
-    let max_commitment_txs_per_block = 2;
+    let max_commitment_txs_per_block: u64 = 2;
+    let num_blocks_in_epoch = 5;
+
     initialize_tracing();
 
-    let mut genesis_config = NodeConfig::testnet();
+    let max_commitments_per_epoch =
+        (num_blocks_in_epoch * max_commitment_txs_per_block) - max_commitment_txs_per_block;
+
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into()?);
     genesis_config
         .consensus
         .get_mut()
@@ -1274,7 +1279,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     genesis_node.post_commitment_tx(&stake_tx).await?;
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
-    for _ in 0..4 {
+    for _ in 0..11 {
         let tx = new_pledge_tx(
             tx_ids.last().expect("valid tx id for use as anchor"),
             &signer,
@@ -1285,59 +1290,85 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     // wait for all txs to ingress mempool
     genesis_node
-        .wait_for_mempool_commitment_txs(tx_ids, seconds_to_wait)
+        .wait_for_mempool_commitment_txs(tx_ids.clone(), seconds_to_wait)
         .await?;
 
     let mut counts = Vec::new();
-    for i in 1..=3 {
+    for i in 1..=8 {
         genesis_node.mine_block().await?;
         let block = genesis_node.get_block_by_height(i).await?;
+        let is_epoch_block = block.height > 0 && block.height % num_blocks_in_epoch as u64 == 0;
         counts.push(
             block
                 .system_ledgers
                 .get(SystemLedger::Commitment as usize)
                 .map_or(0, |l| l.tx_ids.len()),
         );
+        if is_epoch_block {
+            assert_eq!(counts[(i - 1) as usize], max_commitments_per_epoch as usize);
+        } else {
+            assert!(counts[(i - 1) as usize] <= max_commitment_txs_per_block as usize);
+        }
     }
 
-    // check the total txs is correct
-    assert!(counts
-        .iter()
-        .all(|c| *c <= max_commitment_txs_per_block as usize));
+    // check the grand total txs is correct
     assert_eq!(
         counts.iter().sum::<usize>(),
-        5,
-        "Total count of commitment txs is incorrect"
+        20,
+        "Total count of commitment txs is incorrect",
     );
 
     // check individual blocks have correct txs.
-    // for 1 stake + 4 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 1
-    let block1 = genesis_node.get_block_by_height(1).await?;
+    // for 1 stake + 11 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 2 + 2 + 0 + 2 + 2
+
+    for h in 1..num_blocks_in_epoch {
+        let block_n = genesis_node.get_block_by_height(h).await?;
+        assert_eq!(
+            2,
+            block_n
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+            "block {} commitment tx count is incorrect",
+            h
+        );
+    }
+
+    // epoch block rolls up previous txs
+    let epoch_block = genesis_node
+        .get_block_by_height(num_blocks_in_epoch)
+        .await?;
+    assert_eq!(epoch_block.height % num_blocks_in_epoch as u64, 0);
+    let epoch_tx_ids = epoch_block
+        .system_ledgers
+        .get(SystemLedger::Commitment as usize)
+        .map_or(Vec::<H256>::new(), |l| l.tx_ids.0.clone());
+    assert_eq!(epoch_tx_ids, tx_ids[..max_commitments_per_epoch as usize]);
+
+    // some blocks after epoch should contain commitment txs
+    for h in 6..=7 {
+        let block_n = genesis_node.get_block_by_height(h).await?;
+        assert_eq!(
+            2,
+            block_n
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+            "post-epoch block commitment tx count is incorrect",
+        );
+    }
+
+    // we have then used all commitment txs from mempool, so final block(s) are empty
+    let final_height = 8;
+    let final_block = genesis_node.get_block_by_height(final_height).await?;
     assert_eq!(
-        2,
-        block1
+        0,
+        final_block
             .system_ledgers
             .get(SystemLedger::Commitment as usize)
             .map_or(0, |l| l.tx_ids.len()),
-        "block 1 commitment tx count is incorrect"
-    );
-    let block2 = genesis_node.get_block_by_height(2).await?;
-    assert_eq!(
-        2,
-        block2
-            .system_ledgers
-            .get(SystemLedger::Commitment as usize)
-            .map_or(0, |l| l.tx_ids.len()),
-        "block 2 commitment tx count is incorrect"
-    );
-    let block3 = genesis_node.get_block_by_height(3).await?;
-    assert_eq!(
-        1,
-        block3
-            .system_ledgers
-            .get(SystemLedger::Commitment as usize)
-            .map_or(0, |l| l.tx_ids.len()),
-        "block 3 commitment tx count is incorrect"
+        "post-epoch, emptied mempool of commitments. block {:?} commitment tx count is incorrect",
+        final_height,
     );
 
     genesis_node.stop().await;
