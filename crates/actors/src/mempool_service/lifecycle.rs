@@ -119,7 +119,7 @@ impl Inner {
     /// Re-process all currently valid mempool txs
     /// all this does is take all valid submit & commitment txs, and passes them back through ingress
     /// right now, all this is used for is to validate the anchor state of a tx
-    /// (in case of a reorg, the anchor a tx used to make it into valid txs could now be pending)
+    /// (when a reorg happens, the anchor a tx used to make it into valid txs could now be pending)
     #[instrument(skip_all)]
     pub async fn revalidate_all_txs(&mut self) -> eyre::Result<()> {
         // re-process all valid txs
@@ -133,20 +133,17 @@ impl Inner {
         };
         for (id, tx) in valid_submit_ledger_tx {
             match self.handle_data_tx_ingress_message(tx).await {
-                Ok(_) => debug!("resubmitted data tx {:?} to mempool", &id),
-                Err(err) => debug!(
-                    "failed to resubmit data tx {:?} to mempool: {:?}",
-                    &id, &err
-                ),
+                Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
+                Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
             }
         }
         for (_address, txs) in valid_commitment_tx {
             for tx in txs {
                 let id = tx.id;
                 match self.handle_ingress_commitment_tx_message(tx).await {
-                    Ok(_) => debug!("resubmitted commitment tx {:?} to mempool", &id),
+                    Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
                     Err(err) => debug!(
-                        "failed to resubmit commitment tx {:?} to mempool: {:?}",
+                        "failed to resubmit commitment tx {} to mempool: {:?}",
                         &id, &err
                     ),
                 }

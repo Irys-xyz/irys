@@ -23,7 +23,6 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{ActorAddresses, BlockValidationTracker, StorageModuleService};
-use irys_api_client::ApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -32,8 +31,8 @@ use irys_database::{add_genesis_commitments, database, get_genesis_commitments, 
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData};
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, P2PService, PeerList as _, PeerListService,
-    PeerListServiceFacade, ServiceHandleWithShutdownSignal, SyncState,
+    BlockPool, BlockStatusProvider, P2PService, PeerListService, PeerListServiceFacade,
+    ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -614,25 +613,8 @@ impl IrysNode {
             &ctx.config,
         )
         .await?;
-        // let top_peer = ctx.peer_list.top_trusted_peer().await?.first();
-        // match top_peer {
-        //     Some(tp) => {
-        //         let client =  irys_api_client::IrysApiClient::new();
-        //         let latest_block =         self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
-        //     .await
-
-        //     },
-        //     None => todo!(),
-        // }
 
         if config.node_config.stake_pledge_drives {
-            {
-                let btrg = ctx.block_tree_guard.read();
-                debug!(
-                    "JESSEDEBUG2 LATEST HEIGHT {}",
-                    btrg.get_canonical_chain().0.last().unwrap().height
-                );
-            };
             const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
             let mut validation_tracker = BlockValidationTracker::new(
                 ctx.block_tree_guard.clone(),
@@ -645,7 +627,7 @@ impl IrysNode {
             {
                 let btrg = ctx.block_tree_guard.read();
                 debug!(
-                    "JESSEDEBUG2 LATEST HEIGHT {}, latest hash: {}",
+                    "Checking stakes & pledges at height {}, latest hash: {}",
                     btrg.get_canonical_chain().0.last().unwrap().height,
                     &latest_hash
                 );
@@ -1621,7 +1603,6 @@ async fn stake_and_pledge(
     config: &Config,
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
-    // mut validation_tracker: BlockValidationTracker,
     latest_hash: BlockHash,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");

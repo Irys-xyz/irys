@@ -9,10 +9,10 @@ use irys_types::{
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument, trace, warn};
 
 impl Inner {
-    #[instrument(skip_all,/*  fields(tx_id = %commitment_tx.id) */)]
+    #[instrument(skip_all)]
     pub async fn handle_ingress_commitment_tx_message(
         &mut self,
         commitment_tx: CommitmentTransaction,
@@ -70,9 +70,10 @@ impl Inner {
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
-        debug!(
-            "JESSEDEBUG2 COMMITMENT tx {} status {:?}",
-            &commitment_tx.id, &commitment_status
+        trace!(
+            "commitment tx {} status {:?}",
+            &commitment_tx.id,
+            &commitment_status
         );
         if commitment_status == CommitmentSnapshotStatus::Accepted {
             // Validate tx signature
@@ -87,8 +88,8 @@ impl Inner {
 
             let mut mempool_state_guard = mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
-            debug!(
-                "JESSEDEBUG2 COMMITMENT pushing to valid_commitment_tx {:?}",
+            trace!(
+                "pushing commitment {} to valid_commitment_tx",
                 &commitment_tx.id
             );
             mempool_state_guard
@@ -189,6 +190,7 @@ impl Inner {
     }
 
     /// read specified commitment txs from mempool
+    #[instrument(skip_all, name = "get_commitment_tx")]
     pub async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
@@ -226,22 +228,17 @@ impl Inner {
         // if data tx exists in anchor_pending
 
         for tx_id in commitment_tx_ids.iter() {
-            debug!("JESSEDEBUG2 COMMITMENTS checking {:?}", &tx_id);
+            trace!("checking for {} in mempool", &tx_id);
             if hash_map.contains_key(tx_id) {
-                debug!("JESSEDEBUG2 COMMITMENTS in map {:?}", &tx_id);
-
                 continue;
             }
             if let Some(tx_header) = mempool_state_guard.pending_anchor_txs.get(tx_id) {
-                debug!("JESSEDEBUG2 COMMITMENTS in pending_anchor_txs {:?}", &tx_id);
+                trace!("{} in pending_anchor_txs", &tx_id);
 
                 match tx_header {
                     IrysTransaction::Data(_) => {}
                     IrysTransaction::Commitment(tx_header) => {
-                        debug!(
-                            "JESSEDEBUG2 COMMITMENTS Got tx {:?} from pending_anchor_txs/mempool",
-                            &tx_id
-                        );
+                        debug!("Got tx {:?} from mempool/pending_anchor_txs", &tx_id);
                         hash_map.insert(*tx_id, tx_header.clone());
                     }
                 }

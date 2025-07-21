@@ -1007,10 +1007,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             if prev == expected {
                 break;
             }
-            debug!(
-                "JESSEDEBUG2 GOT {:?} expected {:?} {:?}",
-                &prev, expected, &txs
-            );
+            debug!("got {:?} expected {:?} - txs: {:?}", &prev, expected, &txs);
 
             tokio::time::sleep(Duration::from_secs(1)).await;
             retries += 1;

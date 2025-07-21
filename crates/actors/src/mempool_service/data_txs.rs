@@ -36,7 +36,7 @@ impl Inner {
             if let Some(tx_header) = mempool_state_guard.pending_anchor_txs.get(&tx) {
                 match tx_header {
                     IrysTransaction::Data(tx_header) => {
-                        debug!("Got tx {:?} from mempool", &tx);
+                        debug!("Got tx {:?} from mempool/pending_anchor_txs", &tx);
                         found_txs.push(Some(tx_header.clone()));
                     }
                     IrysTransaction::Commitment(_) => {}
@@ -207,9 +207,6 @@ impl Inner {
                 }
             }
         }
-
-        // // notify that we've accepted this tx
-        // self.notify_anchor(tx.id).await;
 
         // Gossip transaction
         let gossip_broadcast_message = GossipBroadcastMessage::from(tx.clone());

@@ -182,7 +182,6 @@ impl SyncState {
     pub async fn wait_for_processed_block_to_reach_target(&self) {
         // If already synced, return immediately
         if !self.is_syncing() {
-            debug!("JESSEDEBUG2 SYNC already syncing");
             return;
         }
 
@@ -202,7 +201,6 @@ impl SyncState {
         })
         .await
         .expect("Sync checking task failed");
-        debug!("JESSEDEBUG2 SYNC {:?}", &self.sync_target_height);
     }
 
     pub fn set_trusted_sync(&self, is_trusted_sync: bool) {

@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_testing_utils::{initialize_tracing, initialize_tracing_with_backtrace};
+use irys_testing_utils::initialize_tracing_with_backtrace;
 use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, H256};
 
 #[actix_web::test]

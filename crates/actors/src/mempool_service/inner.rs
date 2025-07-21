@@ -551,7 +551,8 @@ impl Inner {
 
     // Helper to validate anchor
     // this takes in an IrysTransaction, and will pass it into `pending_anchor_txs` if it fails validation
-    // otherwise, returns the tx back with the height of the anchor (whatever that means)
+    // otherwise, returns the tx back with the height that made the anchor canonical (i.e the block height, or the height of the block containing the tx)
+    #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
         &mut self,
         tx: IrysTransaction,
@@ -607,12 +608,15 @@ impl Inner {
             .cloned()
         {
             if hdr.height + anchor_expiry_depth >= latest_height {
-                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
+                debug!("valid block hash anchor for tx ");
                 return Ok(Some((hdr.height, tx)));
             } else {
                 let mut mempool_state_write_guard = mempool_state.write().await;
                 mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
+                warn!(
+                    "Invalid anchor value for tx - header height {} beyond expiry depth {}",
+                    &hdr.height, &anchor_expiry_depth
+                );
                 return Err(TxIngressError::InvalidAnchor);
             }
         }
@@ -621,13 +625,12 @@ impl Inner {
         match irys_database::block_header_by_hash(&read_tx, &anchor, false) {
             Ok(Some(hdr)) => {
                 if hdr.height + anchor_expiry_depth >= latest_height {
-                    debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
-                    // Ok(hdr)
+                    debug!("valid block hash anchor for tx");
                     Ok(Some((hdr.height, tx)))
                 } else {
                     let mut mempool_state_write_guard = mempool_state.write().await;
                     mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                    warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
+                    warn!("Invalid block hash anchor value for tx - header height {} beyond expiry depth {}", &hdr.height, &anchor_expiry_depth);
                     Err(TxIngressError::InvalidAnchor)
                 }
             }
@@ -749,6 +752,7 @@ impl Inner {
     }
 
     // Helper to verify signature
+    #[instrument(skip_all, fields(tx_id = %tx.id()))]
     pub async fn validate_signature<T: IrysTransactionCommon>(
         &mut self,
         tx: &T,
@@ -763,7 +767,7 @@ impl Inner {
                 .await
                 .recent_invalid_tx
                 .put(tx.id(), ());
-            debug!("Signature is NOT valid");
+            warn!("Signature is invalid");
             Err(TxIngressError::InvalidSignature)
         }
     }
@@ -778,8 +782,8 @@ impl Inner {
         Ok(latest.height)
     }
 
-    #[instrument(skip_all /*,  fields(tx_id = %tx.id(), anchor = %tx.anchor()) */)]
     /// Mark the provided tx as waiting for it's anchor to be valid
+    #[instrument(skip_all)]
     pub async fn mark_tx_pending_anchor(&self, tx: IrysTransaction) -> eyre::Result<()> {
         let tx_id = tx.id();
         debug!(tx_id = ?tx_id, anchor = ?tx.anchor(), "Tx is pending anchor");
@@ -806,7 +810,7 @@ impl Inner {
             .pending_anchor_txids
             .entry(anchor)
             .or_default()
-            .insert(tx_id); //one wrong line lmao
+            .insert(tx_id);
 
         Ok(())
     }
@@ -825,10 +829,7 @@ impl Inner {
                 Some(_) | None => return,
             }
         };
-        debug!(
-            "JESSEDEBUG2 WAITING FOR ANCHOR {} {:?}",
-            &anchor, &waiting_for_anchor
-        );
+
         // throw all pending txs back to the mempool for re-validation
         for id in waiting_for_anchor {
             let tx = {
@@ -840,15 +841,15 @@ impl Inner {
             let tx = match tx {
                 Some(tx) => tx,
                 None => {
-                    warn!("JESSEDEBUG2 UNABLE TO RESUBMIT TX {} due to ANCHOR {} - NOT FOUND IN PENDING", &id, &anchor);
+                    warn!(
+                        "Unable to resubmit tx {} with anchor {} - not found in pending_anchor_txs",
+                        &id, &anchor
+                    );
                     continue;
                 }
             };
 
-            debug!(
-                "Re-validating pending tx {:?} due to anchor {:?}",
-                &id, &anchor
-            );
+            debug!("Re-validating pending tx {} due to anchor {}", &id, &anchor);
 
             match match tx {
                 IrysTransaction::Data(tx) => self.handle_data_tx_ingress_message(tx).await,
