@@ -1297,7 +1297,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     for i in 1..=8 {
         genesis_node.mine_block().await?;
         let block = genesis_node.get_block_by_height(i).await?;
-        let is_epoch_block = block.height > 0 && block.height % num_blocks_in_epoch as u64 == 0;
+        let is_epoch_block = block.height > 0 && block.height % num_blocks_in_epoch == 0;
         counts.push(
             block
                 .system_ledgers
@@ -1338,7 +1338,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let epoch_block = genesis_node
         .get_block_by_height(num_blocks_in_epoch)
         .await?;
-    assert_eq!(epoch_block.height % num_blocks_in_epoch as u64, 0);
+    assert_eq!(epoch_block.height % num_blocks_in_epoch, 0);
     let epoch_tx_ids = epoch_block
         .system_ledgers
         .get(SystemLedger::Commitment as usize)
