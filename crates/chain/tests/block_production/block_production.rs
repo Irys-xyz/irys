@@ -1246,9 +1246,11 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
 }
 
 #[actix::test]
-/// test that max_commitment_txs_per_block is enforced
+/// test that config option max_commitment_txs_per_block is enforced
 /// check individual blocks have correct txs. e.g.
-/// for 1 stake + 4 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 1
+/// 1 stake + 11 pledge commitment txs with a limit of two per block, we should see 2 +2 +2 +2 +0 +2 +2
+/// epoch blocks should include any new txs
+/// epoch blocks should contain a copy of all commitment txs from blocks in the epoch block range
 async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let seconds_to_wait = 10;
     let max_commitment_txs_per_block: u64 = 2;
