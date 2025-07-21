@@ -941,8 +941,8 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        stake_fee = 0.1
-        pledge_base_fee = 0.1
+        stake_fee = 20000.0
+        pledge_base_fee = 950.0
         pledge_decay = 0.9
 
         [reth]
@@ -963,10 +963,10 @@ mod tests {
         terminalTotalDifficultyPassed = false
 
         [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
-        balance = "0x9935f581f050000"
+        balance = "0x152cf4e72a974f1c0000"
 
         [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
-        balance = "0xd3c21bcecceda1000000"
+        balance = "0x152cf4e72a974f1c0000"
 
         [mempool]
         max_data_txs_per_block = 100
