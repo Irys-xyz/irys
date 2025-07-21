@@ -1,7 +1,7 @@
-use crate::peer_list::PeerList;
 use crate::{GossipError, GossipResult};
 use base58::ToBase58 as _;
 use irys_api_client::ApiClient;
+use irys_domain::PeerListGuard;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
 use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;
@@ -219,7 +219,7 @@ impl SyncState {
 pub async fn sync_chain(
     sync_state: SyncState,
     api_client: impl ApiClient,
-    peer_list: impl PeerList,
+    peer_list: &PeerListGuard,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
 ) -> Result<(), GossipError> {
@@ -268,9 +268,7 @@ pub async fn sync_chain(
         )
         .await
         {
-            Ok(peer_list_result) => {
-                peer_list_result?;
-            }
+            Ok(()) => {}
             Err(elapsed) => {
                 warn!("Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task", elapsed);
                 sync_state.finish_sync();
@@ -278,7 +276,7 @@ pub async fn sync_chain(
             }
         };
     } else {
-        peer_list.wait_for_active_peers().await?;
+        peer_list.wait_for_active_peers().await;
     }
 
     debug!("Sync task: Syncing started");
@@ -286,7 +284,7 @@ pub async fn sync_chain(
     if trusted_mode {
         // We should enable full validation when the index nears the (tip - migration depth)
         let migration_depth = config.consensus.block_migration_depth as usize;
-        let trusted_peers = peer_list.top_trusted_peer().await?;
+        let trusted_peers = peer_list.trusted_peers();
         if let Some((_, peer)) = trusted_peers.first() {
             let node_info = api_client
                 .node_info(peer.address.api)
@@ -315,7 +313,7 @@ pub async fn sync_chain(
 
     let mut block_queue = VecDeque::new();
     let block_index = match get_block_index(
-        &peer_list,
+        peer_list,
         &api_client,
         sync_state.sync_target_height(),
         BLOCK_BATCH_SIZE,
@@ -392,7 +390,7 @@ pub async fn sync_chain(
         blocks_to_request -= 1;
         if blocks_to_request == 0 {
             let additional_index = get_block_index(
-                &peer_list,
+                peer_list,
                 &api_client,
                 target,
                 BLOCK_BATCH_SIZE,
@@ -424,7 +422,7 @@ pub async fn sync_chain(
 }
 
 async fn get_block_index(
-    peer_list: &impl PeerList,
+    peer_list: &PeerListGuard,
     api_client: &impl ApiClient,
     start: usize,
     limit: usize,
@@ -432,9 +430,9 @@ async fn get_block_index(
     fetch_from_the_trusted_peer: bool,
 ) -> GossipResult<Vec<BlockIndexItem>> {
     let peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
-        peer_list.top_trusted_peer().await?
+        peer_list.trusted_peers()
     } else {
-        peer_list.top_active_peers(Some(5), None).await?
+        peer_list.top_active_peers(Some(5), None)
     };
 
     if peers_to_fetch_index_from.is_empty() {
@@ -488,6 +486,7 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_list::PeerListServiceWithClient;
+        use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -574,19 +573,21 @@ mod tests {
                 reth_mock_addr.clone(),
             );
             let peer_list = peer_list_service.start();
-            peer_list
-                .add_or_update_peer(
-                    Address::repeat_byte(2),
-                    PeerListItem {
-                        reputation_score: PeerScore::new(100),
-                        response_time: 0,
-                        address: fake_peer_address,
-                        last_seen: 0,
-                        is_online: true,
-                    },
-                )
+            let peer_list_guard = peer_list
+                .send(GetPeerListGuard)
                 .await
-                .expect("to add peer");
+                .expect("to get peer list guard")
+                .expect("to get peer list guard");
+            peer_list_guard.add_or_update_peer(
+                Address::repeat_byte(2),
+                PeerListItem {
+                    reputation_score: PeerScore::new(100),
+                    response_time: 0,
+                    address: fake_peer_address,
+                    last_seen: 0,
+                    is_online: true,
+                },
+            );
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
@@ -594,7 +595,7 @@ mod tests {
             sync_chain(
                 sync_state.clone(),
                 api_client_stub.clone(),
-                peer_list,
+                &peer_list_guard,
                 10,
                 &config,
             )
@@ -680,19 +681,21 @@ mod tests {
             };
 
             let peer_list = peer_list_service.start();
-            peer_list
-                .add_or_update_peer(
-                    Address::repeat_byte(2),
-                    PeerListItem {
-                        reputation_score: PeerScore::new(100),
-                        response_time: 0,
-                        address: fake_peer_address,
-                        last_seen: 0,
-                        is_online: true,
-                    },
-                )
+            let peer_list_guard = peer_list
+                .send(GetPeerListGuard)
                 .await
-                .expect("to add peer");
+                .expect("to get peer list guard")
+                .expect("to get peer list guard");
+            peer_list_guard.add_or_update_peer(
+                Address::repeat_byte(2),
+                PeerListItem {
+                    reputation_score: PeerScore::new(100),
+                    response_time: 0,
+                    address: fake_peer_address,
+                    last_seen: 0,
+                    is_online: true,
+                },
+            );
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
@@ -700,7 +703,7 @@ mod tests {
             sync_chain(
                 sync_state.clone(),
                 api_client_stub.clone(),
-                peer_list,
+                &peer_list_guard,
                 start_from,
                 &config,
             )

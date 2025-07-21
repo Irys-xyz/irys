@@ -2,9 +2,9 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use core::time::Duration;
+use irys_domain::{PeerListGuard, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{Address, GossipData, GossipRequest, PeerAddress, PeerListItem};
 use reqwest::Client;
 use reqwest::Response;
@@ -50,20 +50,17 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    async fn send_data_and_update_score_internal<P>(
+    async fn send_data_and_update_score_internal(
         &self,
         peer: (&Address, &PeerListItem),
         data: &GossipData,
-        peer_list: &P,
-    ) -> GossipResult<()>
-    where
-        P: PeerList,
-    {
+        peer_list: &PeerListGuard,
+    ) -> GossipResult<()> {
         let peer_miner_address = peer.0;
         let peer = peer.1;
 
         let res = self.send_data(peer, data).await;
-        Self::handle_score(peer_list, &res, peer_miner_address).await;
+        Self::handle_score(peer_list, &res, peer_miner_address);
         res
     }
 
@@ -73,7 +70,7 @@ impl GossipClient {
         &self,
         peer: &(Address, PeerListItem),
         requested_data: GossipDataRequest,
-        peer_list: &impl PeerList,
+        peer_list: &PeerListGuard,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
         let get_data_request = self.create_request(requested_data);
@@ -88,7 +85,7 @@ impl GossipClient {
             .json()
             .await
             .map_err(|error| GossipError::Network(error.to_string()));
-        Self::handle_score(peer_list, &res, &peer.0).await;
+        Self::handle_score(peer_list, &res, &peer.0);
         res
     }
 
@@ -184,39 +181,29 @@ impl GossipClient {
             .map_err(|error| GossipError::Network(error.to_string()))
     }
 
-    async fn handle_score<P: PeerList, T>(
-        peer_list: &P,
+    fn handle_score<T>(
+        peer_list: &PeerListGuard,
         result: &GossipResult<T>,
         peer_miner_address: &Address,
     ) {
         match &result {
             Ok(_) => {
                 // Successful send, increase score
-                if let Err(e) = peer_list
-                    .increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online)
-                    .await
-                {
-                    error!("Failed to increase peer score: {}", e);
-                }
+                peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online);
             }
             Err(_) => {
                 // Failed to send, decrease score
-                if let Err(e) = peer_list
-                    .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline)
-                    .await
-                {
-                    error!("Failed to decrease peer score: {}", e);
-                };
+                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline);
             }
         }
     }
 
     /// Sends data to a peer and update their score in a detached task
-    pub fn send_data_and_update_the_score_detached<P: PeerList>(
+    pub fn send_data_and_update_the_score_detached(
         &self,
         peer: (&Address, &PeerListItem),
         data: Arc<GossipData>,
-        peer_list: &P,
+        peer_list: &PeerListGuard,
     ) {
         let client = self.clone();
         let peer_list = peer_list.clone();

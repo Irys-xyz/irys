@@ -1,9 +1,8 @@
-use crate::types::GossipDataRequest;
-use crate::PeerList;
 use alloy_rpc_types::engine::ExecutionData;
 use async_trait::async_trait;
 use irys_actors::block_validation::{shadow_transactions_are_valid, PayloadProvider};
 use irys_actors::services::ServiceSenders;
+use irys_domain::PeerListGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{Config, DatabaseProvider, IrysBlockHeader};
 use lru::LruCache;
@@ -109,19 +108,16 @@ impl From<IrysRethNodeAdapter> for RethBlockProvider {
 }
 
 #[derive(Clone, Debug)]
-pub struct ExecutionPayloadProvider<TPeerList: PeerList> {
+pub struct ExecutionPayloadProvider {
     cache: Arc<RwLock<ExecutionPayloadCache>>,
     reth_payload_provider: RethBlockProvider,
     payload_senders:
         Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<SealedBlock<Block>>>>>>,
-    peer_list: TPeerList,
+    peer_list: PeerListGuard,
 }
 
-impl<TPeerList> ExecutionPayloadProvider<TPeerList>
-where
-    TPeerList: PeerList,
-{
-    pub fn new(peer_list: TPeerList, reth_payload_provider: RethBlockProvider) -> Self {
+impl ExecutionPayloadProvider {
+    pub fn new(peer_list: PeerListGuard, reth_payload_provider: RethBlockProvider) -> Self {
         Self {
             cache: Arc::new(RwLock::new(ExecutionPayloadCache {
                 payloads: LruCache::new(NonZeroUsize::new(PAYLOAD_CACHE_CAPACITY).expect("payload capacity is not a non-zero usize")),
@@ -248,10 +244,7 @@ where
             .put(evm_block_hash, ());
         if let Err(peer_list_error) = self
             .peer_list
-            .request_data_from_the_network(
-                GossipDataRequest::ExecutionPayload(evm_block_hash),
-                use_trusted_peers_only,
-            )
+            .request_payload_from_the_network(evm_block_hash, use_trusted_peers_only)
             .await
         {
             self.cache
@@ -342,10 +335,7 @@ where
 }
 
 #[async_trait]
-impl<TPeerList> PayloadProvider for ExecutionPayloadProvider<TPeerList>
-where
-    TPeerList: PeerList,
-{
+impl PayloadProvider for ExecutionPayloadProvider {
     async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
         self.wait_for_payload(evm_block_hash).await
     }

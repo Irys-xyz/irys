@@ -2,7 +2,6 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::peer_list::{PeerList, ScoreDecreaseReason};
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
@@ -14,6 +13,7 @@ use actix_web::{
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
+use irys_domain::{PeerListGuard, ScoreDecreaseReason};
 use irys_types::{
     Address, CommitmentTransaction, DataTransactionHeader, GossipRequest, IrysBlockHeader,
     PeerListItem, UnpackedChunk,
@@ -24,23 +24,21 @@ use std::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B, A, P>
+pub(crate) struct GossipServer<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
-    data_handler: GossipServerDataHandler<M, B, A, P>,
-    peer_list: P,
+    data_handler: GossipServerDataHandler<M, B, A>,
+    peer_list: PeerListGuard,
 }
 
-impl<M, B, A, P> Clone for GossipServer<M, B, A, P>
+impl<M, B, A> Clone for GossipServer<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     fn clone(&self) -> Self {
         Self {
@@ -50,16 +48,15 @@ where
     }
 }
 
-impl<M, B, A, P> GossipServer<M, B, A, P>
+impl<M, B, A> GossipServer<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, B, A, P>,
-        peer_list: P,
+        gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
+        peer_list: PeerListGuard,
     ) -> Self {
         Self {
             data_handler: gossip_server_data_handler,
@@ -84,13 +81,13 @@ where
         let gossip_request = unpacked_chunk_json.0;
         let source_miner_address = gossip_request.miner_address;
 
-        match Self::check_peer(&server.peer_list, &req, source_miner_address).await {
+        match Self::check_peer(&server.peer_list, &req, source_miner_address) {
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
 
         if let Err(error) = server.data_handler.handle_chunk(gossip_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
             return HttpResponse::InternalServerError().finish();
         }
@@ -98,8 +95,8 @@ where
         HttpResponse::Ok().finish()
     }
 
-    async fn check_peer(
-        peer_list: &P,
+    fn check_peer(
+        peer_list: &PeerListGuard,
         req: &actix_web::HttpRequest,
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
@@ -108,31 +105,27 @@ where
             return Err(HttpResponse::BadRequest().finish());
         };
 
-        match peer_list.peer_by_mining_address(miner_address).await {
-            Ok(maybe_peer) => {
-                if let Some(peer) = maybe_peer {
-                    if peer.address.gossip.ip() != peer_address.ip() {
-                        debug!(
-                            "Miner address {} request came from ip {}, but the expected ip was {}",
-                            miner_address,
-                            peer_address.ip(),
-                            peer.address.gossip.ip()
-                        );
-                        return Err(HttpResponse::Forbidden().finish());
-                    }
-                    Ok(peer)
-                } else {
-                    warn!("Miner address {} is not allowed", miner_address);
-                    Err(HttpResponse::Forbidden().finish())
-                }
+        if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
+            if peer.address.gossip.ip() != peer_address.ip() {
+                debug!(
+                    "Miner address {} request came from ip {}, but the expected ip was {}",
+                    miner_address,
+                    peer_address.ip(),
+                    peer.address.gossip.ip()
+                );
+                return Err(HttpResponse::Forbidden().finish());
             }
-            Err(error) => {
-                error!("Failed to check if miner is allowed: {}", error);
-                Err(HttpResponse::InternalServerError().finish())
-            }
+            Ok(peer)
+        } else {
+            warn!("Miner address {} is not allowed", miner_address);
+            Err(HttpResponse::Forbidden().finish())
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
     async fn handle_block(
         server: Data<Self>,
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
@@ -153,11 +146,10 @@ where
             return HttpResponse::BadRequest().finish();
         };
 
-        let peer =
-            match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address).await {
-                Ok(peer_address) => peer_address,
-                Err(error_response) => return error_response,
-            };
+        let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
+            Ok(peer_address) => peer_address,
+            Err(error_response) => return error_response,
+        };
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
 
@@ -168,7 +160,7 @@ where
                 .handle_block_header_request(gossip_request, peer.address.api, source_socket_addr)
                 .await
             {
-                Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+                Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
                 error!(
                     "Node {:?}: Failed to process the block {:?}: {:?}",
                     this_node_id, block_hash_string, error
@@ -207,7 +199,7 @@ where
         let source_miner_address = evm_block_request.miner_address;
 
         if let Err(error_response) =
-            Self::check_peer(&server.peer_list, &req, evm_block_request.miner_address).await
+            Self::check_peer(&server.peer_list, &req, evm_block_request.miner_address)
         {
             return error_response;
         };
@@ -217,7 +209,7 @@ where
             .handle_execution_payload(evm_block_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
             return HttpResponse::InternalServerError().finish();
         }
@@ -243,13 +235,13 @@ where
         let gossip_request = irys_transaction_header_json.0;
         let source_miner_address = gossip_request.miner_address;
 
-        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address).await {
+        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
 
         if let Err(error) = server.data_handler.handle_transaction(gossip_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
             return HttpResponse::InternalServerError().finish();
         }
@@ -275,7 +267,7 @@ where
         let gossip_request = commitment_tx_json.0;
         let source_miner_address = gossip_request.miner_address;
 
-        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address).await {
+        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
@@ -285,7 +277,7 @@ where
             .handle_commitment_tx(gossip_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
             return HttpResponse::InternalServerError().finish();
         }
@@ -294,28 +286,28 @@ where
         HttpResponse::Ok().finish()
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
     async fn handle_health_check(server: Data<Self>, req: actix_web::HttpRequest) -> HttpResponse {
         let Some(peer_addr) = req.peer_addr() else {
             return HttpResponse::BadRequest().finish();
         };
 
-        match server.peer_list.peer_by_gossip_address(peer_addr).await {
-            Ok(info) => match info {
-                Some(_info) => HttpResponse::Ok().json(true),
-                None => HttpResponse::NotFound().finish(),
-            },
-            Err(_) => HttpResponse::InternalServerError().finish(),
+        match server.peer_list.peer_by_gossip_address(peer_addr) {
+            Some(_info) => HttpResponse::Ok().json(true),
+            None => HttpResponse::NotFound().finish(),
         }
     }
 
-    async fn handle_invalid_data(peer_miner_address: &Address, error: &GossipError, peer_list: &P) {
+    fn handle_invalid_data(
+        peer_miner_address: &Address,
+        error: &GossipError,
+        peer_list: &PeerListGuard,
+    ) {
         if let GossipError::InvalidData(_) = error {
-            if let Err(error) = peer_list
-                .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData)
-                .await
-            {
-                error!("Failed to decrease peer score: {}", error);
-            }
+            peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
         }
     }
 
@@ -343,8 +335,7 @@ where
             );
             return HttpResponse::Forbidden().finish();
         }
-        let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address).await
-        {
+        let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address) {
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };

@@ -246,6 +246,7 @@ pub mod test_utils {
     use irys_types::AcceptedResponse;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+    use tracing::debug;
 
     #[derive(Default, Clone)]
     pub struct CountingMockClient {
@@ -273,6 +274,7 @@ pub mod test_utils {
             peer: std::net::SocketAddr,
             _version: VersionRequest,
         ) -> eyre::Result<PeerResponse> {
+            debug!("post_version called with peer: {}", peer);
             let mut calls = self.post_version_calls.lock().await;
             calls.push(peer);
             Ok(PeerResponse::Accepted(AcceptedResponse::default()))
