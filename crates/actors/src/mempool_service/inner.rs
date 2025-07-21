@@ -403,7 +403,7 @@ impl Inner {
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
-        let max_txs = self
+        let max_data_txs = self
             .config
             .node_config
             .consensus_config()
@@ -419,7 +419,7 @@ impl Inner {
             if check_funding(&tx) {
                 debug!("Submit tx {} passed the funding check", &tx.id);
                 submit_tx.push(tx);
-                if submit_tx.len() >= max_txs {
+                if submit_tx.len() >= max_data_txs {
                     break;
                 }
             } else {
