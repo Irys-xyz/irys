@@ -601,7 +601,7 @@ impl ConsensusConfig {
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                balance: alloy_primitives::U256::from(690000000000000000_u128),
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                                 ..Default::default()
                             },
                         );
@@ -612,9 +612,7 @@ impl ConsensusConfig {
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                balance: alloy_primitives::U256::from(
-                                    1_000_000_000_000_000_000_000_000_u128,
-                                ),
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                                 ..Default::default()
                             },
                         );
@@ -681,7 +679,7 @@ impl NodeConfig {
             accounts.push((
                 signer.address(),
                 GenesisAccount {
-                    balance: alloy_primitives::U256::from(690000000000000000_u128),
+                    balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                     ..Default::default()
                 },
             ))
