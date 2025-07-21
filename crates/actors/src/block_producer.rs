@@ -53,7 +53,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 mod block_validation_tracker;
 pub use block_validation_tracker::BlockValidationTracker;

@@ -26,7 +26,6 @@ pub const BPS_SCALE: U256 = U256([BPS_SCALE_NATIVE, 0, 0, 0]);
 const BPS_SCALE_NATIVE: u64 = 1_000_000;
 
 /// ln(2) in 18-decimal fixed-point:
-/// Approximately 0.693147180559945309 * 1e18 = 693147180559945309
 pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
 
 /// `Amount<T>` represents a value stored as a U256.
@@ -988,7 +987,7 @@ mod tests {
         }
     }
 
-    mod transcendental_functions {
+    mod exp_neg {
         use super::*;
         use rust_decimal_macros::dec;
 

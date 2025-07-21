@@ -19,7 +19,7 @@ use reth::tasks::{shutdown::Shutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
 use tokio::sync::broadcast;
 use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
-use tracing::{info, Instrument};
+use tracing::{info, Instrument as _};
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
