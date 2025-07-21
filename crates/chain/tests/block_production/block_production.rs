@@ -4,6 +4,7 @@ use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
+use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
@@ -1291,7 +1292,12 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     for i in 1..=3 {
         genesis_node.mine_block().await?;
         let block = genesis_node.get_block_by_height(i).await?;
-        counts.push(block.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()));
+        counts.push(
+            block
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+        );
     }
 
     // check the total txs is correct
@@ -1309,19 +1315,28 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let block1 = genesis_node.get_block_by_height(1).await?;
     assert_eq!(
         2,
-        block1.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()),
+        block1
+            .system_ledgers
+            .get(SystemLedger::Commitment as usize)
+            .map_or(0, |l| l.tx_ids.len()),
         "block 1 commitment tx count is incorrect"
     );
     let block2 = genesis_node.get_block_by_height(2).await?;
     assert_eq!(
         2,
-        block2.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()),
+        block2
+            .system_ledgers
+            .get(SystemLedger::Commitment as usize)
+            .map_or(0, |l| l.tx_ids.len()),
         "block 2 commitment tx count is incorrect"
     );
     let block3 = genesis_node.get_block_by_height(3).await?;
     assert_eq!(
         1,
-        block3.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()),
+        block3
+            .system_ledgers
+            .get(SystemLedger::Commitment as usize)
+            .map_or(0, |l| l.tx_ids.len()),
         "block 3 commitment tx count is incorrect"
     );
 
