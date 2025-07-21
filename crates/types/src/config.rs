@@ -397,6 +397,9 @@ pub struct MempoolConfig {
     /// Maximum number of data transactions that can be included in a single block
     pub max_data_txs_per_block: u64,
 
+    /// Maximum number of commitment transactions allowed in a single block
+    pub max_commitment_txs_per_block: u64,
+
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
@@ -527,6 +530,7 @@ impl ConsensusConfig {
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
+                max_commitment_txs_per_block: 100,
                 anchor_expiry_depth: 10,
                 // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
@@ -946,6 +950,7 @@ mod tests {
 
         [mempool]
         max_data_txs_per_block = 100
+        max_commitment_txs_per_block = 100
         anchor_expiry_depth = 10
         max_pending_pledge_items = 100
         max_pledges_per_item = 100
