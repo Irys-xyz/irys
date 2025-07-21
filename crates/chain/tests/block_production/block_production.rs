@@ -11,6 +11,7 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
 use reth::{
@@ -24,8 +25,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, read_block_from_state, solution_context,
-    AddTxError, BlockValidationOutcome, IrysNodeTest,
+    mine_block, mine_block_and_wait_for_validation, new_pledge_tx, new_stake_tx,
+    read_block_from_state, solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
 };
 
 #[test_log::test(tokio::test)]
@@ -1240,5 +1241,91 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     }
 
     node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
+/// test that max_commitment_txs_per_block is enforced
+/// check individual blocks have correct txs. e.g.
+/// for 1 stake + 4 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 1
+async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
+    let seconds_to_wait = 10;
+    let max_commitment_txs_per_block = 2;
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testnet();
+    genesis_config
+        .consensus
+        .get_mut()
+        .mempool
+        .max_commitment_txs_per_block = max_commitment_txs_per_block;
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let _ = genesis_node.start_public_api().await;
+
+    // create and post stake commitment tx
+    let stake_tx = new_stake_tx(&H256::zero(), &signer);
+    genesis_node.post_commitment_tx(&stake_tx).await?;
+
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    for _ in 0..4 {
+        let tx = new_pledge_tx(
+            tx_ids.last().expect("valid tx id for use as anchor"),
+            &signer,
+        );
+        tx_ids.push(tx.id);
+        genesis_node.post_commitment_tx(&tx).await?;
+    }
+
+    // wait for all txs to ingress mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(tx_ids, seconds_to_wait)
+        .await?;
+
+    let mut counts = Vec::new();
+    for i in 1..=3 {
+        genesis_node.mine_block().await?;
+        let block = genesis_node.get_block_by_height(i).await?;
+        counts.push(block.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()));
+    }
+
+    // check the total txs is correct
+    assert!(counts
+        .iter()
+        .all(|c| *c <= max_commitment_txs_per_block as usize));
+    assert_eq!(
+        counts.iter().sum::<usize>(),
+        5,
+        "Total count of commitment txs is incorrect"
+    );
+
+    // check individual blocks have correct txs.
+    // for 1 stake + 4 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 1
+    let block1 = genesis_node.get_block_by_height(1).await?;
+    assert_eq!(
+        2,
+        block1.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()),
+        "block 1 commitment tx count is incorrect"
+    );
+    let block2 = genesis_node.get_block_by_height(2).await?;
+    assert_eq!(
+        2,
+        block2.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()),
+        "block 2 commitment tx count is incorrect"
+    );
+    let block3 = genesis_node.get_block_by_height(3).await?;
+    assert_eq!(
+        1,
+        block3.system_ledgers.get(0).map_or(0, |l| l.tx_ids.len()),
+        "block 3 commitment tx count is incorrect"
+    );
+
+    genesis_node.stop().await;
+
     Ok(())
 }
