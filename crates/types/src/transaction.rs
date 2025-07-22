@@ -390,6 +390,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
     fn signature(&self) -> &IrysSignature {
         &self.signature
+    }
 
     fn user_fee(&self) -> U256 {
         U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
@@ -441,6 +442,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
 
     fn signature(&self) -> &IrysSignature {
         &self.signature
+    }
 
     fn user_fee(&self) -> U256 {
         U256::from(self.fee)
