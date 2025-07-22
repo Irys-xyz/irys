@@ -4,6 +4,7 @@ use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
+use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
@@ -11,6 +12,7 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
 use reth::{
@@ -24,8 +26,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, read_block_from_state, solution_context,
-    AddTxError, BlockValidationOutcome, IrysNodeTest,
+    mine_block, mine_block_and_wait_for_validation, new_pledge_tx, new_stake_tx,
+    read_block_from_state, solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
 };
 
 #[test_log::test(tokio::test)]
@@ -1240,5 +1242,139 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     }
 
     node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
+/// test that config option max_commitment_txs_per_block is enforced
+/// check individual blocks have correct txs. e.g.
+/// 1 stake + 11 pledge commitment txs with a limit of two per block, we should see 2 +2 +2 +2 +0 +2 +2
+/// epoch blocks should include any new txs
+/// epoch blocks should contain a copy of all commitment txs from blocks in the epoch block range
+async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
+    let seconds_to_wait = 10;
+    let max_commitment_txs_per_block: u64 = 2;
+    let num_blocks_in_epoch = 5;
+
+    initialize_tracing();
+
+    let max_commitments_per_epoch =
+        (num_blocks_in_epoch * max_commitment_txs_per_block) - max_commitment_txs_per_block;
+
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into()?);
+    genesis_config
+        .consensus
+        .get_mut()
+        .mempool
+        .max_commitment_txs_per_block = max_commitment_txs_per_block;
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let _ = genesis_node.start_public_api().await;
+
+    // create and post stake commitment tx
+    let stake_tx = new_stake_tx(&H256::zero(), &signer);
+    genesis_node.post_commitment_tx(&stake_tx).await?;
+
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    for _ in 0..11 {
+        let tx = new_pledge_tx(
+            tx_ids.last().expect("valid tx id for use as anchor"),
+            &signer,
+        );
+        tx_ids.push(tx.id);
+        genesis_node.post_commitment_tx(&tx).await?;
+    }
+
+    // wait for all txs to ingress mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(tx_ids.clone(), seconds_to_wait)
+        .await?;
+
+    let mut counts = Vec::new();
+    for i in 1..=8 {
+        genesis_node.mine_block().await?;
+        let block = genesis_node.get_block_by_height(i).await?;
+        let is_epoch_block = block.height > 0 && block.height % num_blocks_in_epoch == 0;
+        counts.push(
+            block
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+        );
+        if is_epoch_block {
+            assert_eq!(counts[(i - 1) as usize], max_commitments_per_epoch as usize);
+        } else {
+            assert!(counts[(i - 1) as usize] <= max_commitment_txs_per_block as usize);
+        }
+    }
+
+    // check the grand total txs is correct
+    assert_eq!(
+        counts.iter().sum::<usize>(),
+        20,
+        "Total count of commitment txs is incorrect",
+    );
+
+    // check individual blocks have correct txs.
+    // for 1 stake + 11 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 2 + 2 + 0 + 2 + 2
+
+    for h in 1..num_blocks_in_epoch {
+        let block_n = genesis_node.get_block_by_height(h).await?;
+        assert_eq!(
+            2,
+            block_n
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+            "block {} commitment tx count is incorrect",
+            h
+        );
+    }
+
+    // epoch block rolls up previous txs
+    let epoch_block = genesis_node
+        .get_block_by_height(num_blocks_in_epoch)
+        .await?;
+    assert_eq!(epoch_block.height % num_blocks_in_epoch, 0);
+    let epoch_tx_ids = epoch_block
+        .system_ledgers
+        .get(SystemLedger::Commitment as usize)
+        .map_or(Vec::<H256>::new(), |l| l.tx_ids.0.clone());
+    assert_eq!(epoch_tx_ids, tx_ids[..max_commitments_per_epoch as usize]);
+
+    // some blocks after epoch should contain commitment txs
+    // this will be a few blocks, as we posted enough txs above to populate two more blocks
+    for h in 6..=7 {
+        let block_n = genesis_node.get_block_by_height(h).await?;
+        assert_eq!(
+            2,
+            block_n
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+            "post-epoch block commitment tx count is incorrect",
+        );
+    }
+
+    // we have then used all commitment txs from mempool, so final block(s) are empty
+    let final_height = 8;
+    let final_block = genesis_node.get_block_by_height(final_height).await?;
+    assert_eq!(
+        0,
+        final_block
+            .system_ledgers
+            .get(SystemLedger::Commitment as usize)
+            .map_or(0, |l| l.tx_ids.len()),
+        "post-epoch, emptied mempool of commitments. block {:?} commitment tx count is incorrect",
+        final_height,
+    );
+
+    genesis_node.stop().await;
+
     Ok(())
 }
