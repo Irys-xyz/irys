@@ -13,7 +13,7 @@ use irys_actors::{
     mempool_service::{ChunkIngressError, MempoolFacade},
 };
 use irys_api_client::ApiClient;
-use irys_domain::{ExecutionPayloadCache, PeerListGuard, ScoreDecreaseReason};
+use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipRequest,
     IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
@@ -37,7 +37,7 @@ where
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
-    pub peer_list: PeerListGuard,
+    pub peer_list: PeerList,
     pub sync_state: SyncState,
     /// Tracing span
     pub span: Span,

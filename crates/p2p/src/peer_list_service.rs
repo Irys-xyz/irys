@@ -5,7 +5,7 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{
-    PeerListDataError, PeerListDataMessage, PeerListGuard, ScoreDecreaseReason, ScoreIncreaseReason,
+    PeerListDataError, PeerListDataMessage, PeerList, ScoreDecreaseReason, ScoreIncreaseReason,
 };
 use irys_types::{
     build_user_agent, Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse,
@@ -48,7 +48,7 @@ where
     /// Reference to the node database
     db: DatabaseProvider,
 
-    pub peer_list_data_guard: PeerListGuard,
+    pub peer_list_data_guard: PeerList,
 
     currently_running_announcements: HashSet<SocketAddr>,
     successful_announcements: HashMap<SocketAddr, AnnounceFinished>,
@@ -94,7 +94,7 @@ where
     ) -> Self {
         let (service_sender, service_receiver) = tokio::sync::mpsc::unbounded_channel();
         let peer_list_data =
-            PeerListGuard::new(config, &db, service_sender).expect("Failed to load peer list data");
+            PeerList::new(config, &db, service_sender).expect("Failed to load peer list data");
 
         Self {
             db,
@@ -560,7 +560,7 @@ where
     T: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
-    type Result = Option<PeerListGuard>;
+    type Result = Option<PeerList>;
 
     fn handle(&mut self, _msg: GetPeerListGuard, _ctx: &mut Self::Context) -> Self::Result {
         Some(self.peer_list_data_guard.clone())

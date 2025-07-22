@@ -23,7 +23,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
-use irys_domain::PeerListGuard;
+use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
 use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
@@ -157,7 +157,7 @@ impl P2PService {
         block_discovery: B,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: PeerListGuard,
+        peer_list: PeerList,
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
@@ -232,7 +232,7 @@ impl P2PService {
     async fn broadcast_data(
         &self,
         broadcast_message: GossipBroadcastMessage,
-        peer_list: &PeerListGuard,
+        peer_list: &PeerList,
     ) -> GossipResult<()> {
         // Check if gossip broadcast is enabled
         if !self.sync_state.is_gossip_broadcast_enabled() {
@@ -345,7 +345,7 @@ fn spawn_broadcast_task(
     mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     service: P2PService,
     task_executor: &TaskExecutor,
-    peer_list: PeerListGuard,
+    peer_list: PeerList,
 ) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",

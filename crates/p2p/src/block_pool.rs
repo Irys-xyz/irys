@@ -10,7 +10,7 @@ use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
-use irys_domain::{ExecutionPayloadCache, PeerListDataError, PeerListGuard};
+use irys_domain::{ExecutionPayloadCache, PeerListDataError, PeerList};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
     IrysBlockHeader,
@@ -73,7 +73,7 @@ where
 
     block_discovery: B,
     mempool: M,
-    peer_list: PeerListGuard,
+    peer_list: PeerList,
 
     sync_state: SyncState,
 
@@ -226,7 +226,7 @@ where
 {
     pub(crate) fn new(
         db: DatabaseProvider,
-        peer_list: PeerListGuard,
+        peer_list: PeerList,
         block_discovery: B,
         mempool: M,
         sync_state: SyncState,

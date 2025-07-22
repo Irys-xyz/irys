@@ -1,4 +1,4 @@
-use crate::PeerListGuard;
+use crate::PeerList;
 use alloy_rpc_types::engine::ExecutionData;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
@@ -109,11 +109,11 @@ pub struct ExecutionPayloadCache {
     cache: Arc<RwLock<ExecutionPayloadCacheInner>>,
     payload_senders:
         Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<SealedBlock<Block>>>>>>,
-    peer_list: PeerListGuard,
+    peer_list: PeerList,
 }
 
 impl ExecutionPayloadCache {
-    pub fn new(peer_list: PeerListGuard, reth_payload_provider: RethBlockProvider) -> Self {
+    pub fn new(peer_list: PeerList, reth_payload_provider: RethBlockProvider) -> Self {
         Self {
             cache: Arc::new(RwLock::new(ExecutionPayloadCacheInner {
                 payloads: LruCache::new(NonZeroUsize::new(PAYLOAD_CACHE_CAPACITY).expect("payload capacity is not a non-zero usize")),

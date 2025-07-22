@@ -75,15 +75,15 @@ impl Default for PeerListDataInner {
 }
 
 #[derive(Clone, Debug)]
-pub struct PeerListGuard(Arc<RwLock<PeerListDataInner>>);
+pub struct PeerList(Arc<RwLock<PeerListDataInner>>);
 
-impl Default for PeerListGuard {
+impl Default for PeerList {
     fn default() -> Self {
         panic!("PeerListGuard should be initialized with new() method, not default()");
     }
 }
 
-impl PeerListGuard {
+impl PeerList {
     pub fn new(
         config: &Config,
         db: &DatabaseProvider,

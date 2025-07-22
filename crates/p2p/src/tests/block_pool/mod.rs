@@ -9,7 +9,7 @@ use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
-use irys_domain::{ExecutionPayloadCache, PeerListGuard, RethBlockProvider};
+use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -120,7 +120,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 struct MockedServices {
     block_status_provider_mock: BlockStatusProvider,
     block_discovery_stub: BlockDiscoveryStub,
-    peer_list_data_guard: PeerListGuard,
+    peer_list_data_guard: PeerList,
     db: DatabaseProvider,
     execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
