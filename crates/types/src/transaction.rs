@@ -266,6 +266,7 @@ pub trait IrysTransactionCommon {
     fn id(&self) -> IrysTransactionId;
     fn total_fee(&self) -> u64;
     fn signer(&self) -> Address;
+    fn signature(&self) -> &IrysSignature;
 }
 
 impl IrysTransactionCommon for DataTransactionHeader {
@@ -284,6 +285,10 @@ impl IrysTransactionCommon for DataTransactionHeader {
     fn signer(&self) -> Address {
         self.signer
     }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
+    }
 }
 
 impl IrysTransactionCommon for CommitmentTransaction {
@@ -300,6 +305,10 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
     }
 }
 
