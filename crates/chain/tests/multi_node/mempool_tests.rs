@@ -1615,3 +1615,81 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     Ok(())
 }
+
+#[actix_web::test]
+/// post invalid commitment txs where tx id has been tampered with
+/// expect invalid txs to fail when posted via api
+async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+    let seconds_to_wait = 10;
+
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testnet();
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let _ = genesis_node.start_public_api().await;
+
+    //
+    // Test case 1: Stake commitment txs
+    //
+
+    // create valid and invalid stake commitment tx
+    let stake_tx = new_stake_tx(&H256::zero(), &signer);
+    let mut stake_tx_invalid = stake_tx.clone();
+    let mut bytes = stake_tx_invalid.id.to_fixed_bytes();
+    bytes[0] ^= 0x01;
+    stake_tx_invalid.id = H256::from(bytes);
+
+    // post invalid stake tx
+    match genesis_node.post_commitment_tx(&stake_tx_invalid).await {
+        Err(_) => {
+            // it failed to ingress, as expected!
+        }
+        Ok(res) => {
+            panic!("Expected failure but got success: {:?}", res);
+        }
+    }
+    // post valid stake tx
+    genesis_node.post_commitment_tx(&stake_tx).await?;
+
+    //
+    // Test case 1: pledge commitment txs
+    //
+
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+
+    let pledge_tx = new_pledge_tx(
+        tx_ids.last().expect("valid tx id for use as anchor"),
+        &signer,
+    );
+    let mut pledge_tx_invalid = pledge_tx.clone();
+    let mut bytes = pledge_tx_invalid.id.to_fixed_bytes();
+    bytes[0] ^= 0x01;
+    pledge_tx_invalid.id = H256::from(bytes);
+
+    match genesis_node.post_commitment_tx(&pledge_tx_invalid).await {
+        Err(_) => {
+            // it failed to ingress, as expected!
+        }
+        Ok(res) => {
+            panic!("Expected failure but got success: {:?}", res);
+        }
+    }
+    genesis_node.post_commitment_tx(&pledge_tx).await?;
+    tx_ids.push(pledge_tx.id);
+
+    // wait for all txs to ingress mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(tx_ids.clone(), seconds_to_wait)
+        .await?;
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
