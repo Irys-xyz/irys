@@ -5,7 +5,9 @@ use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_database::SystemLedger;
-use irys_domain::{BlockState, ChainState, EmaSnapshot};
+use irys_domain::{
+    snapshots::commitment_snapshot::CommitmentSnapshot, BlockState, ChainState, EmaSnapshot,
+};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
@@ -1321,14 +1323,21 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let _ = genesis_node.start_public_api().await;
 
     // create and post stake commitment tx
-    let stake_tx = new_stake_tx(&H256::zero(), &signer);
+    let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
     genesis_node.post_commitment_tx(&stake_tx).await?;
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    let commitment_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_commitment_snapshot();
     for _ in 0..11 {
         let tx = new_pledge_tx(
             tx_ids.last().expect("valid tx id for use as anchor"),
             &signer,
+            &genesis_config.consensus_config(),
+            &commitment_snapshot,
         );
         tx_ids.push(tx.id);
         genesis_node.post_commitment_tx(&tx).await?;
