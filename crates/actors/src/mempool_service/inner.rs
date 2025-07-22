@@ -727,13 +727,16 @@ impl Inner {
         &mut self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
-        let expected_id: [u8; 32] = keccak256(tx.signature().as_bytes()).into();
-        let expected_id = H256::from(expected_id);
+        // compute expected id from the signature
+        let expected_id = {
+            let bytes: [u8; 32] = keccak256(tx.signature().as_bytes()).into();
+            H256::from(bytes)
+        };
 
         // check id is valid
         if expected_id != tx.id() {
-            let mempool_state = &self.mempool_state;
-            mempool_state.write().await.invalid_tx.push(tx.id());
+            let mut mempool = self.mempool_state.write().await;
+            mempool.invalid_tx.push(tx.id());
             debug!("txid mismatch with signature");
             return Err(TxIngressError::InvalidSignature);
         }
