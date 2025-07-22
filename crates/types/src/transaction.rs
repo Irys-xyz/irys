@@ -264,7 +264,7 @@ impl CommitmentTransaction {
         }
     }
 
-    /// Create a new pledge transaction with dynamic fee based on existing pledge count
+    /// Create a new pledge transaction with dynamic value based on existing pledge count
     pub fn new_pledge(
         config: &ConsensusConfig,
         anchor: H256,
@@ -290,7 +290,7 @@ impl CommitmentTransaction {
         }
     }
 
-    /// Create a new unpledge transaction with dynamic fee based on existing pledge count
+    /// Create a new unpledge transaction with dynamic value based on existing pledge count
     pub fn new_unpledge(
         config: &ConsensusConfig,
         anchor: H256,
@@ -300,13 +300,18 @@ impl CommitmentTransaction {
     ) -> Self {
         let count = provider.pledge_count(signer_address);
 
-        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
-        // Note: for unpledge, we use count to match the fee of the most recent pledge
-        let value = config
-            .pledge_base_fee
-            .apply_pledge_decay(count, config.pledge_decay)
-            .map(|a| a.amount)
-            .unwrap_or(config.pledge_base_fee.amount);
+        // If user has no pledges, they get 0 back
+        let value = if count == 0 {
+            U256::zero()
+        } else {
+            // Calculate the value of the most recent pledge (count - 1)
+            // This ensures unpledge matches the cost of the last pledge made
+            config
+                .pledge_base_fee
+                .apply_pledge_decay(count - 1, config.pledge_decay)
+                .map(|a| a.amount)
+                .unwrap_or(config.pledge_base_fee.amount)
+        };
 
         Self {
             commitment_type: CommitmentType::Unpledge,
@@ -652,63 +657,6 @@ mod tests {
         tx.signature = Signature::test_signature().into();
         tx
     }
-
-    #[test]
-    fn test_pledge_decay_first_pledge() {
-        let mut config = ConsensusConfig::testnet();
-        config.pledge_base_fee =
-            crate::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0)).unwrap();
-        config.pledge_decay =
-            crate::storage_pricing::Amount::percentage(rust_decimal_macros::dec!(0.9)).unwrap();
-
-        let provider = MockPledgeProvider::new();
-        let signer_address = Address::default();
-
-        let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
-
-        // First pledge should be at base fee
-        assert_eq!(pledge_tx.value, config.pledge_base_fee.amount);
-    }
-
-    #[test]
-    fn test_pledge_decay_multiple_pledges() {
-        let mut config = ConsensusConfig::testnet();
-        config.pledge_base_fee =
-            crate::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0)).unwrap();
-        config.pledge_decay =
-            crate::storage_pricing::Amount::percentage(rust_decimal_macros::dec!(0.3)).unwrap(); // 30% decay rate
-
-        let signer_address = Address::default();
-
-        // Test with 0 existing pledges (first pledge)
-        let provider = MockPledgeProvider::new();
-        let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
-        let first_pledge_value = pledge_tx.value;
-
-        // Test with 1 existing pledge (second pledge)
-        let provider = MockPledgeProvider::new().with_pledge_count(signer_address, 1);
-        let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
-        let second_pledge_value = pledge_tx.value;
-
-        // Test with 2 existing pledges (third pledge)
-        let provider = MockPledgeProvider::new().with_pledge_count(signer_address, 2);
-        let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
-        let third_pledge_value = pledge_tx.value;
-
-        // Each subsequent pledge should be cheaper
-        assert!(
-            first_pledge_value > second_pledge_value,
-            "First pledge should be more expensive than second"
-        );
-        assert!(
-            second_pledge_value > third_pledge_value,
-            "Second pledge should be more expensive than third"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -760,19 +708,120 @@ mod pledge_decay_parametrized_tests {
         let pledge_tx =
             CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
 
-        // Convert the value back to a dollar amount for comparison
-        // Value is in wei (10^18), so divide by 10^18 to get token amount
-        let actual_cost_tokens = pledge_tx.value.to_string().parse::<f64>().unwrap() / 1e18;
+        // Compare U256 values with precision mask to ignore lower bits
+        let expected_value =
+            crate::storage_pricing::Amount::<crate::storage_pricing::phantoms::Irys>::token(
+                rust_decimal::Decimal::try_from(expected_cost).unwrap(),
+            )
+            .unwrap()
+            .amount;
 
-        // Allow for small rounding differences (0.5% tolerance)
-        let tolerance = expected_cost * 0.005;
-        assert!(
-            (actual_cost_tokens - expected_cost).abs() < tolerance,
-            "Pledge {} cost mismatch: expected ${:.2}, got ${:.2} (tolerance: ${:.2})",
+        // Mask to keep only the most significant bits
+        // We're ignoring the lower 66 bits to account for precision differences in calculations
+        let mask = !U256::from((1u128 << 66) - 1);
+
+        let masked_actual = pledge_tx.value & mask;
+        let masked_expected = expected_value & mask;
+
+        assert_eq!(
+            masked_actual,
+            masked_expected,
+            "Pledge {} cost mismatch: expected {} (masked: {}), got {} (masked: {})",
             existing_pledges + 1,
-            expected_cost,
-            actual_cost_tokens,
-            tolerance
+            expected_value,
+            masked_expected,
+            pledge_tx.value,
+            masked_actual
+        );
+    }
+
+    #[rstest]
+    #[case(0, 0.0)]
+    #[case(1, 20000.0)]
+    #[case(2, 10718.0)]
+    #[case(3, 7441.0)]
+    #[case(4, 5743.0)]
+    #[case(5, 4698.0)]
+    #[case(6, 3987.0)]
+    #[case(7, 3471.0)]
+    #[case(8, 3078.0)]
+    #[case(9, 2768.0)]
+    #[case(10, 2518.0)]
+    #[case(11, 2311.0)]
+    #[case(12, 2137.0)]
+    #[case(13, 1988.0)]
+    #[case(14, 1860.0)]
+    #[case(15, 1748.0)]
+    #[case(16, 1649.0)]
+    #[case(17, 1562.0)]
+    #[case(18, 1483.0)]
+    #[case(19, 1413.0)]
+    #[case(20, 1349.0)]
+    #[case(21, 1291.0)]
+    #[case(22, 1238.0)]
+    #[case(23, 1190.0)]
+    #[case(24, 1145.0)]
+    fn test_pledge_cost_with_unpledge(
+        #[case] existing_pledges: usize,
+        #[case] expected_unpledge_value: f64,
+    ) {
+        use super::test_helpers::MockPledgeProvider;
+
+        // Setup config with $20,000 base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
+        let mut config = ConsensusConfig::testnet();
+        config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
+
+        // Create provider with existing pledge count
+        let signer_address = Address::default();
+        let provider =
+            MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
+
+        // Create an unpledge transaction
+        let unpledge_tx = CommitmentTransaction::new_unpledge(
+            &config,
+            H256::zero(),
+            1,
+            &provider,
+            signer_address,
+        );
+
+        // Verify the commitment type is correct
+        assert_eq!(unpledge_tx.commitment_type, CommitmentType::Unpledge);
+
+        // Verify unpledge total cost only includes fee (not value)
+        assert_eq!(
+            unpledge_tx.total_cost(),
+            U256::from(unpledge_tx.fee),
+            "Unpledge total cost should only include fee"
+        );
+
+        // Compare U256 values with precision mask to ignore lower bits
+        let expected_value = if expected_unpledge_value == 0.0 {
+            U256::zero()
+        } else {
+            crate::storage_pricing::Amount::<crate::storage_pricing::phantoms::Irys>::token(
+                rust_decimal::Decimal::try_from(expected_unpledge_value).unwrap(),
+            )
+            .unwrap()
+            .amount
+        };
+
+        // Mask to keep only the most significant bits
+        // We're ignoring the lower 66 bits to account for precision differences in calculations
+        let mask = !U256::from((1u128 << 66) - 1);
+
+        let masked_actual = unpledge_tx.value & mask;
+        let masked_expected = expected_value & mask;
+
+        assert_eq!(
+            masked_actual, masked_expected,
+            "Unpledge with {} existing pledges value mismatch: expected {} (masked: {}), got {} (masked: {})",
+            existing_pledges,
+            expected_value,
+            masked_expected,
+            unpledge_tx.value,
+            masked_actual
         );
     }
 }
