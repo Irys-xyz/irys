@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing_with_backtrace;
 use irys_types::{CommitmentTransaction, NodeConfig, H256};
 use rstest::rstest;
@@ -46,22 +45,24 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     let mut already_processed_count = 0;
     let from_scratch_expected_count = 3;
 
-    // so autopledge uses a different anchor
     let h = genesis_node.get_canonical_chain_height().await;
-
+    // so autopledge uses a different anchor
     genesis_node.mine_blocks(num_blocks_in_epoch).await?;
-    genesis_node
+    let hash = genesis_node
         .wait_until_height(h + num_blocks_in_epoch as u64, 20)
         .await?;
 
+    let config = genesis_node.node_ctx.config.consensus.clone();
+
+    // Get the commitment snapshot from this block
+    let commitment_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_commitment_snapshot(&hash)?;
+
     if stake {
-        let stake_tx = CommitmentTransaction {
-            commitment_type: CommitmentType::Stake,
-            // TODO: real staking amounts
-            fee: 1,
-            anchor: H256::zero(),
-            ..Default::default()
-        };
+        let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero(), 1);
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
 
         genesis_node.post_commitment_tx(&stake_tx).await?;
@@ -76,14 +77,15 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         // different tx type, so we can use anchor zero
         let mut anchor = H256::zero();
         for _idx in 0..pledges {
-            let stake_tx = CommitmentTransaction {
-                commitment_type: CommitmentType::Pledge,
-                // TODO: real staking amounts
-                fee: 1,
+            let pledge_tx = CommitmentTransaction::new_pledge(
+                &config,
                 anchor,
-                ..Default::default()
-            };
-            let pledge_tx = peer_signer.sign_commitment(stake_tx)?;
+                1,
+                &*commitment_snapshot,
+                peer_signer.address(),
+            );
+            let pledge_tx = peer_signer.sign_commitment(pledge_tx)?;
+            debug!("pledge: {}", &pledge_tx.id);
 
             genesis_node.post_commitment_tx(&pledge_tx).await?;
             anchor = pledge_tx.id;

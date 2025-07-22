@@ -7,6 +7,7 @@ use base58::ToBase58 as _;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -139,4 +140,25 @@ impl GossipData {
 pub struct GossipRequest<T> {
     pub miner_address: Address,
     pub data: T,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GossipDataRequest {
+    ExecutionPayload(B256),
+    Block(BlockHash),
+    Chunk(ChunkPathHash),
+}
+
+impl Debug for GossipDataRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Block(hash) => write!(f, "block {:?}", hash),
+            Self::ExecutionPayload(block_hash) => {
+                write!(f, "execution payload for block {:?}", block_hash)
+            }
+            Self::Chunk(chunk_path_hash) => {
+                write!(f, "chunk {:?}", chunk_path_hash)
+            }
+        }
+    }
 }

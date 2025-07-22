@@ -2,10 +2,12 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipDataRequest, GossipError, GossipResult};
+use crate::types::{GossipError, GossipResult};
 use core::time::Duration;
-use irys_domain::{PeerListGuard, ScoreDecreaseReason, ScoreIncreaseReason};
-use irys_types::{Address, GossipData, GossipRequest, PeerAddress, PeerListItem};
+use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
+use irys_types::{
+    Address, GossipData, GossipDataRequest, GossipRequest, PeerAddress, PeerListItem,
+};
 use reqwest::Client;
 use reqwest::Response;
 use serde::Serialize;
@@ -54,7 +56,7 @@ impl GossipClient {
         &self,
         peer: (&Address, &PeerListItem),
         data: &GossipData,
-        peer_list: &PeerListGuard,
+        peer_list: &PeerList,
     ) -> GossipResult<()> {
         let peer_miner_address = peer.0;
         let peer = peer.1;
@@ -70,7 +72,7 @@ impl GossipClient {
         &self,
         peer: &(Address, PeerListItem),
         requested_data: GossipDataRequest,
-        peer_list: &PeerListGuard,
+        peer_list: &PeerList,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
         let get_data_request = self.create_request(requested_data);
@@ -182,7 +184,7 @@ impl GossipClient {
     }
 
     fn handle_score<T>(
-        peer_list: &PeerListGuard,
+        peer_list: &PeerList,
         result: &GossipResult<T>,
         peer_miner_address: &Address,
     ) {
@@ -203,7 +205,7 @@ impl GossipClient {
         &self,
         peer: (&Address, &PeerListItem),
         data: Arc<GossipData>,
-        peer_list: &PeerListGuard,
+        peer_list: &PeerList,
     ) {
         let client = self.clone();
         let peer_list = peer_list.clone();

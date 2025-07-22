@@ -1,5 +1,3 @@
-use std::{sync::Arc, time::Duration};
-
 use crate::block_tree_service::ValidationResult;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
@@ -11,11 +9,10 @@ use crate::{
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use async_trait::async_trait;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
-use irys_domain::{BlockIndexReadGuard, EmaSnapshot, EpochSnapshot};
+use irys_domain::{BlockIndexReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::alloy_rlp::Decodable as _;
 use irys_reth::shadow_tx::ShadowTransaction;
@@ -31,19 +28,11 @@ use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::revm::primitives::B256;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_ethereum_primitives::Block;
+use std::{sync::Arc, time::Duration};
 use tracing::{debug, error, info};
-
-/// Trait for providing execution payloads for block validation
-#[async_trait]
-pub trait PayloadProvider: Clone + Send + Sync + 'static {
-    /// Waits for the execution payload to arrive over gossip. This method will first check the local
-    /// cache, then try to retrieve the payload from the network if it is not found locally.
-    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData>;
-}
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -462,7 +451,7 @@ pub async fn shadow_transactions_are_valid(
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
-    payload_provider: impl PayloadProvider,
+    payload_provider: ExecutionPayloadCache,
 ) -> eyre::Result<()> {
     // 1. Validate that the evm block is valid
     let payload = payload_provider

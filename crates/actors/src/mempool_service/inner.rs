@@ -216,7 +216,7 @@ impl Inner {
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
-        let mut fees_spent_per_address = HashMap::new();
+        let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
@@ -243,8 +243,8 @@ impl Inner {
                 return false;
             }
 
-            let fee = tx.total_fee();
-            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
+            let fee = tx.total_cost();
+            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
 
             // Calculate total required balance including previously selected transactions
 
@@ -254,7 +254,7 @@ impl Inner {
                 .rpc
                 .get_balance_irys(signer, parent_evm_block_id);
 
-            let has_funds = balance >= U256::from(current_spent + fee);
+            let has_funds = balance >= current_spent + fee;
 
             // Track fees for this address regardless of whether this specific transaction is included
             fees_spent_per_address
@@ -315,7 +315,7 @@ impl Inner {
                 .collect();
 
             // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.user_fee()));
 
             // Select fundable commitments in fee-priority order
             for tx in sorted_commitments {
@@ -402,7 +402,7 @@ impl Inner {
 
         // Sort data transactions by fee (highest first) to maximize revenue
 
-        submit_ledger_txs.sort_by(|a, b| match b.total_fee().cmp(&a.total_fee()) {
+        submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
         });

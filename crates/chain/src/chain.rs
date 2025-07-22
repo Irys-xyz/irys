@@ -23,17 +23,18 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{ActorAddresses, BlockValidationTracker, StorageModuleService};
+use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, PeerListGuard,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, ExecutionPayloadCache,
+    PeerList,
 };
-use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListService,
+    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -53,7 +54,8 @@ use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
     CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, ServiceSet, TokioServiceHandle, H256, U256,
+    OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, ServiceSet,
+    TokioServiceHandle, H256, U256,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
@@ -76,6 +78,7 @@ use std::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
@@ -100,7 +103,7 @@ pub struct IrysNodeCtx {
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
-    pub peer_list: PeerListGuard,
+    pub peer_list: PeerList,
     pub sync_state: SyncState,
     pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
@@ -248,6 +251,7 @@ async fn start_reth_node(
                 random_ports,
                 shadow_tx_store,
             )
+            .in_current_span()
             .await
             .expect("expected reth node to have started")
         }
@@ -809,7 +813,8 @@ impl IrysNode {
                     node_handle.node
                 };
 
-                let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
+                let reth_node =
+                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal().in_current_span());
 
                 reth_node.provider.database.db.close();
                 irys_storage::reth_provider::cleanup_provider(&irys_provider);
@@ -926,17 +931,20 @@ impl IrysNode {
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Spawn peer list service
-        let (peer_list_service, peer_list_arbiter) =
-            init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
+        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(
+            &irys_db,
+            &config,
+            reth_service_actor.clone(),
+            receivers.peer_network,
+            service_senders.peer_network.clone(),
+        );
         let peer_list_guard = peer_list_service
             .send(GetPeerListGuard)
             .await?
             .expect("to get peer list guard");
 
-        let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list_guard.clone(),
-            reth_node_adapter.clone().into(),
-        );
+        let execution_payload_cache =
+            ExecutionPayloadCache::new(peer_list_guard.clone(), reth_node_adapter.clone().into());
 
         // Spawn mempool service
         let mempool_handle = MempoolService::spawn_service(
@@ -978,7 +986,7 @@ impl IrysNode {
             &service_senders,
             reth_node_adapter.clone(),
             irys_db.clone(),
-            execution_payload_provider.clone(),
+            execution_payload_cache.clone(),
             receivers.validation_service,
             runtime_handle.clone(),
         );
@@ -1014,7 +1022,7 @@ impl IrysNode {
             irys_db.clone(),
             gossip_listener,
             block_status_provider.clone(),
-            execution_payload_provider,
+            execution_payload_cache,
             vdf_state_readonly.clone(),
             config.clone(),
             service_senders.clone(),
@@ -1537,12 +1545,22 @@ fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
-) -> (Addr<PeerListService>, Arbiter) {
+    service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
+    service_sender: PeerNetworkSender,
+) -> (
+    Addr<PeerNetworkService<IrysApiClient, RethServiceActor>>,
+    Arbiter,
+) {
     let peer_list_arbiter = Arbiter::new();
-    let peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
+    let peer_list_service = PeerNetworkService::new(
+        irys_db.clone(),
+        config,
+        reth_service_addr,
+        service_receiver,
+        service_sender,
+    );
     let peer_list_service =
-        PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
-    SystemRegistry::set(peer_list_service.clone());
+        PeerNetworkService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     (peer_list_service, peer_list_arbiter)
 }
 
@@ -1650,13 +1668,7 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction {
-            commitment_type: irys_primitives::CommitmentType::Stake,
-            // TODO: real staking amounts
-            fee: 1,
-            anchor: latest_hash,
-            ..Default::default()
-        };
+        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_hash, 1);
         let stake_tx = signer.sign_commitment(stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
@@ -1688,13 +1700,13 @@ async fn stake_and_pledge(
 
     for idx in 0..to_pledge_count {
         // post a pledge tx
-        let pledge_tx = CommitmentTransaction {
-            commitment_type: irys_primitives::CommitmentType::Pledge,
-            // TODO: real pledge amounts
-            fee: 1,
-            anchor: last_tx_id, // use a cascading anchor so we don't have duplicate txids
-            ..Default::default()
-        };
+        let pledge_tx = CommitmentTransaction::new_pledge(
+            &config.consensus,
+            last_tx_id,
+            1,
+            commitment_snapshot.as_ref(),
+            address,
+        );
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();

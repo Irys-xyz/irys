@@ -28,7 +28,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _, Span};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -84,8 +84,6 @@ pub struct BlockTreeServiceInner {
     pub reth_service_actor: Addr<RethServiceActor>,
     /// Current actix system
     pub system: System,
-    /// Tracing span
-    pub span: tracing::Span,
 }
 
 #[derive(Debug, Clone)]
@@ -136,7 +134,6 @@ impl BlockTreeService {
         let epoch_replay_data = (*epoch_replay_data).clone();
         let config = config.clone();
         let storage_submodules_config = storage_submodules_config.clone();
-        let span = tracing::Span::current();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -174,7 +171,6 @@ impl BlockTreeService {
                         service_senders,
                         reth_service_actor,
                         system,
-                        span,
                         storage_submodules_config: storage_submodules_config.clone(),
                     },
                 };
@@ -183,7 +179,7 @@ impl BlockTreeService {
                     .await
                     .expect("BlockTree encountered an irrecoverable error")
             }
-            .instrument(Span::current()),
+            .instrument(tracing::Span::current()),
         );
 
         TokioServiceHandle {
@@ -608,9 +604,6 @@ impl BlockTreeServiceInner {
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
-        let span = self.span.clone();
-        let _span = span.enter();
-
         let height = self
             .cache
             .read()

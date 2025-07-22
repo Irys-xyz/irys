@@ -19,7 +19,7 @@ use reth::tasks::{shutdown::Shutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
 use tokio::sync::broadcast;
 use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
-use tracing::{info, Instrument as _, Span};
+use tracing::{info, Instrument as _};
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
@@ -82,11 +82,10 @@ impl MempoolService {
                 };
                 mempool_service
                     .start()
-                    .instrument(Span::current())
                     .await
                     .expect("Mempool service encountered an irrecoverable error")
             }
-            .instrument(Span::current()),
+            .instrument(tracing::Span::current()),
         );
 
         Ok(TokioServiceHandle {

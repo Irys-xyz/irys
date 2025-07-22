@@ -1,7 +1,7 @@
 use crate::{GossipError, GossipResult};
 use base58::ToBase58 as _;
 use irys_api_client::ApiClient;
-use irys_domain::PeerListGuard;
+use irys_domain::PeerList;
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
 use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;
@@ -219,7 +219,7 @@ impl SyncState {
 pub async fn sync_chain(
     sync_state: SyncState,
     api_client: impl ApiClient,
-    peer_list: &PeerListGuard,
+    peer_list: &PeerList,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
 ) -> Result<(), GossipError> {
@@ -422,7 +422,7 @@ pub async fn sync_chain(
 }
 
 async fn get_block_index(
-    peer_list: &PeerListGuard,
+    peer_list: &PeerList,
     api_client: &impl ApiClient,
     start: usize,
     limit: usize,
@@ -485,14 +485,15 @@ mod tests {
 
     mod catch_up_task {
         use super::*;
-        use crate::peer_list::PeerListServiceWithClient;
+        use crate::peer_network_service::PeerNetworkService;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, NodeConfig, PeerAddress, PeerListItem, PeerScore,
+            Address, Config, DatabaseProvider, NodeConfig, PeerAddress, PeerListItem,
+            PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -564,20 +565,25 @@ mod tests {
                 }
             });
 
+            let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
-            let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+            let peer_list_service = PeerNetworkService::new_with_custom_api_client(
                 db,
                 &config,
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
+                receiver,
+                sender,
             );
-            let peer_list = peer_list_service.start();
-            let peer_list_guard = peer_list
+            let peer_service_addr = peer_list_service.start();
+            let peer_list_guard = peer_service_addr
                 .send(GetPeerListGuard)
                 .await
-                .expect("to get peer list guard")
-                .expect("to get peer list guard");
+                .expect("to get peer list")
+                .expect("to get peer list");
+
             peer_list_guard.add_or_update_peer(
                 Address::repeat_byte(2),
                 PeerListItem {
@@ -667,11 +673,15 @@ mod tests {
 
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
-            let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+
+            let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+            let peer_list_service = PeerNetworkService::new_with_custom_api_client(
                 db,
                 &config,
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
+                receiver,
+                sender,
             );
 
             let fake_peer_address = PeerAddress {
@@ -680,13 +690,14 @@ mod tests {
                 execution: Default::default(),
             };
 
-            let peer_list = peer_list_service.start();
-            let peer_list_guard = peer_list
+            let peer_service_addr = peer_list_service.start();
+            let peer_list = peer_service_addr
                 .send(GetPeerListGuard)
                 .await
-                .expect("to get peer list guard")
-                .expect("to get peer list guard");
-            peer_list_guard.add_or_update_peer(
+                .expect("to get peer list")
+                .expect("to get peer list");
+
+            peer_list.add_or_update_peer(
                 Address::repeat_byte(2),
                 PeerListItem {
                     reputation_score: PeerScore::new(100),
@@ -703,7 +714,7 @@ mod tests {
             sync_chain(
                 sync_state.clone(),
                 api_client_stub.clone(),
-                &peer_list_guard,
+                &peer_list,
                 start_from,
                 &config,
             )

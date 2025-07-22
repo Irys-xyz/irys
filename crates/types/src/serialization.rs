@@ -1012,4 +1012,24 @@ mod tests {
         assert_eq!(null.unwrap().unwrap(), None);
         assert_eq!(empty.unwrap().unwrap(), None);
     }
+
+    #[test]
+    fn test_u256_serde_json_string_serialization() {
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct TestStruct {
+            value: U256,
+        }
+
+        // Test with 1e18
+        let one_e18 = U256::from(1_000_000_000_000_000_000_u64);
+        let test_struct = TestStruct { value: one_e18 };
+
+        // Serialize to JSON
+        let serialized = serde_json::to_string(&test_struct).unwrap();
+        assert_eq!(serialized, r#"{"value":"1000000000000000000"}"#);
+
+        // Deserialize back
+        let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, test_struct);
+    }
 }

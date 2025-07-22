@@ -40,7 +40,7 @@ pub enum ShadowTransaction {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 pub enum TransactionPacket {
     /// Unstake funds to an account (balance increment). Used for unstaking or protocol rewards.
-    Unstake(BalanceIncrement),
+    Unstake(EitherIncrementOrDecrement),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
     BlockReward(BlockRewardIncrement),
     /// Stake funds from an account (balance decrement). Used for staking operations.
@@ -50,7 +50,13 @@ pub enum TransactionPacket {
     /// Pledge funds to an account (balance decrement). Used for pledging operations.
     Pledge(BalanceDecrement),
     /// Unpledge funds from an account (balance increment). Used for unpledging operations.
-    Unpledge(BalanceIncrement),
+    Unpledge(EitherIncrementOrDecrement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
+pub enum EitherIncrementOrDecrement {
+    BalanceIncrement(BalanceIncrement),
+    BalanceDecrement(BalanceDecrement),
 }
 
 /// Topics for shadow transaction logs
@@ -127,6 +133,10 @@ pub const STORAGE_FEES_ID: u8 = 0x04;
 pub const PLEDGE_ID: u8 = 0x05;
 pub const UNPLEDGE_ID: u8 = 0x06;
 
+/// Discriminants for EitherIncrementOrDecrement
+pub const EITHER_INCREMENT_ID: u8 = 0x01;
+pub const EITHER_DECREMENT_ID: u8 = 0x02;
+
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "length calculation is safe for small values"
@@ -193,6 +203,32 @@ impl Encodable for TransactionPacket {
 }
 
 #[expect(
+    clippy::arithmetic_side_effects,
+    reason = "length calculation is safe for small values"
+)]
+impl Encodable for EitherIncrementOrDecrement {
+    fn length(&self) -> usize {
+        1 + match self {
+            Self::BalanceIncrement(bi) => bi.length(),
+            Self::BalanceDecrement(bd) => bd.length(),
+        }
+    }
+
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        match self {
+            Self::BalanceIncrement(inner) => {
+                out.put_u8(EITHER_INCREMENT_ID);
+                inner.encode(out);
+            }
+            Self::BalanceDecrement(inner) => {
+                out.put_u8(EITHER_DECREMENT_ID);
+                inner.encode(out);
+            }
+        }
+    }
+}
+
+#[expect(
     clippy::indexing_slicing,
     reason = "buffer bounds are checked before indexing"
 )]
@@ -230,7 +266,7 @@ impl Decodable for TransactionPacket {
 
         match disc {
             UNSTAKE_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
+                let inner = EitherIncrementOrDecrement::decode(buf)?;
                 Ok(Self::Unstake(inner))
             }
             BLOCK_REWARD_ID => {
@@ -250,11 +286,39 @@ impl Decodable for TransactionPacket {
                 Ok(Self::Pledge(inner))
             }
             UNPLEDGE_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
+                let inner = EitherIncrementOrDecrement::decode(buf)?;
                 Ok(Self::Unpledge(inner))
             }
             _ => Err(alloy_rlp::Error::Custom(
                 "Unknown shadow transaction discriminant",
+            )),
+        }
+    }
+}
+
+#[expect(
+    clippy::indexing_slicing,
+    reason = "buffer bounds are checked before indexing"
+)]
+impl Decodable for EitherIncrementOrDecrement {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+        let disc = buf[0];
+        *buf = &buf[1..]; // advance past the discriminant byte
+
+        match disc {
+            EITHER_INCREMENT_ID => {
+                let inner = BalanceIncrement::decode(buf)?;
+                Ok(Self::BalanceIncrement(inner))
+            }
+            EITHER_DECREMENT_ID => {
+                let inner = BalanceDecrement::decode(buf)?;
+                Ok(Self::BalanceDecrement(inner))
+            }
+            _ => Err(alloy_rlp::Error::Custom(
+                "Unknown EitherIncrementOrDecrement discriminant",
             )),
         }
     }
