@@ -142,6 +142,27 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
+
+    /// Fee required for staking operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub stake_fee: Amount<Irys>,
+
+    /// Base fee required for pledging operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub pledge_base_fee: Amount<Irys>,
+
+    /// Decay rate for pledge fees - subsequent pledges become cheaper
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
+    pub pledge_decay: Amount<Percentage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,6 +418,9 @@ pub struct MempoolConfig {
     /// Maximum number of data transactions that can be included in a single block
     pub max_data_txs_per_block: u64,
 
+    /// Maximum number of commitment transactions allowed in a single block
+    pub max_commitment_txs_per_block: u64,
+
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
@@ -527,6 +551,7 @@ impl ConsensusConfig {
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
+                max_commitment_txs_per_block: 100,
                 anchor_expiry_depth: 10,
                 // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
@@ -580,7 +605,7 @@ impl ConsensusConfig {
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                balance: alloy_primitives::U256::from(690000000000000000_u128),
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                                 ..Default::default()
                             },
                         );
@@ -591,9 +616,7 @@ impl ConsensusConfig {
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                balance: alloy_primitives::U256::from(
-                                    1_000_000_000_000_000_000_000_000_u128,
-                                ),
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                                 ..Default::default()
                             },
                         );
@@ -606,6 +629,9 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
+            stake_fee: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_fee: Amount::token(dec!(950)).expect("valid token amount"),
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
         }
     }
 }
@@ -657,7 +683,7 @@ impl NodeConfig {
             accounts.push((
                 signer.address(),
                 GenesisAccount {
-                    balance: alloy_primitives::U256::from(690000000000000000_u128),
+                    balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                     ..Default::default()
                 },
             ))
@@ -919,7 +945,9 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        genesis_peer_discovery_timeout_millis = 10000
+        stake_fee = 20000.0
+        pledge_base_fee = 950.0
+        pledge_decay = 0.9
 
         [reth]
         chain = 1270
@@ -939,13 +967,14 @@ mod tests {
         terminalTotalDifficultyPassed = false
 
         [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
-        balance = "0x9935f581f050000"
+        balance = "0x152cf4e72a974f1c0000"
 
         [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
-        balance = "0xd3c21bcecceda1000000"
+        balance = "0x152cf4e72a974f1c0000"
 
         [mempool]
         max_data_txs_per_block = 100
+        max_commitment_txs_per_block = 100
         anchor_expiry_depth = 10
         max_pending_pledge_items = 100
         max_pledges_per_item = 100

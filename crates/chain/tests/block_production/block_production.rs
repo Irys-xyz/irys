@@ -4,6 +4,7 @@ use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
+use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
@@ -11,6 +12,7 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
 use reth::{
@@ -24,9 +26,23 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, read_block_from_state, solution_context,
-    AddTxError, BlockValidationOutcome, IrysNodeTest,
+    mine_block, mine_block_and_wait_for_validation, new_pledge_tx, new_stake_tx,
+    read_block_from_state, solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
 };
+
+// Test fee constants
+const DEFAULT_TX_FEE: U256 = U256::from_limbs([1, 0, 0, 0]);
+
+// EVM test constants
+const EVM_GAS_PRICE: u128 = 20_000_000_000; // 20 gwei
+const EVM_GAS_LIMIT: u64 = 21_000;
+const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::from_limbs([1, 0, 0, 0]);
+
+// Test account balances
+const ZERO_BALANCE: U256 = U256::ZERO;
+const TEST_USER_BALANCE: U256 = U256::from_limbs([1000, 0, 0, 0]);
+const TEST_USER_BALANCE_ETH: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 ETH
+const MINIMAL_TEST_BALANCE: U256 = U256::from_limbs([2, 0, 0, 0]); // Exactly enough for perm_fee(1) + term_fee(1)
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -37,14 +53,14 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             // ensure that the block reward address has 0 balance
             node.cfg.signer().address(),
             GenesisAccount {
-                balance: U256::from(0),
+                balance: ZERO_BALANCE,
                 ..Default::default()
             },
         ),
         (
             user_account.address(),
             GenesisAccount {
-                balance: U256::from(1000),
+                balance: TEST_USER_BALANCE,
                 ..Default::default()
             },
         ),
@@ -101,14 +117,14 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .inner
         .provider
         .basic_account(&user_account.address())
-        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get signer_b balance: {}", err);
-            U256::ZERO
+            ZERO_BALANCE
         });
     assert_eq!(
         signer_balance,
-        U256::from(1000) - U256::from(tx.header.total_fee())
+        TEST_USER_BALANCE - U256::from_le_bytes(tx.header.total_cost().to_le_bytes())
     );
 
     // ensure that the block reward has increased the block reward address balance
@@ -117,15 +133,15 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .inner
         .provider
         .basic_account(&block_reward_address)
-        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get block reward address balance: {}", err);
-            U256::ZERO
+            ZERO_BALANCE
         });
     assert_eq!(
         block_reward_balance,
         // started with 0 balance
-        U256::from(0) + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes())
+        ZERO_BALANCE + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes())
     );
 
     // ensure that block heights in reth and irys are the same
@@ -287,7 +303,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
     let recipient = IrysSigner::random_signer(&config.consensus_config());
-    let account_1_balance = U256::from(1_000000000000000000_u128);
+    let account_1_balance = TEST_USER_BALANCE_ETH;
     config.consensus.extend_genesis_accounts(vec![(
         account1.address(),
         GenesisAccount {
@@ -302,10 +318,10 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     let evm_tx_req = TransactionRequest {
         to: Some(TxKind::Call(recipient.address())),
-        max_fee_per_gas: Some(20e9 as u128),
-        max_priority_fee_per_gas: Some(20e9 as u128),
-        gas: Some(21000),
-        value: Some(U256::from(1)),
+        max_fee_per_gas: Some(EVM_GAS_PRICE),
+        max_priority_fee_per_gas: Some(EVM_GAS_PRICE),
+        gas: Some(EVM_GAS_LIMIT),
+        value: Some(EVM_TEST_TRANSFER_AMOUNT),
         nonce: Some(0),
         chain_id: Some(chain_id),
         ..Default::default()
@@ -367,15 +383,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     // Verify recipient received the transfer
     let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
-    assert_eq!(recipient_balance, U256::from(1)); // The transferred amount
+    assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
 
     // Verify account1 balance decreased by storage fees and gas costs
     let account1_balance = reth_context.rpc.get_balance(account1.address(), None)?;
-    // Balance should be: initial (1000) - storage fees - gas costs - transfer amount (1)
-    let expected_balance = account_1_balance
-        - U256::from(irys_tx.header.total_fee())
-        - U256::from(21000 * 20e9 as u64) // gas_used * max_fee_per_gas
-        - U256::from(1); // transfer amount
+    // Balance should be: initial balance - storage fees - gas costs - transfer amount
+    let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
+    let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
+    let expected_balance = account_1_balance - storage_fees - gas_costs - EVM_TEST_TRANSFER_AMOUNT;
     assert_eq!(account1_balance, expected_balance);
 
     node.stop().await;
@@ -428,7 +443,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
             // ensure that the block reward address has 0 balance
             node.cfg.signer().address(),
             GenesisAccount {
-                balance: U256::from(0),
+                balance: ZERO_BALANCE,
                 ..Default::default()
             },
         ),
@@ -436,7 +451,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
             // unfunded user gets zero balance (but he has an entry in the reth db)
             unfunded_user.address(),
             GenesisAccount {
-                balance: U256::from(0),
+                balance: ZERO_BALANCE,
                 ..Default::default()
             },
         ),
@@ -493,14 +508,13 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
         .inner
         .provider
         .basic_account(&unfunded_user.address())
-        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get unfunded user balance: {}", err);
-            U256::ZERO
+            ZERO_BALANCE
         });
     assert_eq!(
-        user_balance,
-        U256::ZERO,
+        user_balance, ZERO_BALANCE,
         "Unfunded user balance should remain zero"
     );
     node.stop().await;
@@ -518,7 +532,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
             // ensure that the block reward address has 0 balance
             node.cfg.signer().address(),
             GenesisAccount {
-                balance: U256::from(0),
+                balance: ZERO_BALANCE,
                 ..Default::default()
             },
         ),
@@ -576,14 +590,13 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
         .inner
         .provider
         .basic_account(&nonexistent_user.address())
-        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get nonexistent user balance: {}", err);
-            U256::ZERO
+            ZERO_BALANCE
         });
     assert_eq!(
-        user_balance,
-        U256::ZERO,
+        user_balance, ZERO_BALANCE,
         "Nonexistent user balance should be zero"
     );
 
@@ -602,14 +615,14 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
             // ensure that the block reward address has 0 balance
             node.cfg.signer().address(),
             GenesisAccount {
-                balance: U256::from(0),
+                balance: ZERO_BALANCE,
                 ..Default::default()
             },
         ),
         (
             user.address(),
             GenesisAccount {
-                balance: U256::from(2),
+                balance: MINIMAL_TEST_BALANCE,
                 ..Default::default()
             },
         ),
@@ -624,7 +637,11 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .await?;
 
     // Verify the transaction was accepted (fee is 2: perm_fee=1 + term_fee=1)
-    assert_eq!(tx.header.total_fee(), 2, "Total fee should be 2");
+    assert_eq!(
+        tx.header.total_cost(),
+        irys_types::U256::from_le_bytes(MINIMAL_TEST_BALANCE.to_le_bytes()),
+        "Total cost should match minimal test balance (perm_fee=1 + term_fee=1)"
+    );
 
     // Mine a block - should contain block reward and storage fee transactions
     let irys_block = node.mine_block().await?;
@@ -677,14 +694,13 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .inner
         .provider
         .basic_account(&user.address())
-        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get user balance: {}", err);
-            U256::ZERO
+            ZERO_BALANCE
         });
     assert_eq!(
-        user_balance,
-        U256::from(0),
+        user_balance, ZERO_BALANCE,
         "User balance should go down to 0"
     );
 
@@ -725,10 +741,10 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .inner
         .provider
         .basic_account(&peer_signer.address())
-        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get peer balance: {}", err);
-            U256::ZERO
+            ZERO_BALANCE
         });
 
     // Post stake + pledge commitments to the peer
@@ -811,20 +827,38 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .inner
         .provider
         .basic_account(&peer_signer.address())
-        .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+        .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get peer balance: {}", err);
-            U256::ZERO
+            ZERO_BALANCE
         });
 
-    // In the same block:
-    // - Stake decreases balance by (commitment_value + fee)
-    // - Pledge decreases balance by (commitment_value + fee)
-    // Both decrease balance by 2 each, so total decrease is 4
+    // Calculate expected balance change based on consensus config
+    let consensus_config = genesis_config.consensus_config();
+    let stake_fee_amount = consensus_config.stake_fee.amount; // 0.1 token = 10^17 in U256
+    let pledge_fee_amount = consensus_config.pledge_base_fee.amount; // 0.1 token = 10^17 in U256
+
+    // Each commitment transaction has:
+    // - fee: DEFAULT_TX_FEE (passed to post_stake_commitment and post_pledge_commitment)
+    // - value: stake_fee.amount or pledge_fee.amount
+    // Total cost per transaction = fee + value
+    let stake_tx_fee = DEFAULT_TX_FEE;
+    let stake_config_amount = U256::from_le_bytes(stake_fee_amount.to_le_bytes());
+    let stake_total_cost = stake_tx_fee + stake_config_amount;
+
+    let pledge_tx_fee = DEFAULT_TX_FEE;
+    let pledge_config_amount = U256::from_le_bytes(pledge_fee_amount.to_le_bytes());
+    let pledge_total_cost = pledge_tx_fee + pledge_config_amount;
+
+    let total_decrease = stake_total_cost + pledge_total_cost;
+
     assert_eq!(
         balance_after_block1,
-        initial_balance - U256::from(4),
-        "Balance should decrease by 4 (2 for stake + 2 for pledge)"
+        initial_balance - total_decrease,
+        "Balance should decrease by {} (stake: {} + pledge: {})",
+        total_decrease,
+        stake_total_cost,
+        pledge_total_cost
     );
 
     // Mine another block to verify the system continues to work
@@ -890,7 +924,13 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
             .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
+        // Expected amount is DEFAULT_TX_FEE + stake_fee.amount (0.1 token = 10^17)
+        let expected_stake_amount =
+            DEFAULT_TX_FEE + U256::from_le_bytes(consensus_config.stake_fee.amount.to_le_bytes());
+        assert_eq!(
+            bd.amount, expected_stake_amount,
+            "Stake amount should be fee + stake_fee.amount"
+        );
     } else {
         panic!("Second transaction should be stake");
     }
@@ -901,7 +941,13 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
             .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        assert_eq!(bd.amount, U256::from(2)); // commitment_value(1) + fee(1)
+        // Expected amount is DEFAULT_TX_FEE + pledge_fee.amount (0.1 token = 10^17)
+        let expected_pledge_amount = DEFAULT_TX_FEE
+            + U256::from_le_bytes(consensus_config.pledge_base_fee.amount.to_le_bytes());
+        assert_eq!(
+            bd.amount, expected_pledge_amount,
+            "Pledge amount should be fee + pledge_fee.amount"
+        );
     } else {
         panic!("Third transaction should be pledge");
     }
@@ -1240,5 +1286,146 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     }
 
     node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
+/// test that config option max_commitment_txs_per_block is enforced
+/// check individual blocks have correct txs. e.g.
+/// 1 stake + 11 pledge commitment txs with a limit of two per block, we should see 2 +2 +2 +2 +0 +2 +2
+/// epoch blocks should include any new txs
+/// epoch blocks should contain a copy of all commitment txs from blocks in the epoch block range
+async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
+    let seconds_to_wait = 10;
+    let max_commitment_txs_per_block: u64 = 2;
+    let num_blocks_in_epoch = 5;
+
+    initialize_tracing();
+
+    let max_commitments_per_epoch =
+        (num_blocks_in_epoch * max_commitment_txs_per_block) - max_commitment_txs_per_block;
+
+    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into()?);
+    genesis_config
+        .consensus
+        .get_mut()
+        .mempool
+        .max_commitment_txs_per_block = max_commitment_txs_per_block;
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let _ = genesis_node.start_public_api().await;
+
+    // create and post stake commitment tx
+    let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
+    genesis_node.post_commitment_tx(&stake_tx).await?;
+
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    let commitment_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_commitment_snapshot();
+    for _ in 0..11 {
+        let tx = new_pledge_tx(
+            tx_ids.last().expect("valid tx id for use as anchor"),
+            &signer,
+            &genesis_config.consensus_config(),
+            &commitment_snapshot,
+        );
+        tx_ids.push(tx.id);
+        genesis_node.post_commitment_tx(&tx).await?;
+    }
+
+    // wait for all txs to ingress mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(tx_ids.clone(), seconds_to_wait)
+        .await?;
+
+    let mut counts = Vec::new();
+    for i in 1..=8 {
+        genesis_node.mine_block().await?;
+        let block = genesis_node.get_block_by_height(i).await?;
+        let is_epoch_block = block.height > 0 && block.height % num_blocks_in_epoch == 0;
+        counts.push(
+            block
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+        );
+        if is_epoch_block {
+            assert_eq!(counts[(i - 1) as usize], max_commitments_per_epoch as usize);
+        } else {
+            assert!(counts[(i - 1) as usize] <= max_commitment_txs_per_block as usize);
+        }
+    }
+
+    // check the grand total txs is correct
+    assert_eq!(
+        counts.iter().sum::<usize>(),
+        20,
+        "Total count of commitment txs is incorrect",
+    );
+
+    // check individual blocks have correct txs.
+    // for 1 stake + 11 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 2 + 2 + 0 + 2 + 2
+
+    for h in 1..num_blocks_in_epoch {
+        let block_n = genesis_node.get_block_by_height(h).await?;
+        assert_eq!(
+            2,
+            block_n
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+            "block {} commitment tx count is incorrect",
+            h
+        );
+    }
+
+    // epoch block rolls up previous txs
+    let epoch_block = genesis_node
+        .get_block_by_height(num_blocks_in_epoch)
+        .await?;
+    assert_eq!(epoch_block.height % num_blocks_in_epoch, 0);
+    let epoch_tx_ids = epoch_block
+        .system_ledgers
+        .get(SystemLedger::Commitment as usize)
+        .map_or(Vec::<H256>::new(), |l| l.tx_ids.0.clone());
+    assert_eq!(epoch_tx_ids, tx_ids[..max_commitments_per_epoch as usize]);
+
+    // some blocks after epoch should contain commitment txs
+    // this will be a few blocks, as we posted enough txs above to populate two more blocks
+    for h in 6..=7 {
+        let block_n = genesis_node.get_block_by_height(h).await?;
+        assert_eq!(
+            2,
+            block_n
+                .system_ledgers
+                .get(SystemLedger::Commitment as usize)
+                .map_or(0, |l| l.tx_ids.len()),
+            "post-epoch block commitment tx count is incorrect",
+        );
+    }
+
+    // we have then used all commitment txs from mempool, so final block(s) are empty
+    let final_height = 8;
+    let final_block = genesis_node.get_block_by_height(final_height).await?;
+    assert_eq!(
+        0,
+        final_block
+            .system_ledgers
+            .get(SystemLedger::Commitment as usize)
+            .map_or(0, |l| l.tx_ids.len()),
+        "post-epoch, emptied mempool of commitments. block {:?} commitment tx count is incorrect",
+        final_height,
+    );
+
+    genesis_node.stop().await;
+
     Ok(())
 }

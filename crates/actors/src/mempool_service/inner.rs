@@ -211,10 +211,19 @@ impl Inner {
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
-        let mut fees_spent_per_address = HashMap::new();
+        let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
+
+        let max_commitments: usize = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .max_commitment_txs_per_block
+            .try_into()
+            .expect("max_commitment_txs_per_block to fit into usize");
 
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
@@ -229,8 +238,8 @@ impl Inner {
                 return false;
             }
 
-            let fee = tx.total_fee();
-            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
+            let fee = tx.total_cost();
+            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
 
             // Calculate total required balance including previously selected transactions
 
@@ -240,7 +249,7 @@ impl Inner {
                 .rpc
                 .get_balance_irys(signer, parent_evm_block_id);
 
-            let has_funds = balance >= U256::from(current_spent + fee);
+            let has_funds = balance >= current_spent + fee;
 
             // Track fees for this address regardless of whether this specific transaction is included
             fees_spent_per_address
@@ -288,7 +297,7 @@ impl Inner {
         // This order ensures stake transactions are processed before pledges
         let mempool_state_guard = mempool_state.read().await;
 
-        for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+        'outer: for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
             // Gather all commitments of current type from all addresses
             let mut sorted_commitments: Vec<_> = mempool_state_guard
                 .valid_commitment_tx
@@ -301,7 +310,7 @@ impl Inner {
                 .collect();
 
             // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.user_fee()));
 
             // Select fundable commitments in fee-priority order
             for tx in sorted_commitments {
@@ -361,6 +370,12 @@ impl Inner {
 
                 debug!("best_mempool_txs: adding commitment tx {}", tx.id);
                 commitment_tx.push(tx);
+
+                // if we have reached the maximum allowed number of commitment txs per block
+                // do not push anymore
+                if commitment_tx.len() >= max_commitments {
+                    break 'outer;
+                }
             }
         }
         drop(mempool_state_guard);
@@ -382,14 +397,14 @@ impl Inner {
 
         // Sort data transactions by fee (highest first) to maximize revenue
 
-        submit_ledger_txs.sort_by(|a, b| match b.total_fee().cmp(&a.total_fee()) {
+        submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
         });
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
-        let max_txs = self
+        let max_data_txs = self
             .config
             .node_config
             .consensus_config()
@@ -405,7 +420,7 @@ impl Inner {
             if check_funding(&tx) {
                 debug!("Submit tx {} passed the funding check", &tx.id);
                 submit_tx.push(tx);
-                if submit_tx.len() >= max_txs {
+                if submit_tx.len() >= max_data_txs {
                     break;
                 }
             } else {

@@ -53,7 +53,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 mod block_validation_tracker;
 pub use block_validation_tracker::BlockValidationTracker;
@@ -119,7 +119,7 @@ pub struct BlockProducerInner {
 
 impl BlockProducerService {
     /// Spawn a new block producer service
-    #[tracing::instrument(skip_all, fields(blocks_remaining_for_test = ?blocks_remaining_for_test))]
+    #[tracing::instrument(skip_all)]
     pub fn spawn_service(
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
@@ -132,18 +132,21 @@ impl BlockProducerService {
         );
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-        let handle = runtime_handle.spawn(async move {
-            let service = Self {
-                shutdown: shutdown_rx,
-                cmd_rx: rx,
-                inner,
-                blocks_remaining_for_test,
-            };
-            service
-                .start()
-                .await
-                .expect("Block producer service encountered an irrecoverable error")
-        });
+        let handle = runtime_handle.spawn(
+            async move {
+                let service = Self {
+                    shutdown: shutdown_rx,
+                    cmd_rx: rx,
+                    inner,
+                    blocks_remaining_for_test,
+                };
+                service
+                    .start()
+                    .await
+                    .expect("Block producer service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
 
         TokioServiceHandle {
             name: "block_producer_service".to_string(),

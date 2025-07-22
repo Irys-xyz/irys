@@ -28,7 +28,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -84,8 +84,6 @@ pub struct BlockTreeServiceInner {
     pub reth_service_actor: Addr<RethServiceActor>,
     /// Current actix system
     pub system: System,
-    /// Tracing span
-    pub span: tracing::Span,
 }
 
 #[derive(Debug, Clone)]
@@ -136,52 +134,53 @@ impl BlockTreeService {
         let epoch_replay_data = (*epoch_replay_data).clone();
         let config = config.clone();
         let storage_submodules_config = storage_submodules_config.clone();
-        let span = tracing::Span::current();
 
-        let handle = runtime_handle.spawn(async move {
-            let cache = BlockTree::restore_from_db(
-                bi_guard.clone(),
-                epoch_replay_data,
-                db.clone(),
-                &storage_submodules_config,
-                config.clone(),
-            );
+        let handle = runtime_handle.spawn(
+            async move {
+                let cache = BlockTree::restore_from_db(
+                    bi_guard.clone(),
+                    epoch_replay_data,
+                    db.clone(),
+                    &storage_submodules_config,
+                    config.clone(),
+                );
 
-            //  Notify reth service
-            let tip_hash = {
-                let block_index = bi_guard.read();
-                block_index.get_latest_item().unwrap().block_hash
-            };
+                //  Notify reth service
+                let tip_hash = {
+                    let block_index = bi_guard.read();
+                    block_index.get_latest_item().unwrap().block_hash
+                };
 
-            reth_service_actor
-                .try_send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(tip_hash),
-                    confirmed_hash: None,
-                    finalized_hash: None,
-                })
-                .expect("could not send message to `RethServiceActor`");
+                reth_service_actor
+                    .try_send(ForkChoiceUpdateMessage {
+                        head_hash: BlockHashType::Irys(tip_hash),
+                        confirmed_hash: None,
+                        finalized_hash: None,
+                    })
+                    .expect("could not send message to `RethServiceActor`");
 
-            let block_tree_service = Self {
-                shutdown: shutdown_rx,
-                msg_rx: rx,
-                inner: BlockTreeServiceInner {
-                    db,
-                    cache: Arc::new(RwLock::new(cache)),
-                    miner_address,
-                    block_index_guard: bi_guard,
-                    config,
-                    service_senders,
-                    reth_service_actor,
-                    system,
-                    span,
-                    storage_submodules_config: storage_submodules_config.clone(),
-                },
-            };
-            block_tree_service
-                .start()
-                .await
-                .expect("BlockTree encountered an irrecoverable error")
-        });
+                let block_tree_service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner: BlockTreeServiceInner {
+                        db,
+                        cache: Arc::new(RwLock::new(cache)),
+                        miner_address,
+                        block_index_guard: bi_guard,
+                        config,
+                        service_senders,
+                        reth_service_actor,
+                        system,
+                        storage_submodules_config: storage_submodules_config.clone(),
+                    },
+                };
+                block_tree_service
+                    .start()
+                    .await
+                    .expect("BlockTree encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
 
         TokioServiceHandle {
             name: "block_tree_service".to_string(),
@@ -605,9 +604,6 @@ impl BlockTreeServiceInner {
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
-        let span = self.span.clone();
-        let _span = span.enter();
-
         let height = self
             .cache
             .read()
