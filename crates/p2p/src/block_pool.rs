@@ -1,17 +1,19 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
-use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::SyncState;
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::block_validation::shadow_transactions_are_valid;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_domain::{PeerListDataError, PeerListGuard};
+#[cfg(test)]
+use irys_domain::execution_payload_cache::RethBlockProvider;
+use irys_domain::{ExecutionPayloadCache, PeerList};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
-    IrysBlockHeader,
+    IrysBlockHeader, PeerNetworkError,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
@@ -52,8 +54,8 @@ pub enum BlockPoolError {
     PreviousBlockNotFound(BlockHash),
 }
 
-impl From<PeerListDataError> for BlockPoolError {
-    fn from(err: PeerListDataError) -> Self {
+impl From<PeerNetworkError> for BlockPoolError {
+    fn from(err: PeerNetworkError) -> Self {
         Self::OtherInternal(format!("Peer list error: {:?}", err))
     }
 }
@@ -71,12 +73,12 @@ where
 
     block_discovery: B,
     mempool: M,
-    peer_list: PeerListGuard,
+    peer_list: PeerList,
 
     sync_state: SyncState,
 
     block_status_provider: BlockStatusProvider,
-    execution_payload_provider: ExecutionPayloadProvider,
+    execution_payload_provider: ExecutionPayloadCache,
 
     vdf_state: VdfStateReadonly,
 
@@ -224,12 +226,12 @@ where
 {
     pub(crate) fn new(
         db: DatabaseProvider,
-        peer_list: PeerListGuard,
+        peer_list: PeerList,
         block_discovery: B,
         mempool: M,
         sync_state: SyncState,
         block_status_provider: BlockStatusProvider,
-        execution_payload_provider: ExecutionPayloadProvider,
+        execution_payload_provider: ExecutionPayloadCache,
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
@@ -355,15 +357,35 @@ where
             "Block pool: Validating and submitting execution payload for block {:?}",
             block_header.block_hash
         );
-        match self
+
+        // For tests that specifically want to mock the payload provider
+        // All tests that do not is going to use the real provider
+        #[cfg(test)]
+        {
+            if let RethBlockProvider::Mock(_) =
+                &self.execution_payload_provider.reth_payload_provider
+            {
+                return Ok(());
+            }
+        }
+
+        let adapter = self
             .execution_payload_provider
-            .fetch_validate_and_submit_payload(
-                &self.config,
-                &self.service_senders,
-                block_header,
-                &self.db,
-            )
-            .await
+            .reth_payload_provider
+            .as_irys_reth_adapter()
+            .ok_or(BlockPoolError::OtherInternal(
+                "Reth payload provider is not set".into(),
+            ))?;
+
+        match shadow_transactions_are_valid(
+            &self.config,
+            &self.service_senders,
+            block_header,
+            adapter,
+            &self.db,
+            self.execution_payload_provider.clone(),
+        )
+        .await
         {
             Ok(()) => {}
             Err(err) => {

@@ -15,7 +15,6 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
     is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
-    PayloadProvider,
 };
 use crate::validation_service::ValidationServiceInner;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
@@ -33,18 +32,18 @@ enum ParentValidationResult {
 }
 
 /// Handles the execution of a single block validation task
-pub(crate) struct BlockValidationTask<T: PayloadProvider> {
+pub(crate) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
     pub block_hash: BlockHash,
-    pub service_inner: Arc<ValidationServiceInner<T>>,
+    pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
 }
 
-impl<T: PayloadProvider> BlockValidationTask<T> {
+impl BlockValidationTask {
     pub(crate) fn new(
         block: Arc<IrysBlockHeader>,
         block_hash: BlockHash,
-        service_inner: Arc<ValidationServiceInner<T>>,
+        service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
     ) -> Self {
         Self {

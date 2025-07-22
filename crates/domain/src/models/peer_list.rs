@@ -1,49 +1,20 @@
-use actix::Message;
 use alloy_core::primitives::B256;
-use irys_database::reth_db::{Database as _, DatabaseError};
+use irys_database::reth_db::Database as _;
 use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
 use irys_primitives::Address;
-use irys_types::{BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem};
+use irys_types::{
+    BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError,
+    PeerNetworkSender,
+};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::mpsc::error::SendError;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, warn};
 
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
-
-#[derive(Debug, Error)]
-pub enum PeerListDataError {
-    #[error("Internal database error: {0}")]
-    Database(DatabaseError),
-    #[error("Peer list internal error: {0:?}")]
-    InternalSendError(SendError<PeerListDataMessage>),
-    #[error("Peer list internal error: {0}")]
-    OtherInternalError(String),
-}
-
-impl From<SendError<PeerListDataMessage>> for PeerListDataError {
-    fn from(err: SendError<PeerListDataMessage>) -> Self {
-        Self::InternalSendError(err)
-    }
-}
-
-impl From<DatabaseError> for PeerListDataError {
-    fn from(err: DatabaseError) -> Self {
-        Self::Database(err)
-    }
-}
-
-impl From<eyre::Report> for PeerListDataError {
-    fn from(err: eyre::Report) -> Self {
-        Self::Database(DatabaseError::Other(err.to_string()))
-    }
-}
 
 #[derive(Clone, Debug, Copy)]
 pub enum ScoreDecreaseReason {
@@ -64,31 +35,18 @@ pub struct PeerListDataInner {
     peer_list_cache: HashMap<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
     trusted_peers_api_addresses: HashSet<SocketAddr>,
-    peer_list_service_sender: UnboundedSender<PeerListDataMessage>,
-}
-
-// TODO: remove default, right now it's there just to make service into a ssytem service
-impl Default for PeerListDataInner {
-    fn default() -> Self {
-        panic!("PeerListData should be initialized with new() method, not default()");
-    }
+    peer_network_service_sender: PeerNetworkSender,
 }
 
 #[derive(Clone, Debug)]
-pub struct PeerListGuard(Arc<RwLock<PeerListDataInner>>);
+pub struct PeerList(Arc<RwLock<PeerListDataInner>>);
 
-impl Default for PeerListGuard {
-    fn default() -> Self {
-        panic!("PeerListGuard should be initialized with new() method, not default()");
-    }
-}
-
-impl PeerListGuard {
+impl PeerList {
     pub fn new(
         config: &Config,
         db: &DatabaseProvider,
-        peer_service_sender: UnboundedSender<PeerListDataMessage>,
-    ) -> Result<Self, PeerListDataError> {
+        peer_service_sender: PeerNetworkSender,
+    ) -> Result<Self, PeerNetworkError> {
         let inner = PeerListDataInner::new(config, db, peer_service_sender)?;
         Ok(Self(Arc::new(RwLock::new(inner))))
     }
@@ -200,7 +158,7 @@ impl PeerListGuard {
         peers
     }
 
-    pub fn inactive_peers(&self) -> Vec<(Address, PeerListItem, SocketAddr)> {
+    pub fn inactive_peers(&self) -> Vec<(Address, PeerListItem)> {
         self.read()
             .peer_list_cache
             .iter()
@@ -209,8 +167,7 @@ impl PeerListGuard {
                 // Clone or copy the fields we need for the async operation
                 let peer_item = peer.clone();
                 let mining_addr = *mining_addr;
-                let peer_addr = peer_item.address;
-                (mining_addr, peer_item, peer_addr.gossip)
+                (mining_addr, peer_item)
             })
             .collect()
     }
@@ -251,50 +208,32 @@ impl PeerListGuard {
         &self,
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
-    ) -> Result<(), PeerListDataError> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let message = PeerListDataMessage::RequestBlockFromNetwork {
-            block_hash,
-            use_trusted_peers_only,
-            response: sender,
-        };
-        self.0
-            .write()
+    ) -> Result<(), PeerNetworkError> {
+        let sender = self
+            .0
+            .read()
             .expect("PeerListDataInner lock poisoned")
-            .peer_list_service_sender
-            .send(message)?;
-
-        receiver.await.map_err(|recv_error| {
-            PeerListDataError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
-            ))
-        })?
+            .peer_network_service_sender
+            .clone();
+        sender
+            .request_block_from_network(block_hash, use_trusted_peers_only)
+            .await
     }
 
     pub async fn request_payload_from_the_network(
         &self,
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,
-    ) -> Result<(), PeerListDataError> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let message = PeerListDataMessage::RequestPayloadFromNetwork {
-            payload_hash: evm_payload_hash,
-            use_trusted_peers_only,
-            response: sender,
-        };
-        self.0
-            .write()
+    ) -> Result<(), PeerNetworkError> {
+        let sender = self
+            .0
+            .read()
             .expect("PeerListDataInner lock poisoned")
-            .peer_list_service_sender
-            .send(message)?;
-
-        receiver.await.map_err(|recv_error| {
-            PeerListDataError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
-            ))
-        })?
+            .peer_network_service_sender
+            .clone();
+        sender
+            .request_payload_from_network(evm_payload_hash, use_trusted_peers_only)
+            .await
     }
 
     pub fn read(&self) -> std::sync::RwLockReadGuard<'_, PeerListDataInner> {
@@ -306,28 +245,12 @@ impl PeerListGuard {
     }
 }
 
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub enum PeerListDataMessage {
-    PeerUpdated(PeerListItem),
-    RequestBlockFromNetwork {
-        block_hash: BlockHash,
-        use_trusted_peers_only: bool,
-        response: tokio::sync::oneshot::Sender<Result<(), PeerListDataError>>,
-    },
-    RequestPayloadFromNetwork {
-        payload_hash: B256,
-        use_trusted_peers_only: bool,
-        response: tokio::sync::oneshot::Sender<Result<(), PeerListDataError>>,
-    },
-}
-
 impl PeerListDataInner {
     pub fn new(
         config: &Config,
         db: &DatabaseProvider,
-        peer_service_sender: UnboundedSender<PeerListDataMessage>,
-    ) -> Result<Self, PeerListDataError> {
+        peer_service_sender: PeerNetworkSender,
+    ) -> Result<Self, PeerNetworkError> {
         let mut peer_list = Self {
             gossip_addr_to_mining_addr_map: HashMap::new(),
             api_addr_to_mining_addr_map: HashMap::new(),
@@ -339,13 +262,13 @@ impl PeerListDataInner {
                 .iter()
                 .map(|p| p.api)
                 .collect(),
-            peer_list_service_sender: peer_service_sender,
+            peer_network_service_sender: peer_service_sender,
         };
 
-        let read_tx = db.tx().map_err(PeerListDataError::from)?;
+        let read_tx = db.tx().map_err(PeerNetworkError::from)?;
 
         let peer_list_items =
-            walk_all::<PeerListItems, _>(&read_tx).map_err(PeerListDataError::from)?;
+            walk_all::<PeerListItems, _>(&read_tx).map_err(PeerNetworkError::from)?;
 
         for (mining_addr, entry) in peer_list_items {
             let address = entry.address;
@@ -372,8 +295,8 @@ impl PeerListDataInner {
             );
             // Notify the peer list service that a peer was updated
             if let Err(e) = self
-                .peer_list_service_sender
-                .send(PeerListDataMessage::PeerUpdated(peer))
+                .peer_network_service_sender
+                .announce_yourself_to_peer(peer)
             {
                 error!("Failed to send peer updated message: {:?}", e);
             }

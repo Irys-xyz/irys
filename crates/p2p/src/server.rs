@@ -3,7 +3,7 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::server_data_handler::GossipServerDataHandler;
-use crate::types::{GossipDataRequest, InternalGossipError};
+use crate::types::InternalGossipError;
 use crate::types::{GossipError, GossipResult};
 use actix_web::dev::Server;
 use actix_web::{
@@ -13,10 +13,10 @@ use actix_web::{
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
-use irys_domain::{PeerListGuard, ScoreDecreaseReason};
+use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
-    Address, CommitmentTransaction, DataTransactionHeader, GossipRequest, IrysBlockHeader,
-    PeerListItem, UnpackedChunk,
+    Address, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
+    IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -31,7 +31,7 @@ where
     A: ApiClient,
 {
     data_handler: GossipServerDataHandler<M, B, A>,
-    peer_list: PeerListGuard,
+    peer_list: PeerList,
 }
 
 impl<M, B, A> Clone for GossipServer<M, B, A>
@@ -56,7 +56,7 @@ where
 {
     pub(crate) const fn new(
         gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
-        peer_list: PeerListGuard,
+        peer_list: PeerList,
     ) -> Self {
         Self {
             data_handler: gossip_server_data_handler,
@@ -96,7 +96,7 @@ where
     }
 
     fn check_peer(
-        peer_list: &PeerListGuard,
+        peer_list: &PeerList,
         req: &actix_web::HttpRequest,
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
@@ -304,7 +304,7 @@ where
     fn handle_invalid_data(
         peer_miner_address: &Address,
         error: &GossipError,
-        peer_list: &PeerListGuard,
+        peer_list: &PeerList,
     ) {
         if let GossipError::InvalidData(_) = error {
             peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
@@ -322,11 +322,11 @@ where
             let node_id = server.data_handler.gossip_client.mining_address;
             let request_id = match &data_request.0.data {
                 GossipDataRequest::Block(hash) => format!("block {:?}", hash),
-                GossipDataRequest::Transaction(hash) => {
-                    format!("transaction {:?}", hash)
-                }
                 GossipDataRequest::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
+                }
+                GossipDataRequest::Chunk(chunk_path_hash) => {
+                    format!("chunk {:?}", chunk_path_hash)
                 }
             };
             warn!(

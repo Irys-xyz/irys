@@ -9,7 +9,7 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerListGuard};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_p2p::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
@@ -29,7 +29,7 @@ use tracing::{debug, info};
 pub struct ApiState {
     pub mempool_service: UnboundedSender<MempoolServiceMessage>,
     pub chunk_provider: Arc<ChunkProvider>,
-    pub peer_list: PeerListGuard,
+    pub peer_list: PeerList,
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!

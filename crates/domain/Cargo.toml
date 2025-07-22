@@ -16,13 +16,16 @@ irys-config.workspace = true
 irys-database.workspace = true
 irys-primitives.workspace = true
 irys-storage.workspace = true
+irys-reth-node-bridge.workspace = true
 tracing.workspace = true
 base58.workspace = true
 reth-db.workspace = true
 rust_decimal.workspace = true
 tokio.workspace = true
-thiserror.workspace = true
 alloy-core.workspace = true
+lru.workspace = true
+alloy-rpc-types.workspace = true
+reth.workspace = true
 
 [dev-dependencies]
 test-log.workspace = true
