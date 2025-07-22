@@ -27,6 +27,7 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
 
 /// ln(2) in 18-decimal fixed-point:
 pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
+const TAYLOR_TERMS: u32 = 20;
 
 /// `Amount<T>` represents a value stored as a U256.
 ///
@@ -557,7 +558,6 @@ fn ln_fp18(x: U256) -> Result<U256> {
     let y = safe_sub(m, TOKEN_SCALE)?;
 
     // Taylor series: ln(1+y) = y - y²/2 + y³/3 - y⁴/4 + ...
-    const TAYLOR_TERMS: u32 = 20;
     let mut sum = U256::zero();
     let mut y_power = y; // y^i
 
@@ -584,8 +584,6 @@ fn ln_fp18(x: U256) -> Result<U256> {
 /// Computes exp(x) in 18-decimal fixed-point using Taylor series
 /// Input x must be in TOKEN_SCALE (1e18 = 1.0)
 fn exp_fp18(x: U256) -> Result<U256> {
-    const TAYLOR_TERMS: u32 = 20;
-
     let mut term = TOKEN_SCALE; // first term is 1
     let mut sum = TOKEN_SCALE; // accumulated sum
 
@@ -602,8 +600,6 @@ fn exp_fp18(x: U256) -> Result<U256> {
 /// Input x must be in TOKEN_SCALE (1e18 = 1.0)
 /// Uses the expansion: exp(-x) = 1 - x + x²/2! - x³/3! + x⁴/4! - ...
 pub fn exp_neg_fp18(x: U256) -> Result<U256> {
-    const TAYLOR_TERMS: u32 = 20;
-
     let mut term = TOKEN_SCALE; // first term is 1
     let mut sum = TOKEN_SCALE; // accumulated sum
 
@@ -1049,7 +1045,7 @@ mod tests {
 
             let diff = (product_dec - dec!(1.0)).abs();
             assert!(
-                diff < dec!(0.001),
+                diff < dec!(0.0001),
                 "exp(-x) * exp(x) = {}, expected 1.0",
                 product_dec
             );
