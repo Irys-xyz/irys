@@ -2,7 +2,7 @@ use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     sync::SyncState,
-    types::{GossipDataRequest, InternalGossipError, InvalidDataError},
+    types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
 use alloy_core::primitives::keccak256;
@@ -15,8 +15,8 @@ use irys_actors::{
 use irys_api_client::ApiClient;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipRequest,
-    IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipDataRequest,
+    GossipRequest, IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -493,7 +493,6 @@ where
                     None => Ok(false),
                 }
             }
-            GossipDataRequest::Transaction(_tx_hash) => Ok(false),
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 debug!(
                     "Node {}: Handling execution payload request for block {:?}",
@@ -517,6 +516,7 @@ where
                     None => Ok(false),
                 }
             }
+            GossipDataRequest::Chunk(_chunk_path_hash) => Ok(false),
         }
     }
 }

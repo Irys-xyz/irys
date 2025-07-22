@@ -3,7 +3,7 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::server_data_handler::GossipServerDataHandler;
-use crate::types::{GossipDataRequest, InternalGossipError};
+use crate::types::InternalGossipError;
 use crate::types::{GossipError, GossipResult};
 use actix_web::dev::Server;
 use actix_web::{
@@ -15,8 +15,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
-    Address, CommitmentTransaction, DataTransactionHeader, GossipRequest, IrysBlockHeader,
-    PeerListItem, UnpackedChunk,
+    Address, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
+    IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -322,11 +322,11 @@ where
             let node_id = server.data_handler.gossip_client.mining_address;
             let request_id = match &data_request.0.data {
                 GossipDataRequest::Block(hash) => format!("block {:?}", hash),
-                GossipDataRequest::Transaction(hash) => {
-                    format!("transaction {:?}", hash)
-                }
                 GossipDataRequest::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
+                }
+                GossipDataRequest::Chunk(chunk_path_hash) => {
+                    format!("chunk {:?}", chunk_path_hash)
                 }
             };
             warn!(

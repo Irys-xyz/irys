@@ -10,10 +10,10 @@ use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
-use irys_domain::{ExecutionPayloadCache, PeerList, PeerListDataError};
+use irys_domain::{ExecutionPayloadCache, PeerList};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
-    IrysBlockHeader,
+    IrysBlockHeader, PeerNetworkError,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
@@ -54,8 +54,8 @@ pub enum BlockPoolError {
     PreviousBlockNotFound(BlockHash),
 }
 
-impl From<PeerListDataError> for BlockPoolError {
-    fn from(err: PeerListDataError) -> Self {
+impl From<PeerNetworkError> for BlockPoolError {
+    fn from(err: PeerNetworkError) -> Self {
         Self::OtherInternal(format!("Peer list error: {:?}", err))
     }
 }

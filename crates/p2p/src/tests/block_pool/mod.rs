@@ -1,5 +1,5 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
-use crate::peer_list_service::PeerListService;
+use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
 use crate::{BlockStatusProvider, GetPeerListGuard, SyncState};
 use actix::Actor as _;
@@ -15,7 +15,8 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     Config, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionResponse,
-    NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
+    NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore,
+    VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -147,11 +148,14 @@ impl MockedServices {
         };
         let reth_service = MockRethServiceActor {};
         let reth_addr = reth_service.start();
-        let peer_list_service = PeerListService::new_with_custom_api_client(
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_list_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             config,
             mock_client.clone(),
             reth_addr,
+            receiver,
+            sender,
         );
         let peer_service_addr = peer_list_service.start();
         let peer_list_data_guard = peer_service_addr

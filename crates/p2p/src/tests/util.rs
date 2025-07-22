@@ -1,5 +1,4 @@
-use crate::peer_list_service::{GetPeerListGuard, PeerListService};
-use crate::types::GossipDataRequest;
+use crate::peer_network_service::{GetPeerListGuard, PeerNetworkService};
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
@@ -24,9 +23,9 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipRequest, IrysBlockHeader, IrysTransactionResponse, NodeConfig,
-    NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset,
-    UnpackedChunk, VersionRequest, H256,
+    GossipBroadcastMessage, GossipDataRequest, GossipRequest, IrysBlockHeader,
+    IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
+    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -286,7 +285,7 @@ impl Default for ApiClientStub {
     }
 }
 
-pub(crate) type PeerListMock = Addr<PeerListService<ApiClientStub, MockRethServiceActor>>;
+pub(crate) type PeerListMock = Addr<PeerNetworkService<ApiClientStub, MockRethServiceActor>>;
 
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
@@ -350,11 +349,14 @@ impl GossipServiceTestFixture {
 
         let (service_senders, service_receivers) = ServiceSenders::new();
 
-        let peer_service = PeerListService::new_with_custom_api_client(
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             &config,
             ApiClientStub::new(),
             reth_service_addr,
+            receiver,
+            sender,
         );
         let peer_list = peer_service.start();
         let peer_list_data_guard = peer_list
@@ -724,14 +726,14 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(res)
             }
-            GossipDataRequest::Transaction(transaction_hash) => {
-                warn!("Transaction request for hash {:?}", transaction_hash);
+            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+                warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)
             }
-            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
-                warn!("Execution payload request for hash {:?}", evm_block_hash);
+            GossipDataRequest::Chunk(chunk_hash) => {
+                warn!("Chunk request for hash {:?}", chunk_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)

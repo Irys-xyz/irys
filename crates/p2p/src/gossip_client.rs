@@ -2,10 +2,12 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipDataRequest, GossipError, GossipResult};
+use crate::types::{GossipError, GossipResult};
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
-use irys_types::{Address, GossipData, GossipRequest, PeerAddress, PeerListItem};
+use irys_types::{
+    Address, GossipData, GossipDataRequest, GossipRequest, PeerAddress, PeerListItem,
+};
 use reqwest::Client;
 use reqwest::Response;
 use serde::Serialize;

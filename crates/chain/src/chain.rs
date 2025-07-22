@@ -34,7 +34,7 @@ use irys_domain::{
     PeerList,
 };
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListService,
+    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -53,7 +53,8 @@ use irys_storage::{
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
     CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, ServiceSet, TokioServiceHandle, H256, U256,
+    OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, ServiceSet,
+    TokioServiceHandle, H256, U256,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
@@ -76,6 +77,7 @@ use std::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
@@ -913,8 +915,13 @@ impl IrysNode {
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Spawn peer list service
-        let (peer_list_service, peer_list_arbiter) =
-            init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
+        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(
+            &irys_db,
+            &config,
+            reth_service_actor.clone(),
+            receivers.peer_network,
+            service_senders.peer_network.clone(),
+        );
         let peer_list_guard = peer_list_service
             .send(GetPeerListGuard)
             .await?
@@ -1522,14 +1529,22 @@ fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
+    service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
+    service_sender: PeerNetworkSender,
 ) -> (
-    Addr<PeerListService<IrysApiClient, RethServiceActor>>,
+    Addr<PeerNetworkService<IrysApiClient, RethServiceActor>>,
     Arbiter,
 ) {
     let peer_list_arbiter = Arbiter::new();
-    let peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
+    let peer_list_service = PeerNetworkService::new(
+        irys_db.clone(),
+        config,
+        reth_service_addr,
+        service_receiver,
+        service_sender,
+    );
     let peer_list_service =
-        PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
+        PeerNetworkService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     (peer_list_service, peer_list_arbiter)
 }
 
