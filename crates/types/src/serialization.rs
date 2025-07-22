@@ -1021,7 +1021,7 @@ mod tests {
         }
 
         // Test with 1e18
-        let one_e18 = U256::from(1_000_000_000_000_000_000u64);
+        let one_e18 = U256::from(1_000_000_000_000_000_000_u64);
         let test_struct = TestStruct { value: one_e18 };
 
         // Serialize to JSON
