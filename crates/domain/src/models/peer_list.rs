@@ -4,8 +4,8 @@ use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem,
-    PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
+    BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError,
+    PeerNetworkSender, PeerNetworkServiceMessage,
 };
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -35,7 +35,7 @@ pub struct PeerListDataInner {
     peer_list_cache: HashMap<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
     trusted_peers_api_addresses: HashSet<SocketAddr>,
-    peer_list_service_sender: PeerNetworkSender,
+    peer_network_service_sender: PeerNetworkSender,
 }
 
 #[derive(Clone, Debug)]
@@ -213,7 +213,7 @@ impl PeerList {
             .0
             .read()
             .expect("PeerListDataInner lock poisoned")
-            .peer_list_service_sender
+            .peer_network_service_sender
             .clone();
         sender
             .request_block_from_network(block_hash, use_trusted_peers_only)
@@ -229,7 +229,7 @@ impl PeerList {
             .0
             .read()
             .expect("PeerListDataInner lock poisoned")
-            .peer_list_service_sender
+            .peer_network_service_sender
             .clone();
         sender
             .request_payload_from_network(evm_payload_hash, use_trusted_peers_only)
@@ -262,7 +262,7 @@ impl PeerListDataInner {
                 .iter()
                 .map(|p| p.api)
                 .collect(),
-            peer_list_service_sender: peer_service_sender,
+            peer_network_service_sender: peer_service_sender,
         };
 
         let read_tx = db.tx().map_err(PeerNetworkError::from)?;
@@ -295,8 +295,8 @@ impl PeerListDataInner {
             );
             // Notify the peer list service that a peer was updated
             if let Err(e) = self
-                .peer_list_service_sender
-                .send(PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer))
+                .peer_network_service_sender
+                .announce_yourself_to_peer(peer)
             {
                 error!("Failed to send peer updated message: {:?}", e);
             }

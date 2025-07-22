@@ -357,6 +357,14 @@ impl PeerNetworkSender {
         self.0.send(message)
     }
 
+    pub fn announce_yourself_to_peer(
+        &self,
+        peer: PeerListItem,
+    ) -> Result<(), SendError<PeerNetworkServiceMessage>> {
+        let message = PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer);
+        self.send(message)
+    }
+
     pub async fn request_block_from_network(
         &self,
         block_hash: BlockHash,
