@@ -1528,7 +1528,6 @@ fn init_peer_list_service(
     let peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
-    SystemRegistry::set(peer_list_service.clone());
     (peer_list_service, peer_list_arbiter)
 }
 

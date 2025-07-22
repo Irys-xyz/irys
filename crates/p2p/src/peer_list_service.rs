@@ -40,7 +40,7 @@ where
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PeerListServiceWithClient<A, R>
 where
     A: ApiClient,
@@ -64,7 +64,7 @@ where
 
     reth_service_addr: Option<Addr<R>>,
 
-    config: Option<Config>,
+    config: Config,
 
     peer_list_service_receiver: Option<UnboundedReceiver<PeerListDataMessage>>,
 }
@@ -129,7 +129,7 @@ where
                 execution: config.node_config.reth_peer_info,
             },
             reth_service_addr: Some(reth_actor),
-            config: Some(config.clone()),
+            config: config.clone(),
             peer_list_service_receiver: Some(service_receiver),
         }
     }
@@ -146,7 +146,7 @@ where
     fn handle(&mut self, msg: PeerListDataMessage, ctx: &mut Self::Context) {
         let address = ctx.address();
         match msg {
-            PeerListDataMessage::PeerUpdated(peer_list_item) => {
+            PeerListDataMessage::AnnounceYourselfToPeer(peer_list_item) => {
                 ctx.spawn(
                     async move {
                         let _res = address
@@ -288,10 +288,10 @@ where
 
         ctx.run_interval(INACTIVE_PEERS_HEALTH_CHECK_INTERVAL, |act, ctx| {
             // Collect inactive peers with the required fields
-            let inactive_peers: Vec<(Address, PeerListItem, SocketAddr)> =
+            let inactive_peers: Vec<(Address, PeerListItem)> =
                 act.peer_list_data_guard.inactive_peers();
 
-            for (mining_addr, peer, ..) in inactive_peers {
+            for (mining_addr, peer) in inactive_peers {
                 // Clone the peer address to use in the async block
                 let peer_address = peer.address;
                 let client = act.gossip_client.clone();
@@ -330,24 +330,6 @@ where
         let announce_fut = Self::announce_yourself_to_all_peers(peers_cache, peer_service_address)
             .into_actor(self);
         ctx.spawn(announce_fut);
-    }
-}
-
-/// Allows this actor to live in the the service registry
-impl<A, R> Supervised for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
-{
-}
-
-impl<A, R> SystemService for PeerListServiceWithClient<A, R>
-where
-    A: ApiClient,
-    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>> + Default,
-{
-    fn service_started(&mut self, _ctx: &mut Context<Self>) {
-        println!("service started: peer_list");
     }
 }
 
@@ -439,8 +421,6 @@ where
     fn create_version_request(&self) -> VersionRequest {
         let signer = self
             .config
-            .as_ref()
-            .expect("Config must exist")
             .irys_signer();
         let mut version_request = VersionRequest {
             address: self.peer_address,
@@ -890,7 +870,7 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
-    use irys_types::{NodeConfig, RethPeerInfo, VersionRequest};
+    use irys_types::{NodeConfig, RethPeerInfo};
     use std::collections::HashSet;
     use std::net::IpAddr;
     use std::str::FromStr as _;

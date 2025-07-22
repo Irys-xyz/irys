@@ -200,7 +200,7 @@ impl PeerListGuard {
         peers
     }
 
-    pub fn inactive_peers(&self) -> Vec<(Address, PeerListItem, SocketAddr)> {
+    pub fn inactive_peers(&self) -> Vec<(Address, PeerListItem)> {
         self.read()
             .peer_list_cache
             .iter()
@@ -209,8 +209,7 @@ impl PeerListGuard {
                 // Clone or copy the fields we need for the async operation
                 let peer_item = peer.clone();
                 let mining_addr = *mining_addr;
-                let peer_addr = peer_item.address;
-                (mining_addr, peer_item, peer_addr.gossip)
+                (mining_addr, peer_item)
             })
             .collect()
     }
@@ -309,7 +308,7 @@ impl PeerListGuard {
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub enum PeerListDataMessage {
-    PeerUpdated(PeerListItem),
+    AnnounceYourselfToPeer(PeerListItem),
     RequestBlockFromNetwork {
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
@@ -373,7 +372,7 @@ impl PeerListDataInner {
             // Notify the peer list service that a peer was updated
             if let Err(e) = self
                 .peer_list_service_sender
-                .send(PeerListDataMessage::PeerUpdated(peer))
+                .send(PeerListDataMessage::AnnounceYourselfToPeer(peer))
             {
                 error!("Failed to send peer updated message: {:?}", e);
             }
