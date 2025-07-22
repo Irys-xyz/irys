@@ -1,4 +1,4 @@
-use crate::{BlockHash, Compact, GossipDataRequest, PeerAddress};
+use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress};
 use actix::Message;
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
@@ -386,6 +386,27 @@ impl PeerNetworkSender {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
             data_request: GossipDataRequest::ExecutionPayload(evm_payload_hash),
+            use_trusted_peers_only,
+            response: sender,
+        };
+        self.send(message)?;
+
+        receiver.await.map_err(|recv_error| {
+            PeerNetworkError::OtherInternalError(format!(
+                "Failed to receive response: {:?}",
+                recv_error
+            ))
+        })?
+    }
+
+    pub async fn request_chunk_from_network(
+        &self,
+        chunk_path_hash: ChunkPathHash,
+        use_trusted_peers_only: bool,
+    ) -> Result<(), PeerNetworkError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
+            data_request: GossipDataRequest::Chunk(chunk_path_hash),
             use_trusted_peers_only,
             response: sender,
         };

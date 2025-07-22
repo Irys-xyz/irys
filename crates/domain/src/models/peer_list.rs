@@ -4,7 +4,7 @@ use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, GossipDataRequest, PeerAddress, PeerListItem,
+    BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem,
     PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
 };
 use std::collections::{HashMap, HashSet};
@@ -209,24 +209,15 @@ impl PeerList {
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
     ) -> Result<(), PeerNetworkError> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::Block(block_hash),
-            use_trusted_peers_only,
-            response: sender,
-        };
-        self.0
-            .write()
+        let sender = self
+            .0
+            .read()
             .expect("PeerListDataInner lock poisoned")
             .peer_list_service_sender
-            .send(message)?;
-
-        receiver.await.map_err(|recv_error| {
-            PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
-            ))
-        })?
+            .clone();
+        sender
+            .request_block_from_network(block_hash, use_trusted_peers_only)
+            .await
     }
 
     pub async fn request_payload_from_the_network(
@@ -234,24 +225,15 @@ impl PeerList {
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,
     ) -> Result<(), PeerNetworkError> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::ExecutionPayload(evm_payload_hash),
-            use_trusted_peers_only,
-            response: sender,
-        };
-        self.0
-            .write()
+        let sender = self
+            .0
+            .read()
             .expect("PeerListDataInner lock poisoned")
             .peer_list_service_sender
-            .send(message)?;
-
-        receiver.await.map_err(|recv_error| {
-            PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
-            ))
-        })?
+            .clone();
+        sender
+            .request_payload_from_network(evm_payload_hash, use_trusted_peers_only)
+            .await
     }
 
     pub fn read(&self) -> std::sync::RwLockReadGuard<'_, PeerListDataInner> {
