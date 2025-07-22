@@ -1005,7 +1005,7 @@ mod tests {
             let expected = dec!(0.9048374180359595);
             let diff = (result_dec - expected).abs();
             assert!(
-                diff < dec!(0.0001),
+                diff <= dec!(0.000000000000001),
                 "exp(-0.1) = {}, expected {}",
                 result_dec,
                 expected
@@ -1023,7 +1023,7 @@ mod tests {
             let expected = dec!(0.36787944117144233);
             let diff = (result_dec - expected).abs();
             assert!(
-                diff < dec!(0.0001),
+                diff <= dec!(0.000000000000001),
                 "exp(-1) = {}, expected {}",
                 result_dec,
                 expected
@@ -1045,7 +1045,7 @@ mod tests {
 
             let diff = (product_dec - dec!(1.0)).abs();
             assert!(
-                diff < dec!(0.0001),
+                diff <= dec!(0.000000000000001),
                 "exp(-x) * exp(x) = {}, expected 1.0",
                 product_dec
             );
