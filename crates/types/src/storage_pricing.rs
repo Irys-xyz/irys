@@ -25,6 +25,10 @@ const TOKEN_SCALE_NATIVE: u64 = 1_000_000_000_000_000_000_u64;
 pub const BPS_SCALE: U256 = U256([BPS_SCALE_NATIVE, 0, 0, 0]);
 const BPS_SCALE_NATIVE: u64 = 1_000_000;
 
+/// ln(2) in 18-decimal fixed-point:
+pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
+const TAYLOR_TERMS: u32 = 30;
+
 /// `Amount<T>` represents a value stored as a U256.
 ///
 /// The actual scale is defined by the usage: pr
@@ -207,6 +211,50 @@ pub mod phantoms {
 }
 
 use phantoms::*;
+
+impl Amount<Irys> {
+    /// Used for pledge fee decay calculation
+    ///
+    /// The formula is: pledge_value = pledge_base_fee / ((current_pledge_count + 1) ^ decay_rate)
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn apply_pledge_decay(
+        self,
+        current_pledge_count: usize,
+        decay_rate: Amount<Percentage>,
+    ) -> Result<Self> {
+        // The formula is: pledge_value = pledge_base_fee / ((count + 1) ^ decay_rate)
+        // We use the identity: x^y = exp(y * ln(x))
+        let count_plus_one = current_pledge_count + 1;
+
+        // Convert count+1 to fixed-point
+        let count_fp18 = safe_mul(U256::from(count_plus_one), TOKEN_SCALE)?;
+
+        // Calculate ln(count+1) in fixed-point
+        let ln_count = ln_fp18(count_fp18)?;
+
+        // Convert decay_rate from basis points to TOKEN_SCALE
+        // decay_rate is in BPS_SCALE (1e6), we need it in TOKEN_SCALE (1e18)
+        let decay_rate_fp18 = mul_div(decay_rate.amount, TOKEN_SCALE, BPS_SCALE)?;
+
+        // Calculate decay_rate * ln(count+1)
+        let exponent = mul_div(decay_rate_fp18, ln_count, TOKEN_SCALE)?;
+
+        // Calculate exp(decay_rate * ln(count+1)) = (count+1)^decay_rate
+        let divisor = exp_fp18(exponent)?;
+
+        // Calculate pledge_base_fee / divisor
+        let adjusted_amount = mul_div(self.amount, TOKEN_SCALE, divisor)?;
+
+        Ok(Self {
+            amount: adjusted_amount,
+            _t: PhantomData,
+        })
+    }
+}
 
 /// Implements cost calculation for 1GB/year storage in USD.
 impl Amount<(CostPerGb, Usd)> {
@@ -475,6 +523,98 @@ pub fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
 pub fn mul_div(mul_lhs: U256, mul_rhs: U256, div: U256) -> Result<U256> {
     let prod = safe_mul(mul_lhs, mul_rhs)?;
     safe_div(prod, div)
+}
+
+/// Computes the natural logarithm ln(x) in 18-decimal fixed-point
+/// Input x must be in TOKEN_SCALE (1e18 = 1.0)
+/// Uses the Taylor series: ln(1+y) = y - y²/2 + y³/3 - y⁴/4 + ...
+/// For better convergence, we use: ln(x) = ln(2^k * m) = k*ln(2) + ln(m)
+/// where m is in range [1, 2)
+fn ln_fp18(x: U256) -> Result<U256> {
+    if x.is_zero() {
+        return Err(eyre!("ln(0) is undefined"));
+    }
+
+    const TWO_FP18: U256 = U256([2_000_000_000_000_000_000_u64, 0, 0, 0]);
+
+    // Find k such that x / 2^k is in range [1, 2)
+    let mut k = 0_u32;
+    let mut m = x;
+
+    // Scale down by powers of 2 until m < 2
+    while m >= TWO_FP18 {
+        m = safe_div(m, U256::from(2))?;
+        k += 1;
+    }
+
+    // Scale up by powers of 2 until m >= 1
+    while m < TOKEN_SCALE {
+        m = safe_mul(m, U256::from(2))?;
+        k = k.saturating_sub(1);
+    }
+
+    // Now m is in [1, 2), compute ln(m) using Taylor series
+    // Convert to y = m - 1, so y is in [0, 1)
+    let y = safe_sub(m, TOKEN_SCALE)?;
+
+    // Taylor series: ln(1+y) = y - y²/2 + y³/3 - y⁴/4 + ...
+    let mut sum = U256::zero();
+    let mut y_power = y; // y^i
+
+    for i in 1..=TAYLOR_TERMS {
+        let term = safe_div(y_power, U256::from(i))?;
+
+        if i % 2 == 1 {
+            sum = safe_add(sum, term)?;
+        } else {
+            sum = safe_sub(sum, term)?;
+        }
+
+        // Update y_power for next iteration
+        y_power = mul_div(y_power, y, TOKEN_SCALE)?;
+    }
+
+    // Result = k * ln(2) + ln(m)
+    let k_ln2 = safe_mul(U256::from(k), LN2_FP18)?;
+    let result = safe_add(k_ln2, sum)?;
+
+    Ok(result)
+}
+
+/// Computes exp(x) in 18-decimal fixed-point using Taylor series
+/// Input x must be in TOKEN_SCALE (1e18 = 1.0)
+fn exp_fp18(x: U256) -> Result<U256> {
+    let mut term = TOKEN_SCALE; // first term is 1
+    let mut sum = TOKEN_SCALE; // accumulated sum
+
+    for i in 1..=TAYLOR_TERMS {
+        term = mul_div(term, x, TOKEN_SCALE)?; // multiply by x
+        term = safe_div(term, U256::from(i))?; // divide by i
+        sum = safe_add(sum, term)?;
+    }
+
+    Ok(sum)
+}
+
+/// Computes exp(-x) in 18-decimal fixed-point using Taylor series
+/// Input x must be in TOKEN_SCALE (1e18 = 1.0)
+/// Uses the expansion: exp(-x) = 1 - x + x²/2! - x³/3! + x⁴/4! - ...
+pub fn exp_neg_fp18(x: U256) -> Result<U256> {
+    let mut term = TOKEN_SCALE; // first term is 1
+    let mut sum = TOKEN_SCALE; // accumulated sum
+
+    for i in 1..=TAYLOR_TERMS {
+        term = mul_div(term, x, TOKEN_SCALE)?; // multiply by x
+        term = safe_div(term, U256::from(i))?; // divide by i
+        sum = if i & 1 == 1 {
+            // subtract on odd steps
+            safe_sub(sum, term)?
+        } else {
+            // add on even steps
+            safe_add(sum, term)?
+        };
+    }
+    Ok(sum)
 }
 
 #[cfg(test)]
@@ -840,6 +980,76 @@ mod tests {
 
             let result = original.sub_multiplier(above_one);
             assert!(result.is_err(), "Expected error for sub > 100%");
+        }
+    }
+
+    mod exp_neg {
+        use super::*;
+        use rust_decimal_macros::dec;
+
+        #[test]
+        fn test_exp_neg_fp18_zero() -> Result<()> {
+            // exp(-0) = 1
+            let result = exp_neg_fp18(U256::zero())?;
+            assert_eq!(result, TOKEN_SCALE);
+            Ok(())
+        }
+
+        #[test]
+        fn test_exp_neg_fp18_small_value() -> Result<()> {
+            // Test exp(-0.1) ≈ 0.9048374180359595
+            let x = Amount::<()>::token(dec!(0.1))?.amount;
+            let result = exp_neg_fp18(x)?;
+            let result_dec = Amount::<()>::new(result).token_to_decimal()?;
+
+            let expected = dec!(0.9048374180359595);
+            let diff = (result_dec - expected).abs();
+            assert!(
+                diff <= dec!(0.000000000000001),
+                "exp(-0.1) = {}, expected {}",
+                result_dec,
+                expected
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn test_exp_neg_fp18_one() -> Result<()> {
+            // Test exp(-1) ≈ 0.36787944117144233
+            let x = TOKEN_SCALE;
+            let result = exp_neg_fp18(x)?;
+            let result_dec = Amount::<()>::new(result).token_to_decimal()?;
+
+            let expected = dec!(0.36787944117144233);
+            let diff = (result_dec - expected).abs();
+            assert!(
+                diff <= dec!(0.000000000000001),
+                "exp(-1) = {}, expected {}",
+                result_dec,
+                expected
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn test_exp_neg_fp18_consistency_with_exp() -> Result<()> {
+            // Test that exp(-x) * exp(x) ≈ 1
+            let x = Amount::<()>::token(dec!(0.5))?.amount;
+
+            let exp_neg_x = exp_neg_fp18(x)?;
+            let exp_x = exp_fp18(x)?;
+
+            // exp(-x) * exp(x) should equal 1
+            let product = mul_div(exp_neg_x, exp_x, TOKEN_SCALE)?;
+            let product_dec = Amount::<()>::new(product).token_to_decimal()?;
+
+            let diff = (product_dec - dec!(1.0)).abs();
+            assert!(
+                diff <= dec!(0.000000000000001),
+                "exp(-x) * exp(x) = {}, expected 1.0",
+                product_dec
+            );
+            Ok(())
         }
     }
 }

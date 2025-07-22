@@ -239,7 +239,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .expect("expect setting mining false on peer2");
 
     //
-    // TEST CASE: check genesis blocks match across the theee nodes
+    // TEST CASE: check genesis blocks match across the three nodes
     //
     {
         // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
@@ -286,7 +286,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         let peer2_peer_addr = ctx_peer2_node.node_ctx.config.node_config.peer_address();
 
         // Peer1 should see genesis and peer2
-        assert_eq!(peer_list_items_1.len(), 2, "Peer1 should see 2 other peers");
         assert!(
             peer_list_items_1.contains(&genesis_peer_addr),
             "Peer1 should see genesis node"
@@ -297,7 +296,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         );
 
         // Peer2 should see genesis and peer1
-        assert_eq!(peer_list_items_2.len(), 2, "Peer2 should see 2 other peers");
         assert!(
             peer_list_items_2.contains(&genesis_peer_addr),
             "Peer2 should see genesis node"

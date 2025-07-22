@@ -19,7 +19,7 @@ use reth::tasks::{shutdown::Shutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};
 use tokio::sync::broadcast;
 use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
-use tracing::info;
+use tracing::{info, Instrument as _};
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
@@ -62,28 +62,31 @@ impl MempoolService {
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
 
-        let handle = runtime_handle.spawn(async move {
-            let mempool_service = Self {
-                shutdown: shutdown_rx,
-                msg_rx: rx,
-                reorg_rx,
-                block_migrated_rx,
-                inner: Inner {
-                    block_tree_read_guard,
-                    config,
-                    exec: TaskExecutor::current(),
-                    irys_db,
-                    mempool_state: Arc::new(RwLock::new(mempool_state)),
-                    reth_node_adapter,
-                    service_senders,
-                    storage_modules_guard,
-                },
-            };
-            mempool_service
-                .start()
-                .await
-                .expect("Mempool service encountered an irrecoverable error")
-        });
+        let handle = runtime_handle.spawn(
+            async move {
+                let mempool_service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    reorg_rx,
+                    block_migrated_rx,
+                    inner: Inner {
+                        block_tree_read_guard,
+                        config,
+                        exec: TaskExecutor::current(),
+                        irys_db,
+                        mempool_state: Arc::new(RwLock::new(mempool_state)),
+                        reth_node_adapter,
+                        service_senders,
+                        storage_modules_guard,
+                    },
+                };
+                mempool_service
+                    .start()
+                    .await
+                    .expect("Mempool service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
 
         Ok(TokioServiceHandle {
             name: "mempool_service".to_string(),
