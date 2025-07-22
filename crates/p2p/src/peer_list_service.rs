@@ -1,7 +1,6 @@
 use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::prelude::*;
-use irys_actors::reth_service::RethServiceActor;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
@@ -47,7 +46,7 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Reference to the node database
-    db: Option<DatabaseProvider>,
+    db: DatabaseProvider,
 
     pub peer_list_data_guard: PeerListGuard,
 
@@ -62,22 +61,20 @@ where
     chain_id: u64,
     peer_address: PeerAddress,
 
-    reth_service_addr: Option<Addr<R>>,
+    reth_service_addr: Addr<R>,
 
     config: Config,
 
     peer_list_service_receiver: Option<UnboundedReceiver<PeerListDataMessage>>,
 }
 
-pub type PeerListService = PeerListServiceWithClient<IrysApiClient, RethServiceActor>;
-
-impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
+impl<R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>> PeerListServiceWithClient<IrysApiClient, R> {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
     /// reference to a `DatabaseEnv`
     pub fn new(
         db: DatabaseProvider,
         config: &Config,
-        reth_service_addr: Addr<RethServiceActor>,
+        reth_service_addr: Addr<R>,
     ) -> Self {
         info!("service started: peer_list");
         Self::new_with_custom_api_client(db, config, IrysApiClient::new(), reth_service_addr)
@@ -102,7 +99,7 @@ where
             PeerListGuard::new(config, &db, service_sender).expect("Failed to load peer list data");
 
         Self {
-            db: Some(db),
+            db,
             peer_list_data_guard: peer_list_data,
             currently_running_announcements: HashSet::new(),
             successful_announcements: HashMap::new(),
@@ -128,7 +125,7 @@ where
                 .expect("valid SocketAddr expected"),
                 execution: config.node_config.reth_peer_info,
             },
-            reth_service_addr: Some(reth_actor),
+            reth_service_addr: reth_actor,
             config: config.clone(),
             peer_list_service_receiver: Some(service_receiver),
         }
@@ -369,8 +366,8 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     fn flush(&self) -> Result<(), PeerListServiceError> {
-        if let Some(db) = &self.db {
-            db.update(|tx| {
+        self.db
+            .update(|tx| {
                 for (addr, peer) in self
                     .peer_list_data_guard
                     .all_know_peers_with_mining_address()
@@ -381,9 +378,6 @@ where
                 Ok(())
             })
             .map_err(PeerListServiceError::Database)?
-        } else {
-            Err(PeerListServiceError::DatabaseNotConnected)
-        }
     }
 
     async fn trusted_peers_handshake_task(
@@ -419,9 +413,7 @@ where
     }
 
     fn create_version_request(&self) -> VersionRequest {
-        let signer = self
-            .config
-            .irys_signer();
+        let signer = self.config.irys_signer();
         let mut version_request = VersionRequest {
             address: self.peer_address,
             chain_id: self.chain_id,
@@ -610,13 +602,9 @@ where
             peer_service_addr,
         );
         ctx.spawn(handshake_task.into_actor(self));
-        if let Some(reth_service_addr) = &self.reth_service_addr {
-            let reth_task = Self::add_reth_peer_task(reth_service_addr.clone(), reth_peer_info)
-                .into_actor(self);
-            ctx.spawn(reth_task);
-        } else {
-            warn!("Reth service address is not set in the peer list service");
-        }
+        let reth_task = Self::add_reth_peer_task(self.reth_service_addr.clone(), reth_peer_info)
+            .into_actor(self);
+        ctx.spawn(reth_task);
     }
 }
 

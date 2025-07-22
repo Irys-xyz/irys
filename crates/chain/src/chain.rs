@@ -32,10 +32,7 @@ use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, PeerListGuard,
 };
 use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
-use irys_p2p::{
-    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListService,
-    ServiceHandleWithShutdownSignal, SyncState,
-};
+use irys_p2p::{BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListServiceWithClient, ServiceHandleWithShutdownSignal, SyncState};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
@@ -77,6 +74,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
+use irys_api_client::IrysApiClient;
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -1523,11 +1521,11 @@ fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
-) -> (Addr<PeerListService>, Arbiter) {
+) -> (Addr<PeerListServiceWithClient<IrysApiClient, RethServiceActor>>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
-    let peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
+    let peer_list_service = PeerListServiceWithClient::new(irys_db.clone(), config, reth_service_addr);
     let peer_list_service =
-        PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
+        PeerListServiceWithClient::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     (peer_list_service, peer_list_arbiter)
 }
 
