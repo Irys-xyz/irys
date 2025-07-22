@@ -22,7 +22,6 @@ base58.workspace = true
 reth-db.workspace = true
 rust_decimal.workspace = true
 tokio.workspace = true
-thiserror.workspace = true
 alloy-core.workspace = true
 lru.workspace = true
 alloy-rpc-types.workspace = true

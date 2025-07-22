@@ -4988,7 +4988,6 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "test-log",
- "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
