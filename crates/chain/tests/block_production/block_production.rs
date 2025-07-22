@@ -6,7 +6,7 @@ use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_database::SystemLedger;
 use irys_domain::{
-    snapshots::commitment_snapshot::CommitmentSnapshot, BlockState, ChainState, EmaSnapshot,
+    BlockState, ChainState, EmaSnapshot,
 };
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
