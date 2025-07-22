@@ -1,4 +1,4 @@
-use crate::peer_list_service::{GetPeerListGuard, PeerListServiceWithClient};
+use crate::peer_list_service::{GetPeerListGuard, PeerListService};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
@@ -286,7 +286,7 @@ impl Default for ApiClientStub {
     }
 }
 
-pub(crate) type PeerListMock = Addr<PeerListServiceWithClient<ApiClientStub, MockRethServiceActor>>;
+pub(crate) type PeerListMock = Addr<PeerListService<ApiClientStub, MockRethServiceActor>>;
 
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
@@ -350,7 +350,7 @@ impl GossipServiceTestFixture {
 
         let (service_senders, service_receivers) = ServiceSenders::new();
 
-        let peer_service = PeerListServiceWithClient::new_with_custom_api_client(
+        let peer_service = PeerListService::new_with_custom_api_client(
             db.clone(),
             &config,
             ApiClientStub::new(),

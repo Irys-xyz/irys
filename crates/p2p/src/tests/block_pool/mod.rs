@@ -1,5 +1,5 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
-use crate::peer_list_service::PeerListServiceWithClient;
+use crate::peer_list_service::PeerListService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
 use crate::{BlockStatusProvider, SyncState};
 use actix::Actor as _;
@@ -147,7 +147,7 @@ impl MockedServices {
         };
         let reth_service = MockRethServiceActor {};
         let reth_addr = reth_service.start();
-        let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+        let peer_list_service = PeerListService::new_with_custom_api_client(
             db.clone(),
             config,
             mock_client.clone(),

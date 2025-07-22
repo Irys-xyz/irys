@@ -5023,7 +5023,6 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "alloy-core",
- "alloy-rpc-types",
  "async-trait",
  "base58",
  "eyre",

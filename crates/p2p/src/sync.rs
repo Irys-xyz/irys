@@ -485,7 +485,7 @@ mod tests {
 
     mod catch_up_task {
         use super::*;
-        use crate::peer_list_service::PeerListServiceWithClient;
+        use crate::peer_list_service::PeerListService;
         use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -565,7 +565,7 @@ mod tests {
 
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
-            let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+            let peer_list_service = PeerListService::new_with_custom_api_client(
                 db,
                 &config,
                 api_client_stub.clone(),
@@ -663,7 +663,7 @@ mod tests {
 
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
-            let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+            let peer_list_service = PeerListService::new_with_custom_api_client(
                 db,
                 &config,
                 api_client_stub.clone(),

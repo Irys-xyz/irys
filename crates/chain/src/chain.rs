@@ -34,7 +34,7 @@ use irys_domain::{
     PeerListGuard,
 };
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListServiceWithClient,
+    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListService,
     ServiceHandleWithShutdownSignal, SyncState,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -1523,14 +1523,14 @@ fn init_peer_list_service(
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
 ) -> (
-    Addr<PeerListServiceWithClient<IrysApiClient, RethServiceActor>>,
+    Addr<PeerListService<IrysApiClient, RethServiceActor>>,
     Arbiter,
 ) {
     let peer_list_arbiter = Arbiter::new();
     let peer_list_service =
-        PeerListServiceWithClient::new(irys_db.clone(), config, reth_service_addr);
+        PeerListService::new(irys_db.clone(), config, reth_service_addr);
     let peer_list_service =
-        PeerListServiceWithClient::start_in_arbiter(&peer_list_arbiter.handle(), |_| {
+        PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| {
             peer_list_service
         });
     (peer_list_service, peer_list_arbiter)
