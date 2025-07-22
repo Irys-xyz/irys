@@ -1650,7 +1650,7 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     //
 
     // create valid and invalid stake commitment tx
-    let stake_tx = new_stake_tx(&H256::zero(), &signer);
+    let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
     let mut stake_tx_invalid = stake_tx.clone();
     let mut bytes = stake_tx_invalid.id.to_fixed_bytes();
     bytes[0] ^= 0x01;
@@ -1680,9 +1680,17 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
 
+    let commitment_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_commitment_snapshot();
+
     let pledge_tx = new_pledge_tx(
         tx_ids.last().expect("valid tx id for use as anchor"),
         &signer,
+        &genesis_config.consensus_config(),
+        &commitment_snapshot,
     );
     let mut pledge_tx_invalid = pledge_tx.clone();
     let mut bytes = pledge_tx_invalid.id.to_fixed_bytes();
