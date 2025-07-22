@@ -492,7 +492,6 @@ mod test_helpers {
 
 #[cfg(test)]
 mod tests {
-    use super::test_helpers::MockPledgeProvider;
     use super::*;
     use crate::irys::IrysSigner;
 
@@ -661,39 +660,43 @@ mod tests {
 
 #[cfg(test)]
 mod pledge_decay_parametrized_tests {
+    use super::test_helpers::MockPledgeProvider;
     use super::*;
+    use crate::storage_pricing::Amount;
     use rstest::rstest;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     #[rstest]
-    #[case(0, 20000.0)] // Pledge 1
-    #[case(1, 10718.0)] // Pledge 2
-    #[case(2, 7441.0)] // Pledge 3
-    #[case(3, 5743.0)] // Pledge 4
-    #[case(4, 4698.0)] // Pledge 5
-    #[case(5, 3987.0)] // Pledge 6
-    #[case(6, 3471.0)] // Pledge 7
-    #[case(7, 3078.0)] // Pledge 8
-    #[case(8, 2768.0)] // Pledge 9
-    #[case(9, 2518.0)] // Pledge 10
-    #[case(10, 2311.0)] // Pledge 11
-    #[case(11, 2137.0)] // Pledge 12
-    #[case(12, 1988.0)] // Pledge 13
-    #[case(13, 1860.0)] // Pledge 14
-    #[case(14, 1748.0)] // Pledge 15
-    #[case(15, 1649.0)] // Pledge 16
-    #[case(16, 1562.0)] // Pledge 17
-    #[case(17, 1483.0)] // Pledge 18
-    #[case(18, 1413.0)] // Pledge 19
-    #[case(19, 1349.0)] // Pledge 20
-    #[case(20, 1291.0)] // Pledge 21
-    #[case(21, 1238.0)] // Pledge 22
-    #[case(22, 1190.0)] // Pledge 23
-    #[case(23, 1145.0)] // Pledge 24
-    #[case(24, 1104.0)] // Pledge 25
-    fn test_pledge_cost_with_decay(#[case] existing_pledges: usize, #[case] expected_cost: f64) {
-        use super::test_helpers::MockPledgeProvider;
-
+    #[case(0, dec!(20000.0))]
+    #[case(1, dec!(10717.7))]
+    #[case(2, dec!(7440.8))]
+    #[case(3, dec!(5743.4))]
+    #[case(4, dec!(4698.4))]
+    #[case(5, dec!(3987.4))]
+    #[case(6, dec!(3470.8))]
+    #[case(7, dec!(3077.8))]
+    #[case(8, dec!(2768.2))]
+    #[case(9, dec!(2517.8))]
+    #[case(10, dec!(2310.8))]
+    #[case(11, dec!(2136.8))]
+    #[case(12, dec!(1988.2))]
+    #[case(13, dec!(1860.0))]
+    #[case(14, dec!(1748.0))]
+    #[case(15, dec!(1649.3))]
+    #[case(16, dec!(1561.8))]
+    #[case(17, dec!(1483.4))]
+    #[case(18, dec!(1413.0))]
+    #[case(19, dec!(1349.2))]
+    #[case(20, dec!(1291.3))]
+    #[case(21, dec!(1238.3))]
+    #[case(22, dec!(1189.8))]
+    #[case(23, dec!(1145.0))]
+    #[case(24, dec!(1103.7))]
+    fn test_pledge_cost_with_decay(
+        #[case] existing_pledges: usize,
+        #[case] expected_cost: Decimal,
+    ) {
         // Setup config with $20,000 base fee and 0.9 decay rate
         let mut config = ConsensusConfig::testnet();
         config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
@@ -708,66 +711,45 @@ mod pledge_decay_parametrized_tests {
         let pledge_tx =
             CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
 
-        // Compare U256 values with precision mask to ignore lower bits
-        let expected_value =
-            crate::storage_pricing::Amount::<crate::storage_pricing::phantoms::Irys>::token(
-                rust_decimal::Decimal::try_from(expected_cost).unwrap(),
-            )
-            .unwrap()
-            .amount;
+        // Convert actual value to decimal for comparison
+        let actual_amount = Amount::<()>::new(pledge_tx.value)
+            .token_to_decimal()
+            .unwrap();
 
-        // Mask to keep only the most significant bits
-        // We're ignoring the lower 66 bits to account for precision differences in calculations
-        let mask = !U256::from((1u128 << 66) - 1);
-
-        let masked_actual = pledge_tx.value & mask;
-        let masked_expected = expected_value & mask;
-
-        assert_eq!(
-            masked_actual,
-            masked_expected,
-            "Pledge {} cost mismatch: expected {} (masked: {}), got {} (masked: {})",
-            existing_pledges + 1,
-            expected_value,
-            masked_expected,
-            pledge_tx.value,
-            masked_actual
-        );
+        assert_eq!(actual_amount.round_dp(0), expected_cost.round_dp(0));
     }
 
     #[rstest]
-    #[case(0, 0.0)]
-    #[case(1, 20000.0)]
-    #[case(2, 10718.0)]
-    #[case(3, 7441.0)]
-    #[case(4, 5743.0)]
-    #[case(5, 4698.0)]
-    #[case(6, 3987.0)]
-    #[case(7, 3471.0)]
-    #[case(8, 3078.0)]
-    #[case(9, 2768.0)]
-    #[case(10, 2518.0)]
-    #[case(11, 2311.0)]
-    #[case(12, 2137.0)]
-    #[case(13, 1988.0)]
-    #[case(14, 1860.0)]
-    #[case(15, 1748.0)]
-    #[case(16, 1649.0)]
-    #[case(17, 1562.0)]
-    #[case(18, 1483.0)]
-    #[case(19, 1413.0)]
-    #[case(20, 1349.0)]
-    #[case(21, 1291.0)]
-    #[case(22, 1238.0)]
-    #[case(23, 1190.0)]
-    #[case(24, 1145.0)]
-    fn test_pledge_cost_with_unpledge(
+    #[case(0, dec!(0))]
+    #[case(1, dec!(20000.0))]
+    #[case(2, dec!(10717.7))]
+    #[case(3, dec!(7440.8))]
+    #[case(4, dec!(5743.4))]
+    #[case(5, dec!(4698.4))]
+    #[case(6, dec!(3987.4))]
+    #[case(7, dec!(3470.8))]
+    #[case(8, dec!(3077.8))]
+    #[case(9, dec!(2768.2))]
+    #[case(10,dec!(2517.8))]
+    #[case(11,dec!(2310.8))]
+    #[case(12,dec!(2136.8))]
+    #[case(13,dec!(1988.2))]
+    #[case(14,dec!(1860.0))]
+    #[case(15,dec!(1748.0))]
+    #[case(16,dec!(1649.3))]
+    #[case(17,dec!(1561.8))]
+    #[case(18,dec!(1483.4))]
+    #[case(19,dec!(1413.0))]
+    #[case(20,dec!(1349.2))]
+    #[case(21,dec!(1291.3))]
+    #[case(22,dec!(1238.3))]
+    #[case(23,dec!(1189.8))]
+    #[case(24,dec!(1145.0))]
+    fn test_unpledge_cost(
         #[case] existing_pledges: usize,
-        #[case] expected_unpledge_value: f64,
+        #[case] expected_unpledge_value: Decimal,
     ) {
-        use super::test_helpers::MockPledgeProvider;
-
-        // Setup config with $20,000 base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
+        // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
         let mut config = ConsensusConfig::testnet();
         config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
@@ -796,32 +778,14 @@ mod pledge_decay_parametrized_tests {
             "Unpledge total cost should only include fee"
         );
 
-        // Compare U256 values with precision mask to ignore lower bits
-        let expected_value = if expected_unpledge_value == 0.0 {
-            U256::zero()
-        } else {
-            crate::storage_pricing::Amount::<crate::storage_pricing::phantoms::Irys>::token(
-                rust_decimal::Decimal::try_from(expected_unpledge_value).unwrap(),
-            )
-            .unwrap()
-            .amount
-        };
-
-        // Mask to keep only the most significant bits
-        // We're ignoring the lower 66 bits to account for precision differences in calculations
-        let mask = !U256::from((1u128 << 66) - 1);
-
-        let masked_actual = unpledge_tx.value & mask;
-        let masked_expected = expected_value & mask;
+        // Convert actual value to decimal for comparison
+        let actual_amount = Amount::<()>::new(unpledge_tx.value)
+            .token_to_decimal()
+            .unwrap();
 
         assert_eq!(
-            masked_actual, masked_expected,
-            "Unpledge with {} existing pledges value mismatch: expected {} (masked: {}), got {} (masked: {})",
-            existing_pledges,
-            expected_value,
-            masked_expected,
-            unpledge_tx.value,
-            masked_actual
+            actual_amount.round_dp(0),
+            expected_unpledge_value.round_dp(0)
         );
     }
 }

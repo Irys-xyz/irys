@@ -27,7 +27,7 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
 
 /// ln(2) in 18-decimal fixed-point:
 pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
-const TAYLOR_TERMS: u32 = 20;
+const TAYLOR_TERMS: u32 = 30;
 
 /// `Amount<T>` represents a value stored as a U256.
 ///
