@@ -3,7 +3,7 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
-use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_actors::mempool_service::{MempoolServiceMessage,TxIngressError};
 use irys_chain::IrysNodeCtx;
 use irys_database::{tables::IngressProofs, SystemLedger};
 use irys_reth_node_bridge::{
@@ -1618,7 +1618,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 /// post invalid commitment txs where tx id has been tampered with
-/// expect invalid txs to fail when posted via api
+/// expect invalid txs to fail when sent directly to the mempool
 async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
@@ -1633,8 +1633,6 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
         .start()
         .await;
 
-    let _ = genesis_node.start_public_api().await;
-
     //
     // Test case 1: Stake commitment txs
     //
@@ -1646,17 +1644,23 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     bytes[0] ^= 0x01;
     stake_tx_invalid.id = H256::from(bytes);
 
-    // post invalid stake tx
-    match genesis_node.post_commitment_tx(&stake_tx_invalid).await {
-        Err(_) => {
+    // ingest invalid stake tx directly to the mempool
+    match genesis_node
+        .ingest_commitment_tx(stake_tx_invalid.clone())
+        .await
+    {
+        Err(AddTxError::TxIngress(TxIngressError::InvalidSignature)) => {
             // it failed to ingress, as expected!
         }
-        Ok(res) => {
-            panic!("Expected failure but got success: {:?}", res);
+        Err(e) => {
+            panic!("Expected InvalidSignature but got: {:?}", e);
+        }
+        Ok(_) => {
+            panic!("Expected failure but got success");
         }
     }
-    // post valid stake tx
-    genesis_node.post_commitment_tx(&stake_tx).await?;
+    // ingest valid stake tx
+    genesis_node.ingest_commitment_tx(stake_tx.clone()).await?;
 
     //
     // Test case 1: pledge commitment txs
@@ -1673,15 +1677,21 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     bytes[0] ^= 0x01;
     pledge_tx_invalid.id = H256::from(bytes);
 
-    match genesis_node.post_commitment_tx(&pledge_tx_invalid).await {
-        Err(_) => {
+    match genesis_node
+        .ingest_commitment_tx(pledge_tx_invalid.clone())
+        .await
+    {
+        Err(AddTxError::TxIngress(TxIngressError::InvalidSignature)) => {
             // it failed to ingress, as expected!
         }
-        Ok(res) => {
-            panic!("Expected failure but got success: {:?}", res);
+        Err(e) => {
+            panic!("Expected InvalidSignature but got: {:?}", e);
+        }
+        Ok(_) => {
+            panic!("Expected failure but got success");
         }
     }
-    genesis_node.post_commitment_tx(&pledge_tx).await?;
+    genesis_node.ingest_commitment_tx(pledge_tx.clone()).await?;
     tx_ids.push(pledge_tx.id);
 
     // wait for all txs to ingress mempool
