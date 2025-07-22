@@ -633,7 +633,8 @@ impl IrysNode {
                     &latest_hash
                 );
             };
-
+            // TODO: add code to proactively grab the latest head block from peers
+            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
             stake_and_pledge(
                 config,
                 ctx.block_tree_guard.clone(),

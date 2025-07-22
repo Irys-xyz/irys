@@ -63,7 +63,7 @@ use reth::{
 };
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
 use sha2::{Digest as _, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -923,55 +923,38 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn wait_for_mempool_commitment_txs(
         &self,
-        mut tx_ids: Vec<H256>,
+        tx_ids: Vec<H256>,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
-        let mut retries = 0;
         let max_retries = seconds_to_wait * 5; // 200ms per retry
+        let mut tx_ids: HashSet<H256> = tx_ids.clone().into_iter().collect();
 
-        'outer: while let Some(tx_id) = tx_ids.pop() {
-            'inner: loop {
-                if retries >= max_retries {
-                    error!(
-                        "Failed to get commitment tx {} after {} retries",
-                        &tx_id, &retries
-                    );
-                    break 'outer;
-                }
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
-                    commitment_tx_ids: vec![tx_id],
-                    response: oneshot_tx,
-                })?;
+        for retry in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            let to_fetch = tx_ids.iter().copied().collect_vec();
+            debug!("Fetching {:?}", &to_fetch);
+            mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
+                commitment_tx_ids: to_fetch,
+                response: oneshot_tx,
+            })?;
+            let fetched = oneshot_rx.await?;
 
-                //if transaction exists in mempool
-                if oneshot_rx
-                    .await
-                    .expect("to process GetCommitmentTxs")
-                    .contains_key(&tx_id)
-                {
-                    break 'inner;
-                }
-
-                sleep(Duration::from_millis(200)).await;
-                retries += 1;
+            for found in fetched.keys() {
+                debug!("Fetched tx {} from mempool in {} retries", &found, &retry);
+                tx_ids.remove(found);
             }
-        }
 
-        if retries == max_retries {
-            tracing::error!(
-                "transaction not found in mempool after {} retries",
-                &retries
-            );
-            Err(eyre::eyre!(
-                "Failed to locate tx in mempool after {} retries",
-                retries
-            ))
-        } else {
-            info!("transactions found in mempool after {} retries", &retries);
-            Ok(())
+            if tx_ids.is_empty() {
+                debug!("Fetched all txs from mempool in {} retries", &retry);
+                return Ok(());
+            }
+            sleep(Duration::from_millis(200)).await;
         }
+        eyre::bail!(
+            "Unable to get txs {:?} from the mempool",
+            &tx_ids.iter().collect_vec()
+        )
     }
 
     // waits until mempool
