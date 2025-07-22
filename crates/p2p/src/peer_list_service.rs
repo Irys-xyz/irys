@@ -150,7 +150,7 @@ where
                 ctx.spawn(
                     async move {
                         let _res = address
-                            .send(PeerUpdated {
+                            .send(AnnounceYourselfToPeerAndConnectReth {
                                 peer: peer_list_item,
                             })
                             .await;
@@ -324,17 +324,11 @@ where
         ctx.spawn(trusted_peers_handshake_task);
 
         // Announce yourself to the network
-        let version_request = self.create_version_request();
-        let api_client = self.irys_api_client.clone();
-        let peers_cache = self.peer_list_data_guard.all_known_peers();
-        let announce_fut = Self::announce_yourself_to_all_peers(
-            api_client,
-            version_request,
-            peers_cache,
-            peer_service_address,
-            self.reth_service_addr.clone(),
-        )
-        .into_actor(self);
+        let peers_cache = self
+            .peer_list_data_guard
+            .all_know_peers_with_mining_address();
+        let announce_fut = Self::announce_yourself_to_all_peers(peers_cache, peer_service_address)
+            .into_actor(self);
         ctx.spawn(announce_fut);
     }
 }
@@ -548,36 +542,39 @@ where
         }
     }
 
-    async fn announce_yourself_to_all_peers(
-        api_client: A,
-        version_request: VersionRequest,
-        known_peers_cache: Vec<PeerAddress>,
-        peer_service_address: Addr<Self>,
-        reth_service_address: Option<Addr<R>>,
-    ) {
-        for peer in known_peers_cache.iter() {
-            match Self::announce_yourself_to_address(
-                api_client.clone(),
-                peer.api,
-                version_request.clone(),
-                peer_service_address.clone(),
-            )
-            .await
-            {
-                Ok(_peer_response) => {
-                    // TODO: announce yourself to those peers as well
-                    // TODO @antouhou do we need this here?
-                    if let Some(ref reth_service_address) = reth_service_address {
-                        let _ = reth_service_address
-                            .send(peer.execution)
-                            .await
-                            .inspect_err(|e| error!("Failed to connect to reth peer {}", &e));
-                    }
+    async fn add_reth_peer_task(reth_service_addr: Addr<R>, reth_peer_info: RethPeerInfo) {
+        match reth_service_addr.send(reth_peer_info).await {
+            Ok(res) => match res {
+                Ok(()) => {
+                    debug!("Successfully connected to reth peer: {:?}", reth_peer_info);
                 }
-                Err(e) => {
-                    warn!(
-                        "Failed to announce yourself to address {}: {:?}",
-                        peer.api, e
+                Err(reth_error) => {
+                    error!("Failed to connect to reth peer: {}", reth_error.to_string());
+                }
+            },
+            Err(mailbox_error) => {
+                error!("Failed to connect to reth peer: {}", mailbox_error);
+            }
+        }
+    }
+
+    /// Note: this method uses HashMap<Address, PeerListItem> because that's what is stored and
+    /// returned by the PeerListGuard. It doesn't require any maps or other transformations, but
+    /// requires the loop in this method to ignore mining addresses.
+    async fn announce_yourself_to_all_peers(
+        known_peers: HashMap<Address, PeerListItem>,
+        peer_service_address: Addr<Self>,
+    ) {
+        for (_mining_address, peer) in known_peers {
+            match peer_service_address
+                .send(AnnounceYourselfToPeerAndConnectReth { peer })
+                .await
+            {
+                Ok(()) => {}
+                Err(mailbox_error) => {
+                    error!(
+                        "Failed to send AnnounceYourselfToPeer message to peer service: {:?}",
+                        mailbox_error
                     );
                 }
             }
@@ -604,19 +601,23 @@ where
 /// Add peer to the peer list
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
-struct PeerUpdated {
+struct AnnounceYourselfToPeerAndConnectReth {
     pub peer: PeerListItem,
 }
 
-impl<A, R> Handler<PeerUpdated> for PeerListServiceWithClient<A, R>
+impl<A, R> Handler<AnnounceYourselfToPeerAndConnectReth> for PeerListServiceWithClient<A, R>
 where
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
 
-    fn handle(&mut self, msg: PeerUpdated, ctx: &mut Self::Context) -> Self::Result {
-        debug!("PeerUpdated message received: {:?}", msg.peer);
+    fn handle(
+        &mut self,
+        msg: AnnounceYourselfToPeerAndConnectReth,
+        ctx: &mut Self::Context,
+    ) -> Self::Result {
+        debug!("AnnounceYourselfToPeer message received: {:?}", msg.peer);
         let peer_api_addr = msg.peer.address.api;
         let reth_peer_info = msg.peer.address.execution;
         let peer_service_addr = ctx.address();
@@ -630,23 +631,8 @@ where
         );
         ctx.spawn(handshake_task.into_actor(self));
         if let Some(reth_service_addr) = &self.reth_service_addr {
-            let future = reth_service_addr.send(reth_peer_info);
-            let reth_task = async move {
-                match future.await {
-                    Ok(res) => match res {
-                        Ok(()) => {
-                            debug!("Successfully connected to reth peer: {:?}", reth_peer_info);
-                        }
-                        Err(reth_error) => {
-                            error!("Failed to connect to reth peer: {}", reth_error.to_string());
-                        }
-                    },
-                    Err(mailbox_error) => {
-                        error!("Failed to connect to reth peer: {}", mailbox_error);
-                    }
-                }
-            }
-            .into_actor(self);
+            let reth_task = Self::add_reth_peer_task(reth_service_addr.clone(), reth_peer_info)
+                .into_actor(self);
             ctx.spawn(reth_task);
         } else {
             warn!("Reth service address is not set in the peer list service");
@@ -1326,7 +1312,6 @@ mod tests {
         let peer_list_data_guard = service.peer_list_data_guard.clone();
         service.start();
 
-
         // Add multiple test peers
         let (mining_addr1, peer1) = create_test_peer(
             "0x1111111111111111111111111111111111111111",
@@ -1426,29 +1411,24 @@ mod tests {
         );
         let addr = peer_list_service.start();
 
-        let (_mining1, peer1) = create_test_peer(
+        let (mining1, peer1) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9001,
             true,
             None,
         );
-        let (_mining2, peer2) = create_test_peer(
+        let (mining2, peer2) = create_test_peer(
             "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             9002,
             true,
             None,
         );
-        let known_peers = vec![peer1.address, peer2.address];
-        let version_request = VersionRequest::default();
+        let known_peers = HashMap::from([(mining1, peer1.clone()), (mining2, peer2.clone())]);
 
-        PeerListServiceWithClient::announce_yourself_to_all_peers(
-            mock_client,
-            version_request,
-            known_peers,
-            addr,
-            Some(mock_addr),
-        )
-        .await;
+        PeerListServiceWithClient::announce_yourself_to_all_peers(known_peers, addr).await;
+
+        // Wait a little for the service to process the announcements
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let calls = calls.lock().await;
         assert_eq!(calls.len(), 2);
