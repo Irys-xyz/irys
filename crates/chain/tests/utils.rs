@@ -1545,7 +1545,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    pub async fn mempool_ingest_commitment_tx(
+    pub async fn ingest_commitment_tx(
         &self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), AddTxError> {
