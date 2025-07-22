@@ -8,7 +8,6 @@
 )]
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
-use crate::execution_payload_provider::ExecutionPayloadProvider;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -23,6 +22,7 @@ use core::time::Duration;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
+use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerListGuard;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
 use irys_vdf::state::VdfStateReadonly;
@@ -161,7 +161,7 @@ impl P2PService {
         db: DatabaseProvider,
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
-        execution_payload_provider: ExecutionPayloadProvider,
+        execution_payload_provider: ExecutionPayloadCache,
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
@@ -197,7 +197,7 @@ impl P2PService {
             peer_list: peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: Span::current(),
-            execution_payload_provider,
+            execution_payload_cache: execution_payload_provider,
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 

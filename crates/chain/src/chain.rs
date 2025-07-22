@@ -23,16 +23,20 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_actors::{ActorAddresses, BlockValidationTracker, StorageModuleService};
+use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, PeerListGuard,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, ExecutionPayloadCache,
+    PeerListGuard,
 };
-use irys_p2p::execution_payload_provider::ExecutionPayloadProvider;
-use irys_p2p::{BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListServiceWithClient, ServiceHandleWithShutdownSignal, SyncState};
+use irys_p2p::{
+    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerListServiceWithClient,
+    ServiceHandleWithShutdownSignal, SyncState,
+};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
@@ -74,7 +78,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
-use irys_api_client::IrysApiClient;
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -917,10 +920,8 @@ impl IrysNode {
             .await?
             .expect("to get peer list guard");
 
-        let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list_guard.clone(),
-            reth_node_adapter.clone().into(),
-        );
+        let execution_payload_cache =
+            ExecutionPayloadCache::new(peer_list_guard.clone(), reth_node_adapter.clone().into());
 
         // Spawn mempool service
         let mempool_handle = MempoolService::spawn_service(
@@ -962,7 +963,7 @@ impl IrysNode {
             &service_senders,
             reth_node_adapter.clone(),
             irys_db.clone(),
-            execution_payload_provider.clone(),
+            execution_payload_cache.clone(),
             receivers.validation_service,
             runtime_handle.clone(),
         );
@@ -998,7 +999,7 @@ impl IrysNode {
             irys_db.clone(),
             gossip_listener,
             block_status_provider.clone(),
-            execution_payload_provider,
+            execution_payload_cache,
             vdf_state_readonly.clone(),
             config.clone(),
             service_senders.clone(),
@@ -1521,11 +1522,17 @@ fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
-) -> (Addr<PeerListServiceWithClient<IrysApiClient, RethServiceActor>>, Arbiter) {
+) -> (
+    Addr<PeerListServiceWithClient<IrysApiClient, RethServiceActor>>,
+    Arbiter,
+) {
     let peer_list_arbiter = Arbiter::new();
-    let peer_list_service = PeerListServiceWithClient::new(irys_db.clone(), config, reth_service_addr);
     let peer_list_service =
-        PeerListServiceWithClient::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
+        PeerListServiceWithClient::new(irys_db.clone(), config, reth_service_addr);
+    let peer_list_service =
+        PeerListServiceWithClient::start_in_arbiter(&peer_list_arbiter.handle(), |_| {
+            peer_list_service
+        });
     (peer_list_service, peer_list_arbiter)
 }
 

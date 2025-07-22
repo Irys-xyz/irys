@@ -1,4 +1,3 @@
-use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
 use crate::peer_list_service::{GetPeerListGuard, PeerListServiceWithClient};
 use crate::types::GossipDataRequest;
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
@@ -17,6 +16,7 @@ use irys_actors::{
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
 };
 use irys_api_client::ApiClient;
+use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -305,7 +305,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
-    pub execution_payload_provider: ExecutionPayloadProvider,
+    pub execution_payload_provider: ExecutionPayloadCache,
     pub config: Config,
     pub vdf_state_stub: VdfStateReadonly,
     pub service_senders: ServiceSenders,
@@ -377,7 +377,7 @@ impl GossipServiceTestFixture {
         let task_executor = task_manager.executor();
 
         let mocked_execution_payloads = Arc::new(RwLock::new(HashMap::new()));
-        let execution_payload_provider = ExecutionPayloadProvider::new(
+        let execution_payload_provider = ExecutionPayloadCache::new(
             peer_list_data_guard,
             RethBlockProvider::Mock(mocked_execution_payloads),
         );

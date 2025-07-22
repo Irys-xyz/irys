@@ -1,7 +1,6 @@
 mod block_pool;
 mod block_status_provider;
 mod cache;
-pub mod execution_payload_provider;
 mod gossip_client;
 mod gossip_service;
 mod peer_list_service;

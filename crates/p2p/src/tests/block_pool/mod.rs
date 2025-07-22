@@ -1,5 +1,4 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
-use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
 use crate::peer_list_service::PeerListServiceWithClient;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
 use crate::{BlockStatusProvider, SyncState};
@@ -10,7 +9,7 @@ use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
-use irys_domain::PeerListGuard;
+use irys_domain::{ExecutionPayloadCache, PeerListGuard, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -123,7 +122,7 @@ struct MockedServices {
     block_discovery_stub: BlockDiscoveryStub,
     peer_list_data_guard: PeerListGuard,
     db: DatabaseProvider,
-    execution_payload_provider: ExecutionPayloadProvider,
+    execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
     vdf_state_stub: VdfStateReadonly,
     service_senders: ServiceSenders,
@@ -156,10 +155,8 @@ impl MockedServices {
         );
         let peer_list_data_guard = peer_list_service.peer_list_data_guard.clone();
         peer_list_service.start();
-        let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list_data_guard.clone(),
-            RethBlockProvider::new_mock(),
-        );
+        let execution_payload_provider =
+            ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);

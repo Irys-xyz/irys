@@ -68,14 +68,12 @@ where
     peer_list_service_receiver: Option<UnboundedReceiver<PeerListDataMessage>>,
 }
 
-impl<R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>> PeerListServiceWithClient<IrysApiClient, R> {
+impl<R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>>
+    PeerListServiceWithClient<IrysApiClient, R>
+{
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
     /// reference to a `DatabaseEnv`
-    pub fn new(
-        db: DatabaseProvider,
-        config: &Config,
-        reth_service_addr: Addr<R>,
-    ) -> Self {
+    pub fn new(db: DatabaseProvider, config: &Config, reth_service_addr: Addr<R>) -> Self {
         info!("service started: peer_list");
         Self::new_with_custom_api_client(db, config, IrysApiClient::new(), reth_service_addr)
     }
@@ -334,7 +332,6 @@ where
 pub enum PeerListServiceError {
     DatabaseNotConnected,
     Database(DatabaseError),
-    HealthCheckFailed(String),
     PostVersionError(String),
     PeerHandshakeRejected(RejectedResponse),
     NoPeersAvailable,
