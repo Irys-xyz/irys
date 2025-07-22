@@ -356,8 +356,12 @@ impl GossipServiceTestFixture {
             ApiClientStub::new(),
             reth_service_addr,
         );
-        let peer_list_data_guard = peer_service.peer_list_data_guard.clone();
         let peer_list = peer_service.start();
+        let peer_list_data_guard = peer_list
+            .send(GetPeerListGuard)
+            .await
+            .expect("to get peer list")
+            .expect("to get peer list");
 
         let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
         let mempool_txs = Arc::clone(&mempool_stub.txs);

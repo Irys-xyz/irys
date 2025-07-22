@@ -1,7 +1,7 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::peer_list_service::PeerListService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
-use crate::{BlockStatusProvider, SyncState};
+use crate::{BlockStatusProvider, GetPeerListGuard, SyncState};
 use actix::Actor as _;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
@@ -153,8 +153,12 @@ impl MockedServices {
             mock_client.clone(),
             reth_addr,
         );
-        let peer_list_data_guard = peer_list_service.peer_list_data_guard.clone();
-        peer_list_service.start();
+        let peer_service_addr = peer_list_service.start();
+        let peer_list_data_guard = peer_service_addr
+            .send(GetPeerListGuard)
+            .await
+            .expect("to get peer list")
+            .expect("to get peer list");
         let execution_payload_provider =
             ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
 

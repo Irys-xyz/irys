@@ -10,7 +10,7 @@ use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
-use irys_domain::{ExecutionPayloadCache, PeerListDataError, PeerList};
+use irys_domain::{ExecutionPayloadCache, PeerList, PeerListDataError};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
     IrysBlockHeader,

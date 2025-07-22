@@ -5,7 +5,7 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{
-    PeerListDataError, PeerListDataMessage, PeerList, ScoreDecreaseReason, ScoreIncreaseReason,
+    PeerList, PeerListDataError, PeerListDataMessage, ScoreDecreaseReason, ScoreIncreaseReason,
 };
 use irys_types::{
     build_user_agent, Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse,
@@ -48,7 +48,7 @@ where
     /// Reference to the node database
     db: DatabaseProvider,
 
-    pub peer_list_data_guard: PeerList,
+    peer_list: PeerList,
 
     currently_running_announcements: HashSet<SocketAddr>,
     successful_announcements: HashMap<SocketAddr, AnnounceFinished>,
@@ -98,7 +98,7 @@ where
 
         Self {
             db,
-            peer_list_data_guard: peer_list_data,
+            peer_list: peer_list_data,
             currently_running_announcements: HashSet::new(),
             successful_announcements: HashMap::new(),
             failed_announcements: HashMap::new(),
@@ -283,8 +283,7 @@ where
 
         ctx.run_interval(INACTIVE_PEERS_HEALTH_CHECK_INTERVAL, |act, ctx| {
             // Collect inactive peers with the required fields
-            let inactive_peers: Vec<(Address, PeerListItem)> =
-                act.peer_list_data_guard.inactive_peers();
+            let inactive_peers: Vec<(Address, PeerListItem)> = act.peer_list.inactive_peers();
 
             for (mining_addr, peer) in inactive_peers {
                 // Clone the peer address to use in the async block
@@ -313,15 +312,13 @@ where
         // Initiate the trusted peers handshake
         let trusted_peers_handshake_task = Self::trusted_peers_handshake_task(
             peer_service_address.clone(),
-            self.peer_list_data_guard.trusted_peer_addresses(),
+            self.peer_list.trusted_peer_addresses(),
         )
         .into_actor(self);
         ctx.spawn(trusted_peers_handshake_task);
 
         // Announce yourself to the network
-        let peers_cache = self
-            .peer_list_data_guard
-            .all_know_peers_with_mining_address();
+        let peers_cache = self.peer_list.all_know_peers_with_mining_address();
         let announce_fut = Self::announce_yourself_to_all_peers(peers_cache, peer_service_address)
             .into_actor(self);
         ctx.spawn(announce_fut);
@@ -365,11 +362,7 @@ where
     fn flush(&self) -> Result<(), PeerListServiceError> {
         self.db
             .update(|tx| {
-                for (addr, peer) in self
-                    .peer_list_data_guard
-                    .all_know_peers_with_mining_address()
-                    .iter()
-                {
+                for (addr, peer) in self.peer_list.all_know_peers_with_mining_address().iter() {
                     insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
                 }
                 Ok(())
@@ -400,13 +393,11 @@ where
     }
 
     fn increase_peer_score(&mut self, mining_addr: &Address, score: ScoreIncreaseReason) {
-        self.peer_list_data_guard
-            .increase_peer_score(mining_addr, score);
+        self.peer_list.increase_peer_score(mining_addr, score);
     }
 
     fn decrease_peer_score(&mut self, mining_addr: &Address, reason: ScoreDecreaseReason) {
-        self.peer_list_data_guard
-            .decrease_peer_score(mining_addr, reason);
+        self.peer_list.decrease_peer_score(mining_addr, reason);
     }
 
     fn create_version_request(&self) -> VersionRequest {
@@ -552,7 +543,7 @@ where
 }
 
 #[derive(Message, Debug)]
-#[rtype(result = "Option<PeerListGuard>")]
+#[rtype(result = "Option<PeerList>")]
 pub struct GetPeerListGuard;
 
 impl<T, R> Handler<GetPeerListGuard> for PeerListService<T, R>
@@ -563,7 +554,7 @@ where
     type Result = Option<PeerList>;
 
     fn handle(&mut self, _msg: GetPeerListGuard, _ctx: &mut Self::Context) -> Self::Result {
-        Some(self.peer_list_data_guard.clone())
+        Some(self.peer_list.clone())
     }
 }
 
@@ -649,9 +640,7 @@ where
             return;
         }
 
-        let already_in_cache = self
-            .peer_list_data_guard
-            .contains_api_address(&msg.api_address);
+        let already_in_cache = self.peer_list.contains_api_address(&msg.api_address);
         let already_announcing = self
             .currently_running_announcements
             .contains(&msg.api_address);
@@ -964,12 +953,8 @@ mod tests {
         let mock_api_client = CountingMockClient::default();
 
         // Create service with our mocks
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_api_client,
-            reth_actor,
-        );
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_api_client, reth_actor);
 
         // Test adding a new peer
         let (mining_addr, peer) = create_test_peer(
@@ -981,19 +966,19 @@ mod tests {
 
         // Add peer using guard
         service
-            .peer_list_data_guard
+            .peer_list
             .add_or_update_peer(mining_addr, peer.clone());
 
         // Verify peer was added correctly
         let result = service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(peer.address.gossip);
 
         assert!(result.is_some());
         assert_eq!(result.expect("get peer"), peer);
 
         // Verify known peers using KnownPeersRequest
-        let known_peers = service.peer_list_data_guard.all_known_peers();
+        let known_peers = service.peer_list.all_known_peers();
         assert!(known_peers.contains(&peer.address));
     }
 
@@ -1008,12 +993,8 @@ mod tests {
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
 
         // Add a test peer
         let (mining_addr, peer) = create_test_peer(
@@ -1024,16 +1005,16 @@ mod tests {
         );
 
         service
-            .peer_list_data_guard
+            .peer_list
             .add_or_update_peer(mining_addr, peer.clone());
         // Test increasing score
         service
-            .peer_list_data_guard
+            .peer_list
             .increase_peer_score(&mining_addr, ScoreIncreaseReason::Online);
 
         // Verify score increased
         let updated_peer = service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(peer.address.gossip)
             .expect("failed to get updated peer");
 
@@ -1041,12 +1022,12 @@ mod tests {
 
         // Test decreasing score using message handler
         service
-            .peer_list_data_guard
+            .peer_list
             .decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
 
         // Verify score decreased
         let updated_peer = service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(peer.address.gossip)
             .expect("failed to get updated peer");
         assert_eq!(updated_peer.reputation_score.get(), 48);
@@ -1063,12 +1044,8 @@ mod tests {
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
 
         // Add multiple peers with different states
         let (mining_addr1, mut peer1) = create_test_peer(
@@ -1097,19 +1074,17 @@ mod tests {
 
         // Add peers
         service
-            .peer_list_data_guard
+            .peer_list
             .add_or_update_peer(mining_addr1, peer1.clone());
         service
-            .peer_list_data_guard
+            .peer_list
             .add_or_update_peer(mining_addr2, peer2.clone());
-        service
-            .peer_list_data_guard
-            .add_or_update_peer(mining_addr3, peer3);
+        service.peer_list.add_or_update_peer(mining_addr3, peer3);
 
         // Test active peers request using message handler
         let exclude_peers = HashSet::new();
         let active_peers = service
-            .peer_list_data_guard
+            .peer_list
             .top_active_peers(Some(2), Some(exclude_peers));
 
         assert_eq!(active_peers.len(), 2);
@@ -1128,12 +1103,8 @@ mod tests {
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
 
         // Test adding duplicate peer
         let (mining_addr, peer) = create_test_peer(
@@ -1145,14 +1116,12 @@ mod tests {
 
         // Add same peer twice
         service
-            .peer_list_data_guard
+            .peer_list
             .add_or_update_peer(mining_addr, peer.clone());
-        service
-            .peer_list_data_guard
-            .add_or_update_peer(mining_addr, peer);
+        service.peer_list.add_or_update_peer(mining_addr, peer);
 
         // Verify only one entry exists using KnownPeersRequest
-        let known_peers = service.peer_list_data_guard.all_known_peers();
+        let known_peers = service.peer_list.all_known_peers();
         assert_eq!(known_peers.len(), 1);
 
         // Test peer lookup with non-existent address
@@ -1161,16 +1130,16 @@ mod tests {
         let non_existent_gossip_addr =
             SocketAddr::new(IpAddr::from_str("192.168.1.1").expect("invalid IP"), 9999);
         let result = service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(non_existent_gossip_addr);
         assert!(result.is_none());
 
         // Test score manipulation for non-existent peer using message handlers
         service
-            .peer_list_data_guard
+            .peer_list
             .increase_peer_score(&non_existent_addr, ScoreIncreaseReason::Online);
         service
-            .peer_list_data_guard
+            .peer_list
             .decrease_peer_score(&non_existent_addr, ScoreDecreaseReason::Offline);
 
         // Test active peers with empty list
@@ -1191,7 +1160,7 @@ mod tests {
 
         let exclude_peers = HashSet::new();
         let active_peers = empty_service
-            .peer_list_data_guard
+            .peer_list
             .top_active_peers(None, Some(exclude_peers));
         assert!(active_peers.is_empty());
     }
@@ -1215,7 +1184,7 @@ mod tests {
             mock_client,
             mock_addr,
         );
-        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        let peer_list_data_guard = service.peer_list.clone();
         service.start();
 
         // Give some time for the service to start
@@ -1274,7 +1243,7 @@ mod tests {
             mock_client,
             mock_addr,
         );
-        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        let peer_list_data_guard = service.peer_list.clone();
         service.start();
 
         // Add multiple test peers
@@ -1302,19 +1271,15 @@ mod tests {
         let mock_addr = mock_actor.start();
 
         // Create new service instance that should load from database
-        let new_service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
+        let new_service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
 
         // Verify peers were loaded correctly
         let loaded_peer1 = new_service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(peer1.address.gossip);
         let loaded_peer2 = new_service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(peer2.address.gossip);
 
         assert!(
@@ -1442,12 +1407,12 @@ mod tests {
 
         // Add the initial peer
         service
-            .peer_list_data_guard
+            .peer_list
             .add_or_update_peer(mining_addr, initial_peer);
 
         // Verify the peer was added
         let initial_result = service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(initial_gossip_addr);
         assert!(initial_result.is_some());
         assert_eq!(initial_result.unwrap().address, initial_peer_addr);
@@ -1473,13 +1438,11 @@ mod tests {
 
         // Update the peer with new address
         service
-            .peer_list_data_guard
+            .peer_list
             .add_or_update_peer(mining_addr, updated_peer);
 
         // Verify the peer address was updated
-        let updated_result = service
-            .peer_list_data_guard
-            .peer_by_gossip_address(new_gossip_addr);
+        let updated_result = service.peer_list.peer_by_gossip_address(new_gossip_addr);
         assert!(
             updated_result.is_some(),
             "Should find peer with new gossip address"
@@ -1492,7 +1455,7 @@ mod tests {
 
         // The old address should no longer be associated with this peer
         let old_result = service
-            .peer_list_data_guard
+            .peer_list
             .peer_by_gossip_address(initial_gossip_addr);
         assert!(
             old_result.is_none(),
@@ -1523,7 +1486,7 @@ mod tests {
             mock_api_client,
             reth_actor.clone(),
         );
-        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        let peer_list_data_guard = service.peer_list.clone();
         service.start();
 
         // Give some time for the service to start
@@ -1593,13 +1556,9 @@ mod tests {
         let mock_addr = mock_actor.start();
 
         // Create the service with our mock client instead of the real one
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
-        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
+        let peer_list_data_guard = service.peer_list.clone();
         service.start();
 
         // Create a test peer
@@ -1652,13 +1611,9 @@ mod tests {
         let mock_addr = mock_actor.start();
 
         // Create the service with our mock client instead of the real one
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
-        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
+        let peer_list_data_guard = service.peer_list.clone();
         let service_addr = service.start();
 
         // Give some time for the service to start
@@ -1747,13 +1702,9 @@ mod tests {
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
-        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
+        let peer_list_data_guard = service.peer_list.clone();
         service.start();
 
         // Verify we don't have any peers
@@ -1818,13 +1769,9 @@ mod tests {
         let mock_client = CountingMockClient::default();
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
-        let peer_list_data_guard = service.peer_list_data_guard.clone();
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
+        let peer_list_data_guard = service.peer_list.clone();
         service.start();
 
         // Verify we don't have any peers
@@ -1898,12 +1845,8 @@ mod tests {
         let mock_addr = mock_actor.start();
 
         // Create and start the service with our mock client
-        let service = PeerListService::new_with_custom_api_client(
-            db,
-            &config,
-            mock_client,
-            mock_addr,
-        );
+        let service =
+            PeerListService::new_with_custom_api_client(db, &config, mock_client, mock_addr);
         let _service_addr = service.start();
 
         // Give time for handshake to process

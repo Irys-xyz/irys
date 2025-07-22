@@ -486,6 +486,7 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_list_service::PeerListService;
+        use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -571,8 +572,12 @@ mod tests {
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
             );
-            let peer_list_guard = peer_list_service.peer_list_data_guard.clone();
-            peer_list_service.start();
+            let peer_service_addr = peer_list_service.start();
+            let peer_list_guard = peer_service_addr
+                .send(GetPeerListGuard)
+                .await
+                .expect("to get peer list")
+                .expect("to get peer list");
 
             peer_list_guard.add_or_update_peer(
                 Address::repeat_byte(2),
@@ -676,8 +681,12 @@ mod tests {
                 execution: Default::default(),
             };
 
-            let peer_list = peer_list_service.peer_list_data_guard.clone();
-            peer_list_service.start();
+            let peer_service_addr = peer_list_service.start();
+            let peer_list = peer_service_addr
+                .send(GetPeerListGuard)
+                .await
+                .expect("to get peer list")
+                .expect("to get peer list");
 
             peer_list.add_or_update_peer(
                 Address::repeat_byte(2),
