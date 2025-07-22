@@ -264,7 +264,9 @@ impl CommitmentTransaction {
         }
     }
 
-    /// Create a new pledge transaction with dynamic value based on existing pledge count
+    /// Create a new pledge transaction with decreasing cost per pledge.
+    /// Cost = pledge_base_fee / ((existing_pledges + 1) ^ pledge_decay)
+    /// The calculated cost is stored in the transaction's `value` field.
     pub fn new_pledge(
         config: &ConsensusConfig,
         anchor: H256,
@@ -290,7 +292,9 @@ impl CommitmentTransaction {
         }
     }
 
-    /// Create a new unpledge transaction with dynamic value based on existing pledge count
+    /// Create a new unpledge transaction that refunds the most recent pledge's cost.
+    /// Refund = cost of the last pledge made (existing_pledges - 1)
+    /// Returns 0 if user has no pledges. The refund is in the `value` field.
     pub fn new_unpledge(
         config: &ConsensusConfig,
         anchor: H256,
