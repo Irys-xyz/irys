@@ -215,6 +215,15 @@ impl Inner {
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
 
+        let max_commitments: usize = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .max_commitment_txs_per_block
+            .try_into()
+            .expect("max_commitment_txs_per_block to fit into usize");
+
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
         // and previously included transactions in this block
@@ -287,7 +296,7 @@ impl Inner {
         // This order ensures stake transactions are processed before pledges
         let mempool_state_guard = mempool_state.read().await;
 
-        for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+        'outer: for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
             // Gather all commitments of current type from all addresses
             let mut sorted_commitments: Vec<_> = mempool_state_guard
                 .valid_commitment_tx
@@ -360,6 +369,12 @@ impl Inner {
 
                 debug!("best_mempool_txs: adding commitment tx {}", tx.id);
                 commitment_tx.push(tx);
+
+                // if we have reached the maximum allowed number of commitment txs per block
+                // do not push anymore
+                if commitment_tx.len() >= max_commitments {
+                    break 'outer;
+                }
             }
         }
         drop(mempool_state_guard);
@@ -388,7 +403,7 @@ impl Inner {
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
-        let max_txs = self
+        let max_data_txs = self
             .config
             .node_config
             .consensus_config()
@@ -404,7 +419,7 @@ impl Inner {
             if check_funding(&tx) {
                 debug!("Submit tx {} passed the funding check", &tx.id);
                 submit_tx.push(tx);
-                if submit_tx.len() >= max_txs {
+                if submit_tx.len() >= max_data_txs {
                     break;
                 }
             } else {
