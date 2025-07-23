@@ -4789,7 +4789,6 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-network",
- "alloy-primitives",
  "alloy-rpc-types-engine",
  "alloy-signer-local",
  "async-trait",
