@@ -101,7 +101,7 @@ impl DataSyncServiceInner {
                 .filter(|(_, a)| a.ledger_id == Some(ledger_id))
                 .collect();
 
-            // Make sure we have an updated PeerBandiwdthManager for any peers that are assigned to stor the same
+            // Make sure we have an updated PeerBandwidthManager for any peers that are assigned to stor the same
             // slot data as us.
             for (_partition_hash, pa) in slot_assignments {
                 // Find the peer by their mining address
