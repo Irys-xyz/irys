@@ -16,8 +16,8 @@ See .devcontainer/setup.sh for more information.
 
 
 # Configuring
-You can get the default configuration file (`./config.toml`) by running the node: `cargo run --bin irys --release`\
-If the config file doesn't exist, this will write the default configuration file, and then exit.
+You can get the default configuration file (`./config.toml`) from `crates/config/templates/testnet_config.toml`
+you should rename this to `config.toml` and place in the directory you want to run the Irys node in.
 ## Config file overview
 The config file is comprised of header sections, such as `[category.subcategory(...)]`.\
 All the config options under the `[consensus(...)]` category **must be the same between all nodes in the network**.\

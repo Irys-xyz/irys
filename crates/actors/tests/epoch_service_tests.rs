@@ -14,8 +14,8 @@ use irys_actors::{
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{add_genesis_commitments, add_test_commitments};
-use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot};
-use irys_storage::{ie, StorageModule, StorageModuleVec};
+use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
+use irys_storage::ie;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::PartitionChunkRange;
 use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
