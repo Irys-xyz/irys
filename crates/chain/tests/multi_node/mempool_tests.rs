@@ -3,7 +3,7 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
-use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_chain::IrysNodeCtx;
 use irys_database::{tables::IngressProofs, SystemLedger};
 use irys_reth_node_bridge::{
@@ -1624,6 +1624,118 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     );
 
     tokio::join!(genesis.stop(), peer1.stop(), peer2.stop());
+
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+/// post invalid commitment txs where tx id has been tampered with
+/// expect invalid txs to fail when sent directly to the mempool
+async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+    let seconds_to_wait = 10;
+
+    let mut genesis_config = NodeConfig::testnet();
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    //
+    // Test case 1: Stake commitment txs
+    //
+
+    // create valid and invalid stake commitment tx
+    let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
+    let mut stake_tx_invalid = stake_tx.clone();
+    let mut bytes = stake_tx_invalid.id.to_fixed_bytes();
+    bytes[0] ^= 0x01;
+    stake_tx_invalid.id = H256::from(bytes);
+
+    // ingest invalid stake tx directly to the mempool
+    let res = genesis_node
+        .ingest_commitment_tx(stake_tx_invalid.clone())
+        .await
+        .expect_err("expected failure but got success");
+    match res {
+        AddTxError::TxIngress(TxIngressError::InvalidSignature) => {
+            // it failed to ingress, as expected!
+        }
+        e => {
+            panic!("Expected InvalidSignature but got: {:?}", e);
+        }
+    }
+
+    // ingest valid stake tx
+    genesis_node.ingest_commitment_tx(stake_tx.clone()).await?;
+
+    //
+    // Test case 2: pledge commitment txs
+    //
+
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+
+    let commitment_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_commitment_snapshot();
+
+    let pledge_tx = new_pledge_tx(
+        tx_ids.last().expect("valid tx id for use as anchor"),
+        &signer,
+        &genesis_config.consensus_config(),
+        &commitment_snapshot,
+    );
+    let mut pledge_tx_invalid_pending_anchor = pledge_tx.clone();
+    let mut bytes = pledge_tx_invalid_pending_anchor.id.to_fixed_bytes();
+    bytes[0] ^= 0x01; // flip first bit
+    pledge_tx_invalid_pending_anchor.id = H256::from(bytes);
+
+    // With an unknown anchor, the mempool defers signature validation until the
+    // referenced transaction is confirmed. The invalid pledge should therefore
+    // be accepted and cached as a pending-anchor transaction.
+    let result = genesis_node
+        .ingest_commitment_tx(pledge_tx_invalid_pending_anchor.clone())
+        .await;
+    if result.is_err() {
+        panic!(
+            "Expected success for pledge with pending anchor, got: {:?}",
+            result
+        );
+    }
+
+    // mine a block so we get some more anchors that are not pending
+    genesis_node.mine_block().await?;
+
+    let mut pledge_tx_invalid = pledge_tx.clone();
+    let mut bytes = pledge_tx_invalid.id.to_fixed_bytes();
+    bytes[1] ^= 0x01; // flip second bit to be different from pledge_tx_invalid_pending_anchor.id
+    pledge_tx_invalid.id = H256::from(bytes);
+    // check an invalid id on a pledge, that also has a valid non pending anchor
+    let res = genesis_node
+        .ingest_commitment_tx(pledge_tx_invalid.clone())
+        .await
+        .expect_err("expected failure but got success");
+    match res {
+        AddTxError::TxIngress(TxIngressError::InvalidSignature) => {
+            // it failed to ingress, as expected!
+        }
+        e => {
+            panic!("Expected InvalidSignature but got: {:?}", e);
+        }
+    }
+    genesis_node.ingest_commitment_tx(pledge_tx.clone()).await?;
+    tx_ids.push(pledge_tx.id);
+
+    // wait for all txs to ingress mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(tx_ids.clone(), seconds_to_wait)
+        .await?;
+
+    genesis_node.stop().await;
 
     Ok(())
 }

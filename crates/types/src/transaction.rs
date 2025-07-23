@@ -362,6 +362,7 @@ pub trait IrysTransactionCommon {
     fn id(&self) -> IrysTransactionId;
     fn total_cost(&self) -> U256;
     fn signer(&self) -> Address;
+    fn signature(&self) -> &IrysSignature;
     fn anchor(&self) -> H256;
     fn user_fee(&self) -> U256;
 
@@ -386,6 +387,10 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
     }
 
     fn anchor(&self) -> H256 {
@@ -439,8 +444,13 @@ impl IrysTransactionCommon for CommitmentTransaction {
     fn signer(&self) -> Address {
         self.signer
     }
+
     fn anchor(&self) -> H256 {
         self.anchor
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
     }
 
     fn user_fee(&self) -> U256 {
@@ -523,6 +533,13 @@ impl IrysTransactionCommon for IrysTransaction {
         match self {
             Self::Data(tx) => tx.signer(),
             Self::Commitment(tx) => tx.signer(),
+        }
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        match self {
+            Self::Data(tx) => tx.signature(),
+            Self::Commitment(tx) => tx.signature(),
         }
     }
 
