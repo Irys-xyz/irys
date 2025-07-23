@@ -976,18 +976,21 @@ mod tests {
 
         // mock header
         let mut header = IrysBlockHeader::new_mock_header();
-        // Create a block where the submit ledger has stored 35 chunks. With the
+        header.height = 0;
+        // Create a block where the submit ledger has stored up to 36 chunks. With the
         // correct capacity formula (4 slots * 10 chunks), this is below the
         // allocation threshold and should trigger two additional slots.
-        header.height = 0;
-        header.data_ledgers[DataLedger::Submit].max_chunk_offset = 35;
-        let slots_to_add = snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
-        assert_eq!(slots_to_add, 0);
+        for offset in 1..=34 {
+            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            let slots_to_add =
+                snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
+            assert_eq!(slots_to_add, 0, "offset: {:?}", offset);
+        }
 
         // Create a block where the submit ledger has stored 36 to 40 chunks. With the
         // correct capacity formula (4 slots * 10 chunks), this is above the
         // allocation threshold and should trigger two additional slots.
-        for offset in 36..=40 {
+        for offset in 35..=40 {
             header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
@@ -995,12 +998,12 @@ mod tests {
         }
 
         // and test for more than 40 chunks
-        // FIXME: This seems incorrect
-        for offset in 41..=60000 {
+        // should produce the same result as 36..=40 as new slots are capped at 2 using the Threshold-based capacity expansion
+        for offset in 41..=99 {
             header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
-            assert_eq!(slots_to_add, 3, "offset: {:?}", offset);
+            assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
         }
     }
 }
