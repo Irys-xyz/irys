@@ -151,10 +151,10 @@ mod tests {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
                 num_chunks_in_partition: 100,
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             base_directory: base_path,
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
         let infos = [StorageModuleInfo {

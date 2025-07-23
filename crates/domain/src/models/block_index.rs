@@ -318,7 +318,7 @@ mod tests {
     async fn read_and_write_block_index() -> eyre::Result<()> {
         let tmp_dir = setup_tracing_and_temp_dir(Some("read_and_write_block_index"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.base_directory = base_path;
 
         let block_items = vec![

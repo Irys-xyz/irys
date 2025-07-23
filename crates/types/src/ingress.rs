@@ -115,14 +115,14 @@ mod tests {
 
     #[test]
     fn interleave_test() -> eyre::Result<()> {
-        let testnet_config = ConsensusConfig::testnet();
-        let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
+        let testing_config = ConsensusConfig::testing();
+        let data_size = (testing_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
-        let signer = IrysSigner::random_signer(&testnet_config);
+        let signer = IrysSigner::random_signer(&testing_config);
         let leaves = generate_leaves(
             vec![data_bytes].into_iter().map(Ok),
-            testnet_config.chunk_size as usize,
+            testing_config.chunk_size as usize,
         )?;
         let interleave_value = signer.address();
         let interleave_hash = hash_sha256(&interleave_value.0 .0)?;
@@ -142,24 +142,24 @@ mod tests {
     #[test]
     fn basic() -> eyre::Result<()> {
         // Create some random data
-        let testnet_config = ConsensusConfig::testnet();
-        let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
+        let testing_config = ConsensusConfig::testing();
+        let data_size = (testing_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Build a merkle tree and data_root from the chunks
         let leaves = generate_leaves(
             vec![data_bytes.clone()].into_iter().map(Ok),
-            testnet_config.chunk_size as usize,
+            testing_config.chunk_size as usize,
         )
         .unwrap();
         let root = generate_data_root(leaves)?;
         let data_root = H256(root.id);
 
         // Generate an ingress proof
-        let signer = IrysSigner::random_signer(&testnet_config);
+        let signer = IrysSigner::random_signer(&testing_config);
         let chunks: Vec<Vec<u8>> = data_bytes
-            .chunks(testnet_config.chunk_size as usize)
+            .chunks(testing_config.chunk_size as usize)
             .map(Vec::from)
             .collect();
         let proof = generate_ingress_proof(signer, data_root, chunks.clone().into_iter().map(Ok))?;

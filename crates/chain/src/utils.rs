@@ -1,32 +1,34 @@
 use irys_types::{NodeConfig, NodeMode};
-use std::path::PathBuf;
-use tracing::{debug, warn};
+use std::{fs::File, io::Write as _, path::PathBuf};
+use tracing::warn;
 
 pub fn load_config() -> eyre::Result<NodeConfig> {
     // load the config
     let config_path = std::env::var("CONFIG")
-        .map(|s| s.parse::<PathBuf>().expect("file path to be valid"))
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .expect("Unable to determine working dir, aborting")
-                .join("config.toml")
-        });
+        .unwrap_or_else(|_| "config.toml".to_owned())
+        .parse::<PathBuf>()
+        .expect("file path to be valid");
 
-    let mut config = std::fs::read_to_string(&config_path)
-        .map(|config_file| {
-            debug!("Loading config from {:?}", &config_path);
-            toml::from_str::<NodeConfig>(&config_file).expect("invalid config file")
-        })
-        .unwrap_or_else(|err| {
+    let mut config = match std::fs::read_to_string(&config_path)
+        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
+    {
+        Ok(cfg) => cfg,
+        Err(err) => {
             warn!(
                 ?err,
                 "config file not provided, defaulting to testnet config"
             );
-            NodeConfig::testnet()
-        });
+            let config = NodeConfig::testnet();
+            let mut file = File::create(&config_path)?;
+            file.write_all(toml::to_string(&config)?.as_bytes())?;
+            eyre::bail!("Config file created - please edit it before restarting.")
+        }
+    };
+
     let is_genesis = std::env::var("GENESIS")
         .map(|_| true)
         .unwrap_or(matches!(config.mode, NodeMode::Genesis));
+
     if is_genesis {
         config.mode = NodeMode::Genesis;
     }

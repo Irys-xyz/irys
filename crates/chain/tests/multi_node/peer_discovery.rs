@@ -16,7 +16,7 @@ use tracing::{debug, error};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.trusted_peers = vec![];
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;

@@ -25,7 +25,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     // and we need to mine blocks to include anchor-chained commitments
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().block_migration_depth = 1;
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -39,7 +39,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         .await;
 
     // Initialize the peer with our keypair/signer
-    let mut peer_config = genesis_node.testnet_peer_with_signer(&peer_signer);
+    let mut peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
     peer_config.stake_pledge_drives = true;
 
     let mut already_processed_count = 0;

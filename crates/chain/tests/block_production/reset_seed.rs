@@ -27,19 +27,19 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     let block_migration_depth = 1;
 
     // Setting up parameters explicitly to check that the reset seed is applied correctly
-    let mut consensus_config = ConsensusConfig::testnet();
+    let mut consensus_config = ConsensusConfig::testing();
     consensus_config.vdf.reset_frequency = reset_frequency;
     consensus_config.block_migration_depth = block_migration_depth;
     consensus_config.block_tree_depth = 200;
 
     // setup trusted peers connection data and configs for genesis and nodes
-    let mut testnet_config_genesis = NodeConfig::testnet();
-    testnet_config_genesis.consensus = ConsensusOptions::Custom(consensus_config);
+    let mut testing_config_genesis = NodeConfig::testing();
+    testing_config_genesis.consensus = ConsensusOptions::Custom(consensus_config);
 
     // setup trusted peers connection data and configs for genesis and nodes
-    let account1 = testnet_config_genesis.signer();
+    let account1 = testing_config_genesis.signer();
 
-    let ctx_genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone())
+    let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
 
@@ -103,7 +103,7 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
 
     warn!("Reset seed verification completed, starting peer node to verify that syncing works");
 
-    let mut ctx_peer1_node = ctx_genesis_node.testnet_peer();
+    let mut ctx_peer1_node = ctx_genesis_node.testing_peer();
     // Setting up mode to full validation sync to check that the reset seed is applied correctly
     //  and all blocks are validated successfully
     ctx_peer1_node.mode = NodeMode::PeerSync;

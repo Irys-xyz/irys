@@ -12,7 +12,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // basic node config
     let seconds_to_wait: usize = 10;
     let seconds_to_wait_u32: u32 = seconds_to_wait.try_into()?;
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.fund_genesis_accounts(vec![&signer]);

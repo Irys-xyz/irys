@@ -7,7 +7,7 @@ pub fn dummy_epoch_snapshot() -> Arc<EpochSnapshot> {
 }
 
 pub fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
-    let config = irys_types::ConsensusConfig::testnet();
+    let config = irys_types::ConsensusConfig::testing();
     let genesis_header = IrysBlockHeader {
         oracle_irys_price: config.genesis_price,
         ema_irys_price: config.genesis_price,
