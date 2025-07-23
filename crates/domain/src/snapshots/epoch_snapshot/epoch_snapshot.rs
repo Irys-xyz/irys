@@ -564,11 +564,11 @@ impl EpochSnapshot {
         let num_slots = data_ledger.slot_count() as u64;
 
         let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
-        let num_partitions_per_slot = self.config.consensus.num_partitions_per_slot;
 
-        // Each slot can store multiple partitions, we account for that in the
-        // max_ledger_capacity calculation.
-        let max_ledger_capacity = num_slots * num_partitions_per_slot * num_chunks_in_partition;
+        // each slot is a unique partition
+        // a partition is a replication of slot data
+        // therefore the number of partitions does not factor into the max_ledger_capacity calculation
+        let max_ledger_capacity = (num_slots * num_chunks_in_partition) + 1;
 
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
