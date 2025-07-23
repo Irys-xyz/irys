@@ -34,7 +34,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
-    let mut config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // set block_migration depth to one less than epoch depth
     let block_migration_depth = num_blocks_in_epoch - 1;
     // set block migration depth so epoch blocks go to index correctly
@@ -298,7 +298,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Start the genesis node and wait for packing
@@ -307,7 +307,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
         .await;
 
     // Initialize the peer with our keypair/signer
-    let peer_config = genesis_node.testnet_peer();
+    let peer_config = genesis_node.testing_peer();
 
     // Start the peer: No packing on the peer, it doesn't have partition assignments yet
     let peer_node = IrysNodeTest::new(peer_config.clone())
@@ -340,7 +340,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // tracing
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.fund_genesis_accounts(vec![&signer]);
 

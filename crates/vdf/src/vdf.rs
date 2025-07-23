@@ -279,7 +279,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_step() {
-        let config = Config::new(NodeConfig::testnet());
+        let config = Config::new(NodeConfig::testing());
         let mut hasher = Sha256::new();
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
@@ -318,7 +318,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_service() {
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
         let config = Config::new(node_config);
@@ -432,7 +432,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_does_not_get_too_far_ahead() {
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
         let config = Config::new(node_config);

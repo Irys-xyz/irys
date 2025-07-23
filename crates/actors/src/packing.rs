@@ -428,7 +428,7 @@ mod tests {
                 entropy_packing_iterations: 1000000,
                 num_chunks_in_partition: num_chunks,
                 chunk_size: 32,
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
@@ -438,7 +438,7 @@ mod tests {
                 gpu_packing_batch_size: 1,
             },
             base_directory: base_path.clone(),
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
         let packing_config = PackingConfig::new(&config);

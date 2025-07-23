@@ -39,7 +39,7 @@ async fn heavy_test_mine() {
 #[test_log::test(actix::test)]
 async fn heavy_test_mine_tx() {
     // output tracing
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let account = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
         account.address(),

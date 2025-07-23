@@ -11,7 +11,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // Default test node config
     let seconds_to_wait = 10;
     let num_blocks_in_epoch = 8;
-    let mut config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     config.consensus.get_mut().chunk_size = 32;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.fund_genesis_accounts(vec![&signer]);
