@@ -338,15 +338,17 @@ pub fn poa_is_valid(
         // partition data -> ledger data
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(poa.partition_hash)
-            .unwrap();
+            .ok_or_else(|| eyre::eyre!("Missing partition assignment for the provided hash"))?;
 
-        let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
+        let ledger_chunk_offset = partition_assignment.slot_index.ok_or_else(|| {
+            eyre::eyre!("Partition assigment for the provided hash is missing slot index")
+        })? as u64
             * config.num_partitions_per_slot
             * config.num_chunks_in_partition
             + poa.partition_chunk_offset as u64;
 
         // ledger data -> block
-        let ledger = DataLedger::try_from(ledger_id).unwrap();
+        let ledger = DataLedger::try_from(ledger_id)?;
 
         let bb = block_index_guard
             .read()
@@ -766,14 +768,19 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let block_index = Arc::new(RwLock::new(BlockIndex::new(&node_config).await.unwrap()));
+        let block_index = Arc::new(RwLock::new(
+            BlockIndex::new(&node_config)
+                .await
+                .expect("Expected to create block index"),
+        ));
 
         let block_index_actor =
             BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
         let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
+                .expect("Expected to load storage submodules config");
 
         // Create an epoch snapshot for the genesis block
         let epoch_snapshot = EpochSnapshot::new(
@@ -799,7 +806,7 @@ mod tests {
 
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(partition_hash)
-            .unwrap();
+            .expect("Expected to get partition assignment");
 
         debug!("Partition assignment {:?}", partition_assignment);
 
@@ -838,8 +845,12 @@ mod tests {
             for chunk in chunks {
                 data.extend_from_slice(chunk);
             }
-            let tx = signer.create_transaction(data, None).unwrap();
-            let tx = signer.sign_transaction(tx).unwrap();
+            let tx = signer
+                .create_transaction(data, None)
+                .expect("Expected to create a transaction");
+            let tx = signer
+                .sign_transaction(tx)
+                .expect("Expected to sign the transaction");
             txs.push(tx);
         }
 
@@ -869,8 +880,12 @@ mod tests {
         let mut txs: Vec<DataTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
-        let tx = signer.create_transaction(data.clone(), None).unwrap();
-        let tx = signer.sign_transaction(tx).unwrap();
+        let tx = signer
+            .create_transaction(data.clone(), None)
+            .expect("Expected to create a transaction");
+        let tx = signer
+            .sign_transaction(tx)
+            .expect("Expected to sign the transaction");
         txs.push(tx);
 
         let poa_tx_num = 0;
@@ -959,7 +974,11 @@ mod tests {
         // Initialize genesis block at height 0
         let height: u64;
         {
-            height = context.block_index.read().unwrap().num_blocks();
+            height = context
+                .block_index
+                .read()
+                .expect("Expected to be able to read block index")
+                .num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -1050,9 +1069,13 @@ mod tests {
             .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
-            .unwrap();
+            .expect("Failed to get block index guard");
 
-        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+        let ledger_chunk_offset = context
+            .partition_assignment
+            .slot_index
+            .expect("Expected to have a slot index in the assignment")
+            as u64
             * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
@@ -1107,8 +1130,12 @@ mod tests {
             for chunk in chunks {
                 data.extend_from_slice(chunk);
             }
-            let tx = signer.create_transaction(data, None).unwrap();
-            let tx = signer.sign_transaction(tx).unwrap();
+            let tx = signer
+                .create_transaction(data, None)
+                .expect("Expected to create a transaction");
+            let tx = signer
+                .sign_transaction(tx)
+                .expect("Expected to sign the transaction");
             txs.push(tx);
         }
 
@@ -1145,7 +1172,11 @@ mod tests {
         // Initialize genesis block at height 0
         let height: u64;
         {
-            height = context.block_index.read().unwrap().num_blocks();
+            height = context
+                .block_index
+                .read()
+                .expect("To read block index")
+                .num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -1191,7 +1222,7 @@ mod tests {
 
         // Trim to actual data size for hash calculation (chunk_size might be larger)
         let trimmed_hacked = &entropy_packed_hacked[0..hacked_data.len().min(chunk_size)];
-        let entropy_packed_hash = hash_sha256(trimmed_hacked).unwrap();
+        let entropy_packed_hash = hash_sha256(trimmed_hacked).expect("Expected to hash data");
 
         // Calculate the correct offset for this chunk position
         let chunk_start_offset = poa_tx_num * 3 * 32 + poa_chunk_num * 32; // Each chunk is 32 bytes
@@ -1291,9 +1322,12 @@ mod tests {
             .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
-            .unwrap();
+            .expect("Expected to get block index guard");
 
-        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+        let ledger_chunk_offset = context
+            .partition_assignment
+            .slot_index
+            .expect("Expected to get slot index") as u64
             * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
