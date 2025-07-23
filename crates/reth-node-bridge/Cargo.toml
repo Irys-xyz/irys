@@ -4,7 +4,6 @@ name = "irys-reth-node-bridge"
 version = "0.1.0"
 
 [dependencies]
-irys-storage.workspace = true
 irys-database.workspace = true
 irys-types.workspace = true
 tracing.workspace = true

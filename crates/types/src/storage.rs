@@ -36,6 +36,7 @@ pub const TERABYTE: usize = GIGABYTE * 1024;
     Div,
     From,
     Into,
+    Hash,
 )]
 pub struct PartitionChunkOffset(u32);
 

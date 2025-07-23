@@ -22,7 +22,7 @@ use irys_actors::{
     services::ServiceSenders,
     validation_service::ValidationService,
 };
-use irys_actors::{ActorAddresses, BlockValidationTracker, StorageModuleService};
+use irys_actors::{ActorAddresses, BlockValidationTracker, DataSyncService, StorageModuleService};
 use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -30,8 +30,9 @@ use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EpochReplayData, ExecutionPayloadCache,
-    PeerList,
+    reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
+    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
+    StorageModule, StorageModuleInfo, StorageModulesReadGuard,
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
@@ -44,12 +45,7 @@ pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::signal::run_until_ctrl_c_or_channel_message;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
-use irys_storage::StorageModulesReadGuard;
-use irys_storage::{
-    irys_consensus_data_db::open_or_create_irys_consensus_data_db,
-    reth_provider::{IrysRethProvider, IrysRethProviderInner},
-    ChunkProvider, ChunkType, StorageModule,
-};
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
@@ -221,7 +217,6 @@ async fn start_reth_node(
     chainspec: ChainSpec,
     config: Config,
     sender: oneshot::Sender<RethNode>,
-    irys_provider: IrysRethProvider,
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
@@ -230,7 +225,6 @@ async fn start_reth_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
         config.node_config.clone(),
-        irys_provider.clone(),
         latest_block,
         random_ports,
         shadow_tx_store.clone(),
@@ -246,7 +240,6 @@ async fn start_reth_node(
                 Arc::new(chainspec.clone()),
                 task_executor.clone(),
                 config.node_config.clone(),
-                irys_provider.clone(),
                 latest_block,
                 random_ports,
                 shadow_tx_store,
@@ -547,7 +540,7 @@ impl IrysNode {
         let (shadow_tx_store, _shadow_tx_notification_stream) =
             ShadowTxStore::new_with_notifications();
 
-        let irys_provider = irys_storage::reth_provider::create_provider();
+        let irys_provider = reth_provider::create_provider();
 
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
@@ -769,7 +762,6 @@ impl IrysNode {
                         reth_chainspec,
                         config,
                         reth_handle_sender,
-                        irys_provider.clone(),
                         latest_block_height,
                         shadow_tx_store,
                     )
@@ -817,7 +809,7 @@ impl IrysNode {
                     tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal().in_current_span());
 
                 reth_node.provider.database.db.close();
-                irys_storage::reth_provider::cleanup_provider(&irys_provider);
+                reth_provider::cleanup_provider(&irys_provider);
                 info!("Reth thread finished");
             })?;
 
@@ -1148,8 +1140,17 @@ impl IrysNode {
         debug!("Starting StorageModuleService");
         let storage_module_handle = StorageModuleService::spawn_service(
             receivers.storage_modules,
-            storage_modules,
+            storage_modules.clone(),
             &irys_node_ctx.actor_addresses,
+            &config,
+            runtime_handle.clone(),
+        );
+
+        let data_sync_handle = DataSyncService::spawn_service(
+            receivers.data_sync,
+            block_tree_guard.clone(),
+            storage_modules.clone(),
+            peer_list_guard.clone(),
             &config,
             runtime_handle.clone(),
         );
@@ -1191,6 +1192,7 @@ impl IrysNode {
             // 4. Storage operations
             services.push(ArbiterEnum::TokioService(chunk_cache_handle));
             services.push(ArbiterEnum::TokioService(storage_module_handle));
+            services.push(ArbiterEnum::TokioService(data_sync_handle));
 
             // 5. Chain management
             services.push(ArbiterEnum::TokioService(block_tree_handle));
@@ -1498,7 +1500,7 @@ impl IrysNode {
 
     fn init_storage_modules(
         config: &Config,
-        storage_module_infos: Vec<irys_storage::StorageModuleInfo>,
+        storage_module_infos: Vec<StorageModuleInfo>,
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
         let mut storage_modules = Vec::new();
         for info in storage_module_infos {
