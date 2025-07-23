@@ -191,7 +191,7 @@ pub struct IrysNodeTest<T = ()> {
 
 impl IrysNodeTest<()> {
     pub fn default_async() -> Self {
-        let config = NodeConfig::testnet();
+        let config = NodeConfig::testing();
         Self::new_genesis(config)
     }
 
@@ -247,14 +247,14 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
-    pub fn testnet_peer(&self) -> NodeConfig {
+    pub fn testing_peer(&self) -> NodeConfig {
         let node_config = &self.node_ctx.config.node_config;
         // Initialize the peer with a random signer, copying the genesis config
         let peer_signer = IrysSigner::random_signer(&node_config.consensus_config());
-        self.testnet_peer_with_signer(&peer_signer)
+        self.testing_peer_with_signer(&peer_signer)
     }
 
-    pub fn testnet_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
+    pub fn testing_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
         use irys_types::{PeerAddress, RethPeerInfo};
 
         let node_config = &self.node_ctx.config.node_config;
@@ -297,15 +297,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config
     }
 
-    pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
+    pub async fn testing_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
         // Create a new peer config using the provided signer
-        let peer_config = self.testnet_peer_with_signer(peer_signer);
+        let peer_config = self.testing_peer_with_signer(peer_signer);
 
-        self.testnet_peer_with_assignments_and_name(peer_config, "PEER")
+        self.testing_peer_with_assignments_and_name(peer_config, "PEER")
             .await
     }
 
-    pub async fn testnet_peer_with_assignments_and_name(
+    pub async fn testing_peer_with_assignments_and_name(
         &self,
         config: NodeConfig,
         name: &'static str,

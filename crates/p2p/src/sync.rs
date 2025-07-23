@@ -533,7 +533,7 @@ mod tests {
                 execution: Default::default(),
             };
 
-            let mut node_config = NodeConfig::testnet();
+            let mut node_config = NodeConfig::testing();
             node_config.mode = NodeMode::PeerSync;
             node_config.trusted_peers = vec![fake_peer_address];
             node_config.genesis_peer_discovery_timeout_millis = 10;
@@ -657,7 +657,7 @@ mod tests {
                     .expect("can't open temp dir"),
             ));
 
-            let mut node_config = NodeConfig::testnet();
+            let mut node_config = NodeConfig::testing();
             node_config.mode = NodeMode::Genesis;
             node_config.trusted_peers = vec![];
             node_config.genesis_peer_discovery_timeout_millis = 10;

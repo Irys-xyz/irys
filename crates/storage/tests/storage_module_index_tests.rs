@@ -27,7 +27,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
-    let mut node_config = NodeConfig::testnet();
+    let mut node_config = NodeConfig::testing();
     node_config.storage.num_writes_before_sync = 1;
     node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
         chunk_size: 32,

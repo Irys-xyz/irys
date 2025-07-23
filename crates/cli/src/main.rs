@@ -79,7 +79,7 @@ pub fn cli_init_db() -> eyre::Result<Arc<DatabaseEnv>> {
                 ?err,
                 "config file not provided, defaulting to testnet config"
             );
-            NodeConfig::testnet()
+            NodeConfig::testing()
         });
 
     // open the Reth database

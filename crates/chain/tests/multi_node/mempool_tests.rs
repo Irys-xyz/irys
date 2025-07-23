@@ -37,7 +37,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     initialize_tracing();
 
     // Configure a test network
-    let mut genesis_config = NodeConfig::testnet();
+    let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for transactions and fund it
@@ -105,7 +105,7 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     initialize_tracing();
 
     // Configure a test network
-    let mut genesis_config = NodeConfig::testnet();
+    let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for transactions and fund it
@@ -161,7 +161,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     initialize_tracing();
 
     // Configure a test network
-    let mut genesis_config = NodeConfig::testnet();
+    let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for transactions and fund it
@@ -251,7 +251,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let seconds_to_wait = 15;
     // setup config / testnet
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch as usize);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
     genesis_config.consensus.get_mut().chunk_size = 32;
     // TODO: change anchor
     genesis_config
@@ -274,8 +274,8 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     genesis_node.start_public_api().await;
 
     // Initialize peer configs with their keypair/signer
-    let peer1_config = genesis_node.testnet_peer_with_signer(&peer1_signer);
-    let peer2_config = genesis_node.testnet_peer_with_signer(&peer2_signer);
+    let peer1_config = genesis_node.testing_peer_with_signer(&peer1_signer);
+    let peer2_config = genesis_node.testing_peer_with_signer(&peer2_signer);
 
     // Start the peers: No packing on the peers, they don't have partition assignments yet
     let peer1_node = IrysNodeTest::new(peer1_config.clone())
@@ -627,7 +627,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     // setup config
     let block_migration_depth: u64 = num_blocks_in_epoch - 1;
-    let mut a_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into().unwrap());
+    let mut a_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch.try_into().unwrap());
     a_config.consensus.get_mut().chunk_size = 32;
     a_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
     // signers
@@ -653,8 +653,8 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let a_signer = a_node.node_ctx.config.irys_signer();
 
     //  additional configs for peers
-    let config_1 = a_node.testnet_peer_with_signer(&c_signer);
-    let config_2 = a_node.testnet_peer_with_signer(&b_signer);
+    let config_1 = a_node.testing_peer_with_signer(&c_signer);
+    let config_2 = a_node.testing_peer_with_signer(&b_signer);
 
     // start peer nodes
     let b_node = IrysNodeTest::new(config_1)
@@ -1020,7 +1020,7 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     // setup config
     let block_migration_depth: u64 = num_blocks_in_epoch - 1;
-    let mut a_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into().unwrap());
+    let mut a_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch.try_into().unwrap());
     a_config.consensus.get_mut().chunk_size = 32;
     a_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
     // signers
@@ -1046,8 +1046,8 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     // let a_signer = a_node.node_ctx.config.irys_signer();
 
     //  additional configs for peers
-    let config_1 = a_node.testnet_peer_with_signer(&c_signer);
-    let config_2 = a_node.testnet_peer_with_signer(&b_signer);
+    let config_1 = a_node.testing_peer_with_signer(&c_signer);
+    let config_2 = a_node.testing_peer_with_signer(&b_signer);
 
     // start peer nodes
     let b_node = IrysNodeTest::new(config_1)
@@ -1283,7 +1283,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().num_chunks_in_partition = 10;
     genesis_config
@@ -1329,8 +1329,8 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let genesis_reth_context = genesis.node_ctx.reth_node_adapter.clone();
 
     // Initialize peer configs with their keypair/signer
-    let peer1_config = genesis.testnet_peer_with_signer(&peer1_signer);
-    let peer2_config = genesis.testnet_peer_with_signer(&peer2_signer);
+    let peer1_config = genesis.testing_peer_with_signer(&peer1_signer);
+    let peer2_config = genesis.testing_peer_with_signer(&peer2_signer);
 
     // Start the peers
     let peer1 = IrysNodeTest::new(peer1_config.clone())

@@ -22,7 +22,7 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
                 ?err,
                 "config file not provided, defaulting to testnet config"
             );
-            NodeConfig::testnet()
+            NodeConfig::testing()
         });
     let is_genesis = std::env::var("GENESIS")
         .map(|_| true)

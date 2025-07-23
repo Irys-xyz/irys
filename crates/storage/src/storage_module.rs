@@ -1403,10 +1403,10 @@ mod tests {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
                 num_chunks_in_partition: 20,
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             base_directory: base_path.clone(),
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
 
@@ -1607,13 +1607,13 @@ mod tests {
                 chunk_size: 32,
                 num_chunks_in_partition: 51,
                 block_migration_depth: 1,
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
             },
             base_directory: base_path,
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
         let chunk_size = config.consensus.chunk_size as usize;
@@ -1816,10 +1816,10 @@ mod tests {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 5,
                 num_chunks_in_partition: 5,
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             base_directory: base_path,
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
 

@@ -63,7 +63,7 @@ impl Clone for EpochSnapshot {
 
 impl Default for EpochSnapshot {
     fn default() -> Self {
-        let node_config = NodeConfig::testnet();
+        let node_config = NodeConfig::testing();
         let config = Config::new(node_config);
         Self {
             ledgers: Ledgers::new(&config.consensus),

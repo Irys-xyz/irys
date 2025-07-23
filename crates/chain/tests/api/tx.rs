@@ -16,7 +16,7 @@ use tracing::{error, info};
 
 #[actix_web::test]
 async fn test_get_tx() -> eyre::Result<()> {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
