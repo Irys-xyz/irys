@@ -50,6 +50,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
+use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
     CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
@@ -620,16 +621,29 @@ impl IrysNode {
 
         if config.node_config.stake_pledge_drives {
             const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-            let validation_tracker = BlockValidationTracker::new(
+            let mut validation_tracker = BlockValidationTracker::new(
                 ctx.block_tree_guard.clone(),
                 ctx.service_senders.clone(),
                 MAX_WAIT_TIME,
             );
+            // wait for any pending blocks to finish validating
+            let latest_hash = validation_tracker.wait_for_validation().await?;
+
+            {
+                let btrg = ctx.block_tree_guard.read();
+                debug!(
+                    "Checking stakes & pledges at height {}, latest hash: {}",
+                    btrg.get_canonical_chain().0.last().unwrap().height,
+                    &latest_hash
+                );
+            };
+            // TODO: add code to proactively grab the latest head block from peers
+            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
             stake_and_pledge(
                 config,
                 ctx.block_tree_guard.clone(),
                 ctx.storage_modules_guard.clone(),
-                validation_tracker,
+                latest_hash,
             )
             .await?;
         }
@@ -1610,7 +1624,7 @@ async fn stake_and_pledge(
     config: &Config,
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
-    mut validation_tracker: BlockValidationTracker,
+    latest_hash: BlockHash,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
@@ -1627,8 +1641,6 @@ async fn stake_and_pledge(
         client.post(url).send_json(commitment_tx).await
     };
 
-    // wait for any pending blocks to finish validating
-    let latest_hash = validation_tracker.wait_for_validation().await?;
     // now check the canonical state
 
     let (is_historically_staked, commitment_snapshot) = {

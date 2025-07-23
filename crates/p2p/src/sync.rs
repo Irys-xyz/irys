@@ -410,7 +410,7 @@ pub async fn sync_chain(
 
     // If no new blocks were added to the index, nothing is going to mark
     //  the tip as processed
-    if !no_new_blocks_to_process {
+    if no_new_blocks_to_process {
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
     }

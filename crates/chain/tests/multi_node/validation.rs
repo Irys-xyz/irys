@@ -82,9 +82,9 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         .unwrap();
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&block)?;
+    peer_node.gossip_block_to_peers(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(eth_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -148,9 +148,9 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     let irys_block = Arc::new(irys_block);
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&irys_block)?;
-    peer_node.gossip_eth_block(eth_payload.block())?;
-    peer_node.gossip_eth_block(eth_payload_other.block())?;
+    peer_node.gossip_block_to_peers(&irys_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_payload.block())?;
+    peer_node.gossip_eth_block_to_peers(eth_payload_other.block())?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -237,9 +237,9 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .unwrap();
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&block)?;
+    peer_node.gossip_block_to_peers(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(eth_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -331,9 +331,9 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .unwrap();
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&block)?;
+    peer_node.gossip_block_to_peers(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(eth_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);

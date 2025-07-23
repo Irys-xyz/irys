@@ -435,8 +435,8 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // their own.
     assert_eq!(peer1_block.cumulative_diff, peer2_block.cumulative_diff);
 
-    peer2_node.gossip_block(&peer2_block)?;
-    peer1_node.gossip_block(&peer1_block)?;
+    peer2_node.gossip_block_to_peers(&peer2_block)?;
+    peer1_node.gossip_block_to_peers(&peer1_block)?;
 
     // Wait for gossip, to send blocks to opposite peers
     peer1_node
