@@ -362,6 +362,7 @@ pub trait IrysTransactionCommon {
     fn id(&self) -> IrysTransactionId;
     fn total_cost(&self) -> U256;
     fn signer(&self) -> Address;
+    fn signature(&self) -> &IrysSignature;
     fn anchor(&self) -> H256;
     fn user_fee(&self) -> U256;
 
@@ -386,6 +387,10 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
     }
 
     fn anchor(&self) -> H256 {
@@ -439,8 +444,13 @@ impl IrysTransactionCommon for CommitmentTransaction {
     fn signer(&self) -> Address {
         self.signer
     }
+
     fn anchor(&self) -> H256 {
         self.anchor
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
     }
 
     fn user_fee(&self) -> U256 {
@@ -523,6 +533,13 @@ impl IrysTransactionCommon for IrysTransaction {
         match self {
             Self::Data(tx) => tx.signer(),
             Self::Commitment(tx) => tx.signer(),
+        }
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        match self {
+            Self::Data(tx) => tx.signature(),
+            Self::Commitment(tx) => tx.signature(),
         }
     }
 
@@ -641,7 +658,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_rlp_round_trip() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let mut header = mock_header(&config);
 
         // action
@@ -659,7 +676,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_rlp_round_trip() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let mut header = mock_commitment_tx(&config);
 
         // action
@@ -677,7 +694,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample DataTransactionHeader
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_header = mock_header(&config);
 
         // Serialize the DataTransactionHeader to JSON
@@ -696,7 +713,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_serde() {
         // Create a sample commitment tx
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_tx = mock_commitment_tx(&config);
 
         // Serialize the commitment tx to JSON
@@ -714,7 +731,7 @@ mod tests {
     #[test]
     fn test_tx_encode_and_signing() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_header = mock_header(&config);
         let mut sig_data = Vec::new();
         original_header.encode(&mut sig_data);
@@ -745,7 +762,7 @@ mod tests {
     #[test]
     fn test_commitment_tx_encode_and_signing() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_tx = mock_commitment_tx(&config);
         let mut sig_data = Vec::new();
         original_tx.encode(&mut sig_data);
@@ -836,7 +853,7 @@ mod pledge_decay_parametrized_tests {
         #[case] expected_cost: Decimal,
     ) {
         // Setup config with $20,000 base fee and 0.9 decay rate
-        let mut config = ConsensusConfig::testnet();
+        let mut config = ConsensusConfig::testing();
         config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
@@ -888,7 +905,7 @@ mod pledge_decay_parametrized_tests {
         #[case] expected_unpledge_value: Decimal,
     ) {
         // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
-        let mut config = ConsensusConfig::testnet();
+        let mut config = ConsensusConfig::testing();
         config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 

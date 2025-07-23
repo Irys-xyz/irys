@@ -161,7 +161,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let config = NodeConfig::testnet();
+    let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
@@ -291,7 +291,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
@@ -713,7 +713,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for the peer and fund it
@@ -727,7 +727,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     genesis_node.start_public_api().await;
 
     // Initialize the peer with our keypair/signer
-    let peer_config = genesis_node.testnet_peer_with_signer(&peer_signer);
+    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
 
     // Start the peer: No packing on the peer, it doesn't have partition assignments yet
     let peer_node = IrysNodeTest::new(peer_config.clone())
@@ -998,7 +998,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     // Configure test network
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut node = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut node = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
 
     // Create peer signer and fund it
     let peer_signer = node.new_random_signer();
@@ -1117,7 +1117,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     }
 
     // Configure test network
-    let config = NodeConfig::testnet();
+    let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
 
     // disable validation for this test
@@ -1223,7 +1223,7 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     let num_blocks_to_mine = 10;
 
     // Configure a node with specified block_tree_depth
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().block_tree_depth = block_tree_depth;
 
     let node = IrysNodeTest::new_genesis(config).start().await;
@@ -1305,7 +1305,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let max_commitments_per_epoch =
         (num_blocks_in_epoch * max_commitment_txs_per_block) - max_commitment_txs_per_block;
 
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into()?);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch.try_into()?);
     genesis_config
         .consensus
         .get_mut()

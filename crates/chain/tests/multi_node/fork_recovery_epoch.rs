@@ -16,7 +16,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 10;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for the peer and fund it
@@ -31,8 +31,8 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     genesis_node.start_public_api().await;
 
     // Initialize peer configs with their keypair/signer
-    let peer1_config = genesis_node.testnet_peer_with_signer(&peer1_signer);
-    let peer2_config = genesis_node.testnet_peer_with_signer(&peer2_signer);
+    let peer1_config = genesis_node.testing_peer_with_signer(&peer1_signer);
+    let peer2_config = genesis_node.testing_peer_with_signer(&peer2_signer);
 
     // Start the peers: No packing on the peers, they don't have partition assignments yet
     let peer1_node = IrysNodeTest::new(peer1_config.clone())

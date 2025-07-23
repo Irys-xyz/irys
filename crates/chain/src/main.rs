@@ -43,11 +43,14 @@ fn init_tracing() -> eyre::Result<()> {
 
     // use json logging for release builds
     let subscriber = subscriber.with(filter).with(ErrorLayer::default());
-    let subscriber = if cfg!(debug_assertions) {
-        subscriber.with(output_layer.boxed())
-    } else {
-        subscriber.with(output_layer.json().with_current_span(true).boxed())
-    };
+    // TODO: re-enable with config options
+
+    // let subscriber = if cfg!(debug_assertions) {
+    //     subscriber.with(output_layer.boxed())
+    // } else {
+    //     subscriber.with(output_layer.json().with_current_span(true).boxed())
+    // };
+    let subscriber = subscriber.with(output_layer.boxed());
 
     subscriber.init();
 

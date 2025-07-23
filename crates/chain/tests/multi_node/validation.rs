@@ -54,7 +54,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -65,7 +65,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
 
     // produce an invalid block
@@ -106,7 +106,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     // setup config / testnet
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
     // set block migration depth so epoch blocks go to index correctly
@@ -119,7 +119,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
 
     // produce an invalid block
@@ -205,7 +205,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -216,7 +216,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
     let extra_tx = peer_node
         .create_submit_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
@@ -297,7 +297,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -308,7 +308,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
     let _extra_tx_a = peer_node
         .create_submit_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
