@@ -2,11 +2,13 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::server_data_handler::GossipServerDataHandler;
-use crate::types::InternalGossipError;
-use crate::types::{GossipError, GossipResult};
-use actix_web::dev::Server;
+use crate::{
+    server_data_handler::GossipServerDataHandler,
+    types::{GossipError, GossipResult, InternalGossipError},
+    BlockPoolError,
+};
 use actix_web::{
+    dev::Server,
     middleware,
     web::{self, Data},
     App, HttpResponse, HttpServer,
@@ -18,8 +20,7 @@ use irys_types::{
     Address, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
     IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
-use reth::builder::Block as _;
-use reth::primitives::Block;
+use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
@@ -306,9 +307,15 @@ where
         error: &GossipError,
         peer_list: &PeerList,
     ) {
-        if let GossipError::InvalidData(_) = error {
-            peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
-        }
+        match error {
+            GossipError::InvalidData(_) => {
+                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            }
+            GossipError::BlockPool(BlockPoolError::BlockError(_)) => {
+                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            }
+            _ => {}
+        };
     }
 
     async fn handle_get_data(
@@ -393,5 +400,41 @@ where
         );
 
         Ok(server_handle.run())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::util::{ApiClientStub, BlockDiscoveryStub, MempoolStub};
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::{Config, DatabaseProvider, NodeConfig, PeerNetworkSender, PeerScore};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    #[actix_rt::test]
+    // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
+    async fn handle_invalid_block_penalizes_peer() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env =
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf()).expect("db");
+        let db = DatabaseProvider(Arc::new(db_env));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let peer_network_sender = PeerNetworkSender::new(tx);
+        let peer_list = PeerList::new(&config, &db, peer_network_sender).expect("peer list");
+
+        let miner = Address::new([1_u8; 20]);
+        peer_list.add_or_update_peer(miner, PeerListItem::default());
+
+        let error = GossipError::BlockPool(BlockPoolError::BlockError("bad".into()));
+        GossipServer::<MempoolStub, BlockDiscoveryStub, ApiClientStub>::handle_invalid_data(
+            &miner, &error, &peer_list,
+        );
+
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL - 5);
     }
 }
