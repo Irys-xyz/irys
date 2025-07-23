@@ -1675,7 +1675,7 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     genesis_node.ingest_commitment_tx(stake_tx.clone()).await?;
 
     //
-    // Test case 1: pledge commitment txs
+    // Test case 2: pledge commitment txs
     //
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
