@@ -391,6 +391,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
     fn signature(&self) -> &IrysSignature {
         &self.signature
+    }
 
     fn anchor(&self) -> H256 {
         self.anchor
@@ -443,6 +444,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     fn signer(&self) -> Address {
         self.signer
     }
+
     fn anchor(&self) -> H256 {
         self.anchor
     }
@@ -531,6 +533,13 @@ impl IrysTransactionCommon for IrysTransaction {
         match self {
             Self::Data(tx) => tx.signer(),
             Self::Commitment(tx) => tx.signer(),
+        }
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        match self {
+            Self::Data(tx) => tx.signature(),
+            Self::Commitment(tx) => tx.signature(),
         }
     }
 

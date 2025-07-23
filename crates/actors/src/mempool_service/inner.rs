@@ -782,7 +782,7 @@ impl Inner {
         // check id is valid
         if expected_id != tx.id() {
             let mut mempool = self.mempool_state.write().await;
-            mempool.invalid_tx.push(tx.id());
+            mempool.recent_invalid_tx.put(tx.id(), ());
             debug!("txid mismatch with signature");
             return Err(TxIngressError::InvalidSignature);
         }
