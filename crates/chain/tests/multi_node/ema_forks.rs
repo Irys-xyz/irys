@@ -147,7 +147,7 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         tip_block.height,
         common_height.height + BLOCKS_TO_MINE_NODE_2 as u64
     );
-    node_2.gossip_block(&Arc::new(tip_block.clone()))?;
+    node_2.gossip_block_to_peers(&Arc::new(tip_block.clone()))?;
 
     node_1
         .wait_until_height_confirmed(tip_block.height, 200)

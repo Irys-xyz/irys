@@ -8,7 +8,7 @@ use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransac
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
@@ -17,6 +17,9 @@ impl Inner {
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+
+        // notify that we have a new anchor
+        self.notify_anchor(block.block_hash).await;
 
         // FIXME: Loop though the promoted transactions and insert their ingress proofs
         // into the mempool. In the future on a multi node network we may keep
@@ -61,10 +64,23 @@ impl Inner {
                     .insert(tx_header.id, tx_header.clone());
                 mempool_state_write_guard
                     .recent_valid_tx
-                    .insert(tx_header.id);
+                    .put(tx_header.id, ());
                 drop(mempool_state_write_guard);
 
                 info!("Promoted tx:\n{:?}", tx_header);
+            }
+        }
+
+        // notify for all the txs in all the ledgers
+        for ledger in &block.data_ledgers {
+            for tx in ledger.tx_ids.iter() {
+                self.notify_anchor(*tx).await;
+            }
+        }
+
+        for ledger in &block.system_ledgers {
+            for tx in ledger.tx_ids.iter() {
+                self.notify_anchor(*tx).await;
             }
         }
 
@@ -94,7 +110,46 @@ impl Inner {
 
         self.handle_confirmed_commitment_tx_reorg(&event).await?;
 
-        tracing::info!("Reorg handled, new tip: {}", &new_tip);
+        self.revalidate_all_txs().await?;
+
+        tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
+        Ok(())
+    }
+
+    /// Re-process all currently valid mempool txs
+    /// all this does is take all valid submit & commitment txs, and passes them back through ingress
+    /// right now, all this is used for is to validate the anchor state of a tx
+    /// (when a reorg happens, the anchor a tx used to make it into valid txs could now be pending)
+    #[instrument(skip_all)]
+    pub async fn revalidate_all_txs(&mut self) -> eyre::Result<()> {
+        // re-process all valid txs
+        let (valid_submit_ledger_tx, valid_commitment_tx) = {
+            let mut state = self.mempool_state.write().await;
+            state.recent_valid_tx.clear();
+            (
+                std::mem::take(&mut state.valid_submit_ledger_tx),
+                std::mem::take(&mut state.valid_commitment_tx),
+            )
+        };
+        for (id, tx) in valid_submit_ledger_tx {
+            match self.handle_data_tx_ingress_message(tx).await {
+                Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
+                Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
+            }
+        }
+        for (_address, txs) in valid_commitment_tx {
+            for tx in txs {
+                let id = tx.id;
+                match self.handle_ingress_commitment_tx_message(tx).await {
+                    Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
+                    Err(err) => debug!(
+                        "failed to resubmit commitment tx {} to mempool: {:?}",
+                        &id, &err
+                    ),
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -554,7 +609,7 @@ impl Inner {
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .remove(txid);
-                mempool_state_write_guard.recent_valid_tx.remove(txid);
+                mempool_state_write_guard.recent_valid_tx.pop(txid);
             }
         }
 

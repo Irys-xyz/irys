@@ -1,12 +1,13 @@
 use crate::utils::IrysNodeTest;
-use irys_testing_utils::initialize_tracing;
+use irys_testing_utils::initialize_tracing_with_backtrace;
 use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, H256};
 
 #[actix_web::test]
 /// demonstrate that duplicate txs are allowed into mempool, to allow for forks, but not returned by handle_get_best_mempool_txs()
 /// demonstrate that duplicate txs are blocked from mempool ingress when tx is in database after block migration
 async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()> {
-    initialize_tracing();
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    initialize_tracing_with_backtrace();
 
     // basic node config
     let seconds_to_wait: usize = 10;
@@ -54,7 +55,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     let block2 = node.get_block_by_height(2).await?;
     // check the shape of the mempool equates to empty
-    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait_u32)
+    node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
     // create commitment tx that will be allowed into mempool, but not included in a block as this node is already staked
     let stake_for_mempool = node.post_stake_commitment(block2.block_hash).await;
@@ -68,7 +69,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     .await?;
 
     // check the shape of the mempool now contains one commitment txs
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
+    node.wait_for_mempool_best_txs_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
 
     //
@@ -83,9 +84,9 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let txid = tx_for_mempool.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
 
-    // mempool should still have 2 commitments txs
-    // it will not yet return the submit tx as it has not received the txs corresponding data
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
+    // mempool should still have a commitment tx
+    // submit tx should be present, as it's anchor is a canonical tx
+    node.wait_for_mempool_best_txs_shape(1, 0, 1, seconds_to_wait_u32)
         .await?;
 
     // ensure block with tx_for_migration is now in index (from TEST CASE 1)
@@ -98,18 +99,20 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // resubmit tx header that already exists in the mempool
     node.post_data_tx_raw(&tx_for_mempool.header).await;
 
-    // mempool should not provide the submit as part of best txs
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
+    // mempool should provide the submit as part of best txs
+    node.wait_for_mempool_best_txs_shape(1, 0, 1, seconds_to_wait_u32)
         .await?;
+
     // resubmit commitment transactions that were already seen
     node.post_commitment_tx(&stake_for_mempool).await?;
     node.post_commitment_tx(&pledge_for_mempool).await?;
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
+
+    node.wait_for_mempool_best_txs_shape(1, 0, 1, seconds_to_wait_u32)
         .await?;
 
     // ensure mempool does not accept any duplicate tx
     // mempool will have skipped new stake and the duplicate pledge
-    node.wait_for_mempool_shape(0, 0, 1, seconds_to_wait_u32)
+    node.wait_for_mempool_best_txs_shape(1, 0, 1, seconds_to_wait_u32)
         .await?;
 
     // mine another block to migrate block 2 into the index
@@ -151,7 +154,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     // retrieve block 8 for use as a unique, recent and previously unused anchor
     let block8 = node.get_block_by_height(8).await?;
-    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait_u32)
+    node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
 
     // re post existing stake commitment, that also uses the same anchor as the previous stake tx
@@ -163,7 +166,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let _new_anchor_stake_for_mempool = node.post_stake_commitment(block8.block_hash).await;
     // ensure mempool does not accept either of the above two txs
     // i.e. mempool should have rejected both stakes as the node has been staked since epoch
-    node.wait_for_mempool_shape(0, 0, 0, seconds_to_wait_u32)
+    node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
 
     // finally, mine block to ensure block is valid

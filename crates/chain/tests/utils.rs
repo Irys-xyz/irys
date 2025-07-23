@@ -62,7 +62,7 @@ use reth::{
 };
 use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
 use sha2::{Digest as _, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -922,53 +922,43 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn wait_for_mempool_commitment_txs(
         &self,
-        mut tx_ids: Vec<H256>,
+        tx_ids: Vec<H256>,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
-        let mut retries = 0;
         let max_retries = seconds_to_wait * 5; // 200ms per retry
+        let mut tx_ids: HashSet<H256> = tx_ids.clone().into_iter().collect();
 
-        while let Some(tx_id) = tx_ids.pop() {
-            'inner: while retries < max_retries {
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
-                    commitment_tx_ids: vec![tx_id],
-                    response: oneshot_tx,
-                })?;
+        for retry in 0..max_retries {
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            let to_fetch = tx_ids.iter().copied().collect_vec();
+            debug!("Fetching {:?}", &to_fetch);
+            mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
+                commitment_tx_ids: to_fetch,
+                response: oneshot_tx,
+            })?;
+            let fetched = oneshot_rx.await?;
 
-                //if transaction exists in mempool
-                if oneshot_rx
-                    .await
-                    .expect("to process GetCommitmentTxs")
-                    .contains_key(&tx_id)
-                {
-                    break 'inner;
-                }
-
-                sleep(Duration::from_millis(200)).await;
-                retries += 1;
+            for found in fetched.keys() {
+                debug!("Fetched tx {} from mempool in {} retries", &found, &retry);
+                tx_ids.remove(found);
             }
-        }
 
-        if retries == max_retries {
-            tracing::error!(
-                "transaction not found in mempool after {} retries",
-                &retries
-            );
-            Err(eyre::eyre!(
-                "Failed to locate tx in mempool after {} retries",
-                retries
-            ))
-        } else {
-            info!("transactions found in mempool after {} retries", &retries);
-            Ok(())
+            if tx_ids.is_empty() {
+                debug!("Fetched all txs from mempool in {} retries", &retry);
+                return Ok(());
+            }
+            sleep(Duration::from_millis(200)).await;
         }
+        eyre::bail!(
+            "Unable to get txs {:?} from the mempool",
+            &tx_ids.iter().collect_vec()
+        )
     }
 
-    // waits until mempool contains exact expected counts of each tx type.
+    // waits until mempool
     // all filters are AND conditions (e.g., submit_txs=1, publish_txs=1 requires both).
-    pub async fn wait_for_mempool_shape(
+    pub async fn wait_for_mempool_best_txs_shape(
         &self,
         submit_txs: usize,
         publish_txs: usize,
@@ -982,21 +972,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Waiting for {} submit, {} publish and {} commitment",
             &submit_txs, &publish_txs, &commitment_txs
         );
+        let mut prev = (0, 0, 0);
+        let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             mempool_service.send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx))?;
 
+            let txs: MempoolTxs = oneshot_rx.await??;
             let MempoolTxs {
                 commitment_tx,
                 submit_tx,
                 publish_tx,
-            } = oneshot_rx.await??;
-            if commitment_tx.len() == commitment_txs
-                && submit_tx.len() == submit_txs
-                && publish_tx.0.len() == publish_txs
-            {
+            } = txs.clone();
+            prev = (submit_tx.len(), publish_tx.0.len(), commitment_tx.len());
+
+            if prev == expected {
                 break;
             }
+            debug!("got {:?} expected {:?} - txs: {:?}", &prev, expected, &txs);
 
             tokio::time::sleep(Duration::from_secs(1)).await;
             retries += 1;
@@ -1004,8 +997,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         if retries == max_retries {
             Err(eyre::eyre!(
-                "Failed to validate mempool state after {} retries",
-                retries
+                "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
+                retries,
+                &prev,
+                &expected
             ))
         } else {
             info!("mempool state valid after {} retries", &retries);
@@ -1211,7 +1206,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(blocks)
     }
 
-    pub fn gossip_block(&self, block_header: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
+    pub fn gossip_block_to_peers(&self, block_header: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
@@ -1220,7 +1215,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(())
     }
 
-    pub fn gossip_eth_block(
+    pub fn gossip_eth_block_to_peers(
         &self,
         block: &reth::primitives::SealedBlock<reth::primitives::Block>,
     ) -> eyre::Result<()> {
