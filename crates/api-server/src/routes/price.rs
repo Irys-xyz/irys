@@ -4,17 +4,16 @@ use actix_web::{
     HttpResponse, Result as ActixResult,
 };
 use eyre::OptionExt as _;
-use irys_actors::mempool_service::{AtomicMempoolState, MempoolServiceMessage};
 use irys_types::{
     storage_pricing::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    Address, CommitmentType, DataLedger, U256,
+    transaction::PledgeDataProvider as _,
+    Address, DataLedger, U256,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr as _;
-use tokio::sync::oneshot;
 
 use crate::ApiState;
 
@@ -126,50 +125,6 @@ fn parse_user_address(address_str: &str) -> Result<Address, actix_web::Error> {
     Address::from_str(address_str).map_err(|_| ErrorBadRequest("Invalid address format"))
 }
 
-/// Get the current pledge count for a user from the canonical blockchain state
-async fn get_canonical_pledge_count(state: &web::Data<ApiState>, user_address: &Address) -> usize {
-    let commitment_snapshot = state.block_tree.read().canonical_commitment_snapshot();
-    commitment_snapshot
-        .commitments
-        .get(user_address)
-        .map(|miner_commitments| miner_commitments.pledges.len())
-        .unwrap_or(0)
-}
-
-/// Query the mempool state to count pending commitment transactions of a specific type
-async fn count_pending_commitments(
-    state: &web::Data<ApiState>,
-    user_address: &Address,
-    commitment_type: CommitmentType,
-) -> Result<usize, actix_web::Error> {
-    // Query mempool state
-    let (tx, rx) = oneshot::channel();
-    state
-        .mempool_service
-        .send(MempoolServiceMessage::GetState(tx))
-        .map_err(|_| ErrorBadRequest("Failed to query mempool state"))?;
-
-    let mempool_state: AtomicMempoolState = rx
-        .await
-        .map_err(|_| ErrorBadRequest("Failed to receive mempool state"))?;
-
-    // Count pending transactions of the specified type
-    let count = {
-        let mempool = mempool_state.read().await;
-        mempool
-            .valid_commitment_tx
-            .get(user_address)
-            .map(|txs| {
-                txs.iter()
-                    .filter(|tx| tx.commitment_type == commitment_type)
-                    .count()
-            })
-            .unwrap_or(0)
-    };
-
-    Ok(count)
-}
-
 /// Calculate the pledge value based on the pledge count and decay rate
 fn calculate_pledge_value(
     base_value: Amount<Irys>,
@@ -189,16 +144,8 @@ pub async fn get_pledge_price(
     let user_address_str = path.into_inner();
     let user_address = parse_user_address(&user_address_str)?;
 
-    // Get the base pledge count from canonical state
-    let mut pledge_count = get_canonical_pledge_count(&state, &user_address).await;
-
-    // Count pending pledge transactions
-    let pending_pledges =
-        count_pending_commitments(&state, &user_address, CommitmentType::Pledge).await?;
-
-    // Add pending pledges to get the effective pledge count
-    // This ensures the next pledge price accounts for pending pledges
-    pledge_count = pledge_count.saturating_add(pending_pledges);
+    // Use the MempoolPledgeProvider to get accurate pledge count
+    let pledge_count = state.mempool_pledge_provider.pledge_count(user_address);
 
     // Calculate the pledge value with decay
     let pledge_value = calculate_pledge_value(
@@ -223,32 +170,19 @@ pub async fn get_unpledge_price(
     let user_address_str = path.into_inner();
     let user_address = parse_user_address(&user_address_str)?;
 
-    // Get the base pledge count from canonical state
-    let mut pledge_count = get_canonical_pledge_count(&state, &user_address).await;
+    // Use the MempoolPledgeProvider to get accurate pledge count
+    let pledge_count = state.mempool_pledge_provider.pledge_count(user_address);
 
-    // Count pending unpledge transactions
-    let pending_unpledges =
-        count_pending_commitments(&state, &user_address, CommitmentType::Unpledge).await?;
-
-    // Adjust pledge count by subtracting pending unpledges
-    // This ensures we calculate the refund for the correct pledge
-    pledge_count = pledge_count.saturating_sub(pending_unpledges);
-
-    let refund_amount = if pledge_count == 0 {
-        U256::from(0)
-    } else {
-        // Calculate the value of the most recent pledge (count - 1)
-        calculate_pledge_value(
-            state.config.consensus.pledge_base_value,
-            state.config.consensus.pledge_decay,
-            pledge_count - 1,
-        )
-    };
+    let refund_amount = calculate_pledge_value(
+        state.config.consensus.pledge_base_value,
+        state.config.consensus.pledge_decay,
+        pledge_count.saturating_sub(1),
+    );
 
     let commitment_fee = state.config.consensus.mempool.commitment_fee;
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
-        value: refund_amount, // This is the refund amount
+        value: refund_amount,
         fee: commitment_fee,
         user_address: Some(user_address),
     }))

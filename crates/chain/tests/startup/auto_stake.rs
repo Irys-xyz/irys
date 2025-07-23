@@ -48,18 +48,11 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     let h = genesis_node.get_canonical_chain_height().await;
     // so autopledge uses a different anchor
     genesis_node.mine_blocks(num_blocks_in_epoch).await?;
-    let hash = genesis_node
+    let _hash = genesis_node
         .wait_until_height(h + num_blocks_in_epoch as u64, 20)
         .await?;
 
     let config = genesis_node.node_ctx.config.consensus.clone();
-
-    // Get the commitment snapshot from this block
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_commitment_snapshot(&hash)?;
 
     if stake {
         let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero(), 1);
@@ -81,7 +74,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
                 &config,
                 anchor,
                 1,
-                &*commitment_snapshot,
+                genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
                 peer_signer.address(),
             );
             let pledge_tx = peer_signer.sign_commitment(pledge_tx)?;

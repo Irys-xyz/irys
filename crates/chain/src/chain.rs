@@ -109,6 +109,7 @@ pub struct IrysNodeCtx {
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
+    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 
 impl IrysNodeCtx {
@@ -124,6 +125,7 @@ impl IrysNodeCtx {
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
             sync_state: self.sync_state.clone(),
+            mempool_pledge_provider: self.mempool_pledge_provider.clone(),
         }
     }
 
@@ -619,34 +621,8 @@ impl IrysNode {
         )
         .await?;
 
-        if config.node_config.stake_pledge_drives {
-            const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-            let mut validation_tracker = BlockValidationTracker::new(
-                ctx.block_tree_guard.clone(),
-                ctx.service_senders.clone(),
-                MAX_WAIT_TIME,
-            );
-            // wait for any pending blocks to finish validating
-            let latest_hash = validation_tracker.wait_for_validation().await?;
-
-            {
-                let btrg = ctx.block_tree_guard.read();
-                debug!(
-                    "Checking stakes & pledges at height {}, latest hash: {}",
-                    btrg.get_canonical_chain().0.last().unwrap().height,
-                    &latest_hash
-                );
-            };
-            // TODO: add code to proactively grab the latest head block from peers
-            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
-            stake_and_pledge(
-                config,
-                ctx.block_tree_guard.clone(),
-                ctx.storage_modules_guard.clone(),
-                latest_hash,
-            )
-            .await?;
-        }
+        // Note: stake_and_pledge is now called after mempool service initialization
+        // to allow access to MempoolPledgeProvider
 
         Ok(ctx)
     }
@@ -959,6 +935,24 @@ impl IrysNode {
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
+        // Get the mempool state to create the pledge provider
+        let (tx, rx) = oneshot::channel();
+        service_senders
+            .mempool
+            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
+            .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
+
+        let mempool_state = rx
+            .await
+            .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
+
+        // Create the MempoolPledgeProvider
+        let mempool_pledge_provider =
+            Arc::new(irys_actors::mempool_service::MempoolPledgeProvider::new(
+                mempool_state,
+                block_tree_guard.clone(),
+            ));
+
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
             &config,
@@ -1137,6 +1131,7 @@ impl IrysNode {
             block_pool,
             validation_enabled,
             storage_modules_guard,
+            mempool_pledge_provider: mempool_pledge_provider.clone(),
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1207,6 +1202,37 @@ impl IrysNode {
             });
         }
 
+        // Call stake_and_pledge after mempool service is initialized
+        if config.node_config.stake_pledge_drives {
+            const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+            let mut validation_tracker = BlockValidationTracker::new(
+                block_tree_guard.clone(),
+                service_senders.clone(),
+                MAX_WAIT_TIME,
+            );
+            // wait for any pending blocks to finish validating
+            let latest_hash = validation_tracker.wait_for_validation().await?;
+
+            {
+                let btrg = block_tree_guard.read();
+                debug!(
+                    "Checking stakes & pledges at height {}, latest hash: {}",
+                    btrg.get_canonical_chain().0.last().unwrap().height,
+                    &latest_hash
+                );
+            };
+            // TODO: add code to proactively grab the latest head block from peers
+            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
+            stake_and_pledge(
+                &config,
+                block_tree_guard.clone(),
+                irys_node_ctx.storage_modules_guard.clone(),
+                latest_hash,
+                mempool_pledge_provider.clone(),
+            )
+            .await?;
+        }
+
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
@@ -1222,6 +1248,7 @@ impl IrysNode {
                     .http_url()
                     .expect("Missing reth rpc url!"),
                 sync_state,
+                mempool_pledge_provider,
             },
             http_listener,
         );
@@ -1625,6 +1652,7 @@ async fn stake_and_pledge(
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
     latest_hash: BlockHash,
+    mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
@@ -1704,7 +1732,7 @@ async fn stake_and_pledge(
             &config.consensus,
             last_tx_id,
             1,
-            commitment_snapshot.as_ref(),
+            mempool_pledge_provider.as_ref(),
             address,
         );
         let pledge_tx = signer.sign_commitment(pledge_tx)?;

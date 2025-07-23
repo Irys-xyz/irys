@@ -102,16 +102,11 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // ===== TEST CASE 3: post duplicate pledge tx =====
     // Get the CommitmentSnapshot from the latest canonical block
-    let commitment_snapshot = node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         anchor,
         1,
-        &*commitment_snapshot,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
     );
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();

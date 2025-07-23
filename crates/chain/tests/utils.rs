@@ -1542,13 +1542,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let config = &self.node_ctx.config.consensus;
         let signer = self.cfg.signer();
-        let snapshot = self
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .canonical_commitment_snapshot();
-        let pledge_tx =
-            CommitmentTransaction::new_pledge(config, anchor, 1, &*snapshot, signer.address());
+        let pledge_tx = CommitmentTransaction::new_pledge(
+            config,
+            anchor,
+            1,
+            self.node_ctx.mempool_pledge_provider.as_ref(),
+            signer.address(),
+        );
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
@@ -2043,17 +2043,17 @@ pub fn new_stake_tx(
     signer.sign_commitment(stake_tx).unwrap()
 }
 
-pub fn new_pledge_tx(
+pub fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     anchor: &H256,
     signer: &IrysSigner,
     config: &ConsensusConfig,
-    commitment_snapshot: &irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot,
+    pledge_provider: &P,
 ) -> CommitmentTransaction {
     let pledge_tx = CommitmentTransaction::new_pledge(
         config,
         *anchor,
         1,
-        commitment_snapshot,
+        pledge_provider,
         signer.address(),
     );
     signer.sign_commitment(pledge_tx).unwrap()

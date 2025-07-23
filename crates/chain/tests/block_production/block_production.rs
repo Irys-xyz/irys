@@ -1336,11 +1336,6 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     genesis_node.post_commitment_tx(&stake_tx).await?;
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id];
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
 
     for height in 0..11 {
         let hash = genesis_node.get_block_by_height(height).await?.block_hash;
@@ -1349,7 +1344,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
             &hash,
             &signer,
             &genesis_config.consensus_config(),
-            &commitment_snapshot,
+            genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
         );
 
         tx_ids.push(tx.id);

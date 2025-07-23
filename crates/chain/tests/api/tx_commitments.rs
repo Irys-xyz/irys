@@ -377,13 +377,11 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address
-    use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
-    let empty_snapshot = CommitmentSnapshot::default();
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         H256::default(),
         1,
-        &empty_snapshot,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
     );
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
@@ -430,7 +428,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
         consensus,
         H256::default(),
         1,
-        &empty_snapshot,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
     );
     let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
@@ -482,16 +480,11 @@ async fn post_pledge_commitment(
 ) -> CommitmentTransaction {
     let consensus = &node.node_ctx.config.consensus;
     // Get the CommitmentSnapshot from the latest canonical block
-    let commitment_snapshot = node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         anchor,
         1,
-        &*commitment_snapshot,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
     );
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();

@@ -120,13 +120,13 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 
     // Create stake and pledge commitments for the signer
     let config = &genesis_node.node_ctx.config.consensus;
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
     let stake_tx = new_stake_tx(&H256::zero(), &signer, config);
-    let pledge_tx = new_pledge_tx(&H256::zero(), &signer, config, &commitment_snapshot);
+    let pledge_tx = new_pledge_tx(
+        &H256::zero(),
+        &signer,
+        config,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+    );
 
     // Post the pledge before the stake
     genesis_node.post_commitment_tx(&pledge_tx).await?;
@@ -187,12 +187,12 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     assert!(result.is_ok());
 
     //create and post pledge commitment for the signer
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
-    let pledge_tx = new_pledge_tx(&H256::zero(), &signer, config, &commitment_snapshot);
+    let pledge_tx = new_pledge_tx(
+        &H256::zero(),
+        &signer,
+        config,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+    );
     genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     // test storage data

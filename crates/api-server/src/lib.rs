@@ -38,6 +38,7 @@ pub struct ApiState {
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
     pub sync_state: SyncState,
+    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 
 impl ApiState {
