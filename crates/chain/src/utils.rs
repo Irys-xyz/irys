@@ -21,7 +21,7 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
             let config = NodeConfig::testnet();
             let mut file = File::create(&config_path)?;
             file.write_all(toml::to_string(&config)?.as_bytes())?;
-            eyre::bail!("Config file created - please edit it before restarting.")
+            eyre::bail!("Config file created - please edit it before restarting (see SETUP.md)")
         }
     };
 
