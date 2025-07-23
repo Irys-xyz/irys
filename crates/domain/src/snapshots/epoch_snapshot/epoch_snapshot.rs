@@ -949,9 +949,7 @@ mod tests {
     #[test]
     fn threshold_based_allocation() {
         // Build a snapshot with a custom consensus configuration where each
-        // slot can hold two partitions. This highlights the incorrect capacity
-        // calculation which currently multiplies by the number of partitions
-        // per slot.
+        // slot can hold two partitions
         let mut node_config = NodeConfig::testing();
         node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
             num_partitions_per_slot: 2,
@@ -977,7 +975,7 @@ mod tests {
         // mock header
         let mut header = IrysBlockHeader::new_mock_header();
         header.height = 0;
-        // Create a block where the submit ledger has stored up to 36 chunks. With the
+        // Modify mock block so the submit ledger has an offset up to 34 chunks. With the
         // correct capacity formula (4 slots * 10 chunks), this is below the
         // allocation threshold and should trigger two additional slots.
         for offset in 1..=34 {
@@ -987,7 +985,7 @@ mod tests {
             assert_eq!(slots_to_add, 0, "offset: {:?}", offset);
         }
 
-        // Create a block where the submit ledger has stored 36 to 40 chunks. With the
+        // Modify mock block so the submit ledger has an offset between 35 and 40 chunks. With the
         // correct capacity formula (4 slots * 10 chunks), this is above the
         // allocation threshold and should trigger two additional slots.
         for offset in 35..=40 {
@@ -998,7 +996,7 @@ mod tests {
         }
 
         // and test for more than 40 chunks
-        // should produce the same result as 36..=40 as new slots are capped at 2 using the Threshold-based capacity expansion
+        // should produce the same result as 35..=40 as new slots are capped at 2 using the Threshold-based capacity expansion
         for offset in 41..=99 {
             header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
             let slots_to_add =
