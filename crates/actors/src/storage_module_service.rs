@@ -13,7 +13,7 @@
 /// components accessing this information through read guards to ensure
 /// consistency throughout the system.
 use irys_config::StorageSubmodulesConfig;
-use irys_storage::{PackingParams, StorageModule, StorageModuleInfo};
+use irys_domain::{PackingParams, StorageModule, StorageModuleInfo};
 use irys_types::{Config, PartitionChunkRange, TokioServiceHandle};
 use reth::tasks::shutdown::Shutdown;
 use std::{
