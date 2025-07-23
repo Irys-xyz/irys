@@ -5247,7 +5247,7 @@ dependencies = [
  "irys-types",
  "nodit",
  "reth-db",
- "serde",
+ "serde_json",
  "test-log",
  "tokio",
  "tracing",

@@ -1,16 +1,13 @@
 mod chunk_orchestrator;
 mod peer_bandwidth_manager;
-use futures::future::Either;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_types::{Address, Config, TokioServiceHandle};
 use reth::tasks::shutdown::Shutdown;
-use reth::tasks::TaskExecutor;
 use std::{
     collections::HashMap,
-    pin::pin,
     sync::{Arc, RwLock},
 };
-use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use chunk_orchestrator::ChunkOrchestrator;
 use peer_bandwidth_manager::PeerBandwidthManager;
