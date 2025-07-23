@@ -307,9 +307,15 @@ where
         error: &GossipError,
         peer_list: &PeerList,
     ) {
-        if let GossipError::InvalidData(_) = error {
-            peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
-        }
+        match error {
+            GossipError::InvalidData(_) => {
+                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            }
+            GossipError::BlockPool(BlockPoolError::BlockError(_)) => {
+                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            }
+            _ => {}
+        };
     }
 
     async fn handle_get_data(
