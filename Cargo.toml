@@ -370,11 +370,11 @@ panic = "unwind"
 # See https://github.com/oxidecomputer/omicron/issues/4009 for some background context here.
 # By reducing the debug level (though keeping enough to have meaningful
 # backtraces), we reduce incremental build time and binary size significantly.
-# debug = "line-tables-only"
-# split-debuginfo = "unpacked"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
-# [profile.dev.build-override]
-# debug = "line-tables-only"
+[profile.dev.build-override]
+debug = "line-tables-only"
 
 # always optimise crypto
 [profile.dev.package.irys-vdf]
