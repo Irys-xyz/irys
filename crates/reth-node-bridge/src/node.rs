@@ -104,6 +104,20 @@ pub async fn run_node(
     reth_config.engine.persistence_threshold = 0;
     reth_config.engine.memory_block_buffer_target = 0;
 
+    let subpool_max_tx_count = 1_000_000;
+    let subpool_max_size_mb = 1000;
+
+    reth_config.txpool.pending_max_count = subpool_max_tx_count;
+    reth_config.txpool.pending_max_size = subpool_max_size_mb;
+
+    reth_config.txpool.basefee_max_count = subpool_max_tx_count;
+    reth_config.txpool.basefee_max_size = subpool_max_size_mb;
+
+    reth_config.txpool.queued_max_count = subpool_max_tx_count;
+    reth_config.txpool.queued_max_size = subpool_max_size_mb;
+
+    reth_config.txpool.additional_validation_tasks = 2;
+
     let db_args = DatabaseArgs::default();
     // Install the prometheus recorder to be sure to record all metrics
     let _ = install_prometheus_recorder();
