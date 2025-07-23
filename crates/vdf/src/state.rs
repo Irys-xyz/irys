@@ -381,17 +381,6 @@ pub fn vdf_steps_are_valid(
                 ));
             }
 
-            // (
-            //     *checkpoints.last().unwrap(),
-            //     if i == steps.len() - 2 {
-            //         // If this is the last step, return the last checkpoint
-            //         Some(H256List(checkpoints))
-            //     } else {
-            //         // Otherwise, return just the seed for the next step
-            //         None
-            //     },
-            // )
-
             // Store checkpoints if this is the last step
             if i == steps.len() - 2 {
                 *last_step_checkpoints.write().unwrap() = Some(H256List(checkpoints));
@@ -403,17 +392,6 @@ pub fn vdf_steps_are_valid(
 
     let checkpoints_guard = last_step_checkpoints.read().unwrap();
     let last_step_checkpoints: Option<H256List> = checkpoints_guard.clone();
-
-    // let last_step_checkpoints = test.last().unwrap().1.clone();
-    // let test: H256List = H256List(test.into_iter().map(|par| par.0).collect());
-    //
-    // let steps_are_valid = test == vdf_info.steps;
-    //
-    // if !steps_are_valid {
-    //     // Compare the original list with the calculated one
-    //     warn_mismatches(&test, &vdf_info.steps);
-    //     return Err(eyre::eyre!("VDF steps are invalid!"));
-    // }
 
     let last_step_checkpoints_are_valid = last_step_checkpoints
         .as_ref()
