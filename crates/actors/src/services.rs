@@ -6,7 +6,7 @@ use crate::{
     cache_service::CacheServiceAction,
     mempool_service::MempoolServiceMessage,
     validation_service::ValidationServiceMessage,
-    StorageModuleServiceMessage,
+    DataSyncServiceMessage, StorageModuleServiceMessage,
 };
 use actix::Message;
 use core::ops::Deref;
@@ -58,6 +58,7 @@ pub struct ServiceReceivers {
     pub vdf_mining: Receiver<bool>,
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
+    pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
@@ -75,6 +76,7 @@ pub struct ServiceSendersInner {
     pub vdf_mining: Sender<bool>,
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
+    pub data_sync: UnboundedSender<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
@@ -96,6 +98,7 @@ impl ServiceSendersInner {
         // vdf channel for fast forwarding steps during node sync
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
+        let (ds_sender, ds_receiver) = unbounded_channel::<DataSyncServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipBroadcastMessage>();
         let (block_tree_sender, block_tree_receiver) =
@@ -118,6 +121,7 @@ impl ServiceSendersInner {
             vdf_mining: vdf_mining_sender,
             vdf_fast_forward: vdf_fast_forward_sender,
             storage_modules: sm_sender,
+            data_sync: ds_sender,
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
             validation_service: validation_sender,
@@ -133,6 +137,7 @@ impl ServiceSendersInner {
             vdf_mining: vdf_mining_receiver,
             vdf_fast_forward: vdf_fast_forward_receiver,
             storage_modules: sm_receiver,
+            data_sync: ds_receiver,
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
             validation_service: validation_receiver,

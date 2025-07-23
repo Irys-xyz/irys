@@ -1,11 +1,11 @@
 use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
-use crate::EpochBlockData;
+use crate::{EpochBlockData, StorageModuleInfo};
 use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
-use irys_storage::{ie, StorageModuleInfo};
+use irys_storage::ie;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},

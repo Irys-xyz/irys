@@ -7,15 +7,14 @@ use std::{
 use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
+use irys_domain::{ChunkType, StorageModule};
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
 
-#[cfg(feature = "nvidia")]
-use {irys_packing::capacity_pack_range_cuda_c, irys_types::split_interval};
-
-use irys_storage::{ChunkType, StorageModule};
 use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange};
 use tokio::{sync::Semaphore, task::yield_now, time::sleep};
 use tracing::{debug, warn};
+#[cfg(feature = "nvidia")]
+use {irys_packing::capacity_pack_range_cuda_c, irys_types::split_interval};
 
 #[derive(Debug, Message, Clone)]
 #[rtype("()")]
@@ -399,9 +398,9 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use actix::Actor as _;
+    use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_packing::capacity_single::compute_entropy_chunk;
     use irys_storage::ie;
-    use irys_storage::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},

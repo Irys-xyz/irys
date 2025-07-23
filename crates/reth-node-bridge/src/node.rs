@@ -2,7 +2,6 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{payload::ShadowTxStore, IrysEthereumNode};
-use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
 use reth::{
     args::DatabaseArgs,
@@ -86,7 +85,6 @@ pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
-    _provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
     shadow_tx_store: ShadowTxStore,

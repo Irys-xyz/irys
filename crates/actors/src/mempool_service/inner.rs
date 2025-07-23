@@ -7,10 +7,12 @@ use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
-use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus};
+use irys_domain::{
+    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
+};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
-use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
+use irys_storage::RecoveredMempoolState;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,

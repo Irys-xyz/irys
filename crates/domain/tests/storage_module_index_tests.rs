@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use irys_database::{
     cache_chunk, cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
@@ -10,6 +8,7 @@ use irys_database::{
     },
     tables::IrysTables,
 };
+use irys_domain::{ChunkType, StorageModule, StorageModuleInfo, StorageSubmodule};
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -97,13 +96,13 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         },
     ];
 
-    let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
+    let mut storage_modules: Vec<StorageModule> = Vec::new();
 
     // Create a Vec initialized storage modules
     for info in storage_module_infos {
-        let arc_module = Arc::new(StorageModule::new(&info, &config)?);
-        storage_modules.push(arc_module.clone());
-        arc_module.pack_with_zeros();
+        let sm = StorageModule::new(&info, &config).unwrap();
+        sm.pack_with_zeros();
+        storage_modules.push(sm);
     }
 
     let partition_0_range = LedgerChunkRange(ledger_chunk_offset_ii!(0, 19));

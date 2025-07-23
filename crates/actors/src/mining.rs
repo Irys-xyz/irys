@@ -1,3 +1,4 @@
+use irys_domain::{ChunkType, StorageModule};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -12,7 +13,7 @@ use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr as _;
 use irys_efficient_sampling::Ranges;
-use irys_storage::{ie, ii, StorageModule};
+use irys_storage::{ie, ii};
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
@@ -174,11 +175,11 @@ impl PartitionMiningActor {
 
             // Only include the tx_path and data_path for chunks that contain data
             let (tx_path, data_path) = match chunk_type {
-                irys_storage::ChunkType::Entropy => (None, None),
-                irys_storage::ChunkType::Data => self
+                ChunkType::Entropy => (None, None),
+                ChunkType::Data => self
                     .storage_module
                     .read_tx_data_path(LedgerChunkOffset::from(*partition_chunk_offset))?,
-                irys_storage::ChunkType::Uninitialized => {
+                ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
                 }
             };
@@ -409,7 +410,8 @@ mod tests {
     };
     use actix::actors::mocker::Mocker;
     use irys_database::{open_or_create_db, tables::IrysTables};
-    use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
+    use irys_domain::{PackingParams, StorageModuleInfo};
+    use irys_storage::ie;
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
         block_production::SolutionContext, chunk::UnpackedChunk, partition::PartitionAssignment,
