@@ -63,7 +63,7 @@ This will run a small, low-capacity localnet node that you can interact with:
 
 
 ### Joining a network quickstart
-- Get the trusted peer info from the peer(s) you want to connect to\
+- Get the trusted peer info from the peer(s) you want to connect to.\
 Note: the trusted peers section template is:
 ```
 [[trusted_peers]]
@@ -82,10 +82,10 @@ api = "<public IP>:<public port>""
 peering_tcp_addr = ""<public IP>:<public port>""
 peer_id = "..."
 ```
-- Add your peer's info to the other peer's configurations as a trusted peer
-- Make sure your `[consensus(...)]` sections are *identical*
-- Set mode to `PeerSync`
-- Perform any other required setup (port forwarding, loading in EVM genesis state snapshots, etc)
+- Add your peer's info to the other peer's configurations as a trusted peer.
+- Make sure your `[consensus(...)]` sections are *identical*.
+- Set mode to `PeerSync`.
+- Perform any other required setup (port forwarding, loading in EVM genesis state snapshots, etc).
 - Start the node!
 
 These docs are a WIP - [PRs welcome!](https://github.com/Irys-xyz/irys)
