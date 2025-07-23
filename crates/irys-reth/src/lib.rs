@@ -13,8 +13,8 @@
 
 use std::{sync::Arc, time::SystemTime};
 
-use alloy_consensus::TxLegacy;
-use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_consensus::TxEip1559;
+use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, TxKind, U256};
 pub use alloy_rlp;
 use alloy_rlp::{Decodable as _, Encodable as _};
@@ -71,20 +71,23 @@ pub mod payload_service_builder;
 pub mod shadow_tx;
 
 #[must_use]
-pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLegacy {
+pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxEip1559 {
     // allocate 512 bytes for the shadow tx rlp, misc optimisation
     let mut shadow_tx_rlp = Vec::with_capacity(512);
     shadow_tx.encode(&mut shadow_tx_rlp);
-    TxLegacy {
-        // large enough to not be rejected by the payload builder
-        gas_limit: MINIMUM_GAS_LIMIT,
-        value: U256::ZERO,
+    TxEip1559 {
+        chain_id,
         // nonce is always 0 for shadow txs
         nonce: 0_u64,
         // large enough to not be rejected by the payload builder
-        gas_price: DEFAULT_TX_FEE_CAP_WEI,
-        chain_id: Some(chain_id),
+        gas_limit: MINIMUM_GAS_LIMIT,
+        // large enough to not be rejected by the payload builder
+        max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
+        // Set priority fee to 1 Gwei for shadow transactions
+        max_priority_fee_per_gas: 1_000_000_000,
         to: TxKind::Call(Address::ZERO),
+        value: U256::ZERO,
+        access_list: AccessList::default(),
         input: shadow_tx_rlp.into(),
     }
 }
@@ -450,7 +453,7 @@ mod tests {
             .sign_transaction(&mut shadow_tx_raw)
             .await
             .unwrap();
-        let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(shadow_tx_raw.into_signed(signed_tx))
+        let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(shadow_tx_raw.into_signed(signed_tx))
             .encoded_2718()
             .into();
 
@@ -1289,7 +1292,7 @@ mod tests {
             .await
             .unwrap();
         let tx_1_envelope =
-            EthereumTxEnvelope::<TxEip4844>::Legacy(tx_1_raw.into_signed(signed_tx_1))
+            EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_1_raw.into_signed(signed_tx_1))
                 .encoded_2718()
                 .into();
 
@@ -1727,7 +1730,7 @@ pub mod test_utils {
     use crate::payload::DeterministicShadowTxKey;
     use crate::shadow_tx::{ShadowTransaction, TransactionPacket};
     use alloy_consensus::EthereumTxEnvelope;
-    use alloy_consensus::{SignableTransaction as _, TxEip4844, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip4844, TxLegacy, TxEip1559};
     use alloy_genesis::Genesis;
     use alloy_network::EthereumWallet;
     use alloy_network::TxSigner;
@@ -2295,12 +2298,25 @@ pub mod test_utils {
     }
 
     /// Sign a legacy transaction with the provided signer.
-    pub async fn sign_tx(
+    pub async fn sign_tx_legacy(
         mut tx_raw: TxLegacy,
         new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
     ) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
         let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
         let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
+            .try_into_recovered()
+            .unwrap();
+
+        EthPooledTransaction::new(tx, 300)
+    }
+
+    /// Sign an EIP-1559 transaction with the provided signer.
+    pub async fn sign_tx(
+        mut tx_raw: TxEip1559,
+        new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
+    ) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
+        let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
+        let tx = alloy_consensus::EthereumTxEnvelope::Eip1559(tx_raw.into_signed(signed_tx))
             .try_into_recovered()
             .unwrap();
 
