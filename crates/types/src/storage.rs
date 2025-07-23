@@ -37,6 +37,7 @@ pub const TERABYTE: usize = GIGABYTE * 1024;
     From,
     Into,
 )]
+#[derive(Hash)]
 pub struct PartitionChunkOffset(u32);
 
 #[macro_export]
