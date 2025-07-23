@@ -455,7 +455,27 @@ impl StorageModule {
     /// The sync threshold is configured via `min_writes_before_sync` to optimize
     /// disk writes and minimize fragmentation.
     pub fn sync_pending_chunks(&self) -> eyre::Result<()> {
-        let threshold = self.config.node_config.storage.num_writes_before_sync;
+        self.sync_pending_chunks_inner(false)
+    }
+
+    /// Force syncs (writes) all pending writes for this SM
+    ///
+    /// Process:
+    /// 1. Collects pending writes for each submodule
+    /// 2. Acquires write lock only if some pending writes exist
+    /// 3. Writes chunks to disk and removes them from pending queue
+    ///
+    pub fn force_sync_pending_chunks(&self) -> eyre::Result<()> {
+        self.sync_pending_chunks_inner(true)
+    }
+
+    fn sync_pending_chunks_inner(&self, force: bool) -> eyre::Result<()> {
+        let threshold = if force {
+            0
+        } else {
+            self.config.node_config.storage.num_writes_before_sync
+        };
+
         let arc = self.pending_writes.clone();
 
         // First use read lock to check if we have work to do
@@ -1235,6 +1255,18 @@ impl StorageModule {
             );
             self.sync_pending_chunks().unwrap();
         }
+    }
+}
+
+impl Drop for StorageModule {
+    fn drop(&mut self) {
+        info!("Syncing SM {} to disk...", &self.id);
+        let _ = self.force_sync_pending_chunks().inspect_err(|e| {
+            error!(
+                "Unable to sync writes while dropping SM {} - {:?}",
+                &self.id, &e
+            )
+        });
     }
 }
 
