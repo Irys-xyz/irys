@@ -1,7 +1,7 @@
 use irys_domain::{ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
 use irys_types::{Address, PartitionChunkOffset};
 use std::{
-    collections::HashMap,
+    collections::{hash_map, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -103,7 +103,7 @@ impl ChunkOrchestrator {
             for interval_step in *interval.start()..=*interval.end() {
                 let chunk_offset = PartitionChunkOffset::from(interval_step);
                 // check to see if the offset is already requested
-                if !self.chunk_requests.contains_key(&chunk_offset) {
+                if let hash_map::Entry::Vacant(e) = self.chunk_requests.entry(chunk_offset) {
                     // Add the chunk offset as a pending request
                     let chunk_request = ChunkRequest {
                         ledger_id: self.storage_module.id,
@@ -111,7 +111,7 @@ impl ChunkOrchestrator {
                         chunk_offset,
                         request_state: ChunkRequestState::Pending,
                     };
-                    self.chunk_requests.insert(chunk_offset, chunk_request);
+                    e.insert(chunk_request);
 
                     requests_to_add -= 1;
 

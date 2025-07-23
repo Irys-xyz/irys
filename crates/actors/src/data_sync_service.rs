@@ -42,17 +42,26 @@ impl DataSyncServiceInner {
         peer_list: PeerList,
         config: Config,
     ) -> Self {
-        let data_sync = Self {
+        // let mut data_sync = Self {
+        //     block_tree,
+        //     storage_modules,
+        //     peer_list,
+        //     all_peers: Default::default(),
+        //     chunk_orchestrators: Default::default(),
+        //     config,
+        // };
+        // data_sync.sync_peer_partition_assignments();
+        // data_sync.bootstrap_peer_downloads();
+        // data_sync
+
+        Self {
             block_tree,
             storage_modules,
             peer_list,
             all_peers: Default::default(),
             chunk_orchestrators: Default::default(),
             config,
-        };
-        // data_sync.sync_peer_partition_assignments();
-        // data_sync.bootstrap_peer_downloads();
-        data_sync
+        }
     }
 
     pub fn handle_message(&self, _msg: DataSyncServiceMessage) -> eyre::Result<()> {
@@ -113,7 +122,7 @@ impl DataSyncServiceInner {
                     .or_insert(PeerBandwidthManager::new(&peer, &self.config));
 
                 // Add this partition assignment to the peers bandwidth manager if it's not already tracked
-                if !entry.partition_assignments.contains(&pa) {
+                if !entry.partition_assignments.contains(pa) {
                     entry.partition_assignments.push(*pa);
                 }
             }
@@ -125,7 +134,6 @@ impl DataSyncServiceInner {
     /// Add 3rd peer if first two can't hit 150MB/s combined
     /// Add 4th peer only if needed for full 200MB/s
     /// The key is ramping up quickly but safely - we'll want to discover actual peer capacity within 30-60 seconds without overwhelming anyone.
-
     pub fn bootstrap_peer_downloads(&mut self) {
         // Loop though Storage modules
         for sm in self.storage_modules.read().unwrap().iter() {

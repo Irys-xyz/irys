@@ -45,7 +45,7 @@ impl PeerBandwidthManager {
     /// Returns Duration::ZERO if no chunks are recorded.
     pub fn average_chunk_completion_time(&self) -> Duration {
         let recent_chunk_times = &self.recent_chunk_times;
-        if recent_chunk_times.len() == 0 {
+        if recent_chunk_times.is_empty() {
             return Duration::ZERO;
         }
 
