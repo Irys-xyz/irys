@@ -193,18 +193,9 @@ pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
     pub mode: NodeMode,
 
-    /// The initial list of peers to contact for block sync
-    pub trusted_peers: Vec<PeerAddress>,
-
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
     pub base_directory: PathBuf,
-
-    /// Specifies which consensus rules the node follows
-    pub consensus: ConsensusOptions,
-
-    /// Settings for the price oracle system
-    pub oracle: OracleConfig,
 
     /// Private key used for mining operations
     /// This key identifies the node and receives mining rewards
@@ -214,16 +205,24 @@ pub struct NodeConfig {
     )]
     pub mining_key: k256::ecdsa::SigningKey,
 
+    /// The initial list of peers to contact for block sync
+    pub trusted_peers: Vec<PeerAddress>,
+
     pub reward_address: Address,
 
-    /// Data storage configuration
-    pub storage: StorageSyncConfig,
+    // whether we should try to stake & pledge our local drives
+    pub stake_pledge_drives: bool,
 
-    /// Fee and pricing settings
-    pub pricing: PricingConfig,
+    pub genesis_peer_discovery_timeout_millis: u64,
 
     /// Peer-to-peer network communication settings
     pub gossip: GossipConfig,
+
+    /// HTTP API server configuration
+    pub http: HttpConfig,
+
+    /// Data storage configuration
+    pub storage: StorageSyncConfig,
 
     /// Data packing and compression settings
     pub packing: PackingConfig,
@@ -231,8 +230,11 @@ pub struct NodeConfig {
     /// Cache management configuration
     pub cache: CacheConfig,
 
-    /// HTTP API server configuration
-    pub http: HttpConfig,
+    /// Settings for the price oracle system
+    pub oracle: OracleConfig,
+
+    /// Fee and pricing settings
+    pub pricing: PricingConfig,
 
     /// Reth node configuration
     pub reth: RethConfig,
@@ -240,10 +242,8 @@ pub struct NodeConfig {
     /// Reth settings
     pub reth_peer_info: RethPeerInfo,
 
-    pub genesis_peer_discovery_timeout_millis: u64,
-
-    // whether we should try to stake & pledge our local drives
-    pub stake_pledge_drives: bool,
+    /// Specifies which consensus rules the node follows
+    pub consensus: ConsensusOptions,
 }
 
 impl From<NodeConfig> for Config {
@@ -662,7 +662,6 @@ impl ConsensusConfig {
         const HALF_LIFE_YEARS: u128 = 4;
         const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
         const INFLATION_CAP: u128 = 100_000_000;
-
         Self {
             chain_id: 1270,
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
@@ -897,6 +896,79 @@ impl NodeConfig {
         };
 
         Self::testing_with_signer(&signer)
+    }
+
+    pub fn testnet() -> Self {
+        use k256::ecdsa::SigningKey;
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let consensus = ConsensusConfig::testnet();
+        let signer = IrysSigner {
+            signer: mining_key,
+            chain_id: consensus.chain_id,
+            chunk_size: consensus.chunk_size,
+        };
+
+        let mining_key = signer.signer.clone();
+        let reward_address = signer.address();
+        Self {
+            mode: NodeMode::PeerSync,
+            consensus: ConsensusOptions::Custom(consensus),
+            base_directory: default_irys_path(),
+
+            oracle: OracleConfig::Mock {
+                initial_price: Amount::token(dec!(1)).expect("valid token amount"),
+                incremental_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+                smoothing_interval: 15,
+            },
+            mining_key,
+            reward_address,
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+            },
+            trusted_peers: vec![],
+            // trusted_peers: vec![PeerAddress {
+            //     api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+            //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
+            // }],
+            pricing: PricingConfig {
+                fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+            },
+            gossip: GossipConfig {
+                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_port: 8081,
+                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_port: 8081,
+            },
+            reth: RethConfig {
+                use_random_ports: false,
+            },
+            packing: PackingConfig {
+                cpu_packing_concurrency: 4,
+                gpu_packing_batch_size: 1024,
+            },
+            cache: CacheConfig { cache_clean_lag: 2 },
+            http: HttpConfig {
+                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_port: 8080,
+                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_port: 8080,
+            },
+            reth_peer_info: crate::RethPeerInfo {
+                peering_tcp_addr: std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                    std::net::Ipv4Addr::new(127, 0, 0, 1),
+                    9009,
+                )),
+                peer_id: Default::default(),
+            },
+
+            genesis_peer_discovery_timeout_millis: 10000,
+            stake_pledge_drives: false,
+        }
     }
 
     /// get the storage module directory path

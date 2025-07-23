@@ -1634,7 +1634,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
-    let mut genesis_config = NodeConfig::testnet();
+    let mut genesis_config = NodeConfig::testing();
 
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
