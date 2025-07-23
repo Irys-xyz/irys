@@ -1,7 +1,6 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::mempool_service::ChunkIngressError;
 use crate::services::ServiceSenders;
-use alloy_primitives::keccak256;
 use base58::ToBase58 as _;
 use eyre::eyre;
 use futures::future::BoxFuture;
@@ -773,20 +772,6 @@ impl Inner {
         &mut self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
-        // compute expected id from the signature
-        let expected_id = {
-            let bytes: [u8; 32] = keccak256(tx.signature().as_bytes()).into();
-            H256::from(bytes)
-        };
-
-        // check id is valid
-        if expected_id != tx.id() {
-            let mut mempool = self.mempool_state.write().await;
-            mempool.recent_invalid_tx.put(tx.id(), ());
-            debug!("txid mismatch with signature");
-            return Err(TxIngressError::InvalidSignature);
-        }
-
         if tx.is_signature_valid() {
             info!("Signature is valid");
             Ok(())
