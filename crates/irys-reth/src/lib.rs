@@ -71,7 +71,7 @@ pub mod payload_service_builder;
 pub mod shadow_tx;
 
 #[must_use]
-pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxEip1559 {
+pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction, max_priority_fee_per_gas: u128) -> TxEip1559 {
     // allocate 512 bytes for the shadow tx rlp, misc optimisation
     let mut shadow_tx_rlp = Vec::with_capacity(512);
     shadow_tx.encode(&mut shadow_tx_rlp);
@@ -83,8 +83,8 @@ pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxEip1
         gas_limit: MINIMUM_GAS_LIMIT,
         // large enough to not be rejected by the payload builder
         max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
-        // Set priority fee to 1 Gwei for shadow transactions
-        max_priority_fee_per_gas: 1_000_000_000,
+        // Use the provided priority fee
+        max_priority_fee_per_gas,
         to: TxKind::Call(Address::ZERO),
         value: U256::ZERO,
         access_list: AccessList::default(),
@@ -447,7 +447,7 @@ mod tests {
         let ((node, _shadow_tx_rx), ctx) = ctx.get_single_node()?;
 
         let shadow_tx = block_reward(ctx.block_producer_a.address());
-        let mut shadow_tx_raw = compose_shadow_tx(1, &shadow_tx);
+        let mut shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, 1_000_000_000);
         let signed_tx = ctx
             .target_account
             .sign_transaction(&mut shadow_tx_raw)
@@ -559,6 +559,7 @@ mod tests {
                 amount,
                 target: ctx.block_producer_a.address(),
             })),
+            1_000_000_000,
         );
         let shadow_tx = sign_tx(shadow_tx, &ctx.block_producer_a).await;
         let shadow_tx_hash = *shadow_tx.hash();
@@ -1285,7 +1286,7 @@ mod tests {
         // Phase 5: Try to submit the future shadow transactions directly to the pool
         // They should be rejected and never enter the pool
         let future_shadow_tx_1 = block_reward(ctx.block_producer_a.address());
-        let mut tx_1_raw = compose_shadow_tx(1, &future_shadow_tx_1);
+        let mut tx_1_raw = compose_shadow_tx(1, &future_shadow_tx_1, 1_000_000_000);
         let signed_tx_1 = ctx
             .block_producer_a
             .sign_transaction(&mut tx_1_raw)
@@ -1856,7 +1857,7 @@ pub mod test_utils {
         shadow_tx: ShadowTransaction,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<EthPooledTransaction> {
-        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx);
+        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, 1_000_000_000);
         let shadow_pooled_tx = sign_tx(shadow_tx_raw, signer).await;
         Ok(shadow_pooled_tx)
     }

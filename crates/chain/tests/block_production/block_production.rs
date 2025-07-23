@@ -15,6 +15,7 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
+use reth::rpc::types::TransactionTrait;
 use reth::{
     providers::{
         AccountReader as _, BlockReader as _, ReceiptProvider as _, TransactionsProvider as _,
@@ -351,18 +352,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // We expect 3 receipts: storage tx, evm tx, and block reward
     assert_eq!(block_txs.len(), 3);
     // Assert block reward (should be the first receipt)
-    let block_reward_systx =
-        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let block_reward_systx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(matches!(
         block_reward_systx.as_v1().unwrap(),
         TransactionPacket::BlockReward(_)
     ));
 
     // Assert storage tx is included in the receipts (should be the second receipt)
-    let storage_tx_systx =
-        ShadowTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let storage_tx_systx = ShadowTransaction::decode(&mut block_txs[1].input().as_ref()).unwrap();
     assert!(matches!(
         storage_tx_systx.as_v1().unwrap(),
         TransactionPacket::StorageFees(_)
@@ -492,9 +489,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward shadow transaction
-    let shadow_tx =
-        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
             shadow_tx.as_v1().unwrap(),
@@ -574,9 +569,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward shadow transaction
-    let shadow_tx =
-        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
             shadow_tx.as_v1().unwrap(),
@@ -907,9 +900,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // First transaction should be block reward
-    let block_reward_tx =
-        ShadowTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
-            .expect("First transaction should be decodable as shadow transaction");
+    let block_reward_tx = ShadowTransaction::decode(&mut block_txs1[0].input().as_ref())
+        .expect("First transaction should be decodable as shadow transaction");
     assert!(
         matches!(
             block_reward_tx.as_v1().unwrap(),
@@ -919,9 +911,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // Second transaction should be stake
-    let stake_tx =
-        ShadowTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Second transaction should be decodable as shadow transaction");
+    let stake_tx = ShadowTransaction::decode(&mut block_txs1[1].input().as_ref())
+        .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         // Expected amount is DEFAULT_TX_FEE + stake_fee.amount (0.1 token = 10^17)
@@ -936,9 +927,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     }
 
     // Third transaction should be pledge
-    let pledge_tx =
-        ShadowTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Third transaction should be decodable as shadow transaction");
+    let pledge_tx = ShadowTransaction::decode(&mut block_txs1[2].input().as_ref())
+        .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
         // Expected amount is DEFAULT_TX_FEE + pledge_fee.amount (0.1 token = 10^17)
