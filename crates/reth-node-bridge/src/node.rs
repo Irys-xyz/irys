@@ -1,31 +1,22 @@
 use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
-use irys_reth::{
-    evm::IrysEvmConfig, payload::ShadowTxStore, IrysEthereumNode, IrysShadowTxValidator,
-};
+use irys_reth::{payload::ShadowTxStore, IrysEthereumNode};
 use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
 use reth::{
     args::DatabaseArgs,
-    consensus::{ConsensusError, FullConsensus},
-    network::NetworkHandle,
     payload::EthPayloadBuilderAttributes,
-    primitives::EthPrimitives,
     prometheus_exporter::install_prometheus_recorder,
     revm::primitives::B256,
     rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
-    transaction_pool::{
-        blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
-        TransactionValidationTaskExecutor,
-    },
 };
 use reth_chainspec::ChainSpec;
 use reth_db::init_db;
 use reth_node_builder::{
-    FullNode, FullNodeTypesAdapter, NodeAdapter, NodeBuilder, NodeConfig, NodeHandle,
-    NodeTypesWithDBAdapter,
+    FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder, NodeComponentsBuilder,
+    NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
 };
 use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
@@ -36,35 +27,22 @@ use tracing::error;
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
 
-pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
+type NodeTypesAdapter = FullNodeTypesAdapter<IrysEthereumNode, RethDbWrapper, NodeProvider>;
 
+/// Type alias for a `NodeAdapter`
 pub type RethNodeAdapter = NodeAdapter<
-    FullNodeTypesAdapter<
-        IrysEthereumNode,
-        RethDbWrapper,
-        BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
-    >,
-    reth_node_builder::components::Components<
-        FullNodeTypesAdapter<
-            IrysEthereumNode,
-            RethDbWrapper,
-            BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
-        >,
-        NetworkHandle,
-        reth::transaction_pool::Pool<
-            TransactionValidationTaskExecutor<
-                IrysShadowTxValidator<
-                    BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>,
-                    EthPooledTransaction,
-                >,
-            >,
-            CoinbaseTipOrdering<EthPooledTransaction>,
-            DiskFileBlobStore,
-        >,
-        IrysEvmConfig,
-        Arc<(dyn FullConsensus<EthPrimitives, Error = ConsensusError> + 'static)>,
-    >,
+    NodeTypesAdapter,
+    <<IrysEthereumNode as Node<NodeTypesAdapter>>::ComponentsBuilder as NodeComponentsBuilder<
+        NodeTypesAdapter,
+    >>::Components,
 >;
+
+pub type NodeProvider = BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>;
+
+pub type NodeHelperType =
+    NodeTestContext<RethNodeAdapter, <IrysEthereumNode as Node<NodeTypesAdapter>>::AddOns>;
+
+pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
 pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<RethNodeAdapter>;
 

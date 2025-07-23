@@ -12,20 +12,15 @@
 /// Acts as the central authority for storage module membership, with other
 /// components accessing this information through read guards to ensure
 /// consistency throughout the system.
-use futures::future::Either;
 use irys_config::StorageSubmodulesConfig;
 use irys_storage::{PackingParams, StorageModule, StorageModuleInfo};
-use irys_types::{Config, PartitionChunkRange};
-use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use irys_types::{Config, PartitionChunkRange, TokioServiceHandle};
+use reth::tasks::shutdown::Shutdown;
 use std::{
     path::Path,
-    pin::pin,
     sync::{Arc, RwLock},
 };
-use tokio::{
-    sync::{mpsc::UnboundedReceiver /*, oneshot*/},
-    task::JoinHandle,
-};
+use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
 use tracing::{debug, warn, Span};
 
 use crate::{packing::PackingRequest, ActorAddresses};
@@ -40,7 +35,7 @@ pub enum StorageModuleServiceMessage {
 
 #[derive(Debug)]
 pub struct StorageModuleService {
-    shutdown: GracefulShutdown,
+    shutdown: Shutdown,
     msg_rx: UnboundedReceiver<StorageModuleServiceMessage>,
     inner: StorageModuleServiceInner,
 }
@@ -240,60 +235,71 @@ impl StorageModuleServiceInner {
 impl StorageModuleService {
     /// Spawn a new StorageModule service
     pub fn spawn_service(
-        exec: &TaskExecutor,
         rx: UnboundedReceiver<StorageModuleServiceMessage>,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         actor_addresses: &ActorAddresses,
         config: &Config,
-    ) -> JoinHandle<()> {
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        tracing::info!("Spawning storage module service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
         let actor_addresses = actor_addresses.clone();
         let config = config.clone();
-        exec.spawn_critical_with_graceful_shutdown_signal(
-            "StorageModule Service",
-            |shutdown| async move {
-                let pending_storage_module_service = Self {
-                    shutdown,
-                    msg_rx: rx,
-                    inner: StorageModuleServiceInner::new(storage_modules, actor_addresses, config),
-                };
-                pending_storage_module_service
-                    .start()
-                    .await
-                    .expect("StorageModule Service encountered an irrecoverable error")
-            },
-        )
+
+        let handle = runtime_handle.spawn(async move {
+            let pending_storage_module_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                inner: StorageModuleServiceInner::new(storage_modules, actor_addresses, config),
+            };
+            pending_storage_module_service
+                .start()
+                .await
+                .expect("StorageModule Service encountered an irrecoverable error")
+        });
+
+        TokioServiceHandle {
+            name: "storage_module_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
     }
 
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting StorageModule Service");
 
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg)?;
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    tracing::info!("Shutdown signal received for storage module service");
+                    break;
                 }
-                Either::Left((None, _)) => {
-                    tracing::warn!("receiver channel closed");
-                    break None;
-                }
-                Either::Right((shutdown, _)) => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
+                // Handle messages
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.inner.handle_message(msg)?;
+                        }
+                        None => {
+                            tracing::warn!("Message channel closed unexpectedly");
+                            break;
+                        }
+                    }
                 }
             }
-        };
+        }
 
         tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg)?
         }
 
-        // explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
-
-        tracing::info!("shutting down StorageModule Service");
+        tracing::info!("shutting down StorageModule Service gracefully");
         Ok(())
     }
 }

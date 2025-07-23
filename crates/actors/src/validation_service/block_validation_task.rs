@@ -14,7 +14,7 @@
 
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
-    poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid, PayloadProvider,
+    is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
 };
 use crate::validation_service::ValidationServiceInner;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
@@ -32,18 +32,18 @@ enum ParentValidationResult {
 }
 
 /// Handles the execution of a single block validation task
-pub(crate) struct BlockValidationTask<T: PayloadProvider> {
+pub(crate) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
     pub block_hash: BlockHash,
-    pub service_inner: Arc<ValidationServiceInner<T>>,
+    pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
 }
 
-impl<T: PayloadProvider> BlockValidationTask<T> {
+impl BlockValidationTask {
     pub(crate) fn new(
         block: Arc<IrysBlockHeader>,
         block_hash: BlockHash,
-        service_inner: Arc<ValidationServiceInner<T>>,
+        service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
     ) -> Self {
         Self {
@@ -229,12 +229,31 @@ impl<T: PayloadProvider> BlockValidationTask<T> {
             .unwrap_or(ValidationResult::Invalid)
         };
 
-        // Wait for all three tasks to complete
-        let (recall_result, poa_result, shadow_tx_result) =
-            tokio::join!(recall_task, poa_task, shadow_tx_task);
+        let vdf_reset_frequency = self.service_inner.config.consensus.vdf.reset_frequency as u64;
+        let seeds_validation_task = async move {
+            let binding = self.block_tree_guard.read();
+            let previous_block = binding
+                .get_block(&self.block.previous_block_hash)
+                .expect("previous block should exist");
+            is_seed_data_valid(&self.block, previous_block, vdf_reset_frequency)
+        };
 
-        match (recall_result, poa_result, shadow_tx_result) {
-            (ValidationResult::Valid, ValidationResult::Valid, ValidationResult::Valid) => {
+        // Wait for all three tasks to complete
+        let (recall_result, poa_result, shadow_tx_result, seeds_validation_result) =
+            tokio::join!(recall_task, poa_task, shadow_tx_task, seeds_validation_task);
+
+        match (
+            recall_result,
+            poa_result,
+            shadow_tx_result,
+            seeds_validation_result,
+        ) {
+            (
+                ValidationResult::Valid,
+                ValidationResult::Valid,
+                ValidationResult::Valid,
+                ValidationResult::Valid,
+            ) => {
                 tracing::debug!("block validation successful");
                 Ok(ValidationResult::Valid)
             }

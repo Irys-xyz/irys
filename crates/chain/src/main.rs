@@ -90,6 +90,8 @@ fn init_tracing() -> eyre::Result<()> {
 
     // use json logging for release builds
     let subscriber = subscriber.with(filter).with(ErrorLayer::default());
+    // TODO: re-enable with config options
+
     // let subscriber = if cfg!(debug_assertions) {
     //     subscriber.with(output_layer.boxed())
     // } else {

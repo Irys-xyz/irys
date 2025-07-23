@@ -7,8 +7,8 @@ use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
-    Compact, Config, DataRootLeave, H256List, IngressProofsList, IrysSignature,
-    IrysTransactionHeader, Proof, H256, U256,
+    Compact, Config, DataRootLeave, DataTransactionHeader, H256List, IngressProofsList,
+    IrysSignature, Proof, H256, U256,
 };
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
@@ -110,10 +110,31 @@ impl VDFLimiterInfo {
     }
 
     pub fn set_seeds(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
+        let (next_seed, seed) = self.calculate_seeds(reset_frequency, parent_header);
+        debug!(
+            "Setting VDF seeds: next_seed: {}, seed: {}",
+            next_seed, seed
+        );
+        self.next_seed = next_seed;
+        self.seed = seed;
+    }
+
+    /// Returns a pair of expected seeds for the VDF limiter. The first value is the `next_seed`,
+    /// and the second value is the `seed`.
+    pub fn calculate_seeds(
+        &self,
+        reset_frequency: u64,
+        parent_header: &IrysBlockHeader,
+    ) -> (H256, H256) {
         if let Some(step) = self.reset_step(reset_frequency) {
-            debug!("Creating VDF with reset step: {}", step);
-            self.next_seed = parent_header.block_hash;
-            self.seed = parent_header.vdf_limiter_info.next_seed;
+            debug!(
+                "VDFInfo contains a reset step {}, switching the seeds",
+                step
+            );
+            (
+                parent_header.block_hash,
+                parent_header.vdf_limiter_info.next_seed,
+            )
         } else {
             debug!(
                 "Using previous VDF seeds. First step: {}, last step: {}, reset_frequency: {}",
@@ -121,9 +142,10 @@ impl VDFLimiterInfo {
                 self.global_step_number,
                 reset_frequency
             );
-            // Otherwise, we set the next seed to the previous block next_seed.
-            self.next_seed = parent_header.vdf_limiter_info.next_seed;
-            self.seed = parent_header.vdf_limiter_info.seed;
+            (
+                parent_header.vdf_limiter_info.next_seed,
+                parent_header.vdf_limiter_info.seed,
+            )
         }
     }
 }
@@ -259,8 +281,12 @@ impl IrysBlockHeader {
     /// 1.) generating the prehash
     /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
-        self.signature
-            .validate_signature(self.signature_hash(), self.miner_address)
+        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
+        let signature_hash_matches_block_hash = self.block_hash.0 == id;
+        signature_hash_matches_block_hash
+            && self
+                .signature
+                .validate_signature(self.signature_hash(), self.miner_address)
     }
 
     // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
@@ -427,7 +453,7 @@ pub struct DataTransactionLedger {
 impl DataTransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
     /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
-    pub fn merklize_tx_root(data_txs: &[IrysTransactionHeader]) -> (H256, Vec<Proof>) {
+    pub fn merklize_tx_root(data_txs: &[DataTransactionHeader]) -> (H256, Vec<Proof>) {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
@@ -992,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_validate_tx_path() {
-        let mut txs: Vec<IrysTransactionHeader> = vec![IrysTransactionHeader::default(); 10];
+        let mut txs: Vec<DataTransactionHeader> = vec![DataTransactionHeader::default(); 10];
         for tx in txs.iter_mut() {
             tx.data_root = H256::from([3_u8; 32]);
             tx.data_size = 64
@@ -1010,8 +1036,8 @@ mod tests {
     fn test_irys_block_header_signing() {
         // setup
         let mut header = mock_header();
-        let testnet_config = NodeConfig::testnet();
-        let config = Config::new(testnet_config);
+        let testing_config = NodeConfig::testing();
+        let config = Config::new(testing_config);
         let signer = config.irys_signer();
 
         // action
@@ -1048,9 +1074,9 @@ mod tests {
             assert!(!header_clone.is_signature_valid());
         }
 
-        // assert that changing the block hash, the signature is still valid (because the validation does not validate )
+        // assert that changing the block hash changes the validation result to invalid
         header.block_hash = H256::random();
-        assert!(header.is_signature_valid());
+        assert!(!header.is_signature_valid());
     }
 
     fn mock_header() -> IrysBlockHeader {

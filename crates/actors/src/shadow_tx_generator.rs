@@ -1,10 +1,11 @@
 use eyre::Result;
 use irys_reth::shadow_tx::{
-    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, EitherIncrementOrDecrement,
+    ShadowTransaction, TransactionPacket,
 };
 use irys_types::{
-    Address, CommitmentTransaction, IrysBlockHeader, IrysTransactionCommon as _,
-    IrysTransactionHeader,
+    Address, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
+    IrysTransactionCommon as _,
 };
 use reth::revm::primitives::ruint::Uint;
 
@@ -33,7 +34,7 @@ impl<'a> ShadowTxGenerator<'a> {
     pub fn generate_all(
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
-        submit_txs: &'a [IrysTransactionHeader],
+        submit_txs: &'a [DataTransactionHeader],
     ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
         self.generate_shadow_tx_header()
             .chain(self.generate_commitment_shadow_transactions(commitment_txs))
@@ -55,13 +56,13 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Generates the expected data shadow transactions for a given block
     pub fn generate_data_storage_shadow_transactions(
         &'a self,
-        submit_txs: &'a [IrysTransactionHeader],
+        submit_txs: &'a [DataTransactionHeader],
     ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
         // create a storage fee shadow txs
         submit_txs.iter().map(move |tx| {
             Ok(ShadowTransaction::new_v1(TransactionPacket::StorageFees(
                 BalanceDecrement {
-                    amount: Uint::from(tx.total_fee()),
+                    amount: Uint::from_le_bytes(tx.total_cost().to_le_bytes()),
                     target: tx.signer,
                     irys_ref: tx.id.into(),
                 },
@@ -76,56 +77,62 @@ impl<'a> ShadowTxGenerator<'a> {
     ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
         commitment_txs.iter().map(move |tx| {
             let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
-            let total_fee = Uint::from(tx.total_fee());
+            let fee = Uint::from(tx.fee);
+            let total_cost = Uint::from_le_bytes(tx.total_cost().to_le_bytes());
+
+            let create_increment_or_decrement =
+                |operation_type: &str| -> Result<EitherIncrementOrDecrement> {
+                    if fee > commitment_value {
+                        let amount = fee.checked_sub(commitment_value).ok_or_else(|| {
+                            eyre::eyre!(
+                                "Underflow when calculating {} decrement amount",
+                                operation_type
+                            )
+                        })?;
+                        Ok(EitherIncrementOrDecrement::BalanceDecrement(
+                            BalanceDecrement {
+                                amount,
+                                target: tx.signer,
+                                irys_ref: tx.id.into(),
+                            },
+                        ))
+                    } else {
+                        let amount = commitment_value.checked_sub(fee).ok_or_else(|| {
+                            eyre::eyre!("Underflow when calculating {} amount", operation_type)
+                        })?;
+                        Ok(EitherIncrementOrDecrement::BalanceIncrement(
+                            BalanceIncrement {
+                                amount,
+                                target: tx.signer,
+                                irys_ref: tx.id.into(),
+                            },
+                        ))
+                    }
+                };
 
             match tx.commitment_type {
-                irys_primitives::CommitmentType::Stake => {
-                    let amount = total_fee
-                        .checked_add(commitment_value)
-                        .ok_or_else(|| eyre::eyre!("Overflow when calculating stake amount"))?;
-                    Ok(ShadowTransaction::new_v1(TransactionPacket::Stake(
-                        BalanceDecrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    )))
-                }
-                irys_primitives::CommitmentType::Pledge => {
-                    let amount = total_fee
-                        .checked_add(commitment_value)
-                        .ok_or_else(|| eyre::eyre!("Overflow when calculating pledge amount"))?;
-                    Ok(ShadowTransaction::new_v1(TransactionPacket::Pledge(
-                        BalanceDecrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    )))
-                }
+                irys_primitives::CommitmentType::Stake => Ok(ShadowTransaction::new_v1(
+                    TransactionPacket::Stake(BalanceDecrement {
+                        amount: total_cost,
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    }),
+                )),
+                irys_primitives::CommitmentType::Pledge => Ok(ShadowTransaction::new_v1(
+                    TransactionPacket::Pledge(BalanceDecrement {
+                        amount: total_cost,
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    }),
+                )),
                 irys_primitives::CommitmentType::Unpledge => {
-                    let amount = commitment_value
-                        .checked_sub(total_fee)
-                        .ok_or_else(|| eyre::eyre!("Underflow when calculating unpledge amount"))?;
-                    Ok(ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-                        BalanceIncrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    )))
+                    create_increment_or_decrement("unpledge").map(|result| {
+                        ShadowTransaction::new_v1(TransactionPacket::Unpledge(result))
+                    })
                 }
                 irys_primitives::CommitmentType::Unstake => {
-                    let amount = commitment_value
-                        .checked_sub(total_fee)
-                        .ok_or_else(|| eyre::eyre!("Underflow when calculating unstake amount"))?;
-                    Ok(ShadowTransaction::new_v1(TransactionPacket::Unstake(
-                        BalanceIncrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    )))
+                    create_increment_or_decrement("unstake")
+                        .map(|result| ShadowTransaction::new_v1(TransactionPacket::Unstake(result)))
                 }
             }
         })

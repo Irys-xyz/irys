@@ -1,5 +1,5 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     IrysTransactionId, UnpackedChunk,
 };
 use alloy_primitives::{Address, B256};
@@ -7,6 +7,7 @@ use base58::ToBase58 as _;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -41,8 +42,8 @@ impl From<UnpackedChunk> for GossipBroadcastMessage {
     }
 }
 
-impl From<IrysTransactionHeader> for GossipBroadcastMessage {
-    fn from(transaction: IrysTransactionHeader) -> Self {
+impl From<DataTransactionHeader> for GossipBroadcastMessage {
+    fn from(transaction: DataTransactionHeader) -> Self {
         let key = GossipCacheKey::transaction(&transaction);
         let value = GossipData::Transaction(transaction);
         Self::new(key, value)
@@ -78,7 +79,7 @@ impl GossipCacheKey {
         Self::Chunk(chunk.chunk_path_hash())
     }
 
-    pub fn transaction(transaction: &IrysTransactionHeader) -> Self {
+    pub fn transaction(transaction: &DataTransactionHeader) -> Self {
         Self::Transaction(transaction.id)
     }
 
@@ -98,7 +99,7 @@ impl GossipCacheKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipData {
     Chunk(UnpackedChunk),
-    Transaction(IrysTransactionHeader),
+    Transaction(DataTransactionHeader),
     CommitmentTransaction(CommitmentTransaction),
     Block(Arc<IrysBlockHeader>),
     ExecutionPayload(Block),
@@ -139,4 +140,25 @@ impl GossipData {
 pub struct GossipRequest<T> {
     pub miner_address: Address,
     pub data: T,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GossipDataRequest {
+    ExecutionPayload(B256),
+    Block(BlockHash),
+    Chunk(ChunkPathHash),
+}
+
+impl Debug for GossipDataRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Block(hash) => write!(f, "block {:?}", hash),
+            Self::ExecutionPayload(block_hash) => {
+                write!(f, "execution payload for block {:?}", block_hash)
+            }
+            Self::Chunk(chunk_path_hash) => {
+                write!(f, "chunk {:?}", chunk_path_hash)
+            }
+        }
+    }
 }

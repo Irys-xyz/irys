@@ -21,7 +21,7 @@ use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_primitives::range_specifier::ChunkRangeSpecifier;
 use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
 use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 
@@ -39,16 +39,16 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 #[ignore]
 #[test_log::test(actix_web::test)]
 async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
-    let mut testnet_config = NodeConfig::testnet();
-    testnet_config.consensus.get_mut().chunk_size = 32;
-    testnet_config.consensus.get_mut().block_migration_depth = 2;
-    testnet_config
+    let mut testing_config = NodeConfig::testing();
+    testing_config.consensus.get_mut().chunk_size = 32;
+    testing_config.consensus.get_mut().block_migration_depth = 2;
+    testing_config
         .consensus
         .get_mut()
         .num_chunks_in_recall_range = 2;
-    let main_address = testnet_config.miner_address();
-    let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
-    testnet_config.consensus.extend_genesis_accounts(vec![
+    let main_address = testing_config.miner_address();
+    let account1 = IrysSigner::random_signer(&testing_config.consensus_config());
+    testing_config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -71,7 +71,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(testnet_config).start().await;
+    let node = IrysNodeTest::new_genesis(testing_config).start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -170,7 +170,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             };
 
             if response.status() == StatusCode::OK {
-                let result: IrysTransactionHeader = response.json().await.unwrap();
+                let result: DataTransactionHeader = response.json().await.unwrap();
                 assert_eq!(&tx.header, &result);
                 info!("Transaction was retrieved ok after {} attempts", attempt);
                 break;

@@ -2,7 +2,7 @@ use crate::BlockFinalizedMessage;
 use actix::prelude::*;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
-    BlockIndexItem, ConsensusConfig, IrysBlockHeader, IrysTransactionHeader, H256, U256,
+    BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256, U256,
 };
 
 use std::sync::{Arc, RwLock};
@@ -100,7 +100,7 @@ impl BlockIndexService {
     pub fn add_finalized_block(
         &mut self,
         block: &Arc<IrysBlockHeader>,
-        all_txs: &Arc<Vec<IrysTransactionHeader>>,
+        all_txs: &Arc<Vec<DataTransactionHeader>>,
     ) {
         if self.block_index.is_none() {
             error!("block_index service not initialized");

@@ -5,13 +5,9 @@
 //! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
 
 use eyre::{eyre, Result};
-use irys_types::storage_pricing::{mul_div, safe_add, safe_div, safe_sub, TOKEN_SCALE};
-use irys_types::storage_pricing::{phantoms::Irys, Amount};
+use irys_types::storage_pricing::{exp_neg_fp18, phantoms::Irys, Amount, LN2_FP18};
+use irys_types::storage_pricing::{mul_div, safe_div, safe_sub, TOKEN_SCALE};
 use irys_types::U256;
-
-/// ln(2) in 18-decimal fixed-point:
-/// Approximately 0.693147180559945309 * 1e18 = 693147180559945309
-const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
 
 /// Continuous halving emission curve
 ///
@@ -85,32 +81,10 @@ fn decay_factor(t_secs: u128, half_life: u128) -> Result<U256> {
 
     // Compute ln(2) * f / half_life in fixed-point
     let x_fp18 = mul_div(LN2_FP18, U256::from(f_secs), U256::from(half_life))?;
-    let decay_f_fp18 = exp_neg(x_fp18)?;
+    let decay_f_fp18 = exp_neg_fp18(x_fp18)?;
 
     // Final decay = 2^-q * 2^-f
     mul_div(decay_q_fp18, decay_f_fp18, TOKEN_SCALE)
-}
-
-/// Approximates exp(-x) in 18-decimal fixed-point using Taylor series
-fn exp_neg(x_fp18: U256) -> Result<U256> {
-    /// Number of terms in the Taylor series expansion
-    const TAYLOR_TERMS: u128 = 12;
-
-    let mut term = TOKEN_SCALE; // first term is 1
-    let mut sum = TOKEN_SCALE; // accumulated sum
-
-    for i in 1..=TAYLOR_TERMS {
-        term = mul_div(term, x_fp18, TOKEN_SCALE)?; // multiply by x
-        term = safe_div(term, U256::from(i))?; // divide by i
-        sum = if i & 1 == 1 {
-            // subtract on odd steps
-            safe_sub(sum, term)?
-        } else {
-            // add on even steps
-            safe_add(sum, term)?
-        };
-    }
-    Ok(sum)
 }
 
 #[cfg(test)]

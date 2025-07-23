@@ -4,7 +4,7 @@ use crate::utils::IrysNodeTest;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    AcceptedResponse, BlockIndexQuery, IrysTransactionResponse, NodeConfig, PeerResponse,
+    AcceptedResponse, BlockIndexQuery, Config, IrysTransactionResponse, NodeConfig, PeerResponse,
     ProtocolVersion, VersionRequest,
 };
 use semver::Version;
@@ -15,7 +15,13 @@ use std::{
 use tracing::debug;
 
 async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: SocketAddr) {
-    let version_request = VersionRequest::default();
+    let mut version_request = VersionRequest::default();
+    let testing_config = NodeConfig::testing();
+    let config = Config::new(testing_config);
+    let signer = config.irys_signer();
+    signer
+        .sign_p2p_handshake(&mut version_request)
+        .expect("signing p2p handshake should succeed");
 
     let expected_version_response = AcceptedResponse {
         version: Version {
@@ -154,7 +160,7 @@ async fn check_info_endpoint(
 
 #[test_log::test(actix_rt::test)]
 async fn heavy_api_client_all_endpoints_should_work() {
-    let config = NodeConfig::testnet();
+    let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
 

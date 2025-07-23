@@ -171,7 +171,7 @@ impl alloy_rlp::Decodable for IrysSignature {
 mod tests {
     use super::*;
 
-    use crate::{irys::IrysSigner, ConsensusConfig, IrysTransaction, IrysTransactionHeader, H256};
+    use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
     use alloy_primitives::Address;
     use alloy_rlp::{Decodable as _, Encodable as _};
@@ -193,15 +193,15 @@ mod tests {
 
     #[test]
     fn signature_signing_serialization() -> eyre::Result<()> {
-        let testnet_config = ConsensusConfig::testnet();
+        let testing_config = ConsensusConfig::testing();
         let irys_signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: testnet_config.chain_id,
-            chunk_size: testnet_config.chunk_size,
+            chain_id: testing_config.chain_id,
+            chunk_size: testing_config.chunk_size,
         };
 
-        let original_header = IrysTransactionHeader {
+        let original_header = DataTransactionHeader {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,
@@ -211,12 +211,12 @@ mod tests {
             perm_fee: Some(1),
             ledger_id: 0,
             bundle_format: Some(0),
-            chain_id: testnet_config.chain_id,
+            chain_id: testing_config.chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Default::default(),
         };
-        let transaction = IrysTransaction {
+        let transaction = DataTransaction {
             header: original_header,
             ..Default::default()
         };

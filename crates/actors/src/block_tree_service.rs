@@ -11,7 +11,6 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{eyre, Context as _};
-use futures::future::Either;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
@@ -20,20 +19,16 @@ use irys_domain::{
     BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    Address, BlockHash, CommitmentTransaction, Config, DataLedger, DatabaseProvider, H256List,
-    IrysBlockHeader, IrysTransactionHeader, H256,
+    Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DatabaseProvider, H256List, IrysBlockHeader, TokioServiceHandle, H256,
 };
-use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use reth::tasks::shutdown::Shutdown;
 use std::{
-    pin::pin,
     sync::{Arc, RwLock},
     time::SystemTime,
 };
-use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot},
-    task::JoinHandle,
-};
-use tracing::{debug, error, info};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -65,7 +60,7 @@ pub enum BlockTreeServiceMessage {
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockTreeService {
-    shutdown: GracefulShutdown,
+    shutdown: Shutdown,
     msg_rx: UnboundedReceiver<BlockTreeServiceMessage>,
     inner: BlockTreeServiceInner,
 }
@@ -89,8 +84,6 @@ pub struct BlockTreeServiceInner {
     pub reth_service_actor: Addr<RethServiceActor>,
     /// Current actix system
     pub system: System,
-    /// Tracing span
-    pub span: tracing::Span,
 }
 
 #[derive(Debug, Clone)]
@@ -119,7 +112,6 @@ pub struct BlockStateUpdated {
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     pub fn spawn_service(
-        exec: &TaskExecutor,
         rx: UnboundedReceiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
@@ -128,7 +120,12 @@ impl BlockTreeService {
         config: &Config,
         service_senders: &ServiceSenders,
         reth_service_actor: Addr<RethServiceActor>,
-    ) -> JoinHandle<()> {
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        info!("Spawning block tree service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
         let service_senders = service_senders.clone();
@@ -137,11 +134,9 @@ impl BlockTreeService {
         let epoch_replay_data = (*epoch_replay_data).clone();
         let config = config.clone();
         let storage_submodules_config = storage_submodules_config.clone();
-        let span = tracing::Span::current();
 
-        exec.spawn_critical_with_graceful_shutdown_signal(
-            "BlockTree Service",
-            |shutdown| async move {
+        let handle = runtime_handle.spawn(
+            async move {
                 let cache = BlockTree::restore_from_db(
                     bi_guard.clone(),
                     epoch_replay_data,
@@ -165,7 +160,7 @@ impl BlockTreeService {
                     .expect("could not send message to `RethServiceActor`");
 
                 let block_tree_service = Self {
-                    shutdown,
+                    shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner: BlockTreeServiceInner {
                         db,
@@ -176,7 +171,6 @@ impl BlockTreeService {
                         service_senders,
                         reth_service_actor,
                         system,
-                        span,
                         storage_submodules_config: storage_submodules_config.clone(),
                     },
                 };
@@ -184,40 +178,50 @@ impl BlockTreeService {
                     .start()
                     .await
                     .expect("BlockTree encountered an irrecoverable error")
-            },
-        )
+            }
+            .instrument(tracing::Span::current()),
+        );
+
+        TokioServiceHandle {
+            name: "block_tree_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
     }
 
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting BlockTree service");
 
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for block tree service");
+                    break;
                 }
-                Either::Left((None, _)) => {
-                    tracing::warn!("receiver channel closed");
-                    break None;
-                }
-                Either::Right((shutdown, _)) => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
+                // Handle messages
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.inner.handle_message(msg).await?;
+                        }
+                        None => {
+                            warn!("Message channel closed unexpectedly");
+                            break;
+                        }
+                    }
                 }
             }
-        };
+        }
 
         tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?;
         }
 
-        // explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
-
-        tracing::info!("shutting down BlockTree service");
+        tracing::info!("shutting down BlockTree service gracefully");
         Ok(())
     }
 }
@@ -600,9 +604,6 @@ impl BlockTreeServiceInner {
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
-        let span = self.span.clone();
-        let _span = span.enter();
-
         let height = self
             .cache
             .read()
@@ -890,7 +891,7 @@ impl BlockTreeServiceInner {
         &self,
         block_header: &IrysBlockHeader,
         ledger: DataLedger,
-    ) -> eyre::Result<Vec<IrysTransactionHeader>> {
+    ) -> eyre::Result<Vec<DataTransactionHeader>> {
         // Explicitly cast enum to index
         let ledger_index = ledger as usize;
 
@@ -913,7 +914,7 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
             .into_iter()
             .flatten()
-            .collect::<Vec<IrysTransactionHeader>>();
+            .collect::<Vec<DataTransactionHeader>>();
 
         if received.len() != data_tx_ids.len() {
             return Err(eyre::eyre!(

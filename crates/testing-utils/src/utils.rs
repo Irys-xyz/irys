@@ -16,6 +16,15 @@ pub fn initialize_tracing() {
         .try_init();
 }
 
+pub fn initialize_tracing_with_backtrace() {
+    let _ = SubscriberBuilder::default()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
+        .finish()
+        .try_init();
+    let _ = color_eyre::install();
+}
+
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.
 /// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
 /// unless the `keep` flag is set to `true` - in which case the folder persists indefinitely.

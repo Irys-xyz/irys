@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_adjustments() {
-        let mut consensus_config = ConsensusConfig::testnet();
+        let mut consensus_config = ConsensusConfig::testing();
         consensus_config.difficulty_adjustment = DifficultyAdjustmentConfig {
             block_time: 5,
             difficulty_adjustment_interval: 10,

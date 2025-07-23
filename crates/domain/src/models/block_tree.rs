@@ -1399,7 +1399,7 @@ mod tests {
     use eyre::ensure;
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
-        let config = irys_types::ConsensusConfig::testnet();
+        let config = irys_types::ConsensusConfig::testing();
         let genesis_header = IrysBlockHeader {
             oracle_irys_price: config.genesis_price,
             ema_irys_price: config.genesis_price,
@@ -1416,7 +1416,7 @@ mod tests {
         let comm_cache = Arc::new(CommitmentSnapshot::default());
 
         // Initialize block tree cache from `b1`
-        let mut cache = BlockTree::new(&b1, ConsensusConfig::testnet());
+        let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
 
         // Verify cache returns `None` for unknown hashes
         assert_eq!(cache.get_block(&H256::random()), None);
@@ -1698,7 +1698,7 @@ mod tests {
         // <Reset the cache>
         // b1_2->b1 fork is the heaviest, but only b1 is validated. b2_2->b2->b1 is longer but
         // has a lower cdiff.
-        let mut cache = BlockTree::new(&b1, ConsensusConfig::testnet());
+        let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
         assert_matches!(
             cache.add_block(
                 &b1_2,
@@ -1985,7 +1985,7 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTree::new(&b11, ConsensusConfig::testnet());
+        let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(
@@ -2261,7 +2261,7 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTree::new(&b11, ConsensusConfig::testnet());
+        let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(
@@ -2306,7 +2306,7 @@ mod tests {
 
         // <Reset the cache>
         let b11 = random_block(U256::zero());
-        let mut cache = BlockTree::new(&b11, ConsensusConfig::testnet());
+        let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
         let b12 = extend_chain(random_block(U256::one()), &b11);

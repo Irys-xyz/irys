@@ -6,7 +6,7 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader,
+    storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     NodeConfig,
 };
 use reth::payload::EthBuiltPayload;
@@ -20,7 +20,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         pub prod: ProductionStrategy,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
@@ -31,7 +31,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[IrysTransactionHeader],
+            submit_txs: &[DataTransactionHeader],
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -54,7 +54,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -65,7 +65,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
 
     // produce an invalid block
@@ -82,9 +82,9 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         .unwrap();
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&block)?;
+    peer_node.gossip_block_to_peers(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(eth_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -106,7 +106,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     // setup config / testnet
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
     // set block migration depth so epoch blocks go to index correctly
@@ -119,7 +119,7 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
 
     // produce an invalid block
@@ -148,9 +148,9 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     let irys_block = Arc::new(irys_block);
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&irys_block)?;
-    peer_node.gossip_eth_block(eth_payload.block())?;
-    peer_node.gossip_eth_block(eth_payload_other.block())?;
+    peer_node.gossip_block_to_peers(&irys_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_payload.block())?;
+    peer_node.gossip_eth_block_to_peers(eth_payload_other.block())?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -168,10 +168,10 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
 async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub extra_tx: IrysTransactionHeader,
+        pub extra_tx: DataTransactionHeader,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
@@ -182,7 +182,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[IrysTransactionHeader],
+            submit_txs: &[DataTransactionHeader],
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -205,7 +205,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -216,7 +216,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
     let extra_tx = peer_node
         .create_submit_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
@@ -237,9 +237,9 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .unwrap();
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&block)?;
+    peer_node.gossip_block_to_peers(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(eth_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -259,7 +259,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         pub prod: ProductionStrategy,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
@@ -270,7 +270,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[IrysTransactionHeader],
+            submit_txs: &[DataTransactionHeader],
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -297,7 +297,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
 
@@ -308,7 +308,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .await;
     genesis_node.start_public_api().await;
     let peer_node = genesis_node
-        .testnet_peer_with_assignments(&peer_signer)
+        .testing_peer_with_assignments(&peer_signer)
         .await;
     let _extra_tx_a = peer_node
         .create_submit_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
@@ -331,9 +331,9 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .unwrap();
     peer_node.gossip_enable();
 
-    peer_node.gossip_block(&block)?;
+    peer_node.gossip_block_to_peers(&block)?;
     let eth_block = eth_payload.block();
-    peer_node.gossip_eth_block(eth_block)?;
+    peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);

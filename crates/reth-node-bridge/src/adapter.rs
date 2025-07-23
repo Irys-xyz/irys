@@ -4,8 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::node::{eth_payload_attributes, RethNode};
-use crate::node::{RethNodeAdapter, RethNodeAddOns};
+use crate::node::{eth_payload_attributes, NodeHelperType, RethNode};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
@@ -23,7 +22,7 @@ use reth_provider::BlockReaderIdExt as _;
 
 #[derive(Clone)]
 pub struct IrysRethNodeAdapter {
-    pub reth_node: Arc<NodeTestContext<RethNodeAdapter, RethNodeAddOns>>,
+    pub reth_node: Arc<NodeHelperType>,
     pub shadow_tx_store: ShadowTxStore,
 }
 
@@ -44,7 +43,7 @@ impl IrysRethNodeAdapter {
 }
 
 impl Deref for IrysRethNodeAdapter {
-    type Target = NodeTestContext<RethNodeAdapter, RethNodeAddOns>;
+    type Target = NodeHelperType;
     fn deref(&self) -> &Self::Target {
         &self.reth_node
     }

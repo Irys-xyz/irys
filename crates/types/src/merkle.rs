@@ -1,6 +1,7 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
 use crate::chunked::ChunkedIterator;
+use crate::Base64;
 use crate::ChunkBytes;
 use crate::H256;
 use alloy_primitives::Address;
@@ -10,8 +11,7 @@ use eyre::eyre;
 use eyre::Error;
 use eyre::OptionExt as _;
 use openssl::sha;
-
-use crate::Base64;
+use tracing::debug;
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
@@ -172,11 +172,26 @@ pub fn validate_path(
             base64_url::encode(&path_hash)
         );
     }
-    println!(
+
+    let leaf_node_id = hash_all_sha256(vec![
+        &leaf_proof.data_hash,
+        &leaf_proof.offset().to_note_vec(),
+    ])?;
+    let path_hash_matches_leaf = leaf_node_id == expected_path_hash;
+
+    debug!(
         "  LeafProof: data_hash: {}, offset: {}",
         base64_url::encode(&leaf_proof.data_hash),
         usize::from_be_bytes(leaf_proof.offset)
     );
+
+    if !path_hash_matches_leaf {
+        return Err(eyre!(
+            "Invalid Leaf Proof: hash mismatch, expected: {:?}, got: {:?}",
+            base64_url::encode(&expected_path_hash),
+            base64_url::encode(&leaf_proof.data_hash)
+        ));
+    }
 
     // Proof nodes (including leaf nodes) always contain their right bound
     let right_bound = leaf_proof.offset() as u128;
@@ -288,10 +303,15 @@ pub fn validate_chunk(
                 }
             }
 
-            // Validate leaf: both id and data_hash are correct.
+            // Validate leaf data_hash is correct
+            if data_hash != &leaf_proof.data_hash {
+                return Err(eyre!("Invalid Leaf Proof: hash mismatch"));
+            }
+
+            // Validate leaf root id is correct
             let id = hash_all_sha256(vec![data_hash, &max_byte_range.to_note_vec()])?;
-            if (id != root_id) && (data_hash != &leaf_proof.data_hash) {
-                return Err(eyre!("Invalid Leaf Proof"));
+            if id != root_id {
+                return Err(eyre!("Invalid Leaf Proof: root mismatch"));
             }
         }
         _ => {

@@ -12,20 +12,19 @@
 //!     results of a child block.
 use crate::{
     block_tree_service::{BlockTreeServiceMessage, ReorgEvent, ValidationResult},
-    block_validation::PayloadProvider,
     services::ServiceSenders,
 };
 use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
 use eyre::ensure;
 use futures::FutureExt as _;
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader};
+use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader, TokioServiceHandle};
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
-use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use reth::tasks::shutdown::Shutdown;
 use std::{
     pin::pin,
     sync::{
@@ -35,7 +34,6 @@ use std::{
 };
 use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver},
-    task::JoinHandle,
     time::{interval, Duration},
 };
 use tracing::{debug, error, info, instrument, warn};
@@ -51,19 +49,19 @@ pub enum ValidationServiceMessage {
 }
 
 /// Main validation service structure
-pub struct ValidationService<T: PayloadProvider> {
+pub struct ValidationService {
     /// Graceful shutdown handle
-    shutdown: GracefulShutdown,
+    shutdown: Shutdown,
     /// Message receiver
     msg_rx: UnboundedReceiver<ValidationServiceMessage>,
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
     /// Inner service logic
-    inner: Arc<ValidationServiceInner<T>>,
+    inner: Arc<ValidationServiceInner>,
 }
 
 /// Inner service structure containing business logic
-pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
+pub(crate) struct ValidationServiceInner {
     /// Read only view of the block index
     pub(crate) block_index_guard: BlockIndexReadGuard,
     /// VDF steps read guard
@@ -81,15 +79,14 @@ pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
     /// Rayon thread pool that executes vdf steps   
     pub(crate) pool: rayon::ThreadPool,
     /// Execution payload provider for shadow transaction validation
-    pub(crate) execution_payload_provider: T,
+    pub(crate) execution_payload_provider: ExecutionPayloadCache,
     /// Toggle to enable/disable validation message processing
     pub validation_enabled: Arc<AtomicBool>,
 }
 
-impl<T: PayloadProvider> ValidationService<T> {
+impl ValidationService {
     /// Spawn a new validation service
     pub fn spawn_service(
-        exec: &TaskExecutor,
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
         vdf_state_readonly: VdfStateReadonly,
@@ -97,47 +94,55 @@ impl<T: PayloadProvider> ValidationService<T> {
         service_senders: &ServiceSenders,
         reth_node_adapter: IrysRethNodeAdapter,
         db: DatabaseProvider,
-        execution_payload_provider: T,
+        execution_payload_provider: ExecutionPayloadCache,
         rx: UnboundedReceiver<ValidationServiceMessage>,
-    ) -> (JoinHandle<()>, Arc<AtomicBool>) {
+        runtime_handle: tokio::runtime::Handle,
+    ) -> (TokioServiceHandle, Arc<AtomicBool>) {
+        info!("Spawning validation service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
         let config = config.clone();
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
 
-        let handle = exec.spawn_critical_with_graceful_shutdown_signal(
-            "Validation Service",
-            |shutdown| async move {
-                let validation_service = Self {
-                    shutdown,
-                    msg_rx: rx,
-                    reorg_rx,
-                    inner: Arc::new(ValidationServiceInner {
-                        pool: rayon::ThreadPoolBuilder::new()
-                            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
-                            .build()
-                            .expect("to be able to build vdf validation pool"),
-                        block_index_guard,
-                        vdf_state: vdf_state_readonly,
-                        config,
-                        service_senders,
-                        block_tree_guard,
-                        reth_node_adapter,
-                        db,
-                        execution_payload_provider,
-                        validation_enabled: validation_enabled_clone,
-                    }),
-                };
+        let handle = runtime_handle.spawn(async move {
+            let validation_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                reorg_rx,
+                inner: Arc::new(ValidationServiceInner {
+                    pool: rayon::ThreadPoolBuilder::new()
+                        .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+                        .build()
+                        .expect("to be able to build vdf validation pool"),
+                    block_index_guard,
+                    vdf_state: vdf_state_readonly,
+                    config,
+                    service_senders,
+                    block_tree_guard,
+                    reth_node_adapter,
+                    db,
+                    execution_payload_provider,
+                    validation_enabled: validation_enabled_clone,
+                }),
+            };
 
-                validation_service
-                    .start()
-                    .await
-                    .expect("validation service encountered an irrecoverable error")
-            },
-        );
+            validation_service
+                .start()
+                .await
+                .expect("validation service encountered an irrecoverable error")
+        });
 
-        (handle, validation_enabled)
+        let service_handle = TokioServiceHandle {
+            name: "validation_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        };
+
+        (service_handle, validation_enabled)
     }
 
     /// Main service loop
@@ -162,6 +167,7 @@ impl<T: PayloadProvider> ValidationService<T> {
             tokio::select! {
                 // Check for shutdown signal
                 _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for validation service");
                     break;
                 }
 
@@ -224,13 +230,13 @@ impl<T: PayloadProvider> ValidationService<T> {
     }
 }
 
-impl<T: PayloadProvider> ValidationServiceInner<T> {
+impl ValidationServiceInner {
     /// Handle incoming messages
     #[instrument(skip_all, fields(block_hash, block_height))]
     async fn create_validation_future(
         self: Arc<Self>,
         msg: ValidationServiceMessage,
-    ) -> Option<BlockValidationTask<T>> {
+    ) -> Option<BlockValidationTask> {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
                 let block_hash = block.block_hash;

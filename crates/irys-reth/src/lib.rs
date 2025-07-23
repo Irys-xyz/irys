@@ -37,14 +37,17 @@ use reth::{
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
+pub use reth_ethereum_engine_primitives;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
+pub use reth_node_ethereum;
 use reth_node_ethereum::{
     node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
 };
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
+pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
@@ -1500,12 +1503,13 @@ mod tests {
 
         // Now create unpledge transaction
         let unpledge_amount = U256::from(3_000_000_000_000_000_000_u64); // 3 ETH
-        let unpledge_tx =
-            ShadowTransaction::new_v1(TransactionPacket::Unpledge(BalanceIncrement {
+        let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
+            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
                 amount: unpledge_amount,
                 target: target_address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }));
+            }),
+        ));
         let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
 
@@ -1628,12 +1632,13 @@ mod tests {
 
         // Create unpledge transaction for non-existent account
         let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 ETH
-        let unpledge_tx =
-            ShadowTransaction::new_v1(TransactionPacket::Unpledge(BalanceIncrement {
+        let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
+            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
                 amount: unpledge_amount,
                 target: nonexistent_address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }));
+            }),
+        ));
         let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
 
@@ -2169,11 +2174,13 @@ pub mod test_utils {
 
     /// Compose a shadow tx for unstaking.
     pub fn unstake(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Unstake(shadow_tx::BalanceIncrement {
-            amount: U256::ONE,
-            target: address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }))
+        ShadowTransaction::new_v1(TransactionPacket::Unstake(
+            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(shadow_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+        ))
     }
 
     /// Compose a shadow tx for block reward.
@@ -2217,11 +2224,13 @@ pub mod test_utils {
 
     /// Compose a shadow tx for unpledge.
     pub fn unpledge(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Unpledge(shadow_tx::BalanceIncrement {
-            amount: U256::ONE,
-            target: address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }))
+        ShadowTransaction::new_v1(TransactionPacket::Unpledge(
+            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(shadow_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+        ))
     }
 
     /// Assert that a log topic is present in block execution receipts at least `desired_repetitions` times.

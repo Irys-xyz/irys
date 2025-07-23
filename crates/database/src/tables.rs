@@ -6,7 +6,7 @@ use crate::{
     submodule::tables::{ChunkOffsets, ChunkPathHashes},
 };
 use irys_types::{
-    ingress::IngressProof, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, H256,
+    ingress::IngressProof, ChunkPathHash, DataRoot, DataTransactionHeader, IrysBlockHeader, H256,
 };
 use irys_types::{Address, Base64, CommitmentTransaction, PeerListItem};
 use reth_codecs::Compact;
@@ -74,7 +74,7 @@ macro_rules! impl_compression_for_compact {
 }
 
 add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
-add_wrapper_struct!((IrysTransactionHeader, CompactTxHeader));
+add_wrapper_struct!((DataTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((CommitmentTransaction, CompactCommitment));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));

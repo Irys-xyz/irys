@@ -1,6 +1,6 @@
 use alloy_core::primitives::{TxHash, U256};
 use alloy_genesis::GenesisAccount;
-use irys_actors::block_producer::SolutionFoundMessage;
+use irys_actors::block_producer::BlockProducerCommand;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
@@ -24,7 +24,7 @@ const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let expected_addr = hex::decode(DEV_ADDRESS)?;
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.mining_key = SigningKey::from_slice(&dev_wallet).unwrap();
 
     let account1 = IrysSigner::random_signer(&config.consensus_config());
@@ -77,13 +77,16 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     );
 
     loop {
-        let (block, _) = node
-            .node_ctx
-            .actor_addresses
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        node.node_ctx
+            .service_senders
             .block_producer
-            .send(SolutionFoundMessage(SolutionContext::default()))
-            .await??
+            .send(BlockProducerCommand::SolutionFound {
+                solution: SolutionContext::default(),
+                response: response_tx,
+            })
             .unwrap();
+        let (block, _) = response_rx.await??.unwrap();
 
         //check reth for built block
         let reth_block = reth_context

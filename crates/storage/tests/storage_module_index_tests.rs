@@ -14,10 +14,9 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
-    partition_chunk_offset_ii, Base64, Config, ConsensusConfig, ConsensusOptions,
-    DataTransactionLedger, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
-    LedgerChunkRange, NodeConfig, PartitionChunkOffset, PartitionChunkRange, TxChunkOffset,
-    UnpackedChunk, H256,
+    partition_chunk_offset_ii, Base64, Config, ConsensusConfig, ConsensusOptions, DataTransaction,
+    DataTransactionHeader, DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    PartitionChunkOffset, PartitionChunkRange, TxChunkOffset, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database as _;
@@ -28,7 +27,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
-    let mut node_config = NodeConfig::testnet();
+    let mut node_config = NodeConfig::testing();
     node_config.storage.num_writes_before_sync = 1;
     node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
         chunk_size: 32,
@@ -133,7 +132,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Loop though all the data_chunks and create wrapper tx for them
     let signer = config.irys_signer();
-    let mut txs: Vec<IrysTransaction> = Vec::new();
+    let mut txs: Vec<DataTransaction> = Vec::new();
 
     for chunks in data_chunks {
         let mut data: Vec<u8> = Vec::new();
@@ -145,7 +144,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         txs.push(tx);
     }
 
-    let tx_headers: Vec<IrysTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
+    let tx_headers: Vec<DataTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
 
     // Create a tx_root (and paths) from the tx
     let (_tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&tx_headers);

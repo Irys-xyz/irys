@@ -68,7 +68,7 @@ pub fn compute_entropy_chunk(
 #[cfg(test)]
 mod tests {
     use crate::{
-        capacity::{compute_entropy_chunk, compute_seed_hash},
+        capacity::{compute_entropy_chunk, compute_seed_hash, DATA_CHUNK_SIZE},
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_seed_hash() {
-        let testnet_config = ConsensusConfig::testnet();
+        let testing_config = ConsensusConfig::testing();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -90,7 +90,7 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash,
-            testnet_config.chain_id,
+            testing_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -105,7 +105,7 @@ mod tests {
         let c_hash_ptr = c_hash.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id = testnet_config.chain_id;
+        let chain_id = testing_config.chain_id;
 
         unsafe {
             compute_seed_hash(
@@ -129,7 +129,8 @@ mod tests {
 
     #[test]
     fn test_compute_entropy_chunk() {
-        let consensus_config = ConsensusConfig::testnet();
+        let mut consensus_config = ConsensusConfig::testing();
+        consensus_config.chunk_size = DATA_CHUNK_SIZE as u64;
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);

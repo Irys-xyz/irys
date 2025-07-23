@@ -1,4 +1,5 @@
 use crate::{
+    block_producer::BlockProducerCommand,
     block_tree_service::{
         BlockMigratedEvent, BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent,
     },
@@ -9,7 +10,7 @@ use crate::{
 };
 use actix::Message;
 use core::ops::Deref;
-use irys_types::GossipBroadcastMessage;
+use irys_types::{GossipBroadcastMessage, PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
@@ -60,9 +61,11 @@ pub struct ServiceReceivers {
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
+    pub block_producer: UnboundedReceiver<BlockProducerCommand>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
+    pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
 }
 
 #[derive(Debug)]
@@ -75,9 +78,11 @@ pub struct ServiceSendersInner {
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
+    pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
+    pub peer_network: PeerNetworkSender,
 }
 
 impl ServiceSendersInner {
@@ -97,12 +102,15 @@ impl ServiceSendersInner {
             unbounded_channel::<BlockTreeServiceMessage>();
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
+        let (block_producer_sender, block_producer_receiver) =
+            unbounded_channel::<BlockProducerCommand>();
         // Create broadcast channel for reorg events
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
         let (block_migrated_sender, block_migrated_receiver) =
             broadcast::channel::<BlockMigratedEvent>(100);
         let (block_state_sender, block_state_receiver) =
             broadcast::channel::<BlockStateUpdated>(100);
+        let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -113,9 +121,11 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
             validation_service: validation_sender,
+            block_producer: block_producer_sender,
             reorg_events: reorg_sender,
             block_migrated_events: block_migrated_sender,
             block_state_events: block_state_sender,
+            peer_network: PeerNetworkSender::new(peer_network_sender),
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -126,9 +136,11 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
             validation_service: validation_receiver,
+            block_producer: block_producer_receiver,
             reorg_events: reorg_receiver,
             block_migrated_events: block_migrated_receiver,
             block_state_events: block_state_receiver,
+            peer_network: peer_network_receiver,
         };
         (senders, receivers)
     }

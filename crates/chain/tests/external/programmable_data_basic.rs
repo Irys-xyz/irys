@@ -43,7 +43,7 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let main_address = config.miner_address();
     config.consensus.extend_genesis_accounts(vec![

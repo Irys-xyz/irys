@@ -28,11 +28,11 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn external_api() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
 
-    let mut testnet_config = NodeConfig::testnet();
-    testnet_config.http.bind_port = 8080; // external test, should never be run concurrently
+    let mut testing_config = NodeConfig::testing();
+    testing_config.http.bind_port = 8080; // external test, should never be run concurrently
 
-    let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    let account1 = IrysSigner::random_signer(&testing_config.consensus_config());
+    let mut node = IrysNodeTest::new_genesis(testing_config.clone());
     let main_address = node.cfg.miner_address();
     node.cfg.consensus.extend_genesis_accounts(vec![
         (
