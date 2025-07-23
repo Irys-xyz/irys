@@ -426,7 +426,7 @@ mod tests {
         let peer_network_sender = PeerNetworkSender::new(tx);
         let peer_list = PeerList::new(&config, &db, peer_network_sender).expect("peer list");
 
-        let miner = Address::new([1u8; 20]);
+        let miner = Address::new([1_u8; 20]);
         peer_list.add_or_update_peer(miner, PeerListItem::default());
 
         let error = GossipError::BlockPool(BlockPoolError::BlockError("bad".into()));
