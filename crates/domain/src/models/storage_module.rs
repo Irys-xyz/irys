@@ -69,9 +69,12 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock, RwLockReadGuard},
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant},
 };
 use tracing::{debug, error, info};
+
+use crate::{CircularBuffer, StorageModulesReadGuard};
 
 type SubmodulePath = PathBuf;
 
@@ -84,6 +87,24 @@ type SubmoduleMap =
 
 /// Tracks storage state of chunk ranges across all submodules
 type StorageIntervals = NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, ChunkType>;
+
+#[derive(Debug)]
+pub struct ChunkTimeRecord {
+    pub start_time: Instant,
+    pub completion_time: Instant,
+    pub total_duration: Duration,
+}
+
+impl Default for ChunkTimeRecord {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            start_time: now,
+            completion_time: now,
+            total_duration: Duration::ZERO,
+        }
+    }
+}
 
 /// Maps a logical partition (fixed size) to physical storage across multiple drives
 #[derive(Debug)]
@@ -98,6 +119,8 @@ pub struct StorageModule {
     intervals: Arc<RwLock<StorageIntervals>>,
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
+    /// Track the speed/throughput of recent disk writes
+    recent_chunk_times: Arc<RwLock<CircularBuffer<ChunkTimeRecord>>>,
     /// Runtime configuration parameters
     pub config: Config,
 }
@@ -184,26 +207,6 @@ pub enum ChunkType {
 pub struct StorageModules(pub StorageModuleVec);
 
 pub type StorageModuleVec = Vec<Arc<StorageModule>>;
-
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
-#[derive(Debug, Clone)]
-pub struct StorageModulesReadGuard {
-    storage_module_data: Arc<RwLock<Vec<Arc<StorageModule>>>>,
-}
-
-impl StorageModulesReadGuard {
-    /// Creates a new `ReadGuard` for StorageModules list
-    pub const fn new(storage_module_data: Arc<RwLock<Vec<Arc<StorageModule>>>>) -> Self {
-        Self {
-            storage_module_data,
-        }
-    }
-
-    /// Accessor method to get a read guard for the StorageModules list
-    pub fn read(&self) -> RwLockReadGuard<'_, Vec<Arc<StorageModule>>> {
-        self.storage_module_data.read().unwrap()
-    }
-}
 
 impl StorageModules {
     pub fn inner(self) -> StorageModuleVec {
@@ -361,6 +364,7 @@ impl StorageModule {
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             submodules: submodule_map,
+            recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
         })
     }
@@ -1068,6 +1072,8 @@ impl StorageModule {
         // Get the correct submodule reference based on chunk_offset
         let (interval, submodule) = self.get_submodule_for_offset(chunk_offset).unwrap();
 
+        let start_time = Instant::now();
+
         // Get the submodule relative offset of the chunk
         let submodule_offset = chunk_offset - interval.start();
         {
@@ -1096,7 +1102,65 @@ impl StorageModule {
 
         drop(intervals);
 
+        let completion_time = Instant::now();
+
+        let chunk_time_record = ChunkTimeRecord {
+            start_time,
+            completion_time,
+            total_duration: completion_time - start_time,
+        };
+
+        self.recent_chunk_times
+            .write()
+            .unwrap()
+            .push(chunk_time_record);
+
         Ok(())
+    }
+
+    /// Returns the average completion time for chunks in the buffer.
+    /// Returns Duration::ZERO if no chunks are recorded.
+    pub fn average_chunk_completion_time(&self) -> Duration {
+        let recent_chunk_times = self.recent_chunk_times.read().unwrap();
+        if recent_chunk_times.is_empty() {
+            return Duration::ZERO;
+        }
+
+        // Calculate average duration from all records
+        let total_duration_nanos: u128 = recent_chunk_times
+            .iter()
+            .map(|record| record.total_duration.as_nanos())
+            .sum();
+
+        let avg_duration_nanos = total_duration_nanos / recent_chunk_times.len() as u128;
+
+        Duration::from_nanos(avg_duration_nanos as u64)
+    }
+
+    /// Calculate write throughput in bytes per second based on chunk records
+    /// Returns 0 if no records are available
+    pub fn write_throughput(&self) -> u64 {
+        let chunk_size = self.config.consensus.chunk_size;
+        let recent_chunk_times = self.recent_chunk_times.read().unwrap();
+
+        if recent_chunk_times.is_empty() {
+            return 0;
+        }
+
+        let front = recent_chunk_times.front().unwrap();
+        let back = recent_chunk_times.back().unwrap();
+
+        // Calculate the actual time span covered by our records
+        let time_span = back.completion_time.duration_since(front.start_time);
+
+        // Total bytes processed in this time span
+        let total_bytes = chunk_size * recent_chunk_times.len() as u64;
+
+        // Calculate throughput with minimum 1 second time span
+        let time_span_secs = time_span.as_secs_f64().max(1.0);
+
+        let bytes_per_second = total_bytes as f64 / time_span_secs;
+        bytes_per_second.round() as u64
     }
 
     /// Utility method asking the StorageModule to return its chunk range in
