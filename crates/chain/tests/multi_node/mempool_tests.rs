@@ -1628,13 +1628,11 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 /// post invalid commitment txs where tx id has been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
 async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
-
-    initialize_tracing();
 
     let mut genesis_config = NodeConfig::testnet();
 
