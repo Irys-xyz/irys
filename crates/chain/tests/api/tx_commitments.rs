@@ -458,10 +458,10 @@ async fn post_stake_commitment(
     signer: &IrysSigner,
 ) -> CommitmentTransaction {
     let consensus = &node.node_ctx.config.consensus;
-    info!("Node consensus stake_fee: {:?}", consensus.stake_fee);
+    info!("Node consensus stake_fee: {:?}", consensus.stake_value);
     info!(
         "Node consensus stake_fee amount: {}",
-        consensus.stake_fee.amount
+        consensus.stake_value.amount
     );
     let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
     info!("Created stake_tx with value: {:?}", stake_tx.value);

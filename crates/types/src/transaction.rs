@@ -1,10 +1,10 @@
-use crate::{
+pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
-use irys_primitives::CommitmentType;
+pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
 pub type IrysTransactionId = H256;
@@ -248,7 +248,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Stake,
             anchor,
             fee,
-            value: config.stake_fee.amount,
+            value: config.stake_value.amount,
             ..Self::new(config)
         }
     }
@@ -259,7 +259,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Unstake,
             anchor,
             fee,
-            value: config.stake_fee.amount,
+            value: config.stake_value.amount,
             ..Self::new(config)
         }
     }
@@ -278,10 +278,10 @@ impl CommitmentTransaction {
 
         // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
         let value = config
-            .pledge_base_fee
+            .pledge_base_value
             .apply_pledge_decay(count, config.pledge_decay)
             .map(|a| a.amount)
-            .unwrap_or(config.pledge_base_fee.amount);
+            .unwrap_or(config.pledge_base_value.amount);
 
         Self {
             commitment_type: CommitmentType::Pledge,
@@ -311,10 +311,10 @@ impl CommitmentTransaction {
             // Calculate the value of the most recent pledge (count - 1)
             // This ensures unpledge matches the cost of the last pledge made
             config
-                .pledge_base_fee
+                .pledge_base_value
                 .apply_pledge_decay(count - 1, config.pledge_decay)
                 .map(|a| a.amount)
-                .unwrap_or(config.pledge_base_fee.amount)
+                .unwrap_or(config.pledge_base_value.amount)
         };
 
         Self {
@@ -837,7 +837,7 @@ mod pledge_decay_parametrized_tests {
     ) {
         // Setup config with $20,000 base fee and 0.9 decay rate
         let mut config = ConsensusConfig::testnet();
-        config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
         // Create provider with existing pledge count
@@ -889,7 +889,7 @@ mod pledge_decay_parametrized_tests {
     ) {
         // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
         let mut config = ConsensusConfig::testnet();
-        config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
         // Create provider with existing pledge count
