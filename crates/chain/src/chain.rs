@@ -353,7 +353,7 @@ impl IrysNode {
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                self.create_new_genesis_block(genesis_block.clone())
+                self.create_new_genesis_block(genesis_block.clone()).await
             }
             NodeMode::PeerSync | NodeMode::TrustedPeerSync => {
                 // Fetch genesis data from trusted peer when joining network
@@ -401,12 +401,12 @@ impl IrysNode {
         (genesis_block, commitments)
     }
 
-    fn create_new_genesis_block(
+    async fn create_new_genesis_block(
         &self,
         mut genesis_block: IrysBlockHeader,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
         // Generate genesis commitments from configuration
-        let commitments = get_genesis_commitments(&self.config);
+        let commitments = get_genesis_commitments(&self.config).await;
 
         // Calculate initial difficulty based on number of storage modules
         let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
@@ -421,7 +421,7 @@ impl IrysNode {
         genesis_block.last_diff_timestamp = timestamp;
 
         // Add commitment transactions to genesis block
-        add_genesis_commitments(&mut genesis_block, &self.config);
+        add_genesis_commitments(&mut genesis_block, &self.config).await;
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
@@ -621,8 +621,36 @@ impl IrysNode {
         )
         .await?;
 
-        // Note: stake_and_pledge is now called after mempool service initialization
-        // to allow access to MempoolPledgeProvider
+        // Call stake_and_pledge after mempool service is initialized
+        if ctx.config.node_config.stake_pledge_drives {
+            const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+            let mut validation_tracker = BlockValidationTracker::new(
+                ctx.block_tree_guard.clone(),
+                ctx.service_senders.clone(),
+                MAX_WAIT_TIME,
+            );
+            // wait for any pending blocks to finish validating
+            let latest_hash = validation_tracker.wait_for_validation().await?;
+
+            {
+                let btrg = ctx.block_tree_guard.read();
+                debug!(
+                    "Checking stakes & pledges at height {}, latest hash: {}",
+                    btrg.get_canonical_chain().0.last().unwrap().height,
+                    &latest_hash
+                );
+            };
+            // TODO: add code to proactively grab the latest head block from peers
+            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
+            stake_and_pledge(
+                &ctx.config,
+                ctx.block_tree_guard.clone(),
+                ctx.storage_modules_guard.clone(),
+                latest_hash,
+                ctx.mempool_pledge_provider.clone(),
+            )
+            .await?;
+        }
 
         Ok(ctx)
     }
@@ -1202,37 +1230,6 @@ impl IrysNode {
             });
         }
 
-        // Call stake_and_pledge after mempool service is initialized
-        if config.node_config.stake_pledge_drives {
-            const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-            let mut validation_tracker = BlockValidationTracker::new(
-                block_tree_guard.clone(),
-                service_senders.clone(),
-                MAX_WAIT_TIME,
-            );
-            // wait for any pending blocks to finish validating
-            let latest_hash = validation_tracker.wait_for_validation().await?;
-
-            {
-                let btrg = block_tree_guard.read();
-                debug!(
-                    "Checking stakes & pledges at height {}, latest hash: {}",
-                    btrg.get_canonical_chain().0.last().unwrap().height,
-                    &latest_hash
-                );
-            };
-            // TODO: add code to proactively grab the latest head block from peers
-            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
-            stake_and_pledge(
-                &config,
-                block_tree_guard.clone(),
-                irys_node_ctx.storage_modules_guard.clone(),
-                latest_hash,
-                mempool_pledge_provider.clone(),
-            )
-            .await?;
-        }
-
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
@@ -1240,7 +1237,7 @@ impl IrysNode {
                 peer_list: peer_list_guard,
                 db: irys_db,
                 reth_provider: reth_node.clone(),
-                block_tree: block_tree_guard,
+                block_tree: block_tree_guard.clone(),
                 block_index: block_index_guard.clone(),
                 config: config.clone(),
                 reth_http_url: reth_node
@@ -1248,7 +1245,7 @@ impl IrysNode {
                     .http_url()
                     .expect("Missing reth rpc url!"),
                 sync_state,
-                mempool_pledge_provider,
+                mempool_pledge_provider: mempool_pledge_provider.clone(),
             },
             http_listener,
         );
@@ -1666,7 +1663,8 @@ async fn stake_and_pledge(
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
-        client.post(url).send_json(commitment_tx).await
+        let res = client.post(url).send_json(commitment_tx).await;
+        res
     };
 
     // now check the canonical state
@@ -1734,7 +1732,8 @@ async fn stake_and_pledge(
             1,
             mempool_pledge_provider.as_ref(),
             address,
-        );
+        )
+        .await;
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();

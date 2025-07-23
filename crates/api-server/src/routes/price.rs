@@ -145,7 +145,7 @@ pub async fn get_pledge_price(
     let user_address = parse_user_address(&user_address_str)?;
 
     // Use the MempoolPledgeProvider to get accurate pledge count
-    let pledge_count = state.mempool_pledge_provider.pledge_count(user_address);
+    let pledge_count = state.mempool_pledge_provider.pledge_count(user_address).await;
 
     // Calculate the pledge value with decay
     let pledge_value = calculate_pledge_value(
@@ -171,7 +171,7 @@ pub async fn get_unpledge_price(
     let user_address = parse_user_address(&user_address_str)?;
 
     // Use the MempoolPledgeProvider to get accurate pledge count
-    let pledge_count = state.mempool_pledge_provider.pledge_count(user_address);
+    let pledge_count = state.mempool_pledge_provider.pledge_count(user_address).await;
 
     let refund_amount = calculate_pledge_value(
         state.config.consensus.pledge_base_value,

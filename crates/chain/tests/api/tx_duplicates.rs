@@ -108,7 +108,8 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
         1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
-    );
+    )
+    .await;
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
 
     // Post pledge commitment

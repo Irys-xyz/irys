@@ -24,7 +24,7 @@ impl MempoolPledgeProvider {
 }
 
 impl PledgeDataProvider for MempoolPledgeProvider {
-    fn pledge_count(&self, user_address: Address) -> usize {
+    async fn pledge_count(&self, user_address: Address) -> usize {
         // Get the canonical pledge count from the blockchain state
         let canonical_count = {
             let commitment_snapshot = self
@@ -40,7 +40,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
 
         // Count pending pledge transactions in the mempool
         let pending_pledges = {
-            let mempool = self.mempool_state.blocking_read();
+            let mempool = self.mempool_state.read().await;
             mempool
                 .valid_commitment_tx
                 .get(&user_address)
@@ -54,7 +54,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
 
         // Count pending unpledge transactions in the mempool
         let pending_unpledges = {
-            let mempool = self.mempool_state.blocking_read();
+            let mempool = self.mempool_state.read().await;
             mempool
                 .valid_commitment_tx
                 .get(&user_address)

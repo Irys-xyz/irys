@@ -383,7 +383,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
         1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
-    );
+    )
+    .await;
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -430,7 +431,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
         1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
-    );
+    )
+    .await;
     let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -486,7 +488,8 @@ async fn post_pledge_commitment(
         1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
-    );
+    )
+    .await;
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 

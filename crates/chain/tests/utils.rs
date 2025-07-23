@@ -1548,7 +1548,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             1,
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
-        );
+        )
+        .await;
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
@@ -2043,7 +2044,7 @@ pub fn new_stake_tx(
     signer.sign_commitment(stake_tx).unwrap()
 }
 
-pub fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
+pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     anchor: &H256,
     signer: &IrysSigner,
     config: &ConsensusConfig,
@@ -2055,7 +2056,8 @@ pub fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
         1,
         pledge_provider,
         signer.address(),
-    );
+    )
+    .await;
     signer.sign_commitment(pledge_tx).unwrap()
 }
 

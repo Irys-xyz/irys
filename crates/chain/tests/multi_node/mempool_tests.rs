@@ -126,7 +126,8 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
         &signer,
         config,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
-    );
+    )
+    .await;
 
     // Post the pledge before the stake
     genesis_node.post_commitment_tx(&pledge_tx).await?;
@@ -192,7 +193,8 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         &signer,
         config,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
-    );
+    )
+    .await;
     genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     // test storage data

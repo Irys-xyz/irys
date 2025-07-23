@@ -1345,7 +1345,8 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
             &signer,
             &genesis_config.consensus_config(),
             genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
-        );
+        )
+        .await;
 
         tx_ids.push(tx.id);
         genesis_node.post_commitment_tx(&tx).await?;

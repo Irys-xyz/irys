@@ -5263,6 +5263,7 @@ dependencies = [
  "color-eyre",
  "tempfile",
  "tracing",
+ "tracing-error",
  "tracing-subscriber 0.3.19",
 ]
 
