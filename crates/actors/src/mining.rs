@@ -442,13 +442,13 @@ mod tests {
                 entropy_packing_iterations: 1,
                 block_migration_depth: 1, // Testnet / single node config
                 chain_id: 1,
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             base_directory: base_path.clone(),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
 
@@ -615,13 +615,13 @@ mod tests {
                 chunk_size: 32,
                 num_chunks_in_partition: 10,
                 num_chunks_in_recall_range: 2, // Recall range size is 5 chunks
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             base_directory: base_path.clone(),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
 

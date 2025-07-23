@@ -161,7 +161,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let config = NodeConfig::testnet();
+    let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
@@ -291,7 +291,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
@@ -713,7 +713,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for the peer and fund it
@@ -727,7 +727,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     genesis_node.start_public_api().await;
 
     // Initialize the peer with our keypair/signer
-    let peer_config = genesis_node.testnet_peer_with_signer(&peer_signer);
+    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
 
     // Start the peer: No packing on the peer, it doesn't have partition assignments yet
     let peer_node = IrysNodeTest::new(peer_config.clone())
@@ -998,7 +998,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     // Configure test network
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut node = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut node = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
 
     // Create peer signer and fund it
     let peer_signer = node.new_random_signer();
@@ -1117,7 +1117,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     }
 
     // Configure test network
-    let config = NodeConfig::testnet();
+    let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
 
     // disable validation for this test
@@ -1223,7 +1223,7 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     let num_blocks_to_mine = 10;
 
     // Configure a node with specified block_tree_depth
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().block_tree_depth = block_tree_depth;
 
     let node = IrysNodeTest::new_genesis(config).start().await;
@@ -1305,12 +1305,18 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let max_commitments_per_epoch =
         (num_blocks_in_epoch * max_commitment_txs_per_block) - max_commitment_txs_per_block;
 
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch.try_into()?);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch.try_into()?);
     genesis_config
         .consensus
         .get_mut()
         .mempool
         .max_commitment_txs_per_block = max_commitment_txs_per_block;
+
+    genesis_config
+        .consensus
+        .get_mut()
+        .mempool
+        .anchor_expiry_depth = 100;
 
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -1318,25 +1324,34 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    let _ = genesis_node.start_public_api().await;
+
+    // mine enough blocks to serve as anchors for each commitment tx
+    // TODO: once tx anchors have full support for single-block inclusion, revert this test to it's original version
+    genesis_node.mine_blocks(10).await?;
+
+    assert_eq!(genesis_node.get_canonical_chain_height().await, 10);
 
     // create and post stake commitment tx
     let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
     genesis_node.post_commitment_tx(&stake_tx).await?;
 
-    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id];
     let commitment_snapshot = genesis_node
         .node_ctx
         .block_tree_guard
         .read()
         .canonical_commitment_snapshot();
-    for _ in 0..11 {
+
+    for height in 0..11 {
+        let hash = genesis_node.get_block_by_height(height).await?.block_hash;
+
         let tx = new_pledge_tx(
-            tx_ids.last().expect("valid tx id for use as anchor"),
+            &hash,
             &signer,
             &genesis_config.consensus_config(),
             &commitment_snapshot,
         );
+
         tx_ids.push(tx.id);
         genesis_node.post_commitment_tx(&tx).await?;
     }
@@ -1347,9 +1362,12 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
         .await?;
 
     let mut counts = Vec::new();
+    let height_offset = genesis_node.get_canonical_chain_height().await;
+
+    assert!(height_offset % num_blocks_in_epoch == 0);
+
     for i in 1..=8 {
-        genesis_node.mine_block().await?;
-        let block = genesis_node.get_block_by_height(i).await?;
+        let block = genesis_node.mine_block().await?;
         let is_epoch_block = block.height > 0 && block.height % num_blocks_in_epoch == 0;
         counts.push(
             block
@@ -1375,7 +1393,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     // for 1 stake + 11 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 2 + 2 + 0 + 2 + 2
 
     for h in 1..num_blocks_in_epoch {
-        let block_n = genesis_node.get_block_by_height(h).await?;
+        let block_n = genesis_node.get_block_by_height(height_offset + h).await?;
         assert_eq!(
             2,
             block_n
@@ -1389,19 +1407,20 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     // epoch block rolls up previous txs
     let epoch_block = genesis_node
-        .get_block_by_height(num_blocks_in_epoch)
+        .get_block_by_height(height_offset + num_blocks_in_epoch)
         .await?;
     assert_eq!(epoch_block.height % num_blocks_in_epoch, 0);
     let epoch_tx_ids = epoch_block
         .system_ledgers
         .get(SystemLedger::Commitment as usize)
         .map_or(Vec::<H256>::new(), |l| l.tx_ids.0.clone());
+
     assert_eq!(epoch_tx_ids, tx_ids[..max_commitments_per_epoch as usize]);
 
     // some blocks after epoch should contain commitment txs
     // this will be a few blocks, as we posted enough txs above to populate two more blocks
     for h in 6..=7 {
-        let block_n = genesis_node.get_block_by_height(h).await?;
+        let block_n = genesis_node.get_block_by_height(height_offset + h).await?;
         assert_eq!(
             2,
             block_n
@@ -1414,7 +1433,9 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     // we have then used all commitment txs from mempool, so final block(s) are empty
     let final_height = 8;
-    let final_block = genesis_node.get_block_by_height(final_height).await?;
+    let final_block = genesis_node
+        .get_block_by_height(height_offset + final_height)
+        .await?;
     assert_eq!(
         0,
         final_block

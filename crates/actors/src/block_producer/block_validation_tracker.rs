@@ -82,7 +82,7 @@ impl BlockValidationTracker {
         }
     }
 
-    /// Waits for a block to be fully validated, monitoring validation progress
+    /// Waits for a block to be fully validated, monitoring validation progress\
     /// Returns the final block hash to use (either the target or fallback)
     pub async fn wait_for_validation(&mut self) -> eyre::Result<BlockHash> {
         let start_time = Instant::now();

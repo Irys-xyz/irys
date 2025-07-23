@@ -17,7 +17,7 @@ use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().block_migration_depth = 2;
     config.cache.cache_clean_lag = 5;

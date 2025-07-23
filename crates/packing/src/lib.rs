@@ -264,6 +264,7 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
 mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
     use crate::*;
+    use irys_c::capacity::DATA_CHUNK_SIZE;
     use irys_types::{ConsensusConfig, PartitionChunkOffset, TxChunkOffset, H256};
     use rand::{Rng as _, RngCore as _};
     use std::time::*;
@@ -275,16 +276,16 @@ mod tests {
         use irys_types::NodeConfig;
 
         let mut rng = rand::thread_rng();
-        let testnet_config = ConsensusConfig::testnet();
-        let node_config = NodeConfig::testnet();
+        let testing_config = ConsensusConfig::testing();
+        let node_config = NodeConfig::testing();
         let mining_address = node_config.miner_address();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = 2 * testnet_config.chunk_size as u32;
+        let iterations = 2 * testing_config.chunk_size as u32;
 
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(testnet_config.chunk_size as usize);
-        let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(testnet_config.chunk_size as usize);
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
+        let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
 
         let now = Instant::now();
 
@@ -293,9 +294,9 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            testnet_config.chunk_size as usize,
+            testing_config.chunk_size as usize,
             &mut chunk,
-            testnet_config.chain_id,
+            testing_config.chain_id,
         );
 
         capacity_single::compute_entropy_chunk(
@@ -303,16 +304,16 @@ mod tests {
             chunk_offset + 1,
             partition_hash,
             iterations,
-            testnet_config.chunk_size as usize,
+            testing_config.chunk_size as usize,
             &mut chunk2,
-            testnet_config.chain_id,
+            testing_config.chain_id,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        let mut c_chunk = Vec::<u8>::with_capacity(testnet_config.chunk_size as usize);
-        let mut c_chunk2 = Vec::<u8>::with_capacity(testnet_config.chunk_size as usize);
+        let mut c_chunk = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
+        let mut c_chunk2 = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
         let now = Instant::now();
 
         capacity_pack_range_c(
@@ -321,8 +322,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
         );
 
         capacity_pack_range_c(
@@ -331,8 +332,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk2,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -341,7 +342,7 @@ mod tests {
         assert_eq!(chunk, c_chunk, "C chunks should be equal");
         assert_eq!(chunk2, c_chunk2, "Second C chunks should be equal");
 
-        let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * testnet_config.chunk_size as usize);
+        let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * testing_config.chunk_size as usize);
         let now = Instant::now();
 
         let result = capacity_pack_range_cuda_c(
@@ -351,8 +352,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk_cuda,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
         );
 
         println!("CUDA result: {}", result);
@@ -366,13 +367,13 @@ mod tests {
 
         assert_eq!(
             chunk,
-            c_chunk_cuda[0..testnet_config.chunk_size as usize].to_vec(),
+            c_chunk_cuda[0..testing_config.chunk_size as usize].to_vec(),
             "CUDA chunk should be equal"
         );
         assert_eq!(
             chunk2,
             c_chunk_cuda
-                [testnet_config.chunk_size as usize..(2 * testnet_config.chunk_size) as usize]
+                [testing_config.chunk_size as usize..(2 * testing_config.chunk_size) as usize]
                 .to_vec(),
             "Second CUDA chunk should be equal"
         );
@@ -380,7 +381,8 @@ mod tests {
 
     #[test]
     fn test_bench_chunks_packing() {
-        let testnet_config = ConsensusConfig::testnet();
+        let mut testing_config = ConsensusConfig::testing();
+        testing_config.chunk_size = DATA_CHUNK_SIZE as u64;
         let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -404,7 +406,7 @@ mod tests {
         let rnd_chunk_pos = rng.gen_range(0..num_chunks);
         let mut rnd_chunk = chunks[rnd_chunk_pos].clone();
 
-        let iterations = Some(2 * testnet_config.chunk_size as u32);
+        let iterations = Some(2 * testing_config.chunk_size as u32);
         let now = Instant::now();
 
         capacity_pack_range_with_data_c(
@@ -413,9 +415,9 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
-            testnet_config.chunk_size as usize,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
+            testing_config.chunk_size as usize,
         );
 
         let elapsed = now.elapsed();
@@ -429,9 +431,9 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            testnet_config.chunk_size as usize,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
+            testing_config.chunk_size as usize,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -441,15 +443,15 @@ mod tests {
 
         // calculate entropy for chosen random chunk
         let mut entropy_chunk =
-            Vec::<u8>::with_capacity(testnet_config.chunk_size.try_into().unwrap());
+            Vec::<u8>::with_capacity(testing_config.chunk_size.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
             chunk_offset + rnd_chunk_pos as u64,
             partition_hash.into(),
             iterations,
             &mut entropy_chunk,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
         );
 
         // sign picked random chunk with entropy
@@ -461,7 +463,7 @@ mod tests {
     #[cfg(feature = "nvidia")]
     #[test]
     fn test_bench_chunks_packing_cuda() {
-        let testnet_config = ConsensusConfig::testnet();
+        let testing_config = ConsensusConfig::testing();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -491,8 +493,8 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -506,8 +508,8 @@ mod tests {
             partition_hash.into(),
             iterations,
             ConsensusConfig::CHUNK_SIZE as usize,
-            testnet_config.entropy_packing_iterations,
-            testnet_config.chain_id,
+            testing_config.entropy_packing_iterations,
+            testing_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -528,7 +530,7 @@ mod tests {
     fn test_chunk_packing_unpacking() {
         let mut rng = rand::thread_rng();
 
-        let testnet_config = ConsensusConfig::testnet();
+        let testing_config = ConsensusConfig::testing();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0_u8; SHA_HASH_SIZE];
@@ -546,7 +548,7 @@ mod tests {
             iterations,
             chunk_size,
             &mut entropy_chunk,
-            testnet_config.chain_id,
+            testing_config.chain_id,
         );
 
         // simulate a smaller end chunk
@@ -572,7 +574,7 @@ mod tests {
             &packed_chunk,
             iterations,
             chunk_size,
-            testnet_config.chain_id,
+            testing_config.chain_id,
         );
 
         assert_eq!(unpacked_chunk.bytes.0, data_bytes);

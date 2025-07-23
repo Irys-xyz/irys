@@ -410,7 +410,7 @@ pub async fn sync_chain(
 
     // If no new blocks were added to the index, nothing is going to mark
     //  the tip as processed
-    if !no_new_blocks_to_process {
+    if no_new_blocks_to_process {
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
     }
@@ -533,7 +533,7 @@ mod tests {
                 execution: Default::default(),
             };
 
-            let mut node_config = NodeConfig::testnet();
+            let mut node_config = NodeConfig::testing();
             node_config.mode = NodeMode::PeerSync;
             node_config.trusted_peers = vec![fake_peer_address];
             node_config.genesis_peer_discovery_timeout_millis = 10;
@@ -657,7 +657,7 @@ mod tests {
                     .expect("can't open temp dir"),
             ));
 
-            let mut node_config = NodeConfig::testnet();
+            let mut node_config = NodeConfig::testing();
             node_config.mode = NodeMode::Genesis;
             node_config.trusted_peers = vec![];
             node_config.genesis_peer_discovery_timeout_millis = 10;
