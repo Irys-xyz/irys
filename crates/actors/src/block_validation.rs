@@ -341,7 +341,7 @@ pub fn poa_is_valid(
             .ok_or_else(|| eyre::eyre!("Missing partition assignment for the provided hash"))?;
 
         let ledger_chunk_offset = partition_assignment.slot_index.ok_or_else(|| {
-            eyre::eyre!("Partition assigment for the provided hash is missing slot index")
+            eyre::eyre!("Partition assignment for the provided hash is missing slot index")
         })? as u64
             * config.num_partitions_per_slot
             * config.num_chunks_in_partition
