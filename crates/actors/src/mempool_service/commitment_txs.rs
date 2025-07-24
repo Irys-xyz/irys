@@ -144,6 +144,16 @@ impl Inner {
             // Level 1: Keyed by signer address (allows tracking multiple addresses)
             // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
 
+            // Validate tx signature
+            if let Err(e) = self.validate_signature(&commitment_tx).await {
+                tracing::error!(
+                    "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                    &commitment_tx,
+                    e
+                );
+                return Err(TxIngressError::InvalidSignature);
+            }
+
             let mut mempool_state_guard = mempool_state.write().await;
             if let Some(pledges_cache) = mempool_state_guard
                 .pending_pledges
