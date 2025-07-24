@@ -1621,6 +1621,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
             .expect("posted commitment tx");
 
+        // TODO: this is a hack, don't do this! should be removed by #559
         snapshot.add_commitment(&pledge_tx, true);
 
         pledge_tx

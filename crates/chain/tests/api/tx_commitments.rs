@@ -108,7 +108,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
                 &mut commitment_snapshot,
             )
             .await;
-        // let pledge2 = post_pledge_commitment(&node, &signer1, pledge1.id).await;
+
         let pledge2 = &node
             .post_pledge_commitment_with_snapshot(
                 &signer1,
@@ -141,7 +141,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         let block_2 = node.get_block_by_height(2).await.unwrap();
         let commitments_2 = block_2.get_commitment_ledger_tx_ids();
         debug!("Block - height: {:?}\n{:#?}", block_2.height, commitments_2);
-        assert_eq!(commitments_2.len(), 4);
+        assert_eq!(commitments_2.len(), expected_ids.len());
         assert!(expected_ids.iter().all(|id| commitments_2.contains(id)));
 
         // ===== PHASE 3: Verify First Epoch Assignments =====

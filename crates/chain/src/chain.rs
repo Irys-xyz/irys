@@ -1711,6 +1711,7 @@ async fn stake_and_pledge(
 
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
 
+        // TODO: this is a hack, don't do this! should be removed by #559
         let status = commitment_snapshot.add_commitment(&pledge_tx, true); // so the pledge value updates
         if !matches!(status, CommitmentSnapshotStatus::Accepted) {
             warn!("Unable verify pledge {} - {:?}", &pledge_tx.id, &status);
