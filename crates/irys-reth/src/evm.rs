@@ -41,7 +41,7 @@ use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
 // External crate imports - Other
 
 use super::*;
-use crate::shadow_tx::{self, ShadowTransaction};
+use crate::shadow_tx::{self, ShadowTransaction, IRYS_SHADOW_EXEC};
 
 /// Constants for shadow transaction processing
 mod constants {
@@ -152,14 +152,14 @@ where
     ) -> Result<Option<u64>, BlockExecutionError> {
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
-        let rlp_decoded_shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..]);
-
-        let Ok(shadow_tx) = rlp_decoded_shadow_tx else {
+        let Some(stripped) = tx_envelope_input_buf.strip_prefix(IRYS_SHADOW_EXEC) else {
             // if the tx is not a shadow tx, execute it as a regular transaction
             return self
                 .inner
                 .execute_transaction_with_commit_condition(tx, on_result_f);
         };
+        let shadow_tx = ShadowTransaction::decode(&mut &stripped[..])
+            .map_err(|e| create_internal_error(&format!("failed to decode shadow tx: {e}")))?;
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing shadow transaction");
 
         // Process the shadow transaction

@@ -25,6 +25,10 @@ pub const SHADOW_TX_VERSION_V1: u8 = 1;
 /// Current version of ShadowTransaction
 pub const CURRENT_SHADOW_TX_VERSION: u8 = SHADOW_TX_VERSION_V1;
 
+/// Prefix used to identify encoded shadow transactions in a regular
+/// transaction's input field.
+pub const IRYS_SHADOW_EXEC: &[u8; 16] = b"irys-shadow-exec";
+
 /// A versioned shadow transaction, valid for a single block, encoding a protocol-level action.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 #[non_exhaustive]
@@ -106,6 +110,21 @@ impl ShadowTransaction {
         match self {
             Self::V1 { packet, .. } => packet.topic(),
         }
+    }
+
+    /// Decode a shadow transaction from a buffer that contains the
+    /// [`IRYS_SHADOW_EXEC`] prefix followed by the RLP-encoded transaction.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "prefix length checked before slicing"
+    )]
+    pub fn decode_prefixed(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        if buf.len() < IRYS_SHADOW_EXEC.len() || &buf[..IRYS_SHADOW_EXEC.len()] != IRYS_SHADOW_EXEC
+        {
+            return Err(alloy_rlp::Error::Custom("Missing shadow tx prefix"));
+        }
+        *buf = &buf[IRYS_SHADOW_EXEC.len()..];
+        <Self as Decodable>::decode(buf)
     }
 }
 

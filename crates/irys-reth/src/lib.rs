@@ -69,11 +69,13 @@ pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod shadow_tx;
+pub use shadow_tx::IRYS_SHADOW_EXEC;
 
 #[must_use]
 pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLegacy {
     // allocate 512 bytes for the shadow tx rlp, misc optimisation
-    let mut shadow_tx_rlp = Vec::with_capacity(512);
+    let mut shadow_tx_rlp = Vec::with_capacity(IRYS_SHADOW_EXEC.len() + 512);
+    shadow_tx_rlp.extend_from_slice(IRYS_SHADOW_EXEC);
     shadow_tx.encode(&mut shadow_tx_rlp);
     TxLegacy {
         // large enough to not be rejected by the payload builder
@@ -340,14 +342,15 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        // Try to decode as a shadow transaction
         let input = transaction.input();
-        let Ok(_shadow_tx) = ShadowTransaction::decode(&mut &input[..]) else {
+        if !input.starts_with(IRYS_SHADOW_EXEC) {
             tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
             return self.eth_tx_validator.validate_one(origin, transaction);
-        };
+        }
 
         tracing::trace!("shadow txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
+        // Even though we reject shadow txs from the pool, attempt to decode to verify structure
+        let _ = ShadowTransaction::decode_prefixed(&mut &input[..]);
         TransactionValidationOutcome::Invalid(
             transaction,
             reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
