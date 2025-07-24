@@ -1663,8 +1663,8 @@ async fn stake_and_pledge(
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
-        let res = client.post(url).send_json(commitment_tx).await;
-        res
+
+        client.post(url).send_json(commitment_tx).await
     };
 
     // now check the canonical state

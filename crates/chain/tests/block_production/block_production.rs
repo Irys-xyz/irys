@@ -15,7 +15,7 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
-use reth::rpc::types::TransactionTrait;
+use reth::rpc::types::TransactionTrait as _;
 use reth::{
     providers::{
         AccountReader as _, BlockReader as _, ReceiptProvider as _, TransactionsProvider as _,

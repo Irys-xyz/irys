@@ -106,14 +106,9 @@ async fn create_pledge_commitment_transaction(
     config: &Config,
     provider: &impl PledgeDataProvider,
 ) -> CommitmentTransaction {
-    let pledge_commitment = CommitmentTransaction::new_pledge(
-        &config.consensus,
-        anchor,
-        1,
-        provider,
-        signer.address(),
-    )
-    .await;
+    let pledge_commitment =
+        CommitmentTransaction::new_pledge(&config.consensus, anchor, 1, provider, signer.address())
+            .await;
 
     signer
         .sign_commitment(pledge_commitment)

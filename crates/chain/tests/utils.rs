@@ -2050,14 +2050,9 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     config: &ConsensusConfig,
     pledge_provider: &P,
 ) -> CommitmentTransaction {
-    let pledge_tx = CommitmentTransaction::new_pledge(
-        config,
-        *anchor,
-        1,
-        pledge_provider,
-        signer.address(),
-    )
-    .await;
+    let pledge_tx =
+        CommitmentTransaction::new_pledge(config, *anchor, 1, pledge_provider, signer.address())
+            .await;
     signer.sign_commitment(pledge_tx).unwrap()
 }
 

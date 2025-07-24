@@ -847,8 +847,9 @@ mod pledge_decay_parametrized_tests {
             MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
 
         // Create a new pledge transaction
-        let pledge_tx = CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address)
-            .await;
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address)
+                .await;
 
         // Convert actual value to decimal for comparison
         let actual_amount = Amount::<()>::new(pledge_tx.value)

@@ -5,7 +5,7 @@ use tracing::debug;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
     fmt::{self, SubscriberBuilder},
-    layer::SubscriberExt,
+    layer::SubscriberExt as _,
     util::SubscriberInitExt as _,
     EnvFilter,
 };
