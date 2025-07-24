@@ -5,6 +5,15 @@ use irys_database::{
     walk_all,
 };
 
+use irys_database::reth_db::DatabaseEnvKind;
+use irys_types::NodeConfig;
+use reth_node_core::version::default_client_version;
+use std::{path::PathBuf, sync::Arc};
+use tracing::level_filters::LevelFilter;
+use tracing_error::ErrorLayer;
+use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
+
 pub fn load_db() -> DatabaseEnv {
     let path = "/workspaces/irys-rs/.irys/1/reth/db";
     open_or_create_db(path, IrysTables::ALL, None).unwrap()
@@ -17,6 +26,87 @@ fn _promotion_debug() -> eyre::Result<()> {
     dbg!(ingress_proofs);
     let storage_transactions = walk_all::<IrysTxHeaders, _>(&read_tx)?;
     dbg!(storage_transactions);
+
+    Ok(())
+}
+
+fn _check_db_for_commitments() -> eyre::Result<()> {
+    use irys_database::reth_db::cursor::DbCursorRO as _;
+    use irys_database::reth_db::transaction::DbTx as _;
+    use irys_database::reth_db::Database as _;
+
+    let subscriber = Registry::default();
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    let output_layer = tracing_subscriber::fmt::layer()
+        .with_line_number(true)
+        .with_ansi(true)
+        .with_file(true)
+        .with_writer(std::io::stdout);
+
+    let subscriber = subscriber
+        .with(filter)
+        .with(ErrorLayer::default())
+        .with(output_layer.boxed());
+
+    subscriber.init();
+
+    let db = {
+        let config = std::env::var("CONFIG")
+            .unwrap_or_else(|_| "./config.toml".to_owned())
+            .parse::<PathBuf>()
+            .expect("file path to be valid");
+        let config = std::fs::read_to_string(config)
+            .map(|config_file| {
+                toml::from_str::<NodeConfig>(&config_file).expect("invalid config file")
+            })
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    ?err,
+                    "config file not provided, defaulting to testnet config"
+                );
+                NodeConfig::testnet()
+            });
+
+        // open the Irys database
+        let db_path = config.irys_consensus_data_dir();
+
+        Arc::new(DatabaseEnv::open(
+            &db_path,
+            DatabaseEnvKind::RO,
+            irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+                .with_log_level(None)
+                .with_exclusive(Some(false)),
+        )?)
+    };
+
+    let tx = db.tx()?;
+    let mut read_cursor = tx.cursor_read::<irys_database::tables::IrysBlockHeaders>()?;
+    let mut walker = read_cursor.walk(None)?;
+    while let Some((hash, header)) = walker.next().transpose()? {
+        if header.height % 1000 == 0 {
+            tracing::debug!("Processed block {}", &header.height)
+        };
+
+        let ledger =
+            match header.system_ledgers.iter().find(|tx_ledger| {
+                tx_ledger.ledger_id == irys_database::SystemLedger::Commitment as u32
+            }) {
+                Some(ledger) => ledger,
+                None => continue,
+            };
+
+        if !ledger.tx_ids.is_empty() {
+            tracing::debug!(
+                "JESSEDEBUG2 block {} {} as commitment txs {:?}",
+                &header.height,
+                &hash,
+                &ledger.tx_ids
+            );
+        }
+    }
 
     Ok(())
 }
