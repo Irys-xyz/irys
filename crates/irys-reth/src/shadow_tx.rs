@@ -393,6 +393,7 @@ pub struct BalanceIncrement {
 }
 
 /// Block reward increment: used for block reward shadow txs (no irys_ref needed).
+/// The target is always the block beneficiary and is determined during execution.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -408,8 +409,6 @@ pub struct BalanceIncrement {
     arbitrary::Arbitrary,
 )]
 pub struct BlockRewardIncrement {
-    /// Amount to increment to the target account.
+    /// Amount to increment to the beneficiary account.
     pub amount: U256,
-    /// Target account address.
-    pub target: Address,
 }

@@ -169,6 +169,11 @@ where
         // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx
         let priority_fee = tx_envelope.max_priority_fee_per_gas().unwrap_or(0);
         let total_fee = U256::from(priority_fee);
+        
+        tracing::debug!(
+            "Shadow tx priority fee distribution: priority_fee={}, total_fee={}, beneficiary={}",
+            priority_fee, total_fee, beneficiary
+        );
 
         // Track beneficiary balance changes for assertions
         let mut beneficiary_state_change = None;
@@ -248,12 +253,17 @@ where
 
         // Process the shadow transaction
         let (new_account_state, target) =
-            self.process_shadow_transaction(&shadow_tx, tx_envelope.hash())?;
+            self.process_shadow_transaction(&shadow_tx, tx_envelope.hash(), beneficiary)?;
 
         let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
 
         // Add beneficiary state change if priority fee was distributed
         if let Some((beneficiary_addr, beneficiary_account)) = beneficiary_state_change {
+            tracing::debug!(
+                "Inserting beneficiary state change: addr={}, balance={}",
+                beneficiary_addr,
+                beneficiary_account.info.balance
+            );
             new_state.insert(beneficiary_addr, beneficiary_account);
         }
 
@@ -276,14 +286,18 @@ where
                     status |= AccountStatus::Created;
                 };
 
-                new_state.insert(
+                let account = Account {
+                    info: plain_account.info,
+                    storage,
+                    status,
+                };
+                tracing::debug!(
+                    "Inserting target account state: target={}, balance={}, beneficiary={}",
                     target,
-                    Account {
-                        info: plain_account.info,
-                        storage,
-                        status,
-                    },
+                    account.info.balance,
+                    beneficiary
                 );
+                new_state.insert(target, account);
 
                 execution_result
             }
@@ -346,6 +360,7 @@ where
         &mut self,
         shadow_tx: &ShadowTransaction,
         tx_envelope_hash: &FixedBytes<32>,
+        beneficiary: Address,
     ) -> Result<(ShadowTransactionResult<<E as Evm>::HaltReason>, Address), BlockExecutionError>
     {
         let topic = shadow_tx.topic();
@@ -396,17 +411,17 @@ where
                 },
                 shadow_tx::TransactionPacket::BlockReward(block_reward_increment) => {
                     let log = Self::create_shadow_log(
-                        block_reward_increment.target,
+                        beneficiary,
                         vec![topic],
                         vec![
                             DynSolValue::Uint(block_reward_increment.amount, 256),
-                            DynSolValue::Address(block_reward_increment.target),
+                            DynSolValue::Address(beneficiary),
                         ],
                     );
-                    let target = block_reward_increment.target;
+                    let target = beneficiary;
                     let balance_increment = shadow_tx::BalanceIncrement {
                         amount: block_reward_increment.amount,
-                        target: block_reward_increment.target,
+                        target: beneficiary,
                         irys_ref: alloy_primitives::FixedBytes::ZERO,
                     };
                     let (plain_account, execution_result, account_existed) =
