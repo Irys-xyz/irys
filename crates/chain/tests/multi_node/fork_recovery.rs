@@ -430,9 +430,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     // Stage 4: GENERATE ISOLATED txs
     //
 
-    // TODO: once get_best_mempool_txs allows for anchor chained txs to be in the same block,
-    // change these commitments back to using the stake as their anchor.
-
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
         .post_stake_commitment_without_gossip(block_height_1.block_hash)
@@ -445,7 +442,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     let peer_c_b2_stake_tx = node_c
         .post_stake_commitment_without_gossip(block_height_1.block_hash)
         .await;
-
     let peer_c_b2_pledge_tx = node_c
         .post_pledge_commitment_without_gossip(block_height_1.block_hash)
         .await;
@@ -1238,9 +1234,6 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     //
     // Stage 4: GENERATE ISOLATED txs
     //
-
-    // TODO: once get_best_mempool_txs allows for anchor chained txs to be in the same block,
-    // change these commitments back to using the stake as their anchor.
 
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b

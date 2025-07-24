@@ -1684,28 +1684,11 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
         .canonical_commitment_snapshot();
 
     let pledge_tx = new_pledge_tx(
-        tx_ids.last().expect("valid tx id for use as anchor"),
+        &H256::zero(),
         &signer,
         &genesis_config.consensus_config(),
         &commitment_snapshot,
     );
-    let mut pledge_tx_invalid_pending_anchor = pledge_tx.clone();
-    let mut bytes = pledge_tx_invalid_pending_anchor.id.to_fixed_bytes();
-    bytes[0] ^= 0x01; // flip first bit
-    pledge_tx_invalid_pending_anchor.id = H256::from(bytes);
-
-    // With an unknown anchor, the mempool defers signature validation until the
-    // referenced transaction is confirmed. The invalid pledge should therefore
-    // be accepted and cached as a pending-anchor transaction.
-    let result = genesis_node
-        .ingest_commitment_tx(pledge_tx_invalid_pending_anchor.clone())
-        .await;
-    if result.is_err() {
-        panic!(
-            "Expected success for pledge with pending anchor, got: {:?}",
-            result
-        );
-    }
 
     // mine a block so we get some more anchors that are not pending
     genesis_node.mine_block().await?;
@@ -1733,6 +1716,57 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     // wait for all txs to ingress mempool
     genesis_node
         .wait_for_mempool_commitment_txs(tx_ids.clone(), seconds_to_wait)
+        .await?;
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+/// try ingress invalid data tx where tx id has been tampered with
+/// try ingress valid data tx where tx id has not been tampered with
+/// expect invalid txs to fail when sent directly to the mempool
+/// expect valid tx to ingress successfully
+async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+    let seconds_to_wait = 10;
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    // create a signed data transaction
+    let valid_tx = genesis_node
+        .create_signed_data_tx(&signer, b"hello".to_vec())
+        .unwrap();
+
+    // tamper with the transaction id
+    let mut invalid_header = valid_tx.header.clone();
+    let mut bytes = invalid_header.id.to_fixed_bytes();
+    bytes[0] ^= 0x01;
+    invalid_header.id = H256::from(bytes);
+
+    // ingest invalid transaction directly to the mempool
+    let res = genesis_node
+        .ingest_data_tx(invalid_header.clone())
+        .await
+        .expect_err("expected failure but got success");
+    assert!(
+        matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
+        "Expected InvalidSignature but got: {:?}",
+        res
+    );
+
+    // ingest valid transaction
+    genesis_node.ingest_data_tx(valid_tx.header.clone()).await?;
+
+    // wait for all txs to ingress mempool
+    genesis_node
+        .wait_for_mempool(valid_tx.header.id, seconds_to_wait)
         .await?;
 
     genesis_node.stop().await;

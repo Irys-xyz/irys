@@ -18,9 +18,6 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
-        // notify that we have a new anchor
-        self.notify_anchor(block.block_hash).await;
-
         // FIXME: Loop though the promoted transactions and insert their ingress proofs
         // into the mempool. In the future on a multi node network we may keep
         // ingress proofs around longer
@@ -68,19 +65,6 @@ impl Inner {
                 drop(mempool_state_write_guard);
 
                 info!("Promoted tx:\n{:?}", tx_header);
-            }
-        }
-
-        // notify for all the txs in all the ledgers
-        for ledger in &block.data_ledgers {
-            for tx in ledger.tx_ids.iter() {
-                self.notify_anchor(*tx).await;
-            }
-        }
-
-        for ledger in &block.system_ledgers {
-            for tx in ledger.tx_ids.iter() {
-                self.notify_anchor(*tx).await;
             }
         }
 

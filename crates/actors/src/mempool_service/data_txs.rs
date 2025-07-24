@@ -8,8 +8,8 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransaction,
-    IrysTransactionCommon as _, IrysTransactionId, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
+    IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ impl Inner {
         txs: Vec<H256>,
     ) -> Vec<Option<DataTransactionHeader>> {
         let mut found_txs = Vec::with_capacity(txs.len());
-        let mut mempool_state_guard = self.mempool_state.write().await;
+        let mempool_state_guard = self.mempool_state.read().await;
 
         for tx in txs {
             // if data tx exists in mempool
@@ -32,17 +32,7 @@ impl Inner {
                 found_txs.push(Some(tx_header.clone()));
                 continue;
             }
-            // if data tx exists in anchor_pending
-            if let Some(tx_header) = mempool_state_guard.pending_anchor_txs.get(&tx) {
-                match tx_header {
-                    IrysTransaction::Data(tx_header) => {
-                        debug!("Got tx {:?} from mempool/pending_anchor_txs", &tx);
-                        found_txs.push(Some(tx_header.clone()));
-                    }
-                    IrysTransaction::Commitment(_) => {}
-                }
-                continue;
-            }
+
             // if data tx exists in mdbx
             if let Ok(read_tx) = self.read_tx() {
                 if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
@@ -87,20 +77,12 @@ impl Inner {
         }
         drop(mempool_state_read_guard);
 
+        // Validate the transaction signature
+        // check the result and error handle
+        self.validate_signature(&tx).await?;
+
         // Validate anchor
-        let (anchor_height, tx): (u64, DataTransactionHeader) =
-            match self.validate_anchor(tx.into()).await {
-                Err(e) => {
-                    error!(
-                        "Validation failed: {:?} - mapped to: {:?}",
-                        e,
-                        TxIngressError::DatabaseError
-                    );
-                    return Ok(());
-                }
-                Ok(Some((h, tx))) => (h, tx.try_into().unwrap()), // should be impossible to panic
-                Ok(None) => return Ok(()),                        // TODO: plumb success context
-            };
+        let anchor_height = self.validate_anchor(&tx).await?;
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
@@ -146,10 +128,6 @@ impl Inner {
             );
             return Err(TxIngressError::Unfunded);
         }
-
-        // Validate the transaction signature
-        // check the result and error handle
-        self.validate_signature(&tx).await?;
 
         let mut mempool_state_write_guard = self.mempool_state.write().await;
         mempool_state_write_guard

@@ -432,10 +432,6 @@ pub struct MempoolConfig {
     /// Controls memory usage for tracking transactions that arrive before their dependencies
     pub max_pending_pledge_items: usize,
 
-    /// Maximum number of txs pending a valid anchor in the out-of-order LRU cache
-    /// Limits the memory usage for these transactions
-    pub max_pending_anchor_items: usize,
-
     /// Maximum number of pending pledge transactions allowed per address
     /// Limits the resources that can be consumed by a single address
     pub max_pledges_per_item: usize,
@@ -574,7 +570,6 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
-                max_pending_anchor_items: 100,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
             },
@@ -690,7 +685,6 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
-                max_pending_anchor_items: 100,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
             },

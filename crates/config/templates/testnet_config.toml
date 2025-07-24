@@ -1,0 +1,124 @@
+mode = "PeerSync"
+base_directory = ""
+mining_key = ""
+trusted_peers = []
+reward_address = ""
+stake_pledge_drives = false
+genesis_peer_discovery_timeout_millis = 10000
+
+[gossip]
+public_ip = "127.0.0.1"
+public_port = 8081
+bind_ip = "0.0.0.0"
+bind_port = 8081
+
+[http]
+public_ip = "127.0.0.1"
+public_port = 8080
+bind_ip = "0.0.0.0"
+bind_port = 8080
+
+[storage]
+num_writes_before_sync = 1
+
+[packing]
+cpu_packing_concurrency = 4
+gpu_packing_batch_size = 1024
+
+[cache]
+cache_clean_lag = 2
+
+[oracle]
+type = "mock"
+initial_price = 1.0
+incremental_change = 0.00000000000001
+smoothing_interval = 15
+
+[pricing]
+fee_percentage = 0.01
+
+[reth]
+use_random_ports = false
+
+[reth_peer_info]
+peering_tcp_addr = "127.0.0.1:9009"
+peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+[consensus.Custom]
+chain_id = 1270
+token_price_safe_range = 1.0
+genesis_price = 1.0
+annual_cost_per_gb = 0.01
+decay_rate = 0.01
+chunk_size = 262144
+block_migration_depth = 6
+block_tree_depth = 50
+num_chunks_in_partition = 51872000
+num_chunks_in_recall_range = 800
+num_partitions_per_slot = 1
+entropy_packing_iterations = 1000
+number_of_ingress_proofs = 10
+safe_minimum_number_of_years = 200
+stake_fee = 20000.0
+pledge_base_fee = 950.0
+pledge_decay = 0.9
+
+[consensus.Custom.reth]
+chain = 1270
+
+[consensus.Custom.reth.genesis]
+nonce = "0x0"
+timestamp = "0x0"
+extraData = "0x"
+gasLimit = "0x1c9c380"
+difficulty = "0x0"
+mixHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+coinbase = "0x0000000000000000000000000000000000000000"
+
+[consensus.Custom.reth.genesis.config]
+chainId = 1
+daoForkSupport = false
+terminalTotalDifficultyPassed = false
+
+[consensus.Custom.reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
+balance = "0x152cf4e72a974f1c0000"
+
+[consensus.Custom.reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
+balance = "0x152cf4e72a974f1c0000"
+
+[consensus.Custom.mempool]
+max_data_txs_per_block = 100
+max_commitment_txs_per_block = 100
+anchor_expiry_depth = 10
+max_pending_pledge_items = 100
+max_pending_anchor_items = 100
+max_pledges_per_item = 100
+max_pending_chunk_items = 30
+max_chunks_per_item = 500
+max_valid_items = 10000
+max_invalid_items = 10000
+
+[consensus.Custom.difficulty_adjustment]
+block_time = 12
+difficulty_adjustment_interval = 100800000
+max_difficulty_adjustment_factor = "4"
+min_difficulty_adjustment_factor = "0.25"
+
+[consensus.Custom.vdf]
+reset_frequency = 600
+parallel_verification_thread_limit = 4
+num_checkpoints_in_vdf_step = 25
+max_allowed_vdf_fork_steps = 60000
+sha_1s_difficulty = 1800000
+
+[consensus.Custom.block_reward_config]
+inflation_cap = 100000000.0
+half_life_secs = 126144000
+
+[consensus.Custom.epoch]
+capacity_scalar = 100
+num_blocks_in_epoch = 100
+submit_ledger_epoch_length = 5
+
+[consensus.Custom.ema]
+price_adjustment_interval = 10
