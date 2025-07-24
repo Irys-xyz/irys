@@ -1629,9 +1629,10 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 }
 
 #[test_log::test(actix_web::test)]
-/// post invalid commitment txs where tx id has been tampered with
+/// send (staked) invalid pledge commitment txs where tx id has been tampered with
+/// try with and without pending anchor
 /// expect invalid txs to fail when sent directly to the mempool
-async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -1672,7 +1673,7 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     genesis_node.ingest_commitment_tx(stake_tx.clone()).await?;
 
     //
-    // Test case 2: pledge commitment txs
+    // Test case 2: staked pledge commitment txs
     //
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
