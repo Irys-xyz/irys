@@ -8,7 +8,7 @@ use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnState
 use alloy_evm::eth::receipt_builder::ReceiptBuilder as _;
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{Bytes, FixedBytes, Log, LogData};
+use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
 
 // External crate imports - Reth
 use reth::primitives::{SealedBlock, SealedHeader};
@@ -153,6 +153,10 @@ where
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
         let rlp_decoded_shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..]);
+        let beneficiary = {
+            use revm::context::Block as _;
+            self.inner().evm().block().beneficiary()
+        };
 
         let Ok(shadow_tx) = rlp_decoded_shadow_tx else {
             // if the tx is not a shadow tx, execute it as a regular transaction
@@ -162,11 +166,99 @@ where
         };
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing shadow transaction");
 
+        // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx
+        let gas_limit = tx_envelope.gas_limit();
+        let priority_fee = tx_envelope.max_priority_fee_per_gas().unwrap_or(0);
+        let total_fee = U256::from(priority_fee.saturating_mul(gas_limit as u128));
+
+        // Track beneficiary balance changes for assertions
+        let mut beneficiary_state_change = None;
+
+        if !total_fee.is_zero() {
+            tracing::trace!(
+                beneficiary = %beneficiary,
+                priority_fee,
+                gas_limit,
+                total_fee = %total_fee,
+                "Distributing priority fee to beneficiary"
+            );
+
+            // Load beneficiary account and increment balance
+            let evm = self.inner.evm_mut();
+            let db = evm.db_mut();
+            let beneficiary_state = db
+                .load_cache_account(beneficiary)
+                .map_err(|_err| create_internal_error("Could not load beneficiary account"))?;
+
+            let beneficiary_account = if let Some(existing) = beneficiary_state.account.as_ref() {
+                let mut account = existing.clone();
+                let original_balance = account.info.balance;
+                account.info.balance = account.info.balance.saturating_add(total_fee);
+
+                tracing::trace!(
+                    beneficiary = %beneficiary,
+                    original_balance = %original_balance,
+                    new_balance = %account.info.balance,
+                    fee_amount = %total_fee,
+                    "Incrementing beneficiary balance with priority fee"
+                );
+
+                // Assert balance was incremented correctly
+                assert_eq!(
+                    account.info.balance,
+                    original_balance + total_fee,
+                    "Beneficiary balance must be incremented by exactly the priority fee amount"
+                );
+
+                (account, false)
+            } else {
+                // Create new account for beneficiary with fee as balance
+                let mut account = PlainAccount::new_empty_with_storage(PlainStorage::default());
+                account.info.balance = total_fee;
+
+                tracing::debug!(
+                    beneficiary = %beneficiary,
+                    balance = %total_fee,
+                    "Creating new beneficiary account with priority fee"
+                );
+
+                (account, true)
+            };
+
+            // Store beneficiary state change for later commit
+            let storage = beneficiary_account
+                .0
+                .storage
+                .iter()
+                .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
+                .collect();
+
+            let mut status = AccountStatus::Touched;
+            if beneficiary_account.1 {
+                status |= AccountStatus::Created;
+            }
+
+            beneficiary_state_change = Some((
+                beneficiary,
+                Account {
+                    info: beneficiary_account.0.info.clone(),
+                    storage,
+                    status,
+                },
+            ));
+        }
+
         // Process the shadow transaction
         let (new_account_state, target) =
             self.process_shadow_transaction(&shadow_tx, tx_envelope.hash())?;
 
         let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+
+        // Add beneficiary state change if priority fee was distributed
+        if let Some((beneficiary_addr, beneficiary_account)) = beneficiary_state_change {
+            new_state.insert(beneficiary_addr, beneficiary_account);
+        }
+
         // at this point, the shadow tx has been processed, and it was valid *enough*
         // that we should generate a receipt for it even in a failure state
         let execution_result = match new_account_state {

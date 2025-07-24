@@ -71,7 +71,11 @@ pub mod payload_service_builder;
 pub mod shadow_tx;
 
 #[must_use]
-pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction, max_priority_fee_per_gas: u128) -> TxEip1559 {
+pub fn compose_shadow_tx(
+    chain_id: u64,
+    shadow_tx: &ShadowTransaction,
+    max_priority_fee_per_gas: u128,
+) -> TxEip1559 {
     // allocate 512 bytes for the shadow tx rlp, misc optimisation
     let mut shadow_tx_rlp = Vec::with_capacity(512);
     shadow_tx.encode(&mut shadow_tx_rlp);
@@ -1722,6 +1726,167 @@ mod tests {
 
         Ok(())
     }
+
+    /// Test that shadow transactions with priority fees distribute fees to beneficiary
+    #[test_log::test(tokio::test)]
+    async fn test_shadow_tx_priority_fee_distribution() -> eyre::Result<()> {
+        // First create context to get block producer address
+        let temp_ctx = TestContext::new().await?;
+        let beneficiary_address = temp_ctx.block_producer_a.address();
+
+        // Set up context with block producer as beneficiary
+        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
+            eth_payload_attributes_with_beneficiary(timestamp, beneficiary_address)
+        })
+        .await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Get initial balances
+        let beneficiary = beneficiary_address; // Miner is the beneficiary
+        let target_address = ctx.target_account.address();
+        let initial_beneficiary_balance = get_balance(&node.inner, beneficiary);
+        let initial_target_balance = get_balance(&node.inner, target_address);
+
+        // Create shadow transaction with significant priority fee
+        let priority_fee_per_gas = 10_000_000_000_u128; // 10 Gwei
+        let shadow_tx = block_reward(target_address);
+        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
+        let gas_limit = shadow_tx_raw.gas_limit;
+        let expected_priority_fee = U256::from(priority_fee_per_gas * gas_limit as u128);
+
+        // Sign and prepare the transaction using the helper
+        let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
+
+        // Mine block with shadow transaction
+        let _block_payload =
+            mine_block(&mut node, &shadow_tx_store, vec![shadow_tx_pooled]).await?;
+
+        // Verify beneficiary received the priority fee
+        assert_balance_change(
+            &node,
+            beneficiary,
+            initial_beneficiary_balance,
+            expected_priority_fee,
+            true,
+            "Beneficiary should receive priority fee",
+        );
+
+        // Verify target received the block reward (amount = 1 from test helper)
+        assert_balance_change(
+            &node,
+            target_address,
+            initial_target_balance,
+            U256::from(1),
+            true,
+            "Target should receive block reward",
+        );
+
+        Ok(())
+    }
+
+    /// Test multiple shadow transactions accumulate priority fees correctly
+    #[test_log::test(tokio::test)]
+    async fn test_multiple_shadow_tx_priority_fees() -> eyre::Result<()> {
+        // First create context to get block producer address
+        let temp_ctx = TestContext::new().await?;
+        let beneficiary_address = temp_ctx.block_producer_a.address();
+
+        // Set up context with block producer as beneficiary
+        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
+            eth_payload_attributes_with_beneficiary(timestamp, beneficiary_address)
+        })
+        .await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        let beneficiary = beneficiary_address; // Miner is the beneficiary
+        let initial_beneficiary_balance = get_balance(&node.inner, beneficiary);
+
+        // Create multiple shadow transactions with different priority fees
+        let mut shadow_txs = Vec::new();
+        let mut total_expected_fee = U256::ZERO;
+
+        for i in 1..=3 {
+            let priority_fee_per_gas = i as u128 * 1_000_000_000; // 1, 2, 3 Gwei
+            let shadow_tx = block_reward(ctx.target_account.address());
+            let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
+            let gas_limit = shadow_tx_raw.gas_limit;
+            total_expected_fee += U256::from(priority_fee_per_gas * gas_limit as u128);
+
+            let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
+            shadow_txs.push(shadow_tx_pooled);
+        }
+
+        // Mine block with all shadow transactions
+        let _block_payload = mine_block(&mut node, &shadow_tx_store, shadow_txs).await?;
+
+        // Verify beneficiary received total priority fees
+        assert_balance_change(
+            &node,
+            beneficiary,
+            initial_beneficiary_balance,
+            total_expected_fee,
+            true,
+            "Beneficiary should receive sum of all priority fees",
+        );
+
+        Ok(())
+    }
+
+    /// Test shadow tx priority fees go to different miner than tx signer
+    #[test_log::test(tokio::test)]
+    async fn test_shadow_tx_priority_fee_different_miner() -> eyre::Result<()> {
+        // Use block producer B as the miner/beneficiary
+        let temp_ctx = TestContext::new().await?;
+        let miner_address = temp_ctx.block_producer_b.address();
+
+        // Create context with block producer B as beneficiary
+        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
+            eth_payload_attributes_with_beneficiary(timestamp, miner_address)
+        })
+        .await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Get initial balances
+        let initial_miner_balance = get_balance(&node.inner, miner_address);
+        let initial_signer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
+        let target_address = ctx.target_account.address();
+
+        // Create shadow transaction with priority fee, signed by producer A
+        let priority_fee_per_gas = 20_000_000_000_u128; // 20 Gwei
+        let shadow_tx = block_reward(target_address);
+        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
+        let gas_limit = shadow_tx_raw.gas_limit;
+        let expected_priority_fee = U256::from(priority_fee_per_gas * gas_limit as u128);
+
+        // Sign with block producer A (not the miner)
+        let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
+
+        // Mine block
+        let _block_payload =
+            mine_block(&mut node, &shadow_tx_store, vec![shadow_tx_pooled]).await?;
+
+        // Verify miner (producer B) received the priority fee
+        assert_balance_change(
+            &node,
+            miner_address,
+            initial_miner_balance,
+            expected_priority_fee,
+            true,
+            "Miner (block producer B) should receive priority fee",
+        );
+
+        // Verify signer (producer A) balance unchanged
+        assert_balance_change(
+            &node,
+            ctx.block_producer_a.address(),
+            initial_signer_balance,
+            U256::ZERO,
+            true,
+            "Signer (block producer A) balance should not change",
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "test-utils", test))]
@@ -1731,7 +1896,7 @@ pub mod test_utils {
     use crate::payload::DeterministicShadowTxKey;
     use crate::shadow_tx::{ShadowTransaction, TransactionPacket};
     use alloy_consensus::EthereumTxEnvelope;
-    use alloy_consensus::{SignableTransaction as _, TxEip4844, TxLegacy, TxEip1559};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEip4844, TxLegacy};
     use alloy_genesis::Genesis;
     use alloy_network::EthereumWallet;
     use alloy_network::TxSigner;
@@ -2434,6 +2599,21 @@ pub mod test_utils {
             timestamp,
             prev_randao: B256::ZERO,
             suggested_fee_recipient: Address::ZERO,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::ZERO),
+        };
+        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+    }
+
+    /// Returns payload attributes with a custom beneficiary address.
+    pub fn eth_payload_attributes_with_beneficiary(
+        timestamp: u64,
+        beneficiary: Address,
+    ) -> EthPayloadBuilderAttributes {
+        let attributes = PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: beneficiary,
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
         };
