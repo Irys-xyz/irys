@@ -1659,10 +1659,14 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
         .ingest_commitment_tx(stake_tx_invalid.clone())
         .await
         .expect_err("expected failure but got success");
-    assert!(matches!(
-        res,
-        AddTxError::TxIngress(TxIngressError::InvalidSignature)
-    ));
+    match res {
+        AddTxError::TxIngress(TxIngressError::InvalidSignature) => {
+            // it failed to ingress, as expected!
+        }
+        e => {
+            panic!("Expected InvalidSignature but got: {:?}", e);
+        }
+    }
 
     // ingest valid stake tx
     genesis_node.ingest_commitment_tx(stake_tx.clone()).await?;
