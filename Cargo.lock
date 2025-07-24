@@ -3015,6 +3015,12 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "irys-database",
+ "irys-types",
+ "reth-node-core",
+ "toml",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber 0.3.19",
 ]
 
 [[package]]

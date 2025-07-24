@@ -145,20 +145,6 @@ impl BlockTreeService {
                     config.clone(),
                 );
 
-                //  Notify reth service
-                let tip_hash = {
-                    let block_index = bi_guard.read();
-                    block_index.get_latest_item().unwrap().block_hash
-                };
-
-                reth_service_actor
-                    .try_send(ForkChoiceUpdateMessage {
-                        head_hash: BlockHashType::Irys(tip_hash),
-                        confirmed_hash: None,
-                        finalized_hash: None,
-                    })
-                    .expect("could not send message to `RethServiceActor`");
-
                 let block_tree_service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
