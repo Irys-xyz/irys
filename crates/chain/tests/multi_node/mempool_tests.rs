@@ -1741,8 +1741,10 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
 }
 
 #[test_log::test(actix_web::test)]
-/// post invalid data txs where tx id has been tampered with
+/// try ingress invalid data tx where tx id has been tampered with
+/// try ingress valid data tx where tx id has not been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
+/// expect valid tx to ingress successfully
 async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
