@@ -59,6 +59,27 @@ pub enum EitherIncrementOrDecrement {
     BalanceDecrement(BalanceDecrement),
 }
 
+impl TransactionPacket {
+    /// Returns the target address for this transaction packet, if any.
+    /// Returns None for BlockReward since it has no explicit target (uses beneficiary).
+    pub fn target(&self) -> Option<Address> {
+        match self {
+            Self::Unstake(either) => match either {
+                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
+                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
+            },
+            Self::BlockReward(_) => None, // No target, uses beneficiary
+            Self::Stake(dec) => Some(dec.target),
+            Self::StorageFees(dec) => Some(dec.target),
+            Self::Pledge(dec) => Some(dec.target),
+            Self::Unpledge(either) => match either {
+                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
+                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
+            },
+        }
+    }
+}
+
 /// Topics for shadow transaction logs
 #[expect(
     clippy::module_name_repetitions,
