@@ -751,7 +751,7 @@ impl Inner {
             let mempool_state = &self.mempool_state;
 
             // TODO: we need to use the hash of the *entire* tx struct (including ID and signature)
-            // to prevent malformed txs from poisioning legitimate transactions
+            // to prevent malformed txs from poisoning legitimate transactions
 
             // re-derive the tx_id to ensure we don't get poisoned
             // let tx_id = H256::from(alloy_primitives::keccak256(tx.signature().as_bytes()).0);
