@@ -62,7 +62,7 @@ pub enum EitherIncrementOrDecrement {
 impl TransactionPacket {
     /// Returns the target address for this transaction packet, if any.
     /// Returns None for BlockReward since it has no explicit target (uses beneficiary).
-    pub fn target(&self) -> Option<Address> {
+    pub fn fee_payer_address(&self) -> Option<Address> {
         match self {
             Self::Unstake(either) => match either {
                 EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
