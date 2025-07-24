@@ -3,10 +3,7 @@ use base58::ToBase58 as _;
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
-use irys_types::{
-    Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransaction, IrysTransactionId,
-    H256,
-};
+use irys_types::{Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionId, H256};
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, trace, warn};
@@ -59,14 +56,17 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
-        let (_anchor_height, commitment_tx) = match self
-            .validate_anchor(IrysTransaction::Commitment(commitment_tx))
-            .await
-        {
-            Ok(Some((height, tx))) => (height, tx.try_into().unwrap()), // should never error
-            Ok(None) => return Ok(()), // TODO: plumb success context
-            Err(err) => return Err(err),
-        };
+        // Validate tx signature
+        if let Err(e) = self.validate_signature(&commitment_tx).await {
+            tracing::error!(
+                "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                &commitment_tx,
+                e
+            );
+            return Err(TxIngressError::InvalidSignature);
+        }
+
+        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
@@ -76,16 +76,6 @@ impl Inner {
             &commitment_status
         );
         if commitment_status == CommitmentSnapshotStatus::Accepted {
-            // Validate tx signature
-            if let Err(e) = self.validate_signature(&commitment_tx).await {
-                tracing::error!(
-                    "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                    &commitment_tx,
-                    e
-                );
-                return Err(TxIngressError::InvalidSignature);
-            }
-
             let mut mempool_state_guard = mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
             trace!(
@@ -198,7 +188,7 @@ impl Inner {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
-        let mut mempool_state_guard = self.mempool_state.write().await;
+        let mempool_state_guard = self.mempool_state.read().await;
 
         // TODO: what the heck is this, this needs to be optimised at least a little bit
 
@@ -224,27 +214,6 @@ impl Inner {
             "handle_get_commitment_transactions_message: {:?}",
             hash_map.iter().map(|x| x.0).collect::<Vec<_>>()
         );
-
-        // if data tx exists in anchor_pending
-
-        for tx_id in commitment_tx_ids.iter() {
-            trace!("checking for {} in mempool", &tx_id);
-            if hash_map.contains_key(tx_id) {
-                continue;
-            }
-            if let Some(tx_header) = mempool_state_guard.pending_anchor_txs.get(tx_id) {
-                trace!("{} in pending_anchor_txs", &tx_id);
-
-                match tx_header {
-                    IrysTransaction::Data(_) => {}
-                    IrysTransaction::Commitment(tx_header) => {
-                        debug!("Got tx {:?} from mempool/pending_anchor_txs", &tx_id);
-                        hash_map.insert(*tx_id, tx_header.clone());
-                    }
-                }
-                continue;
-            }
-        }
 
         // Attempt to locate and retain only the requested tx_ids
         let mut filtered_map = HashMap::with_capacity(commitment_tx_ids.len());

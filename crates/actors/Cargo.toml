@@ -46,6 +46,7 @@ reth-transaction-pool.workspace = true
 itertools.workspace = true
 reth-ethereum-primitives.workspace = true
 thiserror.workspace = true
+alloy-primitives.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
