@@ -1739,3 +1739,54 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
 
     Ok(())
 }
+
+#[test_log::test(actix_web::test)]
+/// try ingress invalid data tx where tx id has been tampered with
+/// try ingress valid data tx where tx id has not been tampered with
+/// expect invalid txs to fail when sent directly to the mempool
+/// expect valid tx to ingress successfully
+async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+    let seconds_to_wait = 10;
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    // create a signed data transaction
+    let valid_tx = genesis_node
+        .create_signed_data_tx(&signer, b"hello".to_vec())
+        .unwrap();
+
+    // tamper with the transaction id
+    let mut invalid_header = valid_tx.header.clone();
+    let mut bytes = invalid_header.id.to_fixed_bytes();
+    bytes[0] ^= 0x01;
+    invalid_header.id = H256::from(bytes);
+
+    // ingest invalid transaction directly to the mempool
+    let res = genesis_node
+        .ingest_data_tx(invalid_header.clone())
+        .await
+        .expect_err("expected failure but got success");
+    assert!(
+        matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
+        "Expected InvalidSignature but got: {:?}",
+        res
+    );
+
+    // ingest valid transaction
+    genesis_node.ingest_data_tx(valid_tx.header.clone()).await?;
+
+    // wait for all txs to ingress mempool
+    genesis_node
+        .wait_for_mempool(valid_tx.header.id, seconds_to_wait)
+        .await?;
+
+    genesis_node.stop().await;
+
+    Ok(())
+}

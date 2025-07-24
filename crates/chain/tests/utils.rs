@@ -1539,6 +1539,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let result = self
+            .node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::IngestDataTx(data_tx, oneshot_tx));
+        if let Err(e) = result {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+
+        match oneshot_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(tx_error)) => Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => Err(AddTxError::Mailbox(e)),
+        }
+    }
+
     pub async fn ingest_commitment_tx(
         &self,
         commitment_tx: CommitmentTransaction,
