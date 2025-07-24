@@ -494,7 +494,7 @@ mod test {
             ema: irys_types::EmaConfig {
                 price_adjustment_interval: interval,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         };
 
         // Build blocks and snapshots iteratively
@@ -549,7 +549,7 @@ mod test {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         };
 
         // Build blocks and snapshots using utility function
@@ -583,7 +583,7 @@ mod test {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         };
 
         // Create genesis block
@@ -626,7 +626,7 @@ mod test {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         };
 
         // Build blocks and snapshots using utility function
@@ -680,7 +680,7 @@ mod test {
                 price_adjustment_interval: 10,
             },
             token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(),
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         };
 
         // Build blocks and snapshots using utility function
@@ -754,7 +754,7 @@ mod test {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         };
 
         // Build blocks and snapshots using utility function
@@ -819,7 +819,7 @@ mod test {
             ema: irys_types::EmaConfig {
                 price_adjustment_interval: 10,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         };
 
         // Build blocks and snapshots using utility function

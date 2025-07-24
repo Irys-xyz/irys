@@ -1,5 +1,5 @@
 use irys_primitives::CommitmentType;
-use irys_types::{Address, CommitmentTransaction};
+use irys_types::{transaction::PledgeDataProvider, Address, CommitmentTransaction};
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -209,5 +209,14 @@ impl CommitmentSnapshot {
         }
 
         commitment_tx
+    }
+}
+
+impl PledgeDataProvider for CommitmentSnapshot {
+    fn pledge_count(&self, user_address: Address) -> usize {
+        self.commitments
+            .get(&user_address)
+            .map(|c| c.pledges.len())
+            .unwrap_or(0)
     }
 }

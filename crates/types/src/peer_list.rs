@@ -1,10 +1,15 @@
-use crate::{Compact, PeerAddress};
+use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress};
 use actix::Message;
+use alloy_primitives::B256;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
+use reth::providers::errors::db::DatabaseError;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
+use tokio::sync::mpsc::error::SendError;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Arbitrary, PartialEq, Hash)]
 pub struct PeerScore(u16);
@@ -287,6 +292,140 @@ impl Compact for PeerListItem {
             },
             &buf[total_consumed.min(buf.len())..],
         )
+    }
+}
+
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub enum PeerNetworkServiceMessage {
+    AnnounceYourselfToPeer(PeerListItem),
+    RequestDataFromNetwork {
+        data_request: GossipDataRequest,
+        use_trusted_peers_only: bool,
+        response: tokio::sync::oneshot::Sender<Result<(), PeerNetworkError>>,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum PeerNetworkError {
+    #[error("Internal database error: {0}")]
+    Database(DatabaseError),
+    #[error("Peer list internal error: {0:?}")]
+    InternalSendError(SendError<PeerNetworkServiceMessage>),
+    #[error("Peer list internal error: {0}")]
+    OtherInternalError(String),
+}
+
+impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
+    fn from(err: SendError<PeerNetworkServiceMessage>) -> Self {
+        Self::InternalSendError(err)
+    }
+}
+
+impl From<DatabaseError> for PeerNetworkError {
+    fn from(err: DatabaseError) -> Self {
+        Self::Database(err)
+    }
+}
+
+impl From<eyre::Report> for PeerNetworkError {
+    fn from(err: eyre::Report) -> Self {
+        Self::Database(DatabaseError::Other(err.to_string()))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PeerNetworkSender(UnboundedSender<PeerNetworkServiceMessage>);
+
+impl PeerNetworkSender {
+    pub fn new(sender: UnboundedSender<PeerNetworkServiceMessage>) -> Self {
+        Self(sender)
+    }
+
+    pub fn new_with_receiver() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<PeerNetworkServiceMessage>,
+    ) {
+        let (sender, receiver) = unbounded_channel();
+        (Self(sender), receiver)
+    }
+
+    pub fn send(
+        &self,
+        message: PeerNetworkServiceMessage,
+    ) -> Result<(), SendError<PeerNetworkServiceMessage>> {
+        self.0.send(message)
+    }
+
+    pub fn announce_yourself_to_peer(
+        &self,
+        peer: PeerListItem,
+    ) -> Result<(), SendError<PeerNetworkServiceMessage>> {
+        let message = PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer);
+        self.send(message)
+    }
+
+    pub async fn request_block_from_network(
+        &self,
+        block_hash: BlockHash,
+        use_trusted_peers_only: bool,
+    ) -> Result<(), PeerNetworkError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
+            data_request: GossipDataRequest::Block(block_hash),
+            use_trusted_peers_only,
+            response: sender,
+        };
+        self.send(message)?;
+
+        receiver.await.map_err(|recv_error| {
+            PeerNetworkError::OtherInternalError(format!(
+                "Failed to receive response: {:?}",
+                recv_error
+            ))
+        })?
+    }
+
+    pub async fn request_payload_from_network(
+        &self,
+        evm_payload_hash: B256,
+        use_trusted_peers_only: bool,
+    ) -> Result<(), PeerNetworkError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
+            data_request: GossipDataRequest::ExecutionPayload(evm_payload_hash),
+            use_trusted_peers_only,
+            response: sender,
+        };
+        self.send(message)?;
+
+        receiver.await.map_err(|recv_error| {
+            PeerNetworkError::OtherInternalError(format!(
+                "Failed to receive response: {:?}",
+                recv_error
+            ))
+        })?
+    }
+
+    pub async fn request_chunk_from_network(
+        &self,
+        chunk_path_hash: ChunkPathHash,
+        use_trusted_peers_only: bool,
+    ) -> Result<(), PeerNetworkError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
+            data_request: GossipDataRequest::Chunk(chunk_path_hash),
+            use_trusted_peers_only,
+            response: sender,
+        };
+        self.send(message)?;
+
+        receiver.await.map_err(|recv_error| {
+            PeerNetworkError::OtherInternalError(format!(
+                "Failed to receive response: {:?}",
+                recv_error
+            ))
+        })?
     }
 }
 

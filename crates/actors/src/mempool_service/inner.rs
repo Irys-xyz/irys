@@ -7,10 +7,12 @@ use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
-use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus};
+use irys_domain::{
+    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
+};
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
-use irys_storage::{get_atomic_file, RecoveredMempoolState, StorageModulesReadGuard};
+use irys_storage::RecoveredMempoolState;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
@@ -34,7 +36,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(Debug)]
 pub struct Inner {
@@ -104,6 +106,7 @@ pub enum MempoolServiceMessage {
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
     InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
+    GetState(oneshot::Sender<AtomicMempoolState>),
 }
 
 impl Inner {
@@ -200,6 +203,11 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+                MempoolServiceMessage::GetState(response) => {
+                    let _ = response
+                        .send(Arc::clone(&self.mempool_state))
+                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
+                }
             }
             Ok(())
         })
@@ -210,10 +218,19 @@ impl Inner {
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
-        let mut fees_spent_per_address = HashMap::new();
+        let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
+
+        let max_commitments: usize = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .max_commitment_txs_per_block
+            .try_into()
+            .expect("max_commitment_txs_per_block to fit into usize");
 
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
@@ -228,8 +245,8 @@ impl Inner {
                 return false;
             }
 
-            let fee = tx.total_fee();
-            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
+            let fee = tx.total_cost();
+            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
 
             // Calculate total required balance including previously selected transactions
 
@@ -239,7 +256,7 @@ impl Inner {
                 .rpc
                 .get_balance_irys(signer, parent_evm_block_id);
 
-            let has_funds = balance >= U256::from(current_spent + fee);
+            let has_funds = balance >= current_spent + fee;
 
             // Track fees for this address regardless of whether this specific transaction is included
             fees_spent_per_address
@@ -287,7 +304,7 @@ impl Inner {
         // This order ensures stake transactions are processed before pledges
         let mempool_state_guard = mempool_state.read().await;
 
-        for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+        'outer: for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
             // Gather all commitments of current type from all addresses
             let mut sorted_commitments: Vec<_> = mempool_state_guard
                 .valid_commitment_tx
@@ -300,7 +317,7 @@ impl Inner {
                 .collect();
 
             // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.total_fee()));
+            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.user_fee()));
 
             // Select fundable commitments in fee-priority order
             for tx in sorted_commitments {
@@ -360,6 +377,12 @@ impl Inner {
 
                 debug!("best_mempool_txs: adding commitment tx {}", tx.id);
                 commitment_tx.push(tx);
+
+                // if we have reached the maximum allowed number of commitment txs per block
+                // do not push anymore
+                if commitment_tx.len() >= max_commitments {
+                    break 'outer;
+                }
             }
         }
         drop(mempool_state_guard);
@@ -381,14 +404,14 @@ impl Inner {
 
         // Sort data transactions by fee (highest first) to maximize revenue
 
-        submit_ledger_txs.sort_by(|a, b| match b.total_fee().cmp(&a.total_fee()) {
+        submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
         });
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
-        let max_txs = self
+        let max_data_txs = self
             .config
             .node_config
             .consensus_config()
@@ -404,7 +427,7 @@ impl Inner {
             if check_funding(&tx) {
                 debug!("Submit tx {} passed the funding check", &tx.id);
                 submit_tx.push(tx);
-                if submit_tx.len() >= max_txs {
+                if submit_tx.len() >= max_data_txs {
                     break;
                 }
             } else {
@@ -544,12 +567,16 @@ impl Inner {
     }
 
     // Helper to validate anchor
+    // this takes in an IrysTransaction and validates the anchor
+    // if the anchor is valid, returns the tx back with the height that made the anchor canonical (i.e the block height)
+    #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
         &mut self,
-        tx_id: &IrysTransactionId,
-        anchor: &H256,
-    ) -> Result<IrysBlockHeader, TxIngressError> {
+        tx: &impl IrysTransactionCommon,
+    ) -> Result<u64, TxIngressError> {
         let mempool_state = &self.mempool_state;
+        let tx_id = tx.id();
+        let anchor = tx.anchor();
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
@@ -561,56 +588,46 @@ impl Inner {
             .mempool
             .anchor_expiry_depth as u64;
 
-        let mempool_state_read_guard = mempool_state.read().await;
-        // Allow transactions to use the txid of a transaction in the mempool
-        if mempool_state_read_guard.recent_valid_tx.contains(anchor) {
-            let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
-            let latest = canonical_blocks.last().unwrap();
-            // Just provide the most recent block as an anchor
-            if let Some(hdr) = mempool_state_read_guard
-                .prevalidated_blocks
-                .get(&latest.block_hash)
-            {
-                if hdr.height + anchor_expiry_depth >= latest_height {
-                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
-                    return Ok(hdr.clone());
-                }
-            } else if let Ok(Some(hdr)) =
-                irys_database::block_header_by_hash(&read_tx, &latest.block_hash, false)
-            {
-                if hdr.height + anchor_expiry_depth >= latest_height {
-                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
-                    return Ok(hdr);
-                }
-            }
-        }
-        drop(mempool_state_read_guard); // Release read lock before acquiring write lock
-
         // check tree / mempool for block header
         if let Some(hdr) = self
             .mempool_state
             .read()
             .await
             .prevalidated_blocks
-            .get(anchor)
+            .get(&anchor)
             .cloned()
         {
             if hdr.height + anchor_expiry_depth >= latest_height {
-                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
-                return Ok(hdr);
+                debug!("valid block hash anchor for tx ");
+                return Ok(hdr.height);
+            } else {
+                let mut mempool_state_write_guard = mempool_state.write().await;
+                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
+                warn!(
+                    "Invalid anchor value for tx - header height {} beyond expiry depth {}",
+                    &hdr.height, &anchor_expiry_depth
+                );
+                return Err(TxIngressError::InvalidAnchor);
             }
         }
 
         // check index for block header
-        match irys_database::block_header_by_hash(&read_tx, anchor, false) {
-            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
-                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
-                Ok(hdr)
+        match irys_database::block_header_by_hash(&read_tx, &anchor, false) {
+            Ok(Some(hdr)) => {
+                if hdr.height + anchor_expiry_depth >= latest_height {
+                    debug!("valid block hash anchor for tx");
+                    Ok(hdr.height)
+                } else {
+                    let mut mempool_state_write_guard = mempool_state.write().await;
+                    mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
+                    warn!("Invalid block hash anchor value for tx - header height {} beyond expiry depth {}", &hdr.height, &anchor_expiry_depth);
+                    Err(TxIngressError::InvalidAnchor)
+                }
             }
             _ => {
                 let mut mempool_state_write_guard = mempool_state.write().await;
-                mempool_state_write_guard.invalid_tx.push(*tx_id);
-                warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
+                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
+                warn!("Invalid anchor value for tx - Unknown anchor {}", &anchor);
                 Err(TxIngressError::InvalidAnchor)
             }
         }
@@ -722,17 +739,29 @@ impl Inner {
     }
 
     // Helper to verify signature
+    #[instrument(skip_all, fields(tx_id = %tx.id()))]
     pub async fn validate_signature<T: IrysTransactionCommon>(
         &mut self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
-            info!("Signature is valid");
+            info!("Tx {} signature is valid", &tx.id());
             Ok(())
         } else {
             let mempool_state = &self.mempool_state;
-            mempool_state.write().await.invalid_tx.push(tx.id());
-            debug!("Signature is NOT valid");
+
+            // TODO: we need to use the hash of the *entire* tx struct (including ID and signature)
+            // to prevent malformed txs from poisoning legitimate transactions
+
+            // re-derive the tx_id to ensure we don't get poisoned
+            // let tx_id = H256::from(alloy_primitives::keccak256(tx.signature().as_bytes()).0);
+
+            mempool_state
+                .write()
+                .await
+                .recent_invalid_tx
+                .put(tx.id(), ());
+            warn!("Tx {} signature is invalid", &tx.id());
             Err(TxIngressError::InvalidSignature)
         }
     }
@@ -755,9 +784,9 @@ pub struct MempoolState {
     pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
-    pub invalid_tx: Vec<H256>,
+    pub recent_invalid_tx: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
-    pub recent_valid_tx: HashSet<H256>,
+    pub recent_valid_tx: LruCache<H256, ()>,
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
@@ -776,8 +805,8 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         prevalidated_blocks_poa: HashMap::new(),
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
-        invalid_tx: Vec::new(),
-        recent_valid_tx: HashSet::new(),
+        recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
+        recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
     }
@@ -820,6 +849,8 @@ pub enum TxIngressError {
     Skipped,
     /// Invalid anchor value (unknown or too old)
     InvalidAnchor,
+    // /// Unknown anchor value (could be valid)
+    // PendingAnchor,
     /// Some database error occurred
     DatabaseError,
     /// The service is uninitialized
@@ -839,7 +870,7 @@ impl TxIngressError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,

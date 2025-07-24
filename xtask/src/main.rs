@@ -1,3 +1,4 @@
+use cargo_metadata::{MetadataCommand, Package};
 use clap::{Parser, Subcommand};
 use xshell::{cmd, Cmd, Shell};
 
@@ -51,6 +52,7 @@ enum Commands {
         #[clap(short, long, default_value_t = false)]
         fix: bool,
     },
+    CleanWorkspace,
 }
 
 fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
@@ -191,6 +193,25 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     },
                     sh,
                 )?
+            }
+        }
+        Commands::CleanWorkspace => {
+            // get workspace metadata
+            let metadata = MetadataCommand::new().exec()?;
+
+            // filter for just workspace member packages
+            let workspace_packages: Vec<&Package> = metadata
+                .packages
+                .iter()
+                .filter(|pkg| metadata.workspace_members.contains(&pkg.id))
+                .collect();
+
+            // clean
+            // note: can't parallelize due to locks on the build dir
+            for package in workspace_packages {
+                let name = package.name.to_string();
+                println!("Cleaning {}", &name);
+                cmd!(sh, "cargo clean --package {name}").remove_and_run()?;
             }
         }
     };

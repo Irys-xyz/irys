@@ -15,7 +15,7 @@ use tracing::debug;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let chunk_size = 32; // 32 byte chunks
     config.consensus.get_mut().chunk_size = chunk_size;
     config.consensus.get_mut().num_chunks_in_partition = 10;

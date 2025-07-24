@@ -1036,8 +1036,8 @@ mod tests {
     fn test_irys_block_header_signing() {
         // setup
         let mut header = mock_header();
-        let testnet_config = NodeConfig::testnet();
-        let config = Config::new(testnet_config);
+        let testing_config = NodeConfig::testing();
+        let config = Config::new(testing_config);
         let signer = config.irys_signer();
 
         // action

@@ -8,7 +8,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     // setup config / testnet
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
@@ -23,7 +23,7 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     genesis_node.start_public_api().await;
 
     // Initialize the peer with our keypair/signer
-    let peer_config = genesis_node.testnet_peer_with_signer(&peer_signer);
+    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
 
     // Start the peer: No packing on the peer, it doesn't have partition assignments yet
     let peer_node = IrysNodeTest::new(peer_config.clone())

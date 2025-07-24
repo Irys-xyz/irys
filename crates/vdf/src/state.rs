@@ -11,6 +11,7 @@ use nodit::{interval::ii, InclusiveInterval as _, Interval};
 use rayon::prelude::*;
 use reth_db::Database as _;
 use sha2::{Digest as _, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -324,64 +325,73 @@ pub fn vdf_steps_are_valid(
     // Calculate the step number of the first step in the blocks sequence
     let start_step_number: u64 = vdf_info.global_step_number - vdf_info.steps.len() as u64;
 
+    // Atomic flag to signal all threads to stop
+    let should_stop = AtomicBool::new(false);
+    let last_step_checkpoints = Arc::new(RwLock::new(None::<H256List>));
+
     // We must calculate the checkpoint iterations for each step sequentially
     // because we only have the first and last checkpoint of each step, but we
     // can calculate each of the steps in parallel
     // Limit threads number to avoid overloading the system using configuration limit
-    let test: Vec<(H256, Option<H256List>)> = pool.install(|| {
-        (0..steps.len() - 1)
-            .into_par_iter()
-            .map(|i| {
-                let mut hasher = Sha256::new();
-                let mut salt = U256::from(step_number_to_salt_number(
-                    config,
-                    start_step_number + i as u64,
+    pool.install(|| {
+        (0..steps.len() - 1).into_par_iter().try_for_each(|i| {
+            // Check if another thread found a mismatch
+            if should_stop.load(Ordering::Relaxed) {
+                return Err(eyre::eyre!(
+                    "One of the previous threads found a mismatch, stopping further calculations"
                 ));
-                let mut seed = steps[i];
-                let mut checkpoints: Vec<H256> =
-                    vec![H256::default(); config.num_checkpoints_in_vdf_step];
-                if start_step_number + i as u64 > 0
-                    && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
-                {
-                    info!(
-                        "Applying reset seed {:?} to step number {}",
-                        reset_seed,
-                        start_step_number + i as u64
-                    );
-                    seed = apply_reset_seed(seed, reset_seed);
-                }
-                vdf_sha(
-                    &mut hasher,
-                    &mut salt,
-                    &mut seed,
-                    config.num_checkpoints_in_vdf_step,
-                    config.num_iterations_per_checkpoint(),
-                    &mut checkpoints,
+            }
+
+            let mut hasher = Sha256::new();
+            let mut salt = U256::from(step_number_to_salt_number(
+                config,
+                start_step_number + i as u64,
+            ));
+            let mut seed = steps[i];
+            let mut checkpoints: Vec<H256> =
+                vec![H256::default(); config.num_checkpoints_in_vdf_step];
+            if start_step_number + i as u64 > 0
+                && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
+            {
+                info!(
+                    "Applying reset seed {:?} to step number {}",
+                    reset_seed,
+                    start_step_number + i as u64
                 );
-                (
-                    *checkpoints.last().unwrap(),
-                    if i == steps.len() - 2 {
-                        // If this is the last step, return the last checkpoint
-                        Some(H256List(checkpoints))
-                    } else {
-                        // Otherwise, return just the seed for the next step
-                        None
-                    },
-                )
-            })
-            .collect()
-    });
+                seed = apply_reset_seed(seed, reset_seed);
+            }
+            vdf_sha(
+                &mut hasher,
+                &mut salt,
+                &mut seed,
+                config.num_checkpoints_in_vdf_step,
+                config.num_iterations_per_checkpoint(),
+                &mut checkpoints,
+            );
+            let computed_step = seed;
 
-    let last_step_checkpoints = test.last().unwrap().1.clone();
-    let test: H256List = H256List(test.into_iter().map(|par| par.0).collect());
+            // Compare immediately and signal others to stop if mismatch
+            if computed_step != vdf_info.steps[i] {
+                should_stop.store(true, Ordering::Relaxed);
+                return Err(eyre::eyre!(
+                    "VDF step {} is invalid! Expected: {:?}, got: {:?}",
+                    start_step_number + i as u64,
+                    vdf_info.steps[i],
+                    computed_step
+                ));
+            }
 
-    let steps_are_valid = test == vdf_info.steps;
+            // Store checkpoints if this is the last step
+            if i == steps.len() - 2 {
+                *last_step_checkpoints.write().unwrap() = Some(H256List(checkpoints));
+            }
 
-    if !steps_are_valid {
-        // Compare the original list with the calculated one
-        warn_mismatches(&test, &vdf_info.steps);
-        return Err(eyre::eyre!("VDF steps are invalid!"));
-    }
+            Ok(())
+        })
+    })?;
+
+    let checkpoints_guard = last_step_checkpoints.read().unwrap();
+    let last_step_checkpoints: Option<H256List> = checkpoints_guard.clone();
 
     let last_step_checkpoints_are_valid = last_step_checkpoints
         .as_ref()

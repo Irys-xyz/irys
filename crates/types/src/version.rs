@@ -345,8 +345,8 @@ mod tests {
     #[test]
     fn should_sign_and_verify_signature() {
         let mut version_request = VersionRequest::default();
-        let testnet_config = NodeConfig::testnet();
-        let config = Config::new(testnet_config);
+        let testing_config = NodeConfig::testing();
+        let config = Config::new(testing_config);
         let signer = config.irys_signer();
 
         signer.sign_p2p_handshake(&mut version_request).unwrap();

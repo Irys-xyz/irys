@@ -1,21 +1,22 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
-use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
-use crate::peer_list::PeerListServiceWithClient;
+use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
-use crate::{BlockStatusProvider, PeerList as _, SyncState};
-use actix::{Actor as _, Addr};
+use crate::{BlockStatusProvider, GetPeerListGuard, SyncState};
+use actix::Actor as _;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
+use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     Config, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionResponse,
-    NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
+    NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore,
+    VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -86,7 +87,7 @@ impl ApiClient for MockApiClient {
 
 fn create_test_config() -> Config {
     let temp_dir = setup_tracing_and_temp_dir(None, false);
-    let mut node_config = NodeConfig::testnet();
+    let mut node_config = NodeConfig::testing();
     node_config.base_directory = temp_dir.path().to_path_buf();
     node_config.trusted_peers = vec![];
     Config::new(node_config)
@@ -120,11 +121,9 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 struct MockedServices {
     block_status_provider_mock: BlockStatusProvider,
     block_discovery_stub: BlockDiscoveryStub,
-    peer_list_service_addr: Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
+    peer_list_data_guard: PeerList,
     db: DatabaseProvider,
-    execution_payload_provider: ExecutionPayloadProvider<
-        Addr<PeerListServiceWithClient<MockApiClient, MockRethServiceActor>>,
-    >,
+    execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
     vdf_state_stub: VdfStateReadonly,
     service_senders: ServiceSenders,
@@ -149,15 +148,23 @@ impl MockedServices {
         };
         let reth_service = MockRethServiceActor {};
         let reth_addr = reth_service.start();
-        let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_list_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             config,
             mock_client.clone(),
             reth_addr,
+            receiver,
+            sender,
         );
-        let peer_addr = peer_list_service.start();
+        let peer_service_addr = peer_list_service.start();
+        let peer_list_data_guard = peer_service_addr
+            .send(GetPeerListGuard)
+            .await
+            .expect("to get peer list")
+            .expect("to get peer list");
         let execution_payload_provider =
-            ExecutionPayloadProvider::new(peer_addr.clone(), RethBlockProvider::new_mock());
+            ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);
@@ -210,7 +217,7 @@ impl MockedServices {
         Self {
             block_status_provider_mock,
             block_discovery_stub,
-            peer_list_service_addr: peer_addr,
+            peer_list_data_guard,
             db,
             execution_payload_provider,
             mempool_stub,
@@ -227,7 +234,7 @@ async fn should_process_block() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_service_addr: peer_addr,
+        peer_list_data_guard,
         db,
         execution_payload_provider,
         mempool_stub,
@@ -238,7 +245,7 @@ async fn should_process_block() {
     let sync_state = SyncState::new(false, false);
     let service = BlockPool::new(
         db.clone(),
-        peer_addr,
+        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
         sync_state,
@@ -322,7 +329,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_service_addr: peer_addr,
+        peer_list_data_guard,
         db,
         execution_payload_provider,
         mempool_stub,
@@ -330,30 +337,28 @@ async fn should_process_block_with_intermediate_block_in_api() {
         service_senders,
     } = MockedServices::new(&config).await;
 
+    let peer_list_guard = peer_list_data_guard.clone();
     // Set the mock client to return block2 when requested
     // Adding a peer so we can send a request to the mock client
-    peer_addr
-        .add_or_update_peer(
-            Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
-            PeerListItem {
-                reputation_score: PeerScore::new(100),
-                response_time: 0,
-                address: PeerAddress {
-                    gossip: fake_peer_gossip_addr,
-                    ..PeerAddress::default()
-                },
-                last_seen: 0,
-                is_online: true,
+    peer_list_guard.add_or_update_peer(
+        Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
+        PeerListItem {
+            reputation_score: PeerScore::new(100),
+            response_time: 0,
+            address: PeerAddress {
+                gossip: fake_peer_gossip_addr,
+                ..PeerAddress::default()
             },
-        )
-        .await
-        .expect("can't send message to peer list");
+            last_seen: 0,
+            is_online: true,
+        },
+    );
 
     let sync_state = SyncState::new(false, false);
 
     let block_pool = BlockPool::new(
         db.clone(),
-        peer_addr,
+        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
         sync_state,
@@ -414,7 +419,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_service_addr: peer_addr,
+        peer_list_data_guard,
         db,
         execution_payload_provider,
         mempool_stub,
@@ -426,7 +431,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
 
     let block_pool = BlockPool::new(
         db.clone(),
-        peer_addr,
+        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
         sync_state,
@@ -488,7 +493,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_service_addr: peer_addr,
+        peer_list_data_guard,
         db,
         execution_payload_provider,
         mempool_stub,
@@ -505,29 +510,28 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     // Wait for the server to start
     tokio::time::sleep(Duration::from_secs(5)).await;
 
+    let peer_list_guard = peer_list_data_guard.clone();
+
     // Adding a peer so we can send a request to the mock client
-    peer_addr
-        .add_or_update_peer(
-            Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
-            PeerListItem {
-                reputation_score: PeerScore::new(100),
-                response_time: 0,
-                address: PeerAddress {
-                    gossip: fake_peer_gossip_addr,
-                    ..PeerAddress::default()
-                },
-                last_seen: 0,
-                is_online: true,
+    peer_list_guard.add_or_update_peer(
+        Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
+        PeerListItem {
+            reputation_score: PeerScore::new(100),
+            response_time: 0,
+            address: PeerAddress {
+                gossip: fake_peer_gossip_addr,
+                ..PeerAddress::default()
             },
-        )
-        .await
-        .expect("can't send message to peer list");
+            last_seen: 0,
+            is_online: true,
+        },
+    );
 
     let sync_state = SyncState::new(false, false);
 
     let block_pool = BlockPool::new(
         db.clone(),
-        peer_addr,
+        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub,
         sync_state,
@@ -622,7 +626,7 @@ async fn should_fast_track_block() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_service_addr: peer_addr,
+        peer_list_data_guard,
         db,
         execution_payload_provider,
         mempool_stub,
@@ -631,9 +635,10 @@ async fn should_fast_track_block() {
     } = MockedServices::new(&config).await;
 
     let sync_state = SyncState::new(false, true);
+
     let service = BlockPool::new(
         db.clone(),
-        peer_addr,
+        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
         sync_state,
@@ -682,7 +687,7 @@ async fn should_not_fast_track_block_already_in_index() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_service_addr: peer_addr,
+        peer_list_data_guard,
         db,
         execution_payload_provider,
         mempool_stub,
@@ -693,7 +698,7 @@ async fn should_not_fast_track_block_already_in_index() {
     let sync_state = SyncState::new(false, true);
     let service = BlockPool::new(
         db.clone(),
-        peer_addr,
+        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
         sync_state,

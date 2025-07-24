@@ -19,7 +19,7 @@ sol!(
 );
 #[test_log::test(tokio::test)]
 async fn heavy_test_erc20() -> eyre::Result<()> {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
 
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let main_address = IrysSigner::random_signer(&config.consensus_config());

@@ -6,23 +6,24 @@ use irys_primitives::CommitmentType;
 use irys_types::{Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionId, H256};
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::{debug, instrument, trace, warn};
 
 impl Inner {
+    #[instrument(skip_all)]
     pub async fn handle_ingress_commitment_tx_message(
         &mut self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        debug!(
-            "received commitment tx {:?}",
-            &commitment_tx.id.0.to_base58()
-        );
+        debug!("received commitment tx {:?}", &commitment_tx.id);
 
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
 
-        // Early out if we already know about this transaction in mempool (invalid)
-        if mempool_state_guard.invalid_tx.contains(&commitment_tx.id) {
+        // Early out if we already know about this transaction (invalid)
+        if mempool_state_guard
+            .recent_invalid_tx
+            .contains(&commitment_tx.id)
+        {
             return Err(TxIngressError::Skipped);
         }
 
@@ -55,42 +56,41 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
-        // Validate the tx anchor
-        if let Err(e) = self
-            .validate_anchor(&commitment_tx.id, &commitment_tx.anchor)
-            .await
-        {
-            tracing::warn!(
-                "Anchor {:?} for tx {:?} failure with error: {:?}",
-                &commitment_tx.anchor,
-                commitment_tx.id,
+        // Validate tx signature
+        if let Err(e) = self.validate_signature(&commitment_tx).await {
+            tracing::error!(
+                "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                &commitment_tx,
                 e
             );
-            return Err(TxIngressError::InvalidAnchor);
+            return Err(TxIngressError::InvalidSignature);
         }
+
+        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
+        trace!(
+            "commitment tx {} status {:?}",
+            &commitment_tx.id,
+            &commitment_status
+        );
         if commitment_status == CommitmentSnapshotStatus::Accepted {
-            // Validate tx signature
-            if let Err(e) = self.validate_signature(&commitment_tx).await {
-                tracing::error!(
-                    "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                    &commitment_tx,
-                    e
-                );
-                return Err(TxIngressError::InvalidSignature);
-            }
-
             let mut mempool_state_guard = mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
+            trace!(
+                "pushing commitment {} to valid_commitment_tx",
+                &commitment_tx.id
+            );
             mempool_state_guard
                 .valid_commitment_tx
                 .entry(commitment_tx.signer)
                 .or_default()
                 .push(commitment_tx.clone());
 
-            mempool_state_guard.recent_valid_tx.insert(commitment_tx.id);
+            mempool_state_guard
+                .recent_valid_tx
+                .put(commitment_tx.id, ());
 
             // Process any pending pledges for this newly staked address
             // ------------------------------------------------------
@@ -160,6 +160,7 @@ impl Inner {
         } else {
             return Err(TxIngressError::Skipped);
         }
+
         Ok(())
     }
 
@@ -179,6 +180,7 @@ impl Inner {
     }
 
     /// read specified commitment txs from mempool
+    #[instrument(skip_all, name = "get_commitment_tx")]
     pub async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
@@ -186,8 +188,9 @@ impl Inner {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
-        let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
+        let mempool_state_guard = self.mempool_state.read().await;
+
+        // TODO: what the heck is this, this needs to be optimised at least a little bit
 
         // Get any CommitmentTransactions from the valid commitments Map
         mempool_state_guard
@@ -262,7 +265,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         let mut mempool_state_guard = mempool_state.write().await;
 
-        mempool_state_guard.recent_valid_tx.remove(txid);
+        mempool_state_guard.recent_valid_tx.pop(txid);
 
         // Create a vector of addresses to update to avoid borrowing issues
         let addresses_to_check: Vec<Address> = mempool_state_guard

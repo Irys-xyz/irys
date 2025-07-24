@@ -2,7 +2,6 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{payload::ShadowTxStore, IrysEthereumNode};
-use irys_storage::reth_provider::IrysRethProvider;
 use irys_types::Address;
 use reth::{
     args::DatabaseArgs,
@@ -86,7 +85,6 @@ pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
-    _provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
     shadow_tx_store: ShadowTxStore,
@@ -105,6 +103,20 @@ pub async fn run_node(
     reth_config.rpc.http_corsdomain = Some("*".to_string());
     reth_config.engine.persistence_threshold = 0;
     reth_config.engine.memory_block_buffer_target = 0;
+
+    let subpool_max_tx_count = 1_000_000;
+    let subpool_max_size_mb = 1000;
+
+    reth_config.txpool.pending_max_count = subpool_max_tx_count;
+    reth_config.txpool.pending_max_size = subpool_max_size_mb;
+
+    reth_config.txpool.basefee_max_count = subpool_max_tx_count;
+    reth_config.txpool.basefee_max_size = subpool_max_size_mb;
+
+    reth_config.txpool.queued_max_count = subpool_max_tx_count;
+    reth_config.txpool.queued_max_size = subpool_max_size_mb;
+
+    reth_config.txpool.additional_validation_tasks = 2;
 
     let db_args = DatabaseArgs::default();
     // Install the prometheus recorder to be sure to record all metrics

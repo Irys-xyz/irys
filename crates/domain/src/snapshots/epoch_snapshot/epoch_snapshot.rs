@@ -1,11 +1,11 @@
 use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
-use crate::EpochBlockData;
+use crate::{EpochBlockData, StorageModuleInfo};
 use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
-use irys_storage::{ie, StorageModuleInfo};
+use irys_storage::ie;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
@@ -63,7 +63,7 @@ impl Clone for EpochSnapshot {
 
 impl Default for EpochSnapshot {
     fn default() -> Self {
-        let node_config = NodeConfig::testnet();
+        let node_config = NodeConfig::testing();
         let config = Config::new(node_config);
         Self {
             ledgers: Ledgers::new(&config.consensus),
@@ -564,7 +564,12 @@ impl EpochSnapshot {
         let num_slots = data_ledger.slot_count() as u64;
 
         let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
-        let max_ledger_capacity = num_slots * num_chunks_in_partition;
+        let num_partitions_per_slot = self.config.consensus.num_partitions_per_slot;
+
+        // Each slot can store multiple partitions, we account for that in the
+        // max_ledger_capacity calculation.
+        let max_ledger_capacity = num_slots * num_partitions_per_slot * num_chunks_in_partition;
+
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
         // STRATEGY 1: Threshold-based capacity expansion

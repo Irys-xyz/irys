@@ -16,8 +16,8 @@ use tracing::debug;
 
 async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: SocketAddr) {
     let mut version_request = VersionRequest::default();
-    let testnet_config = NodeConfig::testnet();
-    let config = Config::new(testnet_config);
+    let testing_config = NodeConfig::testing();
+    let config = Config::new(testing_config);
     let signer = config.irys_signer();
     signer
         .sign_p2p_handshake(&mut version_request)
@@ -160,7 +160,7 @@ async fn check_info_endpoint(
 
 #[test_log::test(actix_rt::test)]
 async fn heavy_api_client_all_endpoints_should_work() {
-    let config = NodeConfig::testnet();
+    let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
 

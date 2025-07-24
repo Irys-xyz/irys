@@ -24,7 +24,7 @@ const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let expected_addr = hex::decode(DEV_ADDRESS)?;
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.mining_key = SigningKey::from_slice(&dev_wallet).unwrap();
 
     let account1 = IrysSigner::random_signer(&config.consensus_config());

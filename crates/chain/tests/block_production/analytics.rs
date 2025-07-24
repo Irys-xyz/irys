@@ -29,7 +29,7 @@ use crate::utils::IrysNodeTest;
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 1000;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;

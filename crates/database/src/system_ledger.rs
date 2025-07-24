@@ -1,12 +1,12 @@
 use eyre::eyre;
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_primitives::CommitmentType;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, Compact, Config, H256List, IrysBlockHeader,
-    SystemTransactionLedger, H256,
+    irys::IrysSigner, transaction::PledgeDataProvider, Address, CommitmentTransaction, Compact,
+    Config, H256List, IrysBlockHeader, SystemTransactionLedger, H256,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
+
 /// Names for each of the system ledgers as well as their `ledger_id` discriminant
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
@@ -92,6 +92,8 @@ impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
 /// # Arguments
 /// * `signer` - The signer to use for transaction signing
 /// * `anchor` - The anchor value to include in the commitment
+/// * `config` - The configuration containing consensus parameters
+/// * `provider` - The pledge data provider for fee calculation
 ///
 /// # Returns
 /// The signed commitment transaction
@@ -101,12 +103,11 @@ impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
 fn create_pledge_commitment_transaction(
     signer: &IrysSigner,
     anchor: H256,
+    config: &Config,
+    provider: &impl PledgeDataProvider,
 ) -> CommitmentTransaction {
-    let pledge_commitment = CommitmentTransaction {
-        anchor,
-        commitment_type: CommitmentType::Pledge,
-        ..Default::default()
-    };
+    let pledge_commitment =
+        CommitmentTransaction::new_pledge(&config.consensus, anchor, 1, provider, signer.address());
 
     signer
         .sign_commitment(pledge_commitment)
@@ -134,6 +135,15 @@ fn create_pledge_commitment_transaction(
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
 pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
+    // Empty pledge data provider for genesis block creation
+    struct EmptyPledgeProvider;
+
+    impl PledgeDataProvider for EmptyPledgeProvider {
+        fn pledge_count(&self, _user_address: Address) -> usize {
+            0
+        }
+    }
+
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
@@ -147,11 +157,7 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     let signer = config.irys_signer();
 
     // Create a stake commitment tx for the genesis block producer.
-    let stake_commitment = CommitmentTransaction {
-        anchor: H256::default(),
-        commitment_type: CommitmentType::Stake,
-        ..Default::default()
-    };
+    let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default(), 1);
 
     let stake_tx = signer
         .sign_commitment(stake_commitment)
@@ -167,8 +173,10 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
     // will have to be updated.
     let mut anchor = stake_tx.id;
+    let empty_provider = EmptyPledgeProvider;
     for _i in 0..num_submodules {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor);
+        let pledge_tx =
+            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
@@ -256,17 +264,23 @@ pub fn add_test_commitments(
     pledge_count: u8,
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
+    // Empty pledge data provider for test commitments
+    struct EmptyPledgeProvider;
+
+    impl PledgeDataProvider for EmptyPledgeProvider {
+        fn pledge_count(&self, _user_address: Address) -> usize {
+            0
+        }
+    }
+
     let signer = config.irys_signer();
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
 
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
-        let stake_commitment = CommitmentTransaction {
-            anchor: H256::default(),
-            commitment_type: CommitmentType::Stake,
-            ..Default::default()
-        };
+        let stake_commitment =
+            CommitmentTransaction::new_stake(&config.consensus, H256::default(), 1);
 
         let stake_tx = signer
             .sign_commitment(stake_commitment)
@@ -276,8 +290,10 @@ pub fn add_test_commitments(
         commitments.push(stake_tx);
     }
 
+    let empty_provider = EmptyPledgeProvider;
     for _i in 0..pledge_count {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor);
+        let pledge_tx =
+            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;

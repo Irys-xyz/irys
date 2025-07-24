@@ -173,7 +173,7 @@ mod tests {
     #[tokio::test]
     async fn create_and_sign_transaction() {
         // Create 2.5 chunks worth of data *  fill the data with random bytes
-        let config = crate::ConsensusConfig::testnet();
+        let config = crate::ConsensusConfig::testing();
         let data_size = (config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);

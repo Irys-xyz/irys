@@ -308,7 +308,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             //====================================
             // Commitment ledger TX Validation
             //------------------------------------
-            // Extract the Commitment ledger from the epoch block
+            // Extract the Commitment ledger from the block
             let commitment_ledger = new_block_header
                 .system_ledgers
                 .iter()

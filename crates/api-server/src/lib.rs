@@ -9,10 +9,9 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
-use irys_p2p::{PeerList as _, PeerListServiceFacade, SyncState};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
+use irys_p2p::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
     block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
@@ -29,7 +28,7 @@ use tracing::{debug, info};
 pub struct ApiState {
     pub mempool_service: UnboundedSender<MempoolServiceMessage>,
     pub chunk_provider: Arc<ChunkProvider>,
-    pub peer_list: PeerListServiceFacade,
+    pub peer_list: PeerList,
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
@@ -41,11 +40,8 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    pub async fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
-        self.peer_list
-            .all_known_peers()
-            .await
-            .map_err(|mailbox_err| eyre::eyre!("Failed to get known peers: {}", mailbox_err))
+    pub fn get_known_peers(&self) -> Vec<PeerAddress> {
+        self.peer_list.all_known_peers()
     }
 }
 

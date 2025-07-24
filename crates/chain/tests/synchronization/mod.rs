@@ -14,7 +14,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let max_seconds = 10;
 
     //setup config
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let main_address = config.miner_address();
     config.consensus.extend_genesis_accounts(vec![

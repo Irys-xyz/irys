@@ -1,6 +1,4 @@
-use crate::execution_payload_provider::{ExecutionPayloadProvider, RethBlockProvider};
-use crate::peer_list::{AddPeer, PeerListServiceWithClient};
-use crate::types::GossipDataRequest;
+use crate::peer_network_service::{GetPeerListGuard, PeerNetworkService};
 use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
@@ -17,6 +15,7 @@ use irys_actors::{
     mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError, TxReadError},
 };
 use irys_api_client::ApiClient;
+use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -24,9 +23,9 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipRequest, IrysBlockHeader, IrysTransactionResponse, NodeConfig,
-    NodeInfo, PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset,
-    UnpackedChunk, VersionRequest, H256,
+    GossipBroadcastMessage, GossipDataRequest, GossipRequest, IrysBlockHeader,
+    IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
+    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -286,7 +285,7 @@ impl Default for ApiClientStub {
     }
 }
 
-pub(crate) type PeerListMock = Addr<PeerListServiceWithClient<ApiClientStub, MockRethServiceActor>>;
+pub(crate) type PeerListMock = Addr<PeerNetworkService<ApiClientStub, MockRethServiceActor>>;
 
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
@@ -305,7 +304,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
-    pub execution_payload_provider: ExecutionPayloadProvider<PeerListMock>,
+    pub execution_payload_provider: ExecutionPayloadCache,
     pub config: Config,
     pub vdf_state_stub: VdfStateReadonly,
     pub service_senders: ServiceSenders,
@@ -334,7 +333,7 @@ impl GossipServiceTestFixture {
     pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.base_directory = temp_dir.path().to_path_buf();
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
         node_config.mining_key = random_signer.signer;
@@ -350,13 +349,21 @@ impl GossipServiceTestFixture {
 
         let (service_senders, service_receivers) = ServiceSenders::new();
 
-        let peer_service = PeerListServiceWithClient::new_with_custom_api_client(
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             &config,
             ApiClientStub::new(),
             reth_service_addr,
+            receiver,
+            sender,
         );
         let peer_list = peer_service.start();
+        let peer_list_data_guard = peer_list
+            .send(GetPeerListGuard)
+            .await
+            .expect("to get peer list")
+            .expect("to get peer list");
 
         let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
         let mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -376,8 +383,8 @@ impl GossipServiceTestFixture {
         let task_executor = task_manager.executor();
 
         let mocked_execution_payloads = Arc::new(RwLock::new(HashMap::new()));
-        let execution_payload_provider = ExecutionPayloadProvider::new(
-            peer_list.clone(),
+        let execution_payload_provider = ExecutionPayloadCache::new(
+            peer_list_data_guard,
             RethBlockProvider::Mock(mocked_execution_payloads),
         );
 
@@ -450,7 +457,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub(crate) fn run_service(
+    pub(crate) async fn run_service(
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
@@ -478,7 +485,12 @@ impl GossipServiceTestFixture {
             internal_message_bus: self.service_senders.gossip_broadcast.clone(),
         };
 
-        let peer_list = self.peer_list.clone();
+        let peer_list = self
+            .peer_list
+            .send(GetPeerListGuard)
+            .await
+            .expect("to get peer list guard")
+            .expect("to get peer list guard");
         let execution_payload_provider = self.execution_payload_provider.clone();
 
         let gossip_broadcast = self.service_senders.gossip_broadcast.clone();
@@ -529,13 +541,14 @@ impl GossipServiceTestFixture {
             other.mining_address, peer, self.gossip_port
         );
 
-        self.peer_list
-            .send(AddPeer {
-                mining_addr: other.mining_address,
-                peer: peer.clone(),
-            })
+        let peer_list_guard = self
+            .peer_list
+            .send(GetPeerListGuard)
             .await
-            .expect("Adding peer failed");
+            .expect("to get peer list guard")
+            .expect("to get peer list guard");
+
+        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone());
     }
 
     /// # Panics
@@ -551,13 +564,13 @@ impl GossipServiceTestFixture {
             is_online: true,
             ..PeerListItem::default()
         };
-        self.peer_list
-            .send(AddPeer {
-                mining_addr: other.mining_address,
-                peer: peer.clone(),
-            })
+        let peer_list_guard = self
+            .peer_list
+            .send(GetPeerListGuard)
             .await
-            .expect("Adding peer failed");
+            .expect("Failed to get peer list guard")
+            .expect("Failed to get peer list guard");
+        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone());
     }
 }
 
@@ -571,8 +584,8 @@ fn random_free_port() -> u16 {
 /// Can panic
 #[must_use]
 pub(crate) fn generate_test_tx() -> DataTransaction {
-    let testnet_config = NodeConfig::testnet();
-    let config = Config::new(testnet_config);
+    let testing_config = NodeConfig::testing();
+    let config = Config::new(testing_config);
     let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
@@ -713,14 +726,14 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(res)
             }
-            GossipDataRequest::Transaction(transaction_hash) => {
-                warn!("Transaction request for hash {:?}", transaction_hash);
+            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+                warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)
             }
-            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
-                warn!("Execution payload request for hash {:?}", evm_block_hash);
+            GossipDataRequest::Chunk(chunk_hash) => {
+                warn!("Chunk request for hash {:?}", chunk_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)
