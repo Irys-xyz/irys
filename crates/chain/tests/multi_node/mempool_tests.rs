@@ -1684,7 +1684,6 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
         .canonical_commitment_snapshot();
 
     let pledge_tx = new_pledge_tx(
-        // tx_ids.last().expect("valid tx id for use as anchor"),
         &H256::zero(),
         &signer,
         &genesis_config.consensus_config(),

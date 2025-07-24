@@ -1333,14 +1333,6 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
         .as_ref()
         .clone();
     for _ in 0..11 {
-        // let tx = new_pledge_tx(
-        //     tx_ids.last().expect("valid tx id for use as anchor"),
-        //     &signer,
-        //     &genesis_config.consensus_config(),
-        //     &commitment_snapshot,
-        // );
-        // tx_ids.push(tx.id);
-        // genesis_node.post_commitment_tx(&tx).await?;
         let tx = genesis_node
             .post_pledge_commitment_with_snapshot(&signer, H256::zero(), &mut commitment_snapshot)
             .await;
