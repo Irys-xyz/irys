@@ -749,10 +749,19 @@ impl Inner {
             Ok(())
         } else {
             let mempool_state = &self.mempool_state;
+
+            // TODO: we need to use the hash of the *entire* tx struct (including ID and signature)
+            // to prevent malformed txs from poisioning legitimate transactions
+
             // re-derive the tx_id to ensure we don't get poisoned
-            let tx_id = H256::from(alloy_primitives::keccak256(tx.signature().as_bytes()).0);
-            mempool_state.write().await.recent_invalid_tx.put(tx_id, ());
-            warn!("Tx {} signature is invalid", &tx_id);
+            // let tx_id = H256::from(alloy_primitives::keccak256(tx.signature().as_bytes()).0);
+
+            mempool_state
+                .write()
+                .await
+                .recent_invalid_tx
+                .put(tx.id(), ());
+            warn!("Tx {} signature is invalid", &tx.id());
             Err(TxIngressError::InvalidSignature)
         }
     }
