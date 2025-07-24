@@ -167,9 +167,8 @@ where
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing shadow transaction");
 
         // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx
-        let gas_limit = tx_envelope.gas_limit();
         let priority_fee = tx_envelope.max_priority_fee_per_gas().unwrap_or(0);
-        let total_fee = U256::from(priority_fee.saturating_mul(gas_limit as u128));
+        let total_fee = U256::from(priority_fee);
 
         // Track beneficiary balance changes for assertions
         let mut beneficiary_state_change = None;
@@ -178,7 +177,6 @@ where
             tracing::trace!(
                 beneficiary = %beneficiary,
                 priority_fee,
-                gas_limit,
                 total_fee = %total_fee,
                 "Distributing priority fee to beneficiary"
             );

@@ -1751,8 +1751,7 @@ mod tests {
         let priority_fee_per_gas = 10_000_000_000_u128; // 10 Gwei
         let shadow_tx = block_reward(target_address);
         let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
-        let gas_limit = shadow_tx_raw.gas_limit;
-        let expected_priority_fee = U256::from(priority_fee_per_gas * gas_limit as u128);
+        let expected_priority_fee = U256::from(priority_fee_per_gas);
 
         // Sign and prepare the transaction using the helper
         let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
@@ -1809,8 +1808,7 @@ mod tests {
             let priority_fee_per_gas = i as u128 * 1_000_000_000; // 1, 2, 3 Gwei
             let shadow_tx = block_reward(ctx.target_account.address());
             let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
-            let gas_limit = shadow_tx_raw.gas_limit;
-            total_expected_fee += U256::from(priority_fee_per_gas * gas_limit as u128);
+            total_expected_fee += U256::from(priority_fee_per_gas);
 
             let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
             shadow_txs.push(shadow_tx_pooled);
@@ -1855,8 +1853,7 @@ mod tests {
         let priority_fee_per_gas = 20_000_000_000_u128; // 20 Gwei
         let shadow_tx = block_reward(target_address);
         let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
-        let gas_limit = shadow_tx_raw.gas_limit;
-        let expected_priority_fee = U256::from(priority_fee_per_gas * gas_limit as u128);
+        let expected_priority_fee = U256::from(priority_fee_per_gas);
 
         // Sign with block producer A (not the miner)
         let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
