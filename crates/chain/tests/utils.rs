@@ -31,8 +31,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
-    EmaSnapshot,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshot,
+    CommitmentSnapshotStatus, EmaSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -1599,6 +1599,30 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.post_commitment_tx_request(&api_uri, &pledge_tx)
             .await
             .expect("posted commitment tx");
+
+        pledge_tx
+    }
+
+    pub async fn post_pledge_commitment_with_snapshot(
+        &self,
+        signer: &IrysSigner,
+        anchor: H256,
+        snapshot: &mut CommitmentSnapshot,
+    ) -> CommitmentTransaction {
+        let consensus = &self.node_ctx.config.consensus;
+
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(consensus, anchor, 1, snapshot, signer.address());
+        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+
+        // Submit pledge commitment via API
+        self.post_commitment_tx(&pledge_tx)
+            .await
+            .expect("posted commitment tx");
+
+        // TODO: this is a hack, don't do this! should be removed by #559
+        snapshot.add_commitment(&pledge_tx, true);
 
         pledge_tx
     }

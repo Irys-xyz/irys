@@ -31,8 +31,8 @@ use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
-    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
-    StorageModule, StorageModuleInfo, StorageModulesReadGuard,
+    CommitmentSnapshotStatus, EpochReplayData, ExecutionPayloadCache, IrysRethProvider,
+    IrysRethProviderInner, PeerList, StorageModule, StorageModuleInfo, StorageModulesReadGuard,
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
@@ -1626,7 +1626,7 @@ async fn stake_and_pledge(
     config: &Config,
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
-    latest_hash: BlockHash,
+    latest_block_hash: BlockHash,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
@@ -1645,11 +1645,11 @@ async fn stake_and_pledge(
 
     // now check the canonical state
 
-    let (is_historically_staked, commitment_snapshot) = {
+    let (is_historically_staked, mut commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
         let is_historically_staked = epoch_snapshot.is_staked(address);
-        let commitment_snapshot = block_tree_guard.canonical_commitment_snapshot();
+        let commitment_snapshot = (*block_tree_guard.canonical_commitment_snapshot()).clone();
         (is_historically_staked, commitment_snapshot)
     };
 
@@ -1662,15 +1662,14 @@ async fn stake_and_pledge(
 
     // if we have a historic or pending stake, don't send another
     let is_staked = is_historically_staked || has_pending_stake;
-
-    let mut last_tx_id = if !is_staked {
+    if !is_staked {
         debug!(
             "Local mining address {:?} is not staked, staking...",
             &address
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_hash, 1);
+        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash, 1);
         let stake_tx = signer.sign_commitment(stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
@@ -1679,7 +1678,7 @@ async fn stake_and_pledge(
     } else {
         debug!("Local mining address {:?} is staked", &address);
         // latest_block.previous_block_hash
-        latest_hash
+        latest_block_hash
     };
 
     // get all SMs without a partition assignment
@@ -1704,12 +1703,20 @@ async fn stake_and_pledge(
         // post a pledge tx
         let pledge_tx = CommitmentTransaction::new_pledge(
             &config.consensus,
-            last_tx_id,
+            latest_block_hash,
             1,
-            commitment_snapshot.as_ref(),
+            &commitment_snapshot,
             address,
         );
+
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
+
+        // TODO: this is a hack, don't do this! should be removed by #559
+        let status = commitment_snapshot.add_commitment(&pledge_tx, true); // so the pledge value updates
+        if !matches!(status, CommitmentSnapshotStatus::Accepted) {
+            warn!("Unable verify pledge {} - {:?}", &pledge_tx.id, &status);
+            return Ok(());
+        }
 
         post_commitment_tx(&pledge_tx).await.unwrap();
         debug!(
@@ -1718,7 +1725,6 @@ async fn stake_and_pledge(
             to_pledge_count,
             &pledge_tx.id
         );
-        last_tx_id = pledge_tx.id
     }
     debug!("Stake & Pledge check complete");
 
