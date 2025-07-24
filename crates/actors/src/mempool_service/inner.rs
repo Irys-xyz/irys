@@ -18,8 +18,8 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    Address, Base64, CommitmentTransaction, DataRoot, DataTransactionHeader, IrysTransaction,
-    MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
+    Address, Base64, CommitmentTransaction, DataRoot, DataTransactionHeader, MempoolConfig,
+    TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -567,13 +567,13 @@ impl Inner {
     }
 
     // Helper to validate anchor
-    // this takes in an IrysTransaction, and will pass it into `pending_anchor_txs` if it fails validation
-    // otherwise, returns the tx back with the height that made the anchor canonical (i.e the block height, or the height of the block containing the tx)
+    // this takes in an IrysTransaction and validates the anchor
+    // if the anchor is valid, returns the tx back with the height that made the anchor canonical (i.e the block height)
     #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
         &mut self,
-        tx: IrysTransaction,
-    ) -> Result<Option<(u64, IrysTransaction)>, TxIngressError> {
+        tx: &impl IrysTransactionCommon,
+    ) -> Result<u64, TxIngressError> {
         let mempool_state = &self.mempool_state;
         let tx_id = tx.id();
         let anchor = tx.anchor();
@@ -588,33 +588,6 @@ impl Inner {
             .mempool
             .anchor_expiry_depth as u64;
 
-        // try to find the anchor tx in the block tree
-        {
-            let canonical_chain = {
-                let block_tree_read_guard = self.block_tree_read_guard.read();
-                let (canonical_chain, _) = block_tree_read_guard.get_canonical_chain();
-                canonical_chain
-            };
-
-            let canonical_slice = &canonical_chain
-            // usize coercion safe as it's actually a u8
-                [(canonical_chain.len().saturating_sub(anchor_expiry_depth as usize))..canonical_chain.len()];
-
-            for blk_entry in canonical_slice.iter().rev() {
-                // go from newest block to oldest
-
-                for txs in blk_entry
-                    .data_ledgers
-                    .values()
-                    .chain(blk_entry.system_ledgers.values())
-                {
-                    if txs.contains(&anchor) {
-                        return Ok(Some((blk_entry.height, tx)));
-                    }
-                }
-            }
-        }
-
         // check tree / mempool for block header
         if let Some(hdr) = self
             .mempool_state
@@ -626,7 +599,7 @@ impl Inner {
         {
             if hdr.height + anchor_expiry_depth >= latest_height {
                 debug!("valid block hash anchor for tx ");
-                return Ok(Some((hdr.height, tx)));
+                return Ok(hdr.height);
             } else {
                 let mut mempool_state_write_guard = mempool_state.write().await;
                 mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
@@ -643,7 +616,7 @@ impl Inner {
             Ok(Some(hdr)) => {
                 if hdr.height + anchor_expiry_depth >= latest_height {
                     debug!("valid block hash anchor for tx");
-                    Ok(Some((hdr.height, tx)))
+                    Ok(hdr.height)
                 } else {
                     let mut mempool_state_write_guard = mempool_state.write().await;
                     mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
@@ -652,13 +625,10 @@ impl Inner {
                 }
             }
             _ => {
-                // we mark the tx as pending it's anchor,
-                // given it passed through all our checks and we couldn't find what the anchor value was referring to
-                // TODO: plumb success context (the tx being marked as "pending anchor" isn't an error case, but we don't have a way of signaling that yet)
-                self.mark_tx_pending_anchor(tx)
-                    .await
-                    .map_err(|_e| TxIngressError::InvalidAnchor)
-                    .map(|_| None)
+                let mut mempool_state_write_guard = mempool_state.write().await;
+                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
+                warn!("Invalid anchor value for tx - Unknown anchor {}", &anchor);
+                Err(TxIngressError::InvalidAnchor)
             }
         }
     }
@@ -775,16 +745,23 @@ impl Inner {
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
-            info!("Signature is valid");
+            info!("Tx {} signature is valid", &tx.id());
             Ok(())
         } else {
             let mempool_state = &self.mempool_state;
+
+            // TODO: we need to use the hash of the *entire* tx struct (including ID and signature)
+            // to prevent malformed txs from poisoning legitimate transactions
+
+            // re-derive the tx_id to ensure we don't get poisoned
+            // let tx_id = H256::from(alloy_primitives::keccak256(tx.signature().as_bytes()).0);
+
             mempool_state
                 .write()
                 .await
                 .recent_invalid_tx
                 .put(tx.id(), ());
-            warn!("Signature is invalid");
+            warn!("Tx {} signature is invalid", &tx.id());
             Err(TxIngressError::InvalidSignature)
         }
     }
@@ -797,93 +774,6 @@ impl Inner {
         ))?;
 
         Ok(latest.height)
-    }
-
-    /// Mark the provided tx as waiting for it's anchor to be valid
-    #[instrument(skip_all)]
-    pub async fn mark_tx_pending_anchor(&self, tx: IrysTransaction) -> eyre::Result<()> {
-        let tx_id = tx.id();
-        debug!(tx_id = ?tx_id, anchor = ?tx.anchor(), "Tx is pending anchor");
-        let mut state_rw = self.mempool_state.write().await;
-        let anchor = tx.anchor();
-        match state_rw.pending_anchor_txs.push(tx.id(), tx) {
-            // if we have removed an old entry, and not updated an existing one
-            Some((k, _v)) if k != anchor => {
-                // remove this entry from the pending_anchor_map
-                match state_rw.pending_anchor_txids.get_mut(&k) {
-                    Some(hs) => {
-                        debug!("Evicting {:?} from pending_anchor_txs LRUs", &k);
-                        hs.remove(&k)
-                    }
-                    None => false,
-                };
-            }
-            // successfully updated/added this entry
-            // TODO: warn if we've updated? we should never do so.
-            Some(_) | None => {}
-        };
-        // add the tx to `pending_anchor_map`
-        state_rw
-            .pending_anchor_txids
-            .entry(anchor)
-            .or_default()
-            .insert(tx_id);
-
-        Ok(())
-    }
-
-    #[instrument(skip_all)]
-    // notify the pending_anchor_txs cache of a new anchor value
-    pub async fn notify_anchor(&mut self, anchor: H256) {
-        debug!("New anchor {:?}", &anchor);
-        // check if we have any pending txs waiting for this anchor
-        let waiting_for_anchor: HashSet<H256> = {
-            let mut state_rw = self.mempool_state.write().await;
-            // only continue if we get some pending ids
-            // (also remove the entry from pending_anchor_map)
-            match state_rw.pending_anchor_txids.remove(&anchor) {
-                Some(waiting) if !waiting.is_empty() => waiting,
-                Some(_) | None => return,
-            }
-        };
-
-        // throw all pending txs back to the mempool for re-validation
-        for id in waiting_for_anchor {
-            let tx = {
-                // make sure write lock is scoped - as the handle fns need write access
-                let mut state_rw = self.mempool_state.write().await;
-                // pop for 1.) cleanup, 2.) no lifetime nonsense
-                state_rw.pending_anchor_txs.pop(&id)
-            };
-            let tx = match tx {
-                Some(tx) => tx,
-                None => {
-                    warn!(
-                        "Unable to resubmit tx {} with anchor {} - not found in pending_anchor_txs",
-                        &id, &anchor
-                    );
-                    continue;
-                }
-            };
-
-            debug!("Re-validating pending tx {} due to anchor {}", &id, &anchor);
-
-            match match tx {
-                IrysTransaction::Data(tx) => self.handle_data_tx_ingress_message(tx).await,
-                IrysTransaction::Commitment(tx) => {
-                    self.handle_ingress_commitment_tx_message(tx).await
-                }
-            } {
-                Ok(_) => debug!(
-                    "re-submitted tx {} to mempool after anchor {} became available",
-                    id, &anchor,
-                ),
-                Err(err) => warn!(
-                    "failed to re-submit tx {} to mempool after anchor {} became available - {:?}",
-                    id, &anchor, &err
-                ),
-            }
-        }
     }
 }
 
@@ -903,11 +793,6 @@ pub struct MempoolState {
     /// pre-validated blocks that have passed pre-validation in discovery service
     pub prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
     pub prevalidated_blocks_poa: HashMap<H256, Base64>,
-    // maps tx_id -> tx
-    // TODO: add secondary time-based pruning behaviour? see what occupancy looks like.
-    pub pending_anchor_txs: LruCache<IrysTransactionId, IrysTransaction>,
-    // maps anchor value -> tx_ids that are waiting for it
-    pub pending_anchor_txids: HashMap<H256, HashSet<IrysTransactionId>>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
@@ -915,7 +800,6 @@ pub struct MempoolState {
 pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
-    let max_pending_anchor_items = config.max_pending_anchor_items;
     MempoolState {
         prevalidated_blocks: HashMap::new(),
         prevalidated_blocks_poa: HashMap::new(),
@@ -925,8 +809,6 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
-        pending_anchor_txs: LruCache::new(NonZeroUsize::new(max_pending_anchor_items).unwrap()),
-        pending_anchor_txids: HashMap::new(),
     }
 }
 

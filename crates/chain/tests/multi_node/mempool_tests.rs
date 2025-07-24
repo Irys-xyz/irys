@@ -1684,28 +1684,11 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
         .canonical_commitment_snapshot();
 
     let pledge_tx = new_pledge_tx(
-        tx_ids.last().expect("valid tx id for use as anchor"),
+        &H256::zero(),
         &signer,
         &genesis_config.consensus_config(),
         &commitment_snapshot,
     );
-    let mut pledge_tx_invalid_pending_anchor = pledge_tx.clone();
-    let mut bytes = pledge_tx_invalid_pending_anchor.id.to_fixed_bytes();
-    bytes[0] ^= 0x01; // flip first bit
-    pledge_tx_invalid_pending_anchor.id = H256::from(bytes);
-
-    // With an unknown anchor, the mempool defers signature validation until the
-    // referenced transaction is confirmed. The invalid pledge should therefore
-    // be accepted and cached as a pending-anchor transaction.
-    let result = genesis_node
-        .ingest_commitment_tx(pledge_tx_invalid_pending_anchor.clone())
-        .await;
-    if result.is_err() {
-        panic!(
-            "Expected success for pledge with pending anchor, got: {:?}",
-            result
-        );
-    }
 
     // mine a block so we get some more anchors that are not pending
     genesis_node.mine_block().await?;
