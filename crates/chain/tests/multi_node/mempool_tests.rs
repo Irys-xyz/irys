@@ -1770,14 +1770,11 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
         .ingest_data_tx(invalid_header.clone())
         .await
         .expect_err("expected failure but got success");
-    match res {
-        AddTxError::TxIngress(TxIngressError::InvalidSignature) => {
-            // it failed to ingress, as expected!
-        }
-        e => {
-            panic!("Expected InvalidSignature but got: {:?}", e);
-        }
-    }
+    assert!(
+        matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
+        "Expected InvalidSignature but got: {:?}",
+        res
+    );
 
     // ingest valid transaction
     genesis_node.ingest_data_tx(valid_tx.header.clone()).await?;
