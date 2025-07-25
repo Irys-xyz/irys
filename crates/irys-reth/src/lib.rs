@@ -481,17 +481,7 @@ mod tests {
     /// - The normal tx from node a is included in the block.
     #[test_log::test(tokio::test)]
     async fn stale_shadow_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
-        // Get the block producer addresses for beneficiaries
-        let temp_ctx = TestContext::new().await?;
-        let beneficiary_a = temp_ctx.block_producer_a.address();
-        let _beneficiary_b = temp_ctx.block_producer_b.address();
-
-        // Create context with proper beneficiaries
-        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
-            // For this test, we'll use producer A as beneficiary
-            eth_payload_attributes_with_beneficiary(timestamp, beneficiary_a)
-        })
-        .await?;
+        let ctx = TestContext::new().await?;
         let (((mut node_a, shadow_tx_store_a), (mut node_b, shadow_tx_store_b)), ctx) =
             ctx.get_two_nodes()?;
 
@@ -561,15 +551,7 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn block_with_shadow_txs_gets_broadcasted_between_peers() -> eyre::Result<()> {
-        // Create a temporary context to get the block producer address
-        let temp_ctx = TestContext::new().await?;
-        let beneficiary_address = temp_ctx.block_producer_a.address();
-
-        // Create context with block producer as beneficiary
-        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
-            eth_payload_attributes_with_beneficiary(timestamp, beneficiary_address)
-        })
-        .await?;
+        let ctx = TestContext::new().await?;
         let (((mut node_a, shadow_tx_store_a), (mut node_b, _shadow_tx_store_b)), ctx) =
             ctx.get_two_nodes()?;
 
@@ -606,14 +588,14 @@ mod tests {
             .assert_new_block(shadow_tx_hash, block_hash, block_number)
             .await?;
 
-        // The beneficiary receives only the block reward (no priority fee since BlockReward has no target)
+        // The producer A is the beneficiary and receives the block reward (no priority fee since BlockReward has no target)
         assert_balance_change(
             &node_b,
             ctx.block_producer_a.address(),
             initial_balance,
             amount, // block reward only (no priority fee)
             true,
-            "Producer balance should increase by block reward only",
+            "Producer A balance should increase by block reward only",
         );
 
         Ok(())
@@ -662,15 +644,15 @@ mod tests {
             final_balance, expected_balance,
             "Target balance should be initial + unstake - fees"
         );
-        // In this test, beneficiary is the zero address (default), not the producer
-        // So producer balance should not change
+        // Producer is now the beneficiary, so they receive priority fees
+        let expected_producer_gain = total_priority_fees;
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
             initial_producer_balance,
-            U256::ZERO,
+            expected_producer_gain,
             true,
-            "Producer balance should not change (fees go to beneficiary)",
+            "Producer balance should increase by priority fees (as beneficiary)",
         );
         assert_nonce(
             &node,
@@ -731,16 +713,15 @@ mod tests {
             "Target balance should be reduced by shadow tx amount plus priority fees",
         );
 
-        // Assert balance for producer remains the same (shadow txs cost nothing)
-        // In this test, beneficiary is the zero address (default), not the producer
-        // So producer balance should not change
+        // Producer is now the beneficiary, so they receive priority fees
+        let expected_producer_gain = total_priority_fees;
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
             initial_producer_balance,
-            U256::ZERO,
+            expected_producer_gain,
             true,
-            "Producer balance should not change (fees go to beneficiary)",
+            "Producer balance should increase by priority fees (as beneficiary)",
         );
 
         assert_nonce(
@@ -965,19 +946,11 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
-        // Get the block producer address for beneficiary
-        let temp_ctx = TestContext::new().await?;
-        let beneficiary_address = temp_ctx.block_producer_a.address();
-
-        // Setup nodes and context with beneficiary
-        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
-            eth_payload_attributes_with_beneficiary(timestamp, beneficiary_address)
-        })
-        .await?;
+        let ctx = TestContext::new().await?;
         let (((mut node_a, shadow_tx_store_node_a), (mut node_b, shadow_tx_store_node_b)), ctx) =
             ctx.get_two_nodes()?;
-        // Use the beneficiary address instead of a random address for checking rewards
-        let reward_address = beneficiary_address;
+        // Use the producer B address for checking rewards (it's the beneficiary for node B's blocks)
+        let reward_address = ctx.block_producer_b.address();
 
         // Node A: advance 3 blocks, 2 shadow txs per block
         let shadow_tx = block_reward();
@@ -1044,7 +1017,7 @@ mod tests {
             "block hashes after sync must be equal"
         );
         assert_eq!(reward_balance_post_switch_node_a, reward_balance_node_b);
-        // The beneficiary address starts with 1 ETH and gets:
+        // Producer B (beneficiary for node B) starts with initial balance and gets:
         // - 4 block rewards (1 wei each) = 4 wei
         // - NO priority fees since block rewards have no target
         let expected_balance =
@@ -1087,23 +1060,21 @@ mod tests {
     /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
     #[test_log::test(tokio::test)]
     async fn rollback_state_on_safe_blocks() -> eyre::Result<()> {
-        // Get the block producer address for beneficiary
-        let temp_ctx = TestContext::new().await?;
-        let beneficiary_address = temp_ctx.block_producer_a.address();
-
-        // Setup custom payload attributes to control parent block hash and beneficiary
+        // Setup custom parent tracker for forkchoice updates
         let parent_tracker = Arc::new(Mutex::new(B256::ZERO));
+
+        // Create context with custom attributes that can track parent block
         let payload_attributes = {
             let parent_tracker = parent_tracker.clone();
-            move |timestamp: u64| {
+            move |timestamp: u64, beneficiary: Address| {
                 let parent = *parent_tracker.lock().unwrap();
                 let mut attrs = eth_payload_attributes_with_parent(timestamp, parent);
-                attrs.suggested_fee_recipient = beneficiary_address;
+                attrs.suggested_fee_recipient = beneficiary;
                 attrs
             }
         };
 
-        let ctx = TestContext::new_with_payload_attributes(payload_attributes).await?;
+        let ctx = TestContext::new_with_custom_attributes(payload_attributes).await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Initial setup and baseline measurements
@@ -1140,7 +1111,7 @@ mod tests {
             .best_block_number()
             .unwrap();
         assert_eq!(best_block, 4, "Should be at block 4");
-        // Each block reward transaction only gives 1 wei block reward (no priority fee since no target)
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
@@ -1239,7 +1210,7 @@ mod tests {
             final_best_block, fork_block_number,
             "Should be at fork block number"
         );
-        // Each block reward transaction only gives 1 wei block reward (no priority fee since no target)
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
@@ -1823,19 +1794,11 @@ mod tests {
     /// Test that shadow transactions with priority fees distribute fees to beneficiary
     #[test_log::test(tokio::test)]
     async fn test_shadow_tx_priority_fee_distribution() -> eyre::Result<()> {
-        // First create context to get block producer address
-        let temp_ctx = TestContext::new().await?;
-        let beneficiary_address = temp_ctx.block_producer_a.address();
-
-        // Set up context with block producer as beneficiary
-        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
-            eth_payload_attributes_with_beneficiary(timestamp, beneficiary_address)
-        })
-        .await?;
+        let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Get initial balances
-        let beneficiary = beneficiary_address; // Miner is the beneficiary
+        let beneficiary = ctx.block_producer_a.address(); // Producer A is the beneficiary for node 0
         let target_address = ctx.target_account.address();
 
         // Fund the target account first to ensure it can pay priority fees
@@ -1892,18 +1855,10 @@ mod tests {
     /// Test multiple shadow transactions accumulate priority fees correctly
     #[test_log::test(tokio::test)]
     async fn test_multiple_shadow_tx_priority_fees() -> eyre::Result<()> {
-        // First create context to get block producer address
-        let temp_ctx = TestContext::new().await?;
-        let beneficiary_address = temp_ctx.block_producer_a.address();
-
-        // Set up context with block producer as beneficiary
-        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
-            eth_payload_attributes_with_beneficiary(timestamp, beneficiary_address)
-        })
-        .await?;
+        let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
-        let beneficiary = beneficiary_address; // Miner is the beneficiary
+        let beneficiary = ctx.block_producer_a.address(); // Producer A is the beneficiary for node 0
         let target_address = ctx.target_account.address();
 
         // Fund the target account first to ensure it can pay priority fees
@@ -1980,16 +1935,12 @@ mod tests {
     /// Test shadow tx priority fees go to different miner than tx signer
     #[test_log::test(tokio::test)]
     async fn test_shadow_tx_priority_fee_different_miner() -> eyre::Result<()> {
-        // Use block producer B as the miner/beneficiary
-        let temp_ctx = TestContext::new().await?;
-        let miner_address = temp_ctx.block_producer_b.address();
+        let ctx = TestContext::new().await?;
+        // Get node 1 (second node) which has producer B as beneficiary
+        let (((mut _node_a, _shadow_tx_store_a), (mut node, shadow_tx_store)), ctx) =
+            ctx.get_two_nodes()?;
 
-        // Create context with block producer B as beneficiary
-        let ctx = TestContext::new_with_payload_attributes(move |timestamp| {
-            eth_payload_attributes_with_beneficiary(timestamp, miner_address)
-        })
-        .await?;
-        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+        let miner_address = ctx.block_producer_b.address(); // Producer B is the beneficiary for node 1
 
         // Get initial balances
         let initial_miner_balance = get_balance(&node.inner, miner_address);
@@ -2091,11 +2042,11 @@ pub mod test_utils {
 
     impl TestContext {
         pub async fn new() -> eyre::Result<Self> {
-            Self::new_with_payload_attributes(eth_payload_attributes).await
+            Self::new_with_custom_attributes(eth_payload_attributes_with_beneficiary).await
         }
 
-        pub async fn new_with_payload_attributes(
-            payload_attributes: impl Fn(u64) -> EthPayloadBuilderAttributes
+        pub async fn new_with_custom_attributes(
+            payload_attributes: impl Fn(u64, Address) -> EthPayloadBuilderAttributes
                 + Send
                 + Sync
                 + Clone
@@ -2801,7 +2752,7 @@ pub mod test_utils {
         num_nodes: &[Address],
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
-        attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
+        attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
     ) -> eyre::Result<(
         Vec<(NodeHelperType<IrysEthereumNode>, ShadowTxStore)>,
         TaskManager,
@@ -2828,7 +2779,7 @@ pub mod test_utils {
         let mut nodes: Vec<(NodeTestContext<_, _>, ShadowTxStore)> =
             Vec::with_capacity(num_nodes.len());
 
-        for (idx, _producer) in num_nodes.iter().enumerate() {
+        for (idx, producer) in num_nodes.iter().enumerate() {
             let node_config = NodeConfig::new(chain_spec.clone())
                 .with_network(network_config.clone())
                 .with_unused_ports()
@@ -2852,7 +2803,14 @@ pub mod test_utils {
                 .launch()
                 .await?;
 
-            let mut node = NodeTestContext::new(node, attributes_generator.clone()).await?;
+            // Create a closure that passes the producer address
+            let node_attributes_generator = {
+                let attributes_generator = attributes_generator.clone();
+                let producer_address = *producer;
+                move |timestamp| attributes_generator(timestamp, producer_address)
+            };
+
+            let mut node = NodeTestContext::new(node, node_attributes_generator).await?;
 
             // Connect each node in a chain.
             if let Some(previous_node) = nodes.last_mut() {

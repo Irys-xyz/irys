@@ -509,18 +509,17 @@ where
     ///
     /// Shadow transactions support EIP-1559 style priority fees that are distributed
     /// to the block beneficiary (miner) BEFORE the shadow transaction is executed.
-    /// This preserves miner incentives while maintaining protocol-level operations.
     ///
     /// ## Process:
     /// 1. Calculate total fee from `max_priority_fee_per_gas` (direct value, no gas multiplication)
-    /// 2. Extract fee payer address from shadow transaction (source of funds)
-    /// 3. Validate target has sufficient balance
-    /// 4. Deduct fee from target account
-    /// 5. Add fee to beneficiary account (create if needed)
-    /// 6. Commit state changes atomically
+    /// 2. Validate target has sufficient balance
+    /// 3. Deduct fee from target account
+    /// 4. Add fee to beneficiary account (create a new one if needed)
+    /// 5. Commit state changes
     ///
     /// ## Early Returns:
-    /// - No fee to distribute (fee is zero)
+    /// - No fee to distribute (fee is zero).
+    ///   This is valid because enforcement of which shadow txs to include in the block is up to the consensus layer.
     /// - No target address in shadow transaction
     ///
     /// ## Error Cases:
