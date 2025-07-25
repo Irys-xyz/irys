@@ -175,6 +175,28 @@ where
             ShadowTransaction::V1 { packet } => packet.fee_payer_address(),
         };
 
+        // Check if this is a block reward transaction
+        let is_block_reward = matches!(
+            &shadow_tx,
+            ShadowTransaction::V1 {
+                packet: shadow_tx::TransactionPacket::BlockReward(_),
+                ..
+            }
+        );
+
+        // Block reward transactions MUST have 0 priority fee
+        if is_block_reward && !total_fee.is_zero() {
+            tracing::error!(
+                tx_hash = %tx_envelope.hash(),
+                priority_fee = %total_fee,
+                "Block reward transaction with non-zero priority fee"
+            );
+            return Err(create_invalid_tx_error(
+                *tx_envelope.hash(),
+                InvalidTransaction::PriorityFeeGreaterThanMaxFee,
+            ));
+        }
+
         // Distribute priority fees
         self.distribute_priority_fee(
             total_fee,
