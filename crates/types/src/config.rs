@@ -1311,4 +1311,27 @@ mod tests {
         let dec: NodeConfig = toml::from_str(&enc).unwrap();
         assert_eq!(cfg, dec);
     }
+
+    #[test]
+    fn test_parse_testnet_config_template() {
+        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("config")
+            .join("templates")
+            .join("testnet_config.toml");
+
+        let template_content = std::fs::read_to_string(&template_path)
+            .expect("Failed to read testnet_config.toml template");
+
+        let config = toml::from_str::<NodeConfig>(&template_content)
+            .expect("Failed to parse testnet_config.toml template");
+
+        // Basic sanity checks - just verify it parsed successfully
+        assert_eq!(config.mode, NodeMode::PeerSync);
+
+        // Check consensus config fields
+        let consensus = config.consensus_config();
+        assert_eq!(consensus.chain_id, 1270);
+    }
 }
