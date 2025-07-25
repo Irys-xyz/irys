@@ -73,7 +73,6 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(network_config::get_network_config),
         )
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
-        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route(
             "/price/commitment/stake",
             web::get().to(price::get_stake_price),
@@ -90,6 +89,7 @@ pub fn routes() -> impl HttpServiceFactory {
             "/price/commitment/unpledge/{user_address}",
             web::get().to(price::get_unpledge_price),
         )
+        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
