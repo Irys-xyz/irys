@@ -1929,6 +1929,8 @@ mod tests {
     }
 
     /// Test shadow tx priority fees go to different miner than tx signer
+    /// (This is to enable mining pools in the future, where a beneficiary
+    /// of a block may be a different entity that actually mined the block)
     #[test_log::test(tokio::test)]
     async fn test_shadow_tx_priority_fee_different_miner() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
