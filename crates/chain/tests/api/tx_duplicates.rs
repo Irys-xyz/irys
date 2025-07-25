@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use irys_primitives::CommitmentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 
@@ -12,7 +11,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // Default test node config
     let seconds_to_wait = 10;
     let num_blocks_in_epoch = 8;
-    let mut config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     config.consensus.get_mut().chunk_size = 32;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.fund_genesis_accounts(vec![&signer]);
@@ -67,11 +66,8 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 1);
 
     // ===== TEST CASE 2: post duplicate commitment tx =====
-    let stake_tx = CommitmentTransaction {
-        commitment_type: CommitmentType::Stake,
-        fee: 1,
-        ..Default::default()
-    };
+    let consensus = &node.node_ctx.config.consensus;
+    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
 
     // Post the stake commitment and await it in the mempool
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
@@ -105,12 +101,15 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // ===== TEST CASE 3: post duplicate pledge tx =====
-    let pledge_tx = CommitmentTransaction {
-        commitment_type: CommitmentType::Pledge,
+    // Get the CommitmentSnapshot from the latest canonical block
+    let pledge_tx = CommitmentTransaction::new_pledge(
+        consensus,
         anchor,
-        fee: 1,
-        ..Default::default()
-    };
+        1,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
+        signer.address(),
+    )
+    .await;
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
 
     // Post pledge commitment

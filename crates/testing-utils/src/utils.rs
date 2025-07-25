@@ -2,8 +2,10 @@ use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
 pub use tempfile;
 use tempfile::TempDir;
 use tracing::debug;
+use tracing_error::ErrorLayer;
 use tracing_subscriber::{
     fmt::{self, SubscriberBuilder},
+    layer::SubscriberExt as _,
     util::SubscriberInitExt as _,
     EnvFilter,
 };
@@ -14,6 +16,16 @@ pub fn initialize_tracing() {
         .with_span_events(fmt::format::FmtSpan::NONE)
         .finish()
         .try_init();
+}
+
+pub fn initialize_tracing_with_backtrace() {
+    let _ = SubscriberBuilder::default()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::NONE)
+        .finish()
+        .with(ErrorLayer::default())
+        .try_init();
+    let _ = color_eyre::install();
 }
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.

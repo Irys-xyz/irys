@@ -39,16 +39,16 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 #[ignore]
 #[test_log::test(actix_web::test)]
 async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
-    let mut testnet_config = NodeConfig::testnet();
-    testnet_config.consensus.get_mut().chunk_size = 32;
-    testnet_config.consensus.get_mut().block_migration_depth = 2;
-    testnet_config
+    let mut testing_config = NodeConfig::testing();
+    testing_config.consensus.get_mut().chunk_size = 32;
+    testing_config.consensus.get_mut().block_migration_depth = 2;
+    testing_config
         .consensus
         .get_mut()
         .num_chunks_in_recall_range = 2;
-    let main_address = testnet_config.miner_address();
-    let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
-    testnet_config.consensus.extend_genesis_accounts(vec![
+    let main_address = testing_config.miner_address();
+    let account1 = IrysSigner::random_signer(&testing_config.consensus_config());
+    testing_config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -71,7 +71,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = IrysNodeTest::new_genesis(testnet_config).start().await;
+    let node = IrysNodeTest::new_genesis(testing_config).start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

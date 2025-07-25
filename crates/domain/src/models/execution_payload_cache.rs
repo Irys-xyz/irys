@@ -1,18 +1,13 @@
-use crate::types::GossipDataRequest;
 use crate::PeerList;
 use alloy_rpc_types::engine::ExecutionData;
-use async_trait::async_trait;
-use irys_actors::block_validation::{shadow_transactions_are_valid, PayloadProvider};
-use irys_actors::services::ServiceSenders;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{Config, DatabaseProvider, IrysBlockHeader};
 use lru::LruCache;
 use reth::builder::{BeaconOnNewPayloadError, Block as _};
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
 use reth::providers::BlockReader as _;
 use reth::revm::primitives::B256;
-#[cfg(test)]
+#[cfg(feature = "test-utils")]
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -27,7 +22,7 @@ const PAYLOAD_REQUESTS_CACHE_CAPACITY: usize = 1000;
 #[derive(Debug, Clone)]
 pub enum RethBlockProvider {
     IrysRethAdapter(IrysRethNodeAdapter),
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     Mock(Arc<std::sync::RwLock<HashMap<B256, Block>>>),
 }
 
@@ -55,12 +50,12 @@ impl RethBlockProvider {
     pub fn as_irys_reth_adapter(&self) -> Option<&IrysRethNodeAdapter> {
         match self {
             Self::IrysRethAdapter(adapter) => Some(adapter),
-            #[cfg(test)]
+            #[cfg(feature = "test-utils")]
             Self::Mock(_) => None,
         }
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     pub fn new_mock() -> Self {
         Self::Mock(Arc::new(std::sync::RwLock::new(HashMap::new())))
     }
@@ -75,7 +70,7 @@ impl RethBlockProvider {
     pub fn evm_block(&self, evm_block_hash: B256) -> Option<Block> {
         let ctx = match self {
             Self::IrysRethAdapter(adapter) => &adapter.reth_node,
-            #[cfg(test)]
+            #[cfg(feature = "test-utils")]
             Self::Mock(_) => {
                 return self.evm_block_mock(evm_block_hash);
             }
@@ -91,7 +86,7 @@ impl RethBlockProvider {
         Some(evm_block)
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     pub fn evm_block_mock(&self, evm_block_hash: B256) -> Option<Block> {
         if let Self::Mock(payloads) = self {
             let payloads = payloads.read().expect("can always read");
@@ -109,21 +104,18 @@ impl From<IrysRethNodeAdapter> for RethBlockProvider {
 }
 
 #[derive(Clone, Debug)]
-pub struct ExecutionPayloadProvider<TPeerList: PeerList> {
-    cache: Arc<RwLock<ExecutionPayloadCache>>,
-    reth_payload_provider: RethBlockProvider,
+pub struct ExecutionPayloadCache {
+    pub reth_payload_provider: RethBlockProvider,
+    cache: Arc<RwLock<ExecutionPayloadCacheInner>>,
     payload_senders:
         Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<SealedBlock<Block>>>>>>,
-    peer_list: TPeerList,
+    peer_list: PeerList,
 }
 
-impl<TPeerList> ExecutionPayloadProvider<TPeerList>
-where
-    TPeerList: PeerList,
-{
-    pub fn new(peer_list: TPeerList, reth_payload_provider: RethBlockProvider) -> Self {
+impl ExecutionPayloadCache {
+    pub fn new(peer_list: PeerList, reth_payload_provider: RethBlockProvider) -> Self {
         Self {
-            cache: Arc::new(RwLock::new(ExecutionPayloadCache {
+            cache: Arc::new(RwLock::new(ExecutionPayloadCacheInner {
                 payloads: LruCache::new(NonZeroUsize::new(PAYLOAD_CACHE_CAPACITY).expect("payload capacity is not a non-zero usize")),
                 payloads_currently_requested_from_the_network: LruCache::new(NonZeroUsize::new(PAYLOAD_REQUESTS_CACHE_CAPACITY).expect("payloads currently requested from the network capacity is not a non-zero usize")),
             })),
@@ -170,12 +162,9 @@ where
     }
 
     /// DO NOT USE THIS METHOD ANYWHERE WHERE YOU NEED TO RELIABLY GET THE PAYLOAD!
-    /// Use [ExecutionPayloadProvider::wait_for_payload] instead.
+    /// Use [ExecutionPayloadCache::wait_for_payload] instead.
     /// This method is used to retrieve the payload from the local cache or EVM node.
-    pub(crate) async fn get_locally_stored_evm_block(
-        &self,
-        evm_block_hash: &B256,
-    ) -> Option<Block> {
+    pub async fn get_locally_stored_evm_block(&self, evm_block_hash: &B256) -> Option<Block> {
         if let Some(sealed_block) = self.cache.write().await.payloads.get(evm_block_hash) {
             Some(sealed_block.clone_block())
         } else {
@@ -219,7 +208,7 @@ where
         })
     }
 
-    /// Same as [ExecutionPayloadProvider::wait_for_payload], but returns the sealed block instead
+    /// Same as [ExecutionPayloadCache::wait_for_payload], but returns the sealed block instead
     /// of the execution data.
     pub async fn wait_for_sealed_block(
         &self,
@@ -248,10 +237,7 @@ where
             .put(evm_block_hash, ());
         if let Err(peer_list_error) = self
             .peer_list
-            .request_data_from_the_network(
-                GossipDataRequest::ExecutionPayload(evm_block_hash),
-                use_trusted_peers_only,
-            )
+            .request_payload_from_the_network(evm_block_hash, use_trusted_peers_only)
             .await
         {
             self.cache
@@ -266,7 +252,7 @@ where
         }
     }
 
-    pub(crate) async fn is_waiting_for_payload(&self, evm_block_hash: &B256) -> bool {
+    pub async fn is_waiting_for_payload(&self, evm_block_hash: &B256) -> bool {
         self.cache
             .read()
             .await
@@ -287,7 +273,7 @@ where
         receiver
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     pub async fn test_observe_sealed_block_arrival(
         &self,
         evm_block_hash: B256,
@@ -305,54 +291,10 @@ where
                 .unwrap();
         }
     }
-
-    pub async fn fetch_validate_and_submit_payload(
-        &self,
-        config: &Config,
-        service_senders: &ServiceSenders,
-        irys_block_header: &IrysBlockHeader,
-        db: &DatabaseProvider,
-    ) -> Result<(), ExecutionPayloadProviderError> {
-        // For tests that specifically want to mock the payload provider
-        // All tests that do not is going to use the real provider
-        #[cfg(test)]
-        {
-            if let RethBlockProvider::Mock(_) = &self.reth_payload_provider {
-                return Ok(());
-            }
-        }
-
-        let adapter = self
-            .reth_payload_provider
-            .as_irys_reth_adapter()
-            .ok_or(ExecutionPayloadProviderError::ProviderNotSet)?;
-
-        let result = shadow_transactions_are_valid(
-            config,
-            service_senders,
-            irys_block_header,
-            adapter,
-            db,
-            self.clone(),
-        )
-        .await;
-
-        result.map_err(ExecutionPayloadProviderError::PayloadValidationError)
-    }
-}
-
-#[async_trait]
-impl<TPeerList> PayloadProvider for ExecutionPayloadProvider<TPeerList>
-where
-    TPeerList: PeerList,
-{
-    async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        self.wait_for_payload(evm_block_hash).await
-    }
 }
 
 #[derive(Debug)]
-struct ExecutionPayloadCache {
+struct ExecutionPayloadCacheInner {
     payloads: LruCache<B256, SealedBlock<Block>>,
     payloads_currently_requested_from_the_network: LruCache<B256, ()>,
 }

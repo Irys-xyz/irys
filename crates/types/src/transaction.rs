@@ -1,10 +1,10 @@
-use crate::{
+pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
-use irys_primitives::CommitmentType;
+pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
 pub type IrysTransactionId = H256;
@@ -217,6 +217,9 @@ pub struct CommitmentTransaction {
     #[serde(with = "string_u64")]
     pub fee: u64,
 
+    /// The value being staked, pledged, unstaked or unpledged
+    pub value: U256,
+
     /// Transaction signature bytes
     #[rlp(skip)]
     #[rlp(default)]
@@ -224,6 +227,105 @@ pub struct CommitmentTransaction {
 }
 
 impl CommitmentTransaction {
+    /// Create a new CommitmentTransaction with default values from config
+    pub fn new(config: &ConsensusConfig) -> Self {
+        Self {
+            id: H256::zero(),
+            anchor: H256::zero(),
+            signer: Address::default(),
+            commitment_type: CommitmentType::default(),
+            version: 0,
+            chain_id: config.chain_id,
+            fee: 0,
+            value: U256::zero(),
+            signature: IrysSignature::new(Signature::test_signature()),
+        }
+    }
+
+    /// Create a new stake transaction with the configured stake fee as value
+    pub fn new_stake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+        Self {
+            commitment_type: CommitmentType::Stake,
+            anchor,
+            fee,
+            value: config.stake_value.amount,
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new unstake transaction with the configured stake fee as value
+    pub fn new_unstake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+        Self {
+            commitment_type: CommitmentType::Unstake,
+            anchor,
+            fee,
+            value: config.stake_value.amount,
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new pledge transaction with decreasing cost per pledge.
+    /// Cost = pledge_base_fee / ((existing_pledges + 1) ^ pledge_decay)
+    /// The calculated cost is stored in the transaction's `value` field.
+    pub async fn new_pledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        fee: u64,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        let count = provider.pledge_count(signer_address).await;
+
+        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
+        let value = config
+            .pledge_base_value
+            .apply_pledge_decay(count, config.pledge_decay)
+            .map(|a| a.amount)
+            .unwrap_or(config.pledge_base_value.amount);
+
+        Self {
+            commitment_type: CommitmentType::Pledge,
+            anchor,
+            fee,
+            value,
+            ..Self::new(config)
+        }
+    }
+
+    /// Create a new unpledge transaction that refunds the most recent pledge's cost.
+    /// Refund = cost of the last pledge made (existing_pledges - 1)
+    /// Returns 0 if user has no pledges. The refund is in the `value` field.
+    pub async fn new_unpledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        fee: u64,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        let count = provider.pledge_count(signer_address).await;
+
+        // If user has no pledges, they get 0 back
+        let value = if count == 0 {
+            U256::zero()
+        } else {
+            // Calculate the value of the most recent pledge (count - 1)
+            // This ensures unpledge matches the cost of the last pledge made
+            config
+                .pledge_base_value
+                .apply_pledge_decay(count - 1, config.pledge_decay)
+                .map(|a| a.amount)
+                .unwrap_or(config.pledge_base_value.amount)
+        };
+
+        Self {
+            commitment_type: CommitmentType::Unpledge,
+            anchor,
+            fee,
+            value,
+            ..Self::new(config)
+        }
+    }
+
     /// Rely on RLP encoding for signing
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
         self.encode(out)
@@ -236,15 +338,9 @@ impl CommitmentTransaction {
         keccak256(&bytes).0
     }
 
-    /// TODO: assume that staking, pledging, etc just work with +/1 IRYS increments
-    /// This should be a proper implementation in the future
+    /// Returns the value stored in the transaction
     pub fn commitment_value(&self) -> U256 {
-        match self.commitment_type {
-            CommitmentType::Stake => U256::one(),
-            CommitmentType::Pledge => U256::one(),
-            CommitmentType::Unpledge => U256::one(),
-            CommitmentType::Unstake => U256::one(),
-        }
+        self.value
     }
 
     /// Validates the transaction signature by:
@@ -264,8 +360,16 @@ impl CommitmentTransaction {
 pub trait IrysTransactionCommon {
     fn is_signature_valid(&self) -> bool;
     fn id(&self) -> IrysTransactionId;
-    fn total_fee(&self) -> u64;
+    fn total_cost(&self) -> U256;
     fn signer(&self) -> Address;
+    fn signature(&self) -> &IrysSignature;
+    fn anchor(&self) -> H256;
+    fn user_fee(&self) -> U256;
+
+    /// Sign this transaction with the provided signer
+    fn sign(self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error>
+    where
+        Self: Sized;
 }
 
 impl IrysTransactionCommon for DataTransactionHeader {
@@ -277,12 +381,44 @@ impl IrysTransactionCommon for DataTransactionHeader {
         self.id
     }
 
-    fn total_fee(&self) -> u64 {
-        self.perm_fee.unwrap_or(0) + self.term_fee
+    fn total_cost(&self) -> U256 {
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
     }
 
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
+    }
+
+    fn anchor(&self) -> H256 {
+        self.anchor
+    }
+
+    fn user_fee(&self) -> U256 {
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+    }
+
+    fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
+        use crate::Address;
+        use alloy_primitives::keccak256;
+
+        // Store the signer address
+        self.signer = Address::from_public_key(signer.signer.verifying_key());
+
+        // Create the signature hash and sign it
+        let prehash = self.signature_hash();
+        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+
+        self.signature = IrysSignature::new(signature);
+
+        // Derive the txid by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        self.id = H256::from(id);
+
+        Ok(self)
     }
 }
 
@@ -295,11 +431,219 @@ impl IrysTransactionCommon for CommitmentTransaction {
         self.id
     }
 
-    fn total_fee(&self) -> u64 {
-        self.fee
+    fn total_cost(&self) -> U256 {
+        let additional_fee = match self.commitment_type {
+            CommitmentType::Stake => self.value,
+            CommitmentType::Pledge => self.value,
+            CommitmentType::Unpledge => U256::zero(),
+            CommitmentType::Unstake => U256::zero(),
+        };
+        U256::from(self.fee).saturating_add(additional_fee)
     }
+
     fn signer(&self) -> Address {
         self.signer
+    }
+
+    fn anchor(&self) -> H256 {
+        self.anchor
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        &self.signature
+    }
+
+    fn user_fee(&self) -> U256 {
+        U256::from(self.fee)
+    }
+
+    fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
+        use alloy_primitives::keccak256;
+
+        // Store the signer address
+        self.signer = signer.address();
+
+        // Create the signature hash and sign it
+        let prehash = self.signature_hash();
+        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+
+        self.signature = IrysSignature::new(signature);
+
+        // Derive the txid by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        self.id = H256::from(id);
+
+        Ok(self)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum IrysTransaction {
+    Data(DataTransactionHeader),
+    Commitment(CommitmentTransaction),
+}
+
+impl TryInto<DataTransactionHeader> for IrysTransaction {
+    type Error = eyre::Report;
+
+    fn try_into(self) -> Result<DataTransactionHeader, Self::Error> {
+        match self {
+            Self::Data(tx) => Ok(tx),
+            Self::Commitment(_) => Err(eyre::eyre!("This is a commitment tx")),
+        }
+    }
+}
+
+impl TryInto<CommitmentTransaction> for IrysTransaction {
+    type Error = eyre::Report;
+
+    fn try_into(self) -> Result<CommitmentTransaction, Self::Error> {
+        match self {
+            Self::Data(_) => Err(eyre::eyre!("This is a data tx")),
+            Self::Commitment(tx) => Ok(tx),
+        }
+    }
+}
+
+// route to IrysTransactionCommon impl
+// TODO: a better way to do this?
+impl IrysTransactionCommon for IrysTransaction {
+    fn is_signature_valid(&self) -> bool {
+        match self {
+            Self::Data(tx) => tx.is_signature_valid(),
+            Self::Commitment(tx) => tx.is_signature_valid(),
+        }
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        match self {
+            Self::Data(tx) => tx.id(),
+            Self::Commitment(tx) => tx.id(),
+        }
+    }
+
+    // fn total_fee(&self) -> u64 {
+    //     match self {
+    //         Self::Data(tx) => tx.total_fee(),
+    //         Self::Commitment(tx) => tx.total_fee(),
+    //     }
+    // }
+
+    fn signer(&self) -> Address {
+        match self {
+            Self::Data(tx) => tx.signer(),
+            Self::Commitment(tx) => tx.signer(),
+        }
+    }
+
+    fn signature(&self) -> &IrysSignature {
+        match self {
+            Self::Data(tx) => tx.signature(),
+            Self::Commitment(tx) => tx.signature(),
+        }
+    }
+
+    fn anchor(&self) -> H256 {
+        match self {
+            Self::Data(tx) => tx.anchor(),
+            Self::Commitment(tx) => tx.anchor(),
+        }
+    }
+
+    fn total_cost(&self) -> U256 {
+        match self {
+            Self::Data(tx) => tx.total_cost(),
+            Self::Commitment(tx) => tx.total_cost(),
+        }
+    }
+
+    fn user_fee(&self) -> U256 {
+        match self {
+            Self::Data(tx) => tx.user_fee(),
+            Self::Commitment(tx) => tx.user_fee(),
+        }
+    }
+
+    fn sign(self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error>
+    where
+        Self: Sized,
+    {
+        Ok(match self {
+            Self::Data(tx) => Self::Data(tx.sign(signer)?),
+            Self::Commitment(tx) => Self::Commitment(tx.sign(signer)?),
+        })
+    }
+}
+
+impl From<DataTransactionHeader> for IrysTransaction {
+    fn from(tx: DataTransactionHeader) -> Self {
+        Self::Data(tx)
+    }
+}
+
+impl From<CommitmentTransaction> for IrysTransaction {
+    fn from(tx: CommitmentTransaction) -> Self {
+        Self::Commitment(tx)
+    }
+}
+
+// API variant (extra serialisation logic)
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum IrysTransactionResponse {
+    #[serde(rename = "commitment")]
+    Commitment(CommitmentTransaction),
+
+    #[serde(rename = "storage")]
+    Storage(DataTransactionHeader),
+}
+
+impl From<CommitmentTransaction> for IrysTransactionResponse {
+    fn from(tx: CommitmentTransaction) -> Self {
+        Self::Commitment(tx)
+    }
+}
+
+impl From<DataTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: DataTransactionHeader) -> Self {
+        Self::Storage(tx)
+    }
+}
+
+/// Trait for providing pledge count information for dynamic fee calculation
+#[async_trait::async_trait]
+pub trait PledgeDataProvider {
+    /// Returns the number of existing pledges for a given user address
+    async fn pledge_count(&self, user_address: Address) -> usize;
+}
+
+#[cfg(test)]
+mod test_helpers {
+    use super::*;
+    use std::collections::HashMap;
+
+    pub(super) struct MockPledgeProvider {
+        pub pledge_counts: HashMap<Address, usize>,
+    }
+
+    impl MockPledgeProvider {
+        pub(super) fn new() -> Self {
+            Self {
+                pledge_counts: HashMap::new(),
+            }
+        }
+
+        pub(super) fn with_pledge_count(mut self, address: Address, count: usize) -> Self {
+            self.pledge_counts.insert(address, count);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PledgeDataProvider for MockPledgeProvider {
+        async fn pledge_count(&self, user_address: Address) -> usize {
+            self.pledge_counts.get(&user_address).copied().unwrap_or(0)
+        }
     }
 }
 
@@ -316,7 +660,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_rlp_round_trip() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let mut header = mock_header(&config);
 
         // action
@@ -334,7 +678,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_rlp_round_trip() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let mut header = mock_commitment_tx(&config);
 
         // action
@@ -352,7 +696,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample DataTransactionHeader
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_header = mock_header(&config);
 
         // Serialize the DataTransactionHeader to JSON
@@ -371,7 +715,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_serde() {
         // Create a sample commitment tx
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_tx = mock_commitment_tx(&config);
 
         // Serialize the commitment tx to JSON
@@ -389,7 +733,7 @@ mod tests {
     #[test]
     fn test_tx_encode_and_signing() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_header = mock_header(&config);
         let mut sig_data = Vec::new();
         original_header.encode(&mut sig_data);
@@ -402,20 +746,25 @@ mod tests {
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
+
+        // Test signing the header directly using the trait method
+        let signed_header = dec.sign(&signer).unwrap();
+        assert!(signed_header.is_signature_valid());
+
+        // Also test the old way for IrysTransaction
         let tx = DataTransaction {
-            header: dec,
+            header: mock_header(&config),
             ..Default::default()
         };
 
         let signed_tx = signer.sign_transaction(tx).unwrap();
-
         assert!(signed_tx.header.is_signature_valid());
     }
 
     #[test]
     fn test_commitment_tx_encode_and_signing() {
         // setup
-        let config = ConsensusConfig::testnet();
+        let config = ConsensusConfig::testing();
         let original_tx = mock_commitment_tx(&config);
         let mut sig_data = Vec::new();
         original_tx.encode(&mut sig_data);
@@ -428,7 +777,8 @@ mod tests {
             chunk_size: config.chunk_size,
         };
 
-        let signed_tx = signer.sign_commitment(original_tx.clone()).unwrap();
+        // Test using the new trait method
+        let signed_tx = original_tx.clone().sign(&signer).unwrap();
 
         println!(
             "{}",
@@ -457,37 +807,146 @@ mod tests {
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
-        CommitmentTransaction {
-            id: H256::from([255_u8; 32]),
-            anchor: H256::from([1_u8; 32]),
-            signer: Address::default(),
-            commitment_type: CommitmentType::Stake,
-            version: 0,
-            fee: 1,
-            chain_id: config.chain_id,
-            signature: Signature::test_signature().into(),
-        }
+        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]), 1);
+        tx.id = H256::from([255_u8; 32]);
+        tx.signer = Address::default();
+        tx.signature = Signature::test_signature().into();
+        tx
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum IrysTransactionResponse {
-    #[serde(rename = "commitment")]
-    Commitment(CommitmentTransaction),
+#[cfg(test)]
+mod pledge_decay_parametrized_tests {
+    use super::test_helpers::MockPledgeProvider;
+    use super::*;
+    use crate::storage_pricing::Amount;
+    use rstest::rstest;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
-    #[serde(rename = "storage")]
-    Storage(DataTransactionHeader),
-}
+    #[tokio::test]
+    #[rstest]
+    #[case(0, dec!(20000.0))]
+    #[case(1, dec!(10717.7))]
+    #[case(2, dec!(7440.8))]
+    #[case(3, dec!(5743.4))]
+    #[case(4, dec!(4698.4))]
+    #[case(5, dec!(3987.4))]
+    #[case(6, dec!(3470.8))]
+    #[case(7, dec!(3077.8))]
+    #[case(8, dec!(2768.2))]
+    #[case(9, dec!(2517.8))]
+    #[case(10, dec!(2310.8))]
+    #[case(11, dec!(2136.8))]
+    #[case(12, dec!(1988.2))]
+    #[case(13, dec!(1860.0))]
+    #[case(14, dec!(1748.0))]
+    #[case(15, dec!(1649.3))]
+    #[case(16, dec!(1561.8))]
+    #[case(17, dec!(1483.4))]
+    #[case(18, dec!(1413.0))]
+    #[case(19, dec!(1349.2))]
+    #[case(20, dec!(1291.3))]
+    #[case(21, dec!(1238.3))]
+    #[case(22, dec!(1189.8))]
+    #[case(23, dec!(1145.0))]
+    #[case(24, dec!(1103.7))]
+    async fn test_pledge_cost_with_decay(
+        #[case] existing_pledges: usize,
+        #[case] expected_cost: Decimal,
+    ) {
+        // Setup config with $20,000 base fee and 0.9 decay rate
+        let mut config = ConsensusConfig::testing();
+        config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
-impl From<CommitmentTransaction> for IrysTransactionResponse {
-    fn from(tx: CommitmentTransaction) -> Self {
-        Self::Commitment(tx)
+        // Create provider with existing pledge count
+        let signer_address = Address::default();
+        let provider =
+            MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
+
+        // Create a new pledge transaction
+        let pledge_tx =
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address)
+                .await;
+
+        // Convert actual value to decimal for comparison
+        let actual_amount = Amount::<()>::new(pledge_tx.value)
+            .token_to_decimal()
+            .unwrap();
+
+        assert_eq!(actual_amount.round_dp(0), expected_cost.round_dp(0));
     }
-}
 
-impl From<DataTransactionHeader> for IrysTransactionResponse {
-    fn from(tx: DataTransactionHeader) -> Self {
-        Self::Storage(tx)
+    #[tokio::test]
+    #[rstest]
+    #[case(0, dec!(0))]
+    #[case(1, dec!(20000.0))]
+    #[case(2, dec!(10717.7))]
+    #[case(3, dec!(7440.8))]
+    #[case(4, dec!(5743.4))]
+    #[case(5, dec!(4698.4))]
+    #[case(6, dec!(3987.4))]
+    #[case(7, dec!(3470.8))]
+    #[case(8, dec!(3077.8))]
+    #[case(9, dec!(2768.2))]
+    #[case(10,dec!(2517.8))]
+    #[case(11,dec!(2310.8))]
+    #[case(12,dec!(2136.8))]
+    #[case(13,dec!(1988.2))]
+    #[case(14,dec!(1860.0))]
+    #[case(15,dec!(1748.0))]
+    #[case(16,dec!(1649.3))]
+    #[case(17,dec!(1561.8))]
+    #[case(18,dec!(1483.4))]
+    #[case(19,dec!(1413.0))]
+    #[case(20,dec!(1349.2))]
+    #[case(21,dec!(1291.3))]
+    #[case(22,dec!(1238.3))]
+    #[case(23,dec!(1189.8))]
+    #[case(24,dec!(1145.0))]
+    async fn test_unpledge_cost(
+        #[case] existing_pledges: usize,
+        #[case] expected_unpledge_value: Decimal,
+    ) {
+        // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
+        let mut config = ConsensusConfig::testing();
+        config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
+
+        // Create provider with existing pledge count
+        let signer_address = Address::default();
+        let provider =
+            MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
+
+        // Create an unpledge transaction
+        let unpledge_tx = CommitmentTransaction::new_unpledge(
+            &config,
+            H256::zero(),
+            1,
+            &provider,
+            signer_address,
+        )
+        .await;
+
+        // Verify the commitment type is correct
+        assert_eq!(unpledge_tx.commitment_type, CommitmentType::Unpledge);
+
+        // Verify unpledge total cost only includes fee (not value)
+        assert_eq!(
+            unpledge_tx.total_cost(),
+            U256::from(unpledge_tx.fee),
+            "Unpledge total cost should only include fee"
+        );
+
+        // Convert actual value to decimal for comparison
+        let actual_amount = Amount::<()>::new(unpledge_tx.value)
+            .token_to_decimal()
+            .unwrap();
+
+        assert_eq!(
+            actual_amount.round_dp(0),
+            expected_unpledge_value.round_dp(0)
+        );
     }
 }

@@ -9,7 +9,6 @@ irys-actors.workspace = true
 irys-database.workspace = true
 irys-domain.workspace = true
 irys-reth-node-bridge.workspace = true
-irys-storage.workspace = true
 irys-types.workspace = true
 irys-p2p.workspace = true
 

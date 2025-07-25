@@ -1,10 +1,8 @@
-use crate::execution_payload_provider::ExecutionPayloadProvider;
-use crate::peer_list::{PeerList, ScoreDecreaseReason};
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     sync::SyncState,
-    types::{GossipDataRequest, InternalGossipError, InvalidDataError},
+    types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
 use alloy_core::primitives::keccak256;
@@ -15,9 +13,10 @@ use irys_actors::{
     mempool_service::{ChunkIngressError, MempoolFacade},
 };
 use irys_api_client::ApiClient;
+use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipRequest,
-    IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipDataRequest,
+    GossipRequest, IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -27,31 +26,29 @@ use tracing::{debug, error, Span};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, TPeerList>
+pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
     TApiClient: ApiClient,
-    TPeerList: PeerList,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: Arc<BlockPool<TPeerList, TBlockDiscovery, TMempoolFacade>>,
+    pub block_pool: Arc<BlockPool<TBlockDiscovery, TMempoolFacade>>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
-    pub peer_list: TPeerList,
+    pub peer_list: PeerList,
     pub sync_state: SyncState,
     /// Tracing span
     pub span: Span,
-    pub execution_payload_provider: ExecutionPayloadProvider<TPeerList>,
+    pub execution_payload_cache: ExecutionPayloadCache,
 }
 
-impl<M, B, A, P> Clone for GossipServerDataHandler<M, B, A, P>
+impl<M, B, A> Clone for GossipServerDataHandler<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     fn clone(&self) -> Self {
         Self {
@@ -63,17 +60,16 @@ where
             peer_list: self.peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: self.span.clone(),
-            execution_payload_provider: self.execution_payload_provider.clone(),
+            execution_payload_cache: self.execution_payload_cache.clone(),
         }
     }
 }
 
-impl<M, B, A, P> GossipServerDataHandler<M, B, A, P>
+impl<M, B, A> GossipServerDataHandler<M, B, A>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
     A: ApiClient,
-    P: PeerList,
 {
     pub(crate) async fn handle_chunk(
         &self,
@@ -307,13 +303,9 @@ where
                 self.gossip_client.mining_address,
                 block_header.block_hash.0.to_base58()
             );
-            if let Err(peer_list_err) = self
-                .peer_list
-                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData)
-                .await
-            {
-                error!("Failed to decrease peer score: {:?}", peer_list_err);
-            }
+            self.peer_list
+                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
+
             return Err(GossipError::InvalidData(
                 InvalidDataError::InvalidBlockSignature,
             ));
@@ -416,8 +408,7 @@ where
             && is_in_the_trusted_sync_range
             && self
                 .peer_list
-                .is_a_trusted_peer(source_miner_address, data_source_ip.ip())
-                .await?;
+                .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
         self.block_pool
             .process_block(Arc::new(block_header), skip_block_validation)
@@ -439,7 +430,7 @@ where
             .cache
             .seen_execution_payload_from_any_peer(&evm_block_hash)?;
         let expecting_payload = self
-            .execution_payload_provider
+            .execution_payload_cache
             .is_waiting_for_payload(&evm_block_hash)
             .await;
 
@@ -458,7 +449,7 @@ where
             return Ok(());
         }
 
-        self.execution_payload_provider
+        self.execution_payload_cache
             .add_payload_to_cache(sealed_block)
             .await;
         debug!(
@@ -502,14 +493,13 @@ where
                     None => Ok(false),
                 }
             }
-            GossipDataRequest::Transaction(_tx_hash) => Ok(false),
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 debug!(
                     "Node {}: Handling execution payload request for block {:?}",
                     self.gossip_client.mining_address, evm_block_hash
                 );
                 let maybe_evm_block = self
-                    .execution_payload_provider
+                    .execution_payload_cache
                     .get_locally_stored_evm_block(&evm_block_hash)
                     .await;
 
@@ -526,6 +516,7 @@ where
                     None => Ok(false),
                 }
             }
+            GossipDataRequest::Chunk(_chunk_path_hash) => Ok(false),
         }
     }
 }

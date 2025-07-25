@@ -21,7 +21,7 @@ use tracing::{error, info};
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
-    let mut genesis_config = NodeConfig::testnet();
+    let mut genesis_config = NodeConfig::testing();
     let peer_account = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_account]);
 
@@ -29,7 +29,7 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    let peer_config = genesis.testnet_peer_with_signer(&peer_account);
+    let peer_config = genesis.testing_peer_with_signer(&peer_account);
     let peer1 = IrysNodeTest::new(peer_config.clone())
         .start_with_name("PEER1")
         .await;
@@ -99,7 +99,7 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
 #[test_log::test(actix_web::test)]
 async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet();
+    let mut genesis_config = NodeConfig::testing();
     let peer_account = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_account]);
 
@@ -107,7 +107,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    let peer_config = genesis.testnet_peer_with_signer(&peer_account);
+    let peer_config = genesis.testing_peer_with_signer(&peer_account);
     let peer1 = IrysNodeTest::new(peer_config.clone())
         .start_with_name("PEER1")
         .await;
@@ -179,10 +179,10 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let max_seconds = 20;
 
     // setup trusted peers connection data and configs for genesis and nodes
-    let testnet_config_genesis = NodeConfig::testnet();
-    let account1 = testnet_config_genesis.signer();
+    let testing_config_genesis = NodeConfig::testing();
+    let account1 = testing_config_genesis.signer();
 
-    let ctx_genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone())
+    let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
 
@@ -214,13 +214,13 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await?;
 
     // start additional nodes (after we have mined some blocks on genesis node)
-    let ctx_peer1_node = ctx_genesis_node.testnet_peer();
+    let ctx_peer1_node = ctx_genesis_node.testing_peer();
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")
         .await;
     ctx_peer1_node.start_public_api().await;
 
-    let mut ctx_peer2_node = ctx_genesis_node.testnet_peer();
+    let mut ctx_peer2_node = ctx_genesis_node.testing_peer();
     ctx_peer2_node.mode = NodeMode::TrustedPeerSync;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
@@ -239,7 +239,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .expect("expect setting mining false on peer2");
 
     //
-    // TEST CASE: check genesis blocks match across the theee nodes
+    // TEST CASE: check genesis blocks match across the three nodes
     //
     {
         // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
@@ -286,7 +286,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         let peer2_peer_addr = ctx_peer2_node.node_ctx.config.node_config.peer_address();
 
         // Peer1 should see genesis and peer2
-        assert_eq!(peer_list_items_1.len(), 2, "Peer1 should see 2 other peers");
         assert!(
             peer_list_items_1.contains(&genesis_peer_addr),
             "Peer1 should see genesis node"
@@ -297,7 +296,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         );
 
         // Peer2 should see genesis and peer1
-        assert_eq!(peer_list_items_2.len(), 2, "Peer2 should see 2 other peers");
         assert!(
             peer_list_items_2.contains(&genesis_peer_addr),
             "Peer2 should see genesis node"

@@ -9,10 +9,9 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
-use irys_p2p::{PeerList as _, PeerListServiceFacade, SyncState};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
+use irys_p2p::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
     block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
@@ -29,7 +28,7 @@ use tracing::{debug, info};
 pub struct ApiState {
     pub mempool_service: UnboundedSender<MempoolServiceMessage>,
     pub chunk_provider: Arc<ChunkProvider>,
-    pub peer_list: PeerListServiceFacade,
+    pub peer_list: PeerList,
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
@@ -38,14 +37,12 @@ pub struct ApiState {
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
     pub sync_state: SyncState,
+    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 
 impl ApiState {
-    pub async fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
-        self.peer_list
-            .all_known_peers()
-            .await
-            .map_err(|mailbox_err| eyre::eyre!("Failed to get known peers: {}", mailbox_err))
+    pub fn get_known_peers(&self) -> Vec<PeerAddress> {
+        self.peer_list.all_known_peers()
     }
 }
 
@@ -76,6 +73,22 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(network_config::get_network_config),
         )
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
+        .route(
+            "/price/commitment/stake",
+            web::get().to(price::get_stake_price),
+        )
+        .route(
+            "/price/commitment/unstake",
+            web::get().to(price::get_unstake_price),
+        )
+        .route(
+            "/price/commitment/pledge/{user_address}",
+            web::get().to(price::get_pledge_price),
+        )
+        .route(
+            "/price/commitment/unpledge/{user_address}",
+            web::get().to(price::get_unpledge_price),
+        )
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))

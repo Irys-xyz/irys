@@ -142,6 +142,27 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
+
+    /// Fee required for staking operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub stake_value: Amount<Irys>,
+
+    /// Base fee required for pledging operations in Irys tokens
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub pledge_base_value: Amount<Irys>,
+
+    /// Decay rate for pledge fees - subsequent pledges become cheaper
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
+    pub pledge_decay: Amount<Percentage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,18 +193,9 @@ pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
     pub mode: NodeMode,
 
-    /// The initial list of peers to contact for block sync
-    pub trusted_peers: Vec<PeerAddress>,
-
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
     pub base_directory: PathBuf,
-
-    /// Specifies which consensus rules the node follows
-    pub consensus: ConsensusOptions,
-
-    /// Settings for the price oracle system
-    pub oracle: OracleConfig,
 
     /// Private key used for mining operations
     /// This key identifies the node and receives mining rewards
@@ -193,16 +205,24 @@ pub struct NodeConfig {
     )]
     pub mining_key: k256::ecdsa::SigningKey,
 
+    /// The initial list of peers to contact for block sync
+    pub trusted_peers: Vec<PeerAddress>,
+
     pub reward_address: Address,
 
-    /// Data storage configuration
-    pub storage: StorageSyncConfig,
+    // whether we should try to stake & pledge our local drives
+    pub stake_pledge_drives: bool,
 
-    /// Fee and pricing settings
-    pub pricing: PricingConfig,
+    pub genesis_peer_discovery_timeout_millis: u64,
 
     /// Peer-to-peer network communication settings
     pub gossip: GossipConfig,
+
+    /// HTTP API server configuration
+    pub http: HttpConfig,
+
+    /// Data storage configuration
+    pub storage: StorageSyncConfig,
 
     /// Data packing and compression settings
     pub packing: PackingConfig,
@@ -210,8 +230,11 @@ pub struct NodeConfig {
     /// Cache management configuration
     pub cache: CacheConfig,
 
-    /// HTTP API server configuration
-    pub http: HttpConfig,
+    /// Settings for the price oracle system
+    pub oracle: OracleConfig,
+
+    /// Fee and pricing settings
+    pub pricing: PricingConfig,
 
     /// Reth node configuration
     pub reth: RethConfig,
@@ -219,10 +242,8 @@ pub struct NodeConfig {
     /// Reth settings
     pub reth_peer_info: RethPeerInfo,
 
-    pub genesis_peer_discovery_timeout_millis: u64,
-
-    // whether we should try to stake & pledge our local drives
-    pub stake_pledge_drives: bool,
+    /// Specifies which consensus rules the node follows
+    pub consensus: ConsensusOptions,
 }
 
 impl From<NodeConfig> for Config {
@@ -257,6 +278,9 @@ pub enum ConsensusOptions {
 
     /// Use predefined testnet consensus parameters
     Testnet,
+
+    /// Use predefined testing consensus parameters
+    Testing,
 
     /// Use custom consensus parameters defined elsewhere
     Custom(ConsensusConfig),
@@ -397,6 +421,9 @@ pub struct MempoolConfig {
     /// Maximum number of data transactions that can be included in a single block
     pub max_data_txs_per_block: u64,
 
+    /// Maximum number of commitment transactions allowed in a single block
+    pub max_commitment_txs_per_block: u64,
+
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
@@ -416,6 +443,17 @@ pub struct MempoolConfig {
     /// Maximum number of chunks that can be cached per data root
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
     pub max_chunks_per_item: usize,
+
+    /// Maximum number of valid tx txids to keep track of
+    /// Decreasing this will increase the amount of validation the node will have to perform
+    pub max_valid_items: usize,
+
+    /// Maximum number of invalid tx txids to keep track of
+    /// Decreasing this will increase the amount of validation the node will have to perform
+    pub max_invalid_items: usize,
+
+    /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
+    pub commitment_fee: u64,
 }
 
 /// # Gossip Network Configuration
@@ -508,10 +546,11 @@ impl ConsensusConfig {
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 
-    pub fn testnet() -> Self {
+    // this is a config used for testing
+    pub fn testing() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
-
+        const CHUNK_SIZE: u64 = 32;
         // block reward params
         const HALF_LIFE_YEARS: u128 = 4;
         const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
@@ -527,12 +566,16 @@ impl ConsensusConfig {
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
+                max_commitment_txs_per_block: 100,
                 anchor_expiry_depth: 10,
                 // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_invalid_items: 10_000,
+                max_valid_items: 10_000,
+                commitment_fee: 100,
             },
             vdf: VdfConfig {
                 // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
@@ -543,7 +586,7 @@ impl ConsensusConfig {
                 max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: 70_000,
             },
-            chunk_size: Self::CHUNK_SIZE,
+            chunk_size: CHUNK_SIZE,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
@@ -580,7 +623,7 @@ impl ConsensusConfig {
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                balance: alloy_primitives::U256::from(690000000000000000_u128),
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                                 ..Default::default()
                             },
                         );
@@ -591,9 +634,117 @@ impl ConsensusConfig {
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                balance: alloy_primitives::U256::from(
-                                    1_000_000_000_000_000_000_000_000_u128,
-                                ),
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
+                                ..Default::default()
+                            },
+                        );
+                        map
+                    },
+                    ..Default::default()
+                },
+            },
+            block_reward_config: BlockRewardConfig {
+                inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
+                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
+            },
+            stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+        }
+    }
+
+    pub fn testnet() -> Self {
+        const DEFAULT_BLOCK_TIME: u64 = 12;
+        const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
+
+        // block reward params
+        const HALF_LIFE_YEARS: u128 = 4;
+        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
+        const INFLATION_CAP: u128 = 100_000_000;
+        Self {
+            chain_id: 1270,
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
+            safe_minimum_number_of_years: 200,
+            number_of_ingress_proofs: 10,
+            genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
+            chunk_size: Self::CHUNK_SIZE,
+            num_chunks_in_partition: 51_872_000,
+            num_chunks_in_recall_range: 800,
+            num_partitions_per_slot: 1,
+            block_migration_depth: 6,
+            block_tree_depth: 50,
+            entropy_packing_iterations: 1000,
+            stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            mempool: MempoolConfig {
+                max_data_txs_per_block: 100,
+                max_commitment_txs_per_block: 100,
+                anchor_expiry_depth: 10,
+                // TODO: Move the following to a node config
+                max_pending_pledge_items: 100,
+                max_pledges_per_item: 100,
+                max_pending_chunk_items: 30,
+                max_chunks_per_item: 500,
+                max_invalid_items: 10_000,
+                max_valid_items: 10_000,
+                commitment_fee: 100,
+            },
+            vdf: VdfConfig {
+                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
+                // With 12s target block time, this resets approximately every 10 minutes
+                reset_frequency: 50 * 12,
+                parallel_verification_thread_limit: 4,
+                num_checkpoints_in_vdf_step: 25,
+                max_allowed_vdf_fork_steps: 60_000,
+                sha_1s_difficulty: 1_800_000,
+            },
+
+            epoch: EpochConfig {
+                capacity_scalar: 100,
+                num_blocks_in_epoch: 100,
+                submit_ledger_epoch_length: 5,
+                num_capacity_partitions: None,
+            },
+
+            difficulty_adjustment: DifficultyAdjustmentConfig {
+                block_time: DEFAULT_BLOCK_TIME,
+                difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000)
+                    .div_ceil(DEFAULT_BLOCK_TIME)
+                    * 14,
+                max_difficulty_adjustment_factor: dec!(4),
+                min_difficulty_adjustment_factor: dec!(0.25),
+            },
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            reth: RethChainSpec {
+                chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
+                genesis: Genesis {
+                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                    alloc: {
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            Address::from_slice(
+                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                                    .unwrap()
+                                    .as_slice(),
+                            ),
+                            GenesisAccount {
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
+                                ..Default::default()
+                            },
+                        );
+                        map.insert(
+                            Address::from_slice(
+                                hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+                                    .unwrap()
+                                    .as_slice(),
+                            ),
+                            GenesisAccount {
+                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                                 ..Default::default()
                             },
                         );
@@ -623,6 +774,7 @@ impl NodeConfig {
                 })
                 .expect("consensus cfg does not exist"),
             ConsensusOptions::Testnet => ConsensusConfig::testnet(),
+            ConsensusOptions::Testing => ConsensusConfig::testing(),
             ConsensusOptions::Custom(consensus_config) => consensus_config.clone(),
         }
     }
@@ -657,7 +809,7 @@ impl NodeConfig {
             accounts.push((
                 signer.address(),
                 GenesisAccount {
-                    balance: alloy_primitives::U256::from(690000000000000000_u128),
+                    balance: alloy_primitives::U256::from(99999000000000000000000_u128),
                     ..Default::default()
                 },
             ))
@@ -667,12 +819,12 @@ impl NodeConfig {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn testnet_with_signer(signer: &IrysSigner) -> Self {
+    pub fn testing_with_signer(signer: &IrysSigner) -> Self {
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
         Self {
             mode: NodeMode::Genesis,
-            consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
+            consensus: ConsensusOptions::Custom(ConsensusConfig::testing()),
             base_directory: default_irys_path(),
 
             oracle: OracleConfig::Mock {
@@ -721,14 +873,14 @@ impl NodeConfig {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn testnet_with_epochs(num_blocks_in_epoch: usize) -> Self {
-        let mut node_config = Self::testnet();
+    pub fn testing_with_epochs(num_blocks_in_epoch: usize) -> Self {
+        let mut node_config = Self::testing();
         node_config.consensus.get_mut().epoch.num_blocks_in_epoch = num_blocks_in_epoch as u64;
         node_config
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn testnet() -> Self {
+    pub fn testing() -> Self {
         use k256::ecdsa::SigningKey;
         let mining_key = SigningKey::from_slice(
             &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
@@ -741,7 +893,80 @@ impl NodeConfig {
             chunk_size: 0,
         };
 
-        Self::testnet_with_signer(&signer)
+        Self::testing_with_signer(&signer)
+    }
+
+    pub fn testnet() -> Self {
+        use k256::ecdsa::SigningKey;
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let consensus = ConsensusConfig::testnet();
+        let signer = IrysSigner {
+            signer: mining_key,
+            chain_id: consensus.chain_id,
+            chunk_size: consensus.chunk_size,
+        };
+
+        let mining_key = signer.signer.clone();
+        let reward_address = signer.address();
+        Self {
+            mode: NodeMode::PeerSync,
+            consensus: ConsensusOptions::Custom(consensus),
+            base_directory: default_irys_path(),
+
+            oracle: OracleConfig::Mock {
+                initial_price: Amount::token(dec!(1)).expect("valid token amount"),
+                incremental_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+                smoothing_interval: 15,
+            },
+            mining_key,
+            reward_address,
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+            },
+            trusted_peers: vec![],
+            // trusted_peers: vec![PeerAddress {
+            //     api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+            //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
+            // }],
+            pricing: PricingConfig {
+                fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+            },
+            gossip: GossipConfig {
+                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_port: 8081,
+                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_port: 8081,
+            },
+            reth: RethConfig {
+                use_random_ports: false,
+            },
+            packing: PackingConfig {
+                cpu_packing_concurrency: 4,
+                gpu_packing_batch_size: 1024,
+            },
+            cache: CacheConfig { cache_clean_lag: 2 },
+            http: HttpConfig {
+                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_port: 8080,
+                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_port: 8080,
+            },
+            reth_peer_info: crate::RethPeerInfo {
+                peering_tcp_addr: std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                    std::net::Ipv4Addr::new(127, 0, 0, 1),
+                    9009,
+                )),
+                peer_id: Default::default(),
+            },
+
+            genesis_peer_discovery_timeout_millis: 10000,
+            stake_pledge_drives: false,
+        }
     }
 
     /// get the storage module directory path
@@ -910,7 +1135,7 @@ mod tests {
         genesis_price = 1.0
         annual_cost_per_gb = 0.01
         decay_rate = 0.01
-        chunk_size = 262144
+        chunk_size = 32
         block_migration_depth = 6
         block_tree_depth = 50
         num_chunks_in_partition = 10
@@ -919,7 +1144,9 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        genesis_peer_discovery_timeout_millis = 10000
+        stake_value = 20000.0
+        pledge_base_value = 950.0
+        pledge_decay = 0.9
 
         [reth]
         chain = 1270
@@ -939,18 +1166,25 @@ mod tests {
         terminalTotalDifficultyPassed = false
 
         [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
-        balance = "0x9935f581f050000"
+        balance = "0x152cf4e72a974f1c0000"
 
         [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
-        balance = "0xd3c21bcecceda1000000"
+        balance = "0x152cf4e72a974f1c0000"
 
         [mempool]
         max_data_txs_per_block = 100
+        max_commitment_txs_per_block = 100
         anchor_expiry_depth = 10
         max_pending_pledge_items = 100
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
+        max_pending_anchor_items = 100
+        max_invalid_items = 10000
+        max_valid_items = 10000
+        commitment_fee = 100
+
+
 
         [difficulty_adjustment]
         block_time = 1
@@ -980,7 +1214,7 @@ mod tests {
         "#;
 
         // Create the expected config
-        let expected_config = ConsensusConfig::testnet();
+        let expected_config = ConsensusConfig::testing();
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
         // for debugging purposes
         println!("{}", expected_toml_data);
@@ -998,7 +1232,7 @@ mod tests {
         let toml_data = r#"
         mode = "Genesis"
         base_directory = "~/.tmp/.irys"
-        consensus = "Testnet"
+        consensus = "Testing"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
         reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
         genesis_peer_discovery_timeout_millis = 10000
@@ -1051,8 +1285,8 @@ mod tests {
         peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         "#;
         // Create the expected config
-        let mut expected_config = NodeConfig::testnet();
-        expected_config.consensus = ConsensusOptions::Testnet;
+        let mut expected_config = NodeConfig::testing();
+        expected_config.consensus = ConsensusOptions::Testing;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
         expected_config.trusted_peers.get_mut(0).unwrap().execution = RethPeerInfo {
             peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
@@ -1072,9 +1306,32 @@ mod tests {
 
     #[test]
     fn test_roundtrip_toml_serdes() {
-        let cfg = NodeConfig::testnet();
+        let cfg = NodeConfig::testing();
         let enc = toml::to_string_pretty(&cfg).unwrap();
         let dec: NodeConfig = toml::from_str(&enc).unwrap();
         assert_eq!(cfg, dec);
+    }
+
+    #[test]
+    fn test_parse_testnet_config_template() {
+        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("config")
+            .join("templates")
+            .join("testnet_config.toml");
+
+        let template_content = std::fs::read_to_string(&template_path)
+            .expect("Failed to read testnet_config.toml template");
+
+        let config = toml::from_str::<NodeConfig>(&template_content)
+            .expect("Failed to parse testnet_config.toml template");
+
+        // Basic sanity checks - just verify it parsed successfully
+        assert_eq!(config.mode, NodeMode::PeerSync);
+
+        // Check consensus config fields
+        let consensus = config.consensus_config();
+        assert_eq!(consensus.chain_id, 1270);
     }
 }

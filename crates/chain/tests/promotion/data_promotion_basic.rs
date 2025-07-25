@@ -13,7 +13,7 @@ use tracing::debug;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;

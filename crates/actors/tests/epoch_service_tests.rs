@@ -14,8 +14,8 @@ use irys_actors::{
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{add_genesis_commitments, add_test_commitments};
-use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot};
-use irys_storage::{ie, StorageModule, StorageModuleVec};
+use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
+use irys_storage::ie;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::PartitionChunkRange;
 use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
@@ -33,7 +33,7 @@ use tracing::{debug, error, info};
 #[actix::test]
 async fn genesis_test() {
     // setup temp dir
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
     let base_path = tmp_dir.path().to_path_buf();
     config.base_directory = base_path;
@@ -42,7 +42,7 @@ async fn genesis_test() {
     // genesis block
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let commitments = add_genesis_commitments(&mut genesis_block, &config);
+    let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
 
     // Create epoch service with random miner address
     let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
@@ -191,16 +191,16 @@ async fn add_slots_test() {
             num_capacity_partitions: Some(123),
             submit_ledger_epoch_length: 5,
         },
-        ..ConsensusConfig::testnet()
+        ..ConsensusConfig::testing()
     };
-    let mut testnet_config = NodeConfig::testnet();
-    testnet_config.base_directory = base_path;
-    testnet_config.consensus = ConsensusOptions::Custom(consensus_config);
-    let config = Config::new(testnet_config);
+    let mut testing_config = NodeConfig::testing();
+    testing_config.base_directory = base_path;
+    testing_config.consensus = ConsensusOptions::Custom(consensus_config);
+    let config = Config::new(testing_config);
     genesis_block.height = 0;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
-    let commitments = add_genesis_commitments(&mut genesis_block, &config);
+    let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
 
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
@@ -264,7 +264,7 @@ async fn add_slots_test() {
 #[actix::test]
 async fn capacity_projection_tests() {
     let max_data_parts = 1000;
-    let config = ConsensusConfig::testnet();
+    let config = ConsensusConfig::testing();
     for i in (0..max_data_parts).step_by(10) {
         let data_partition_count = i;
         let capacity_count =
@@ -295,16 +295,16 @@ async fn partition_expiration_and_repacking_test() {
             num_blocks_in_epoch: 5,
             num_capacity_partitions: Some(123),
         },
-        ..ConsensusConfig::testnet()
+        ..ConsensusConfig::testing()
     };
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.base_directory = base_path.clone();
     config.consensus = ConsensusOptions::Custom(consensus_config);
     let config = Config::new(config);
 
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let commitments = add_test_commitments(&mut genesis_block, 5, &config);
+    let commitments = add_test_commitments(&mut genesis_block, 5, &config).await;
 
     // Create a storage config for testing
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
@@ -640,9 +640,9 @@ async fn epoch_blocks_reinitialization_test() {
     let chunk_size = 32;
     let consensus_config = ConsensusConfig {
         chunk_size,
-        ..ConsensusConfig::testnet()
+        ..ConsensusConfig::testing()
     };
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.base_directory = base_path.clone();
     config.consensus = ConsensusOptions::Custom(consensus_config);
     let config = Config::new(config);
@@ -660,7 +660,7 @@ async fn epoch_blocks_reinitialization_test() {
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
     let pledge_count = config.consensus.epoch.num_capacity_partitions.unwrap_or(31) as u8;
-    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
+    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config).await;
 
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
@@ -833,9 +833,9 @@ async fn partitions_assignment_determinism_test() {
             submit_ledger_epoch_length: 2,
             num_capacity_partitions: None,
         },
-        ..ConsensusConfig::testnet()
+        ..ConsensusConfig::testing()
     };
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     config.storage.num_writes_before_sync = 1;
     config.base_directory = base_path.clone();
     config.consensus = ConsensusOptions::Custom(consensus_config);
@@ -848,7 +848,7 @@ async fn partitions_assignment_determinism_test() {
     genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
     genesis_block.height = 0;
     let pledge_count = 20;
-    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
+    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config).await;
 
     let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
 

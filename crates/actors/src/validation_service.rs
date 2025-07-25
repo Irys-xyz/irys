@@ -12,14 +12,13 @@
 //!     results of a child block.
 use crate::{
     block_tree_service::{BlockTreeServiceMessage, ReorgEvent, ValidationResult},
-    block_validation::PayloadProvider,
     services::ServiceSenders,
 };
 use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
 use eyre::ensure;
 use futures::FutureExt as _;
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader, TokioServiceHandle};
 use irys_vdf::rayon;
@@ -50,7 +49,7 @@ pub enum ValidationServiceMessage {
 }
 
 /// Main validation service structure
-pub struct ValidationService<T: PayloadProvider> {
+pub struct ValidationService {
     /// Graceful shutdown handle
     shutdown: Shutdown,
     /// Message receiver
@@ -58,11 +57,11 @@ pub struct ValidationService<T: PayloadProvider> {
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
     /// Inner service logic
-    inner: Arc<ValidationServiceInner<T>>,
+    inner: Arc<ValidationServiceInner>,
 }
 
 /// Inner service structure containing business logic
-pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
+pub(crate) struct ValidationServiceInner {
     /// Read only view of the block index
     pub(crate) block_index_guard: BlockIndexReadGuard,
     /// VDF steps read guard
@@ -80,12 +79,12 @@ pub(crate) struct ValidationServiceInner<T: PayloadProvider> {
     /// Rayon thread pool that executes vdf steps   
     pub(crate) pool: rayon::ThreadPool,
     /// Execution payload provider for shadow transaction validation
-    pub(crate) execution_payload_provider: T,
+    pub(crate) execution_payload_provider: ExecutionPayloadCache,
     /// Toggle to enable/disable validation message processing
     pub validation_enabled: Arc<AtomicBool>,
 }
 
-impl<T: PayloadProvider> ValidationService<T> {
+impl ValidationService {
     /// Spawn a new validation service
     pub fn spawn_service(
         block_index_guard: BlockIndexReadGuard,
@@ -95,7 +94,7 @@ impl<T: PayloadProvider> ValidationService<T> {
         service_senders: &ServiceSenders,
         reth_node_adapter: IrysRethNodeAdapter,
         db: DatabaseProvider,
-        execution_payload_provider: T,
+        execution_payload_provider: ExecutionPayloadCache,
         rx: UnboundedReceiver<ValidationServiceMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
@@ -231,13 +230,13 @@ impl<T: PayloadProvider> ValidationService<T> {
     }
 }
 
-impl<T: PayloadProvider> ValidationServiceInner<T> {
+impl ValidationServiceInner {
     /// Handle incoming messages
     #[instrument(skip_all, fields(block_hash, block_height))]
     async fn create_validation_future(
         self: Arc<Self>,
         msg: ValidationServiceMessage,
-    ) -> Option<BlockValidationTask<T>> {
+    ) -> Option<BlockValidationTask> {
         match msg {
             ValidationServiceMessage::ValidateBlock { block } => {
                 let block_hash = block.block_hash;

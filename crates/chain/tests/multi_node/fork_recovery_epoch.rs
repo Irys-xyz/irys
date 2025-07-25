@@ -16,7 +16,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 10;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for the peer and fund it
@@ -31,8 +31,8 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     genesis_node.start_public_api().await;
 
     // Initialize peer configs with their keypair/signer
-    let peer1_config = genesis_node.testnet_peer_with_signer(&peer1_signer);
-    let peer2_config = genesis_node.testnet_peer_with_signer(&peer2_signer);
+    let peer1_config = genesis_node.testing_peer_with_signer(&peer1_signer);
+    let peer2_config = genesis_node.testing_peer_with_signer(&peer2_signer);
 
     // Start the peers: No packing on the peers, they don't have partition assignments yet
     let peer1_node = IrysNodeTest::new(peer1_config.clone())
@@ -109,7 +109,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     );
 
     // Mine a block with gossip on one of the peers to extend the chain on genesis to have the peers epoch block
-    peer1_node.gossip_block(&fork1_3.0)?;
+    peer1_node.gossip_block_to_peers(&fork1_3.0)?;
     let genesis_hash = genesis_node
         .wait_until_height(fork1_3.0.height, seconds_to_wait)
         .await?;
@@ -136,8 +136,8 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     assert_ne!(peer2_head.previous_block_hash, genesis_epoch_hash);
 
     // Validate that the genesis node reorgs the epoch/commitment state correctly
-    genesis_node.gossip_block(&peer2_epoch)?;
-    genesis_node.gossip_block(&Arc::new(peer2_head.clone()))?;
+    genesis_node.gossip_block_to_peers(&peer2_epoch)?;
+    genesis_node.gossip_block_to_peers(&Arc::new(peer2_head.clone()))?;
 
     let genesis_hash = genesis_node.wait_until_height(5, seconds_to_wait).await?;
     let _genesis_head = genesis_node.get_block_by_hash(&genesis_hash)?;
