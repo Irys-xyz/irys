@@ -13,8 +13,8 @@
 
 use std::{sync::Arc, time::SystemTime};
 
-use alloy_consensus::TxLegacy;
-use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_consensus::TxEip1559;
+use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{Address, TxKind, U256};
 pub use alloy_rlp;
 use alloy_rlp::{Decodable as _, Encodable as _};
@@ -71,20 +71,27 @@ pub mod payload_service_builder;
 pub mod shadow_tx;
 
 #[must_use]
-pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLegacy {
+pub fn compose_shadow_tx(
+    chain_id: u64,
+    shadow_tx: &ShadowTransaction,
+    max_priority_fee_per_gas: u128,
+) -> TxEip1559 {
     // allocate 512 bytes for the shadow tx rlp, misc optimisation
     let mut shadow_tx_rlp = Vec::with_capacity(512);
     shadow_tx.encode(&mut shadow_tx_rlp);
-    TxLegacy {
-        // large enough to not be rejected by the payload builder
-        gas_limit: MINIMUM_GAS_LIMIT,
-        value: U256::ZERO,
+    TxEip1559 {
+        chain_id,
         // nonce is always 0 for shadow txs
         nonce: 0_u64,
         // large enough to not be rejected by the payload builder
-        gas_price: DEFAULT_TX_FEE_CAP_WEI,
-        chain_id: Some(chain_id),
+        gas_limit: MINIMUM_GAS_LIMIT,
+        // large enough to not be rejected by the payload builder
+        max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
+        // Use the provided priority fee
+        max_priority_fee_per_gas,
         to: TxKind::Call(Address::ZERO),
+        value: U256::ZERO,
+        access_list: AccessList::default(),
         input: shadow_tx_rlp.into(),
     }
 }
@@ -403,6 +410,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     use crate::shadow_tx::{
         BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction,
@@ -411,13 +419,13 @@ mod tests {
     use crate::test_utils::*;
     use crate::test_utils::{
         advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance, pledge,
-        sign_tx, stake, storage_fees, unpledge, unstake,
+        sign_tx, stake, storage_fees, unpledge, unstake, DEFAULT_PRIORITY_FEE,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
     use alloy_eips::Encodable2718 as _;
     use alloy_network::{EthereumWallet, TxSigner};
     use alloy_primitives::Signature;
-    use alloy_primitives::{Address, Uint, B256};
+    use alloy_primitives::{Address, B256};
     use alloy_rpc_types_engine::ForkchoiceState;
     use alloy_signer_local::PrivateKeySigner;
     use reth::api::EngineApiMessageVersion;
@@ -443,14 +451,14 @@ mod tests {
         let ctx = TestContext::new().await?;
         let ((node, _shadow_tx_rx), ctx) = ctx.get_single_node()?;
 
-        let shadow_tx = block_reward(ctx.block_producer_a.address());
-        let mut shadow_tx_raw = compose_shadow_tx(1, &shadow_tx);
+        let shadow_tx = block_reward();
+        let mut shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, DEFAULT_PRIORITY_FEE);
         let signed_tx = ctx
             .target_account
             .sign_transaction(&mut shadow_tx_raw)
             .await
             .unwrap();
-        let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(shadow_tx_raw.into_signed(signed_tx))
+        let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(shadow_tx_raw.into_signed(signed_tx))
             .encoded_2718()
             .into();
 
@@ -492,7 +500,8 @@ mod tests {
 
         // Submit shadow transaction to node b
         let shadow_tx = create_shadow_tx(BLOCK_REWARD_ID, ctx.block_producer_b.address());
-        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_b).await?;
+        let shadow_tx =
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_b, DEFAULT_PRIORITY_FEE).await?;
         let shadow_tx_hash = *shadow_tx.hash();
         let _payload_node_b =
             advance_block(&mut node_b, &shadow_tx_store_b, vec![shadow_tx]).await?;
@@ -554,8 +563,8 @@ mod tests {
             1,
             &ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount,
-                target: ctx.block_producer_a.address(),
             })),
+            0, // Block rewards must have 0 priority fee
         );
         let shadow_tx = sign_tx(shadow_tx, &ctx.block_producer_a).await;
         let shadow_tx_hash = *shadow_tx.hash();
@@ -580,13 +589,14 @@ mod tests {
             .assert_new_block(shadow_tx_hash, block_hash, block_number)
             .await?;
 
+        // The producer A is the beneficiary and receives the block reward (no priority fee since BlockReward has no target)
         assert_balance_change(
             &node_b,
             ctx.block_producer_a.address(),
             initial_balance,
-            amount,
+            amount, // block reward only (no priority fee)
             true,
-            "Producer balance should increase",
+            "Producer A balance should increase by block reward only",
         );
 
         Ok(())
@@ -596,9 +606,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     #[rstest::rstest]
     #[case::unstake(unstake, signer_b())]
-    #[case::unstake_init_no_balance(unstake, signer_random())]
-    #[case::block_reward(block_reward, signer_b())]
-    #[case::block_reward_init_no_balance(block_reward, signer_random())]
+    #[case::unstake_init_no_balance(unstake, signer_c())]
     async fn incr_shadow_txs(
         #[case] shadow_tx: impl Fn(Address) -> ShadowTransaction,
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
@@ -612,7 +620,8 @@ mod tests {
         let tx_count = 5;
         let shadow_tx = shadow_tx(target_signer.address());
         let shadow_tx_topic = shadow_tx.topic().into();
-        let shadow_tx = sign_shadow_tx(shadow_tx, &target_signer).await?;
+        let shadow_tx =
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_txs = vec![shadow_tx.clone(); tx_count];
 
         let _block_payload =
@@ -621,21 +630,30 @@ mod tests {
         let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
         assert_topic_present_in_logs(block_execution, shadow_tx_topic, tx_count as u64);
 
-        assert_balance_change(
-            &node,
-            target_signer.address(),
-            initial_balance,
-            U256::from(tx_count),
-            true,
-            "Target balance should increase",
+        // Target should gain from unstake but pay priority fees
+        // Each transaction has 1 Gwei priority fee
+        let total_priority_fees = U256::from(tx_count) * U256::from(1_000_000_000_u64);
+        let unstake_amount = U256::from(tx_count); // 1 wei per unstake tx
+
+        // Calculate expected balance change
+        let final_balance = get_balance(&node.inner, target_signer.address());
+        let _final_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
+
+        // All accounts now have sufficient initial balance to pay fees
+        let expected_balance = initial_balance + unstake_amount - total_priority_fees;
+        assert_eq!(
+            final_balance, expected_balance,
+            "Target balance should be initial + unstake - fees"
         );
+        // Producer is now the beneficiary, so they receive priority fees
+        let expected_producer_gain = total_priority_fees;
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
             initial_producer_balance,
-            U256::ZERO,
+            expected_producer_gain,
             true,
-            "Producer balance should not change",
+            "Producer balance should increase by priority fees (as beneficiary)",
         );
         assert_nonce(
             &node,
@@ -665,7 +683,8 @@ mod tests {
         let tx_count = 2;
         let shadow_tx = shadow_tx(target_signer.address());
         let shadow_tx_topic = shadow_tx.topic().into();
-        let shadow_tx = sign_shadow_tx(shadow_tx, &target_signer).await?;
+        let shadow_tx =
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_txs = vec![shadow_tx.clone(); tx_count];
         let tx_hashes = shadow_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
         let block_payload =
@@ -680,24 +699,30 @@ mod tests {
         // Assert all txs have a corresponding log
         assert_topic_present_in_logs(block_execution, shadow_tx_topic, tx_count as u64);
 
-        // Assert balance for target is decremented
+        // Assert balance for target is decremented by both the shadow tx amount and priority fees
+        // Each transaction costs 1 wei (for stake/storage_fees) + 1 Gwei priority fee
+        let total_priority_fees = U256::from(tx_count) * U256::from(1_000_000_000_u64);
+        let shadow_tx_cost = U256::from(tx_count); // 1 wei per decrement tx
+        let total_cost = shadow_tx_cost + total_priority_fees;
+
         assert_balance_change(
             &node,
             target_signer.address(),
             initial_balance,
-            U256::from(tx_count),
+            total_cost,
             false, // is_decrement
-            "Target balance should be reduced",
+            "Target balance should be reduced by shadow tx amount plus priority fees",
         );
 
-        // Assert balance for producer remains the same (shadow txs cost nothing)
+        // Producer is now the beneficiary, so they receive priority fees
+        let expected_producer_gain = total_priority_fees;
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
             initial_producer_balance,
-            U256::ZERO,
+            expected_producer_gain,
             true,
-            "Producer balance should not change",
+            "Producer balance should increase by priority fees (as beneficiary)",
         );
 
         assert_nonce(
@@ -729,7 +754,8 @@ mod tests {
 
         // Create shadow transactions with lower effective priority
         let shadow_tx = create_shadow_tx(UNSTAKE_ID, ctx.target_account.address());
-        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
+        let shadow_tx =
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_txs = vec![shadow_tx.clone(); 2];
         let shadow_tx_hashes = shadow_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
 
@@ -767,7 +793,8 @@ mod tests {
             target: nonexistent_address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
+        let shadow_tx =
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
         // Submit a normal transaction to ensure block is produced
@@ -821,7 +848,8 @@ mod tests {
             target: ctx.normal_signer.address(),
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
+        let shadow_tx =
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
         // Produce a new block
@@ -855,6 +883,13 @@ mod tests {
     }
 
     #[rstest::fixture]
+    fn signer_c() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
+        let wallets = Wallet::new(3).wallet_gen();
+        let signer_c = EthereumWallet::from(wallets[2].clone());
+        (signer_c.default_signer()) as _
+    }
+
+    #[rstest::fixture]
     fn signer_random() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
         Arc::new(PrivateKeySigner::random())
     }
@@ -872,8 +907,8 @@ mod tests {
 
         for block_number in 1..=5 {
             // Block reward shadow tx
-            let shadow_tx = block_reward(ctx.block_producer_a.address());
-            let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a).await?;
+            let shadow_tx = block_reward();
+            let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
 
             // Normal tx
             let normal_tx_hash = create_and_submit_normal_tx(
@@ -911,14 +946,14 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
-        // Setup nodes and context
         let ctx = TestContext::new().await?;
         let (((mut node_a, shadow_tx_store_node_a), (mut node_b, shadow_tx_store_node_b)), ctx) =
             ctx.get_two_nodes()?;
-        let reward_address = Address::random();
+        // Use the producer B address for checking rewards (it's the beneficiary for node B's blocks)
+        let reward_address = ctx.block_producer_b.address();
 
         // Node A: advance 3 blocks, 2 shadow txs per block
-        let shadow_tx = block_reward(reward_address);
+        let shadow_tx = block_reward();
         let shadow_txs = vec![vec![shadow_tx; 2]; 3];
 
         let _block_hashes_a = advance_blocks(
@@ -936,7 +971,7 @@ mod tests {
         let node_a_reward_balance = get_balance(&node_a.inner, reward_address);
 
         // Node B: advance 4 blocks, 1 shadow tx per block
-        let shadow_tx = block_reward(reward_address);
+        let shadow_tx = block_reward();
         let shadow_txs = vec![vec![shadow_tx; 1]; 4];
         let _block_hashes_b = advance_blocks(
             &mut node_b,
@@ -982,7 +1017,12 @@ mod tests {
             "block hashes after sync must be equal"
         );
         assert_eq!(reward_balance_post_switch_node_a, reward_balance_node_b);
-        assert_eq!(reward_balance_post_switch_node_a, Uint::from(4));
+        // Producer B (beneficiary for node B) starts with initial balance and gets:
+        // - 4 block rewards (1 wei each) = 4 wei
+        // - NO priority fees since block rewards have no target
+        let expected_balance =
+            U256::from_str_radix("1000000000000000000000000", 10).unwrap() + U256::from(4); // block rewards only
+        assert_eq!(reward_balance_post_switch_node_a, expected_balance);
         assert_ne!(
             node_a_reward_balance, reward_balance_node_b,
             "initial rewards differ on forks produced by each chain"
@@ -1020,17 +1060,21 @@ mod tests {
     /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
     #[test_log::test(tokio::test)]
     async fn rollback_state_on_safe_blocks() -> eyre::Result<()> {
-        // Setup custom payload attributes to control parent block hash
+        // Setup custom parent tracker for forkchoice updates
         let parent_tracker = Arc::new(Mutex::new(B256::ZERO));
+
+        // Create context with custom attributes that can track parent block
         let payload_attributes = {
             let parent_tracker = parent_tracker.clone();
-            move |timestamp: u64| {
+            move |timestamp: u64, beneficiary: Address| {
                 let parent = *parent_tracker.lock().unwrap();
-                eth_payload_attributes_with_parent(timestamp, parent)
+                let mut attrs = eth_payload_attributes_with_parent(timestamp, parent);
+                attrs.suggested_fee_recipient = beneficiary;
+                attrs
             }
         };
 
-        let ctx = TestContext::new_with_payload_attributes(payload_attributes).await?;
+        let ctx = TestContext::new_with_custom_attributes(payload_attributes).await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         // Initial setup and baseline measurements
@@ -1042,8 +1086,9 @@ mod tests {
         tracing::info!("Phase 1: Building 4 blocks with block rewards");
         for block_number in 1..=4 {
             // Create block reward transaction
-            let block_reward_tx = block_reward(ctx.block_producer_a.address());
-            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
+            let block_reward_tx = block_reward();
+            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a, 0) // Block rewards must have 0 priority fee
+                .await?;
 
             // Mine the block
             let payload =
@@ -1065,11 +1110,12 @@ mod tests {
             .best_block_number()
             .unwrap();
         assert_eq!(best_block, 4, "Should be at block 4");
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
             initial_balance,
-            U256::from(4),
+            U256::from(4), // 4 block rewards only
             true,
             "Balance should reflect 4 block rewards",
         );
@@ -1105,8 +1151,8 @@ mod tests {
         let fork_block_number = 2; // Building block 2 on top of block 1
                                    // Update parent tracker for payload attributes
         *parent_tracker.lock().unwrap() = rollback_target;
-        let fork_reward_tx = block_reward(ctx.block_producer_a.address());
-        let fork_reward_tx = sign_shadow_tx(fork_reward_tx, &ctx.block_producer_a).await?;
+        let fork_reward_tx = block_reward();
+        let fork_reward_tx = sign_shadow_tx(fork_reward_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         let fork_payload = prepare_block(&mut node, &shadow_tx_store, vec![fork_reward_tx]).await?;
         let fork_block_hash = fork_payload.block().hash();
 
@@ -1162,11 +1208,12 @@ mod tests {
             final_best_block, fork_block_number,
             "Should be at fork block number"
         );
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
         assert_balance_change(
             &node,
             ctx.block_producer_a.address(),
             initial_balance,
-            U256::from(2), // 1 from block 1 + 1 from fork block 2
+            U256::from(2), // 2 block rewards only
             true,
             "Balance should reflect rollback to block 1 + new fork block reward",
         );
@@ -1201,8 +1248,9 @@ mod tests {
 
         // Build 3 blocks with shadow transactions
         for block_number in 1..=3 {
-            let block_reward_tx = block_reward(ctx.block_producer_a.address());
-            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
+            let block_reward_tx = block_reward();
+            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a, 0) // Block rewards must have 0 priority fee
+                .await?;
             shadow_txs.push(block_reward_tx.clone());
 
             let normal_tx = create_and_submit_normal_tx(
@@ -1281,15 +1329,15 @@ mod tests {
 
         // Phase 5: Try to submit the future shadow transactions directly to the pool
         // They should be rejected and never enter the pool
-        let future_shadow_tx_1 = block_reward(ctx.block_producer_a.address());
-        let mut tx_1_raw = compose_shadow_tx(1, &future_shadow_tx_1);
+        let future_shadow_tx_1 = block_reward();
+        let mut tx_1_raw = compose_shadow_tx(1, &future_shadow_tx_1, DEFAULT_PRIORITY_FEE);
         let signed_tx_1 = ctx
             .block_producer_a
             .sign_transaction(&mut tx_1_raw)
             .await
             .unwrap();
         let tx_1_envelope =
-            EthereumTxEnvelope::<TxEip4844>::Legacy(tx_1_raw.into_signed(signed_tx_1))
+            EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_1_raw.into_signed(signed_tx_1))
                 .encoded_2718()
                 .into();
 
@@ -1342,32 +1390,40 @@ mod tests {
         let mut expected_tx_hashes = Vec::new();
 
         // 1. Block reward
-        let block_reward_tx = block_reward(address_a);
-        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
+        let block_reward_tx = block_reward();
+        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         expected_tx_hashes.push(*block_reward_tx.hash());
         shadow_txs.push(block_reward_tx);
 
         // 2. Unstake
         let unstake_tx = unstake(address_b);
-        let unstake_tx = sign_shadow_tx(unstake_tx, &ctx.block_producer_a).await?;
+        let unstake_tx =
+            sign_shadow_tx(unstake_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         expected_tx_hashes.push(*unstake_tx.hash());
         shadow_txs.push(unstake_tx);
 
         // 3. Storage fees
         let storage_fees_tx = storage_fees(address_c);
-        let storage_fees_tx = sign_shadow_tx(storage_fees_tx, &ctx.block_producer_a).await?;
+        let storage_fees_tx =
+            sign_shadow_tx(storage_fees_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         expected_tx_hashes.push(*storage_fees_tx.hash());
         shadow_txs.push(storage_fees_tx);
 
         // 4. Another block reward
-        let block_reward_2_tx = block_reward(address_b);
-        let block_reward_2_tx = sign_shadow_tx(block_reward_2_tx, &ctx.block_producer_a).await?;
+        let block_reward_2_tx = block_reward();
+        let block_reward_2_tx = sign_shadow_tx(
+            block_reward_2_tx,
+            &ctx.block_producer_a,
+            0, // Block rewards must have 0 priority fee
+        )
+        .await?;
         expected_tx_hashes.push(*block_reward_2_tx.hash());
         shadow_txs.push(block_reward_2_tx);
 
         // 5. Stake transaction
         let stake_tx = stake(address_a);
-        let stake_tx = sign_shadow_tx(stake_tx, &ctx.block_producer_a).await?;
+        let stake_tx =
+            sign_shadow_tx(stake_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         expected_tx_hashes.push(*stake_tx.hash());
         shadow_txs.push(stake_tx);
 
@@ -1438,28 +1494,21 @@ mod tests {
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
-        let target_address = ctx.target_account.address();
-
-        // First, give the account some initial balance to allow pledge
-        let initial_funding = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
-        let block_reward_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
-                amount: initial_funding,
-                target: target_address,
-            }));
-        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
-        mine_block(&mut node, &shadow_tx_store, vec![block_reward_tx]).await?;
-
+        let target_address = ctx.normal_signer.address();
         let initial_balance = get_balance(&node.inner, target_address);
+        assert!(
+            initial_balance > U256::ZERO,
+            "Target account should have initial balance"
+        );
 
-        // Create pledge transaction
-        let pledge_amount = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
+        // Create pledge transaction with a smaller amount to ensure it's less than initial balance
+        let pledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 ETH
         let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
             amount: pledge_amount,
             target: target_address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.normal_signer, DEFAULT_PRIORITY_FEE).await?;
         let pledge_tx_hash = *pledge_tx.hash();
 
         // Mine block with pledge transaction
@@ -1473,7 +1522,7 @@ mod tests {
             &node,
             target_address,
             initial_balance,
-            pledge_amount,
+            pledge_amount + U256::from(DEFAULT_PRIORITY_FEE),
             false,
             "Target balance should decrease after pledge",
         );
@@ -1487,22 +1536,17 @@ mod tests {
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
-        let target_address = ctx.target_account.address();
-
-        // First, give the account some balance with a block reward
-        let initial_balance_amount = U256::from(10_000_000_000_000_000_000_u64); // 10 ETH
-        let block_reward_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
-                amount: initial_balance_amount,
-                target: target_address,
-            }));
-        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
-        mine_block(&mut node, &shadow_tx_store, vec![block_reward_tx]).await?;
+        // Use a funded account
+        let target_address = ctx.normal_signer.address();
 
         let balance_after_initial_funding = get_balance(&node.inner, target_address);
+        assert!(
+            balance_after_initial_funding > U256::ZERO,
+            "Target account should have initial balance"
+        );
 
         // Now create unpledge transaction
-        let unpledge_amount = U256::from(3_000_000_000_000_000_000_u64); // 3 ETH
+        let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 ETH
         let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
             shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
                 amount: unpledge_amount,
@@ -1510,7 +1554,8 @@ mod tests {
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         ));
-        let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx =
+            sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
 
         // Mine block with unpledge transaction
@@ -1524,7 +1569,7 @@ mod tests {
             &node,
             target_address,
             balance_after_initial_funding,
-            unpledge_amount,
+            unpledge_amount - U256::from(DEFAULT_PRIORITY_FEE),
             true,
             "Target balance should increase after unpledge",
         );
@@ -1538,18 +1583,8 @@ mod tests {
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
-        let target_address = ctx.target_account.address();
-
-        // First, give the account some initial balance to allow pledge operations
-        let initial_funding = U256::from(5_000_000_000_000_000_000_u64); // 5 ETH
-        let block_reward_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
-                amount: initial_funding,
-                target: target_address,
-            }));
-        let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a).await?;
-        mine_block(&mut node, &shadow_tx_store, vec![block_reward_tx]).await?;
-
+        // Use a funded account
+        let target_address = ctx.normal_signer.address();
         let initial_balance = get_balance(&node.inner, target_address);
 
         // Create multiple pledge and unpledge transactions
@@ -1558,19 +1593,22 @@ mod tests {
 
         // 1. Pledge transaction
         let pledge_tx = pledge(target_address);
-        let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx =
+            sign_shadow_tx(pledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         expected_tx_hashes.push(*pledge_tx.hash());
         shadow_txs.push(pledge_tx);
 
         // 2. Another pledge transaction
         let pledge_tx2 = pledge(target_address);
-        let pledge_tx2 = sign_shadow_tx(pledge_tx2, &ctx.block_producer_a).await?;
+        let pledge_tx2 =
+            sign_shadow_tx(pledge_tx2, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         expected_tx_hashes.push(*pledge_tx2.hash());
         shadow_txs.push(pledge_tx2);
 
         // 3. Unpledge transaction
         let unpledge_tx = unpledge(target_address);
-        let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx =
+            sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         expected_tx_hashes.push(*unpledge_tx.hash());
         shadow_txs.push(unpledge_tx);
 
@@ -1602,18 +1640,24 @@ mod tests {
             );
         }
 
-        // Verify final balance (2 pledge decrements - 1 unpledge increment = net -1)
+        // Calculate expected final balance accounting for priority fees
+        // Each transaction costs DEFAULT_PRIORITY_FEE
+        // Net operation: 2 pledge decrements (-2 wei) + 1 unpledge increment (+1 wei) = -1 wei
+        // Total priority fees: 3 * DEFAULT_PRIORITY_FEE
+        let total_priority_fees = U256::from(DEFAULT_PRIORITY_FEE) * U256::from(3);
+        let net_operation_change = U256::ONE; // Net decrease of 1 wei from operations
+        let expected_final_balance = initial_balance - net_operation_change - total_priority_fees;
+
         let final_balance = get_balance(&node.inner, target_address);
-        let expected_final_balance = initial_balance - U256::ONE; // 2 decrements - 1 increment = -1
         assert_eq!(
             final_balance, expected_final_balance,
-            "Final balance should reflect net effect of pledge/unpledge operations"
+            "Final balance should reflect net effect of pledge/unpledge operations plus priority fees"
         );
 
         Ok(())
     }
 
-    /// Test unpledge on non-existent account creates the account
+    /// Test unpledge on non-existent account is rejected
     #[test_log::test(tokio::test)]
     async fn test_unpledge_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
@@ -1639,24 +1683,47 @@ mod tests {
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
         ));
-        let unpledge_tx = sign_shadow_tx(unpledge_tx, &ctx.block_producer_a).await?;
+        let unpledge_tx =
+            sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
+
+        // Submit a normal transaction to ensure block is produced
+        let normal_tx_hash = create_and_submit_normal_tx(
+            &mut node,
+            0,
+            U256::from(1000),
+            1_000_000_000_u128,
+            Address::random(),
+            &ctx.normal_signer,
+        )
+        .await?;
 
         // Produce a new block
         let block_payload = mine_block(&mut node, &shadow_tx_store, vec![unpledge_tx]).await?;
 
-        // Verify the unpledge transaction IS included (balance increments can create accounts)
-        assert_txs_in_block(
+        // Verify the unpledge transaction is NOT included (rejected due to non-existent account)
+        assert_txs_not_in_block(
             &block_payload,
             &[unpledge_tx_hash],
-            "Unpledge transaction should be included and create account",
+            "Unpledge transaction for non-existent account should not be included in block",
         );
 
-        // Verify the account now exists with the unpledged balance
-        let final_balance = get_balance(&node.inner, nonexistent_address);
-        assert_eq!(
-            final_balance, unpledge_amount,
-            "Account should have been created with unpledged amount"
+        // Verify the normal transaction IS included
+        assert_txs_in_block(
+            &block_payload,
+            &[normal_tx_hash],
+            "Normal transaction should be included in block",
+        );
+
+        // Verify the account still doesn't exist
+        let final_account = node
+            .inner
+            .provider
+            .basic_account(&nonexistent_address)
+            .unwrap();
+        assert!(
+            final_account.is_none(),
+            "Non-existent account should remain non-existent after rejected unpledge"
         );
 
         Ok(())
@@ -1685,7 +1752,8 @@ mod tests {
             target: nonexistent_address,
             irys_ref: alloy_primitives::FixedBytes::ZERO,
         }));
-        let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.block_producer_a).await?;
+        let pledge_tx =
+            sign_shadow_tx(pledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let pledge_tx_hash = *pledge_tx.hash();
 
         // Submit a normal transaction to ensure block is produced
@@ -1718,6 +1786,385 @@ mod tests {
 
         Ok(())
     }
+
+    /// Test that shadow transactions with priority fees distribute fees to beneficiary
+    #[test_log::test(tokio::test)]
+    async fn test_shadow_tx_priority_fee_distribution() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Get initial balances
+        let beneficiary = ctx.block_producer_a.address(); // Producer A is the beneficiary for node 0
+        let target_address = ctx.target_account.address();
+
+        // Fund the target account first to ensure it can pay priority fees
+        let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
+        let fund_tx =
+            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+                amount: funding_amount,
+            }));
+        let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
+        mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
+
+        let initial_beneficiary_balance = get_balance(&node.inner, beneficiary);
+        let initial_target_balance = get_balance(&node.inner, target_address);
+
+        // Create shadow transaction with significant priority fee
+        let priority_fee_per_gas = 10_000_000_000_u128; // 10 Gwei
+                                                        // Use unstake instead of block_reward so there's a target for priority fee
+        let shadow_tx = unstake(target_address);
+        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
+        let expected_priority_fee = U256::from(priority_fee_per_gas);
+
+        // Sign and prepare the transaction using the helper (signed by block producer)
+        let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
+
+        // Mine block with shadow transaction
+        let _block_payload =
+            mine_block(&mut node, &shadow_tx_store, vec![shadow_tx_pooled]).await?;
+
+        // Verify beneficiary received the priority fee
+        assert_balance_change(
+            &node,
+            beneficiary,
+            initial_beneficiary_balance,
+            expected_priority_fee,
+            true,
+            "Beneficiary should receive priority fee",
+        );
+
+        // Verify target balance changed: received unstake amount (1 wei) minus priority fee
+        let unstake_amount = U256::from(1); // unstake gives 1 wei
+        let net_decrease = expected_priority_fee - unstake_amount; // Fee is larger than unstake amount
+        assert_balance_change(
+            &node,
+            target_address,
+            initial_target_balance,
+            net_decrease,
+            false, // This is a decrease
+            "Target balance should decrease by net of priority fee minus unstake amount",
+        );
+
+        Ok(())
+    }
+
+    /// Test multiple shadow transactions accumulate priority fees correctly
+    #[test_log::test(tokio::test)]
+    async fn test_multiple_shadow_tx_priority_fees() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        let beneficiary = ctx.block_producer_a.address(); // Producer A is the beneficiary for node 0
+        let target_address = ctx.target_account.address();
+
+        // Fund the target account first to ensure it can pay priority fees
+        let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
+        let fund_tx =
+            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+                amount: funding_amount,
+            }));
+        let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
+        mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
+
+        let initial_beneficiary_balance = get_balance(&node.inner, beneficiary);
+        let initial_target_balance = get_balance(&node.inner, target_address);
+
+        // Create multiple shadow transactions with different priority fees
+        let mut shadow_txs = Vec::new();
+        let mut total_expected_fee = U256::ZERO;
+
+        // Mix transaction types - some with targets (unstake) and some without (block_reward)
+        // Transaction 1: Unstake (has target, so priority fee is distributed)
+        let priority_fee_1 = 1_000_000_000_u128; // 1 Gwei
+        let shadow_tx_1 = unstake(target_address);
+        let shadow_tx_raw_1 = compose_shadow_tx(1, &shadow_tx_1, priority_fee_1);
+        total_expected_fee += U256::from(priority_fee_1);
+        let shadow_tx_pooled_1 = sign_tx(shadow_tx_raw_1, &ctx.block_producer_a).await;
+        shadow_txs.push(shadow_tx_pooled_1);
+
+        // Transaction 2: Block reward (must have 0 priority fee)
+        let priority_fee_2 = 0; // Block rewards must have 0 priority fee
+        let shadow_tx_2 = block_reward();
+        let shadow_tx_raw_2 = compose_shadow_tx(1, &shadow_tx_2, priority_fee_2);
+        // Block rewards with non-zero priority fees are now rejected
+        let shadow_tx_pooled_2 = sign_tx(shadow_tx_raw_2, &ctx.block_producer_a).await;
+        shadow_txs.push(shadow_tx_pooled_2);
+
+        // Transaction 3: Stake (has target, so priority fee is distributed)
+        let priority_fee_3 = 3_000_000_000_u128; // 3 Gwei
+        let shadow_tx_3 = stake(target_address);
+        let shadow_tx_raw_3 = compose_shadow_tx(1, &shadow_tx_3, priority_fee_3);
+        total_expected_fee += U256::from(priority_fee_3);
+        let shadow_tx_pooled_3 = sign_tx(shadow_tx_raw_3, &ctx.block_producer_a).await;
+        shadow_txs.push(shadow_tx_pooled_3);
+
+        // Mine block with all shadow transactions
+        let _block_payload = mine_block(&mut node, &shadow_tx_store, shadow_txs).await?;
+
+        // Verify beneficiary received only fees from transactions with targets
+        // Only unstake (1 Gwei) and stake (3 Gwei) have targets, so total = 4 Gwei
+        let expected_beneficiary_fee = U256::from(priority_fee_1) + U256::from(priority_fee_3);
+        assert_balance_change(
+            &node,
+            beneficiary,
+            initial_beneficiary_balance,
+            expected_beneficiary_fee + U256::from(1), // fees + block reward amount
+            true,
+            "Beneficiary should receive fees only from transactions with targets plus block reward",
+        );
+
+        // Verify target balance changed by net of operations and fees
+        // Target receives: +1 wei (unstake) -1 wei (stake) -4 Gwei (fees) = -4 Gwei total
+        let net_target_change = U256::from(4_000_000_000_u64); // 4 Gwei deducted
+        assert_balance_change(
+            &node,
+            target_address,
+            initial_target_balance,
+            net_target_change,
+            false, // This is a decrease
+            "Target should pay priority fees for transactions where it's the target",
+        );
+
+        Ok(())
+    }
+
+    /// Test shadow tx priority fees go to different miner than tx signer
+    /// (This is to enable mining pools in the future, where a beneficiary
+    /// of a block may be a different entity that actually mined the block)
+    #[test_log::test(tokio::test)]
+    async fn test_shadow_tx_priority_fee_different_miner() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        // Get node 1 (second node) which has producer B as beneficiary
+        let (((mut _node_a, _shadow_tx_store_a), (mut node, shadow_tx_store)), ctx) =
+            ctx.get_two_nodes()?;
+
+        let miner_address = ctx.block_producer_b.address(); // Producer B is the beneficiary for node 1
+
+        // Get initial balances
+        let initial_miner_balance = get_balance(&node.inner, miner_address);
+        let initial_signer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
+
+        // Create shadow transaction with priority fee
+        let priority_fee_per_gas = 20_000_000_000_u128; // 20 Gwei
+                                                        // Use stake transaction which has a target
+        let target_address = ctx.block_producer_a.address(); // Producer A is the target
+        let shadow_tx = stake(target_address);
+        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
+        let expected_priority_fee = U256::from(priority_fee_per_gas);
+
+        // Sign with block producer A (the target, not the miner)
+        let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
+
+        // Mine block
+        let _block_payload =
+            mine_block(&mut node, &shadow_tx_store, vec![shadow_tx_pooled]).await?;
+
+        // Verify miner (producer B) received the priority fee
+        let expected_total = expected_priority_fee; // priority fee only
+        assert_balance_change(
+            &node,
+            miner_address,
+            initial_miner_balance,
+            expected_total,
+            true,
+            "Miner (block producer B) should receive priority fee",
+        );
+
+        // Verify signer (producer A) balance decreased by stake amount + priority fee
+        let stake_amount = U256::from(1); // stake decrements 1 wei
+        let total_decrease = stake_amount + expected_priority_fee;
+        assert_balance_change(
+            &node,
+            ctx.block_producer_a.address(),
+            initial_signer_balance,
+            total_decrease,
+            false, // This is a decrease
+            "Signer (block producer A) balance should decrease by stake amount plus priority fee",
+        );
+
+        Ok(())
+    }
+
+    /// Test that block reward transactions with non-zero priority fees are rejected
+    #[test_log::test(tokio::test)]
+    async fn test_block_reward_rejects_priority_fee() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Create a block reward transaction with a non-zero priority fee
+        let invalid_shadow_tx = block_reward();
+        let priority_fee_per_gas = 1_000_000_000_u128; // 1 Gwei (should be rejected)
+        let invalid_shadow_tx_raw = compose_shadow_tx(1, &invalid_shadow_tx, priority_fee_per_gas);
+
+        // Sign the invalid transaction
+        let invalid_shadow_tx_pooled = sign_tx(invalid_shadow_tx_raw, &ctx.block_producer_a).await;
+
+        // Also create a valid transaction so the block can be produced
+        // Using unstake which increments balance (so we don't need to fund the account first)
+        let valid_tx = unstake(ctx.target_account.address());
+        let valid_tx_raw = compose_shadow_tx(1, &valid_tx, 0); // 0 priority fee
+        let valid_tx_pooled = sign_tx(valid_tx_raw, &ctx.block_producer_a).await;
+
+        // Record initial balances
+        let beneficiary = ctx.block_producer_a.address();
+        let target_address = ctx.target_account.address();
+        let initial_beneficiary_balance = get_balance(&node.inner, beneficiary);
+        let initial_target_balance = get_balance(&node.inner, target_address);
+
+        // Try to mine block with both transactions (invalid block reward + valid stake)
+        let block_payload = mine_block(
+            &mut node,
+            &shadow_tx_store,
+            vec![invalid_shadow_tx_pooled.clone(), valid_tx_pooled.clone()],
+        )
+        .await?;
+
+        // Verify the invalid transaction was not included in the block
+        let invalid_tx_hash = invalid_shadow_tx_pooled.hash();
+        let valid_tx_hash = valid_tx_pooled.hash();
+        let block_tx_hashes: HashSet<_> = block_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.hash())
+            .collect();
+        assert!(
+            !block_tx_hashes.contains(invalid_tx_hash),
+            "Block reward transaction with priority fee should not be included in block"
+        );
+        assert!(
+            block_tx_hashes.contains(valid_tx_hash),
+            "Valid unstake transaction should be included in block"
+        );
+
+        // Verify balances after the block
+        let final_beneficiary_balance = get_balance(&node.inner, beneficiary);
+        let final_target_balance = get_balance(&node.inner, target_address);
+
+        // Beneficiary balance should not change (no block reward from rejected tx, no fee on unstake with 0 priority fee)
+        assert_eq!(
+            final_beneficiary_balance, initial_beneficiary_balance,
+            "Beneficiary balance should not change"
+        );
+
+        // Target balance should increase by 1 (unstake increments balance)
+        assert_eq!(
+            final_target_balance - initial_target_balance,
+            U256::from(1),
+            "Target balance should increase by unstake amount"
+        );
+
+        // Now test that a block reward with 0 priority fee works correctly
+        let valid_shadow_tx = block_reward();
+        let valid_shadow_tx_raw = compose_shadow_tx(1, &valid_shadow_tx, 0); // 0 priority fee, chain ID 1
+        let valid_shadow_tx_pooled = sign_tx(valid_shadow_tx_raw, &ctx.block_producer_a).await;
+
+        // Mine block with valid block reward transaction
+        let _block_payload =
+            mine_block(&mut node, &shadow_tx_store, vec![valid_shadow_tx_pooled]).await?;
+
+        // Verify the block reward was applied
+        let final_balance_after_valid = get_balance(&node.inner, beneficiary);
+        assert_eq!(
+            final_balance_after_valid - final_beneficiary_balance,
+            U256::ONE, // Block reward amount is 1 wei
+            "Beneficiary should receive block reward from valid shadow tx with 0 priority fee"
+        );
+
+        Ok(())
+    }
+
+    /// Test that all shadow transaction types (except block rewards) properly distribute priority fees
+    #[test_log::test(tokio::test)]
+    async fn test_all_shadow_tx_types_priority_fees() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        let beneficiary = ctx.block_producer_a.address();
+        let target_address = ctx.target_account.address();
+
+        // Fund the target account first
+        let funding_amount = U256::from(1_000_000_000_000_u128); // 1000 Gwei
+        let fund_tx =
+            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+                amount: funding_amount,
+            }));
+        let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
+        mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
+
+        let initial_beneficiary_balance = get_balance(&node.inner, beneficiary);
+        let initial_target_balance = get_balance(&node.inner, target_address);
+
+        // Test each transaction type with priority fees
+        let mut shadow_txs = Vec::new();
+        let mut total_expected_fee = U256::ZERO;
+
+        // 1. Stake (decrements balance, has target)
+        let priority_fee_stake = 1_000_000_000_u128; // 1 Gwei
+        let stake_tx = stake(target_address);
+        let stake_tx_raw = compose_shadow_tx(1, &stake_tx, priority_fee_stake);
+        total_expected_fee += U256::from(priority_fee_stake);
+        shadow_txs.push(sign_tx(stake_tx_raw, &ctx.block_producer_a).await);
+
+        // 2. Unstake (increments balance, has target)
+        let priority_fee_unstake = 2_000_000_000_u128; // 2 Gwei
+        let unstake_tx = unstake(target_address);
+        let unstake_tx_raw = compose_shadow_tx(1, &unstake_tx, priority_fee_unstake);
+        total_expected_fee += U256::from(priority_fee_unstake);
+        shadow_txs.push(sign_tx(unstake_tx_raw, &ctx.block_producer_a).await);
+
+        // 3. Pledge (decrements balance, has target)
+        let priority_fee_pledge = 3_000_000_000_u128; // 3 Gwei
+        let pledge_tx = pledge(target_address);
+        let pledge_tx_raw = compose_shadow_tx(1, &pledge_tx, priority_fee_pledge);
+        total_expected_fee += U256::from(priority_fee_pledge);
+        shadow_txs.push(sign_tx(pledge_tx_raw, &ctx.block_producer_a).await);
+
+        // 4. Unpledge (increments balance, has target)
+        let priority_fee_unpledge = 4_000_000_000_u128; // 4 Gwei
+        let unpledge_tx = unpledge(target_address);
+        let unpledge_tx_raw = compose_shadow_tx(1, &unpledge_tx, priority_fee_unpledge);
+        total_expected_fee += U256::from(priority_fee_unpledge);
+        shadow_txs.push(sign_tx(unpledge_tx_raw, &ctx.block_producer_a).await);
+
+        // 5. Storage fees (decrements balance, has target)
+        let priority_fee_storage = 5_000_000_000_u128; // 5 Gwei
+        let storage_tx = storage_fees(target_address);
+        let storage_tx_raw = compose_shadow_tx(1, &storage_tx, priority_fee_storage);
+        total_expected_fee += U256::from(priority_fee_storage);
+        shadow_txs.push(sign_tx(storage_tx_raw, &ctx.block_producer_a).await);
+
+        // Mine block with all shadow transactions
+        let _block_payload = mine_block(&mut node, &shadow_tx_store, shadow_txs).await?;
+
+        // Verify beneficiary received all priority fees
+        // Total fees: 1 + 2 + 3 + 4 + 5 = 15 Gwei
+        assert_balance_change(
+            &node,
+            beneficiary,
+            initial_beneficiary_balance,
+            total_expected_fee,
+            true,
+            "Beneficiary should receive all priority fees from transactions with targets",
+        );
+
+        // Verify target balance changed correctly
+        // Net operations: -1 (stake) +1 (unstake) -1 (pledge) +1 (unpledge) -1 (storage) = -1 wei
+        // Plus paying all the priority fees: -15 Gwei
+        let net_operations = U256::from(1); // Net decrease of 1 wei from operations
+        let total_decrease = net_operations + total_expected_fee;
+        assert_balance_change(
+            &node,
+            target_address,
+            initial_target_balance,
+            total_decrease,
+            false, // This is a decrease
+            "Target should pay all priority fees and have net operation decrease",
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "test-utils", test))]
@@ -1727,7 +2174,7 @@ pub mod test_utils {
     use crate::payload::DeterministicShadowTxKey;
     use crate::shadow_tx::{ShadowTransaction, TransactionPacket};
     use alloy_consensus::EthereumTxEnvelope;
-    use alloy_consensus::{SignableTransaction as _, TxEip4844, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEip4844, TxLegacy};
     use alloy_genesis::Genesis;
     use alloy_network::EthereumWallet;
     use alloy_network::TxSigner;
@@ -1736,6 +2183,9 @@ pub mod test_utils {
     use alloy_primitives::{TxKind, U256};
     use alloy_rpc_types::engine::PayloadAttributes;
     use reth::providers::CanonStateSubscriptions;
+
+    /// Default priority fee for shadow transactions in tests (1 Gwei)
+    pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
     use reth::{
         api::{FullNodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
@@ -1771,11 +2221,11 @@ pub mod test_utils {
 
     impl TestContext {
         pub async fn new() -> eyre::Result<Self> {
-            Self::new_with_payload_attributes(eth_payload_attributes).await
+            Self::new_with_custom_attributes(eth_payload_attributes_with_beneficiary).await
         }
 
-        pub async fn new_with_payload_attributes(
-            payload_attributes: impl Fn(u64) -> EthPayloadBuilderAttributes
+        pub async fn new_with_custom_attributes(
+            payload_attributes: impl Fn(u64, Address) -> EthPayloadBuilderAttributes
                 + Send
                 + Sync
                 + Clone
@@ -1848,12 +2298,13 @@ pub mod test_utils {
         }
     }
 
-    /// Helper for creating and submitting shadow transactions
+    /// Helper for creating and signing shadow transactions with configurable priority fee.
     pub async fn sign_shadow_tx(
         shadow_tx: ShadowTransaction,
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
+        max_priority_fee_per_gas: u128,
     ) -> eyre::Result<EthPooledTransaction> {
-        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx);
+        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, max_priority_fee_per_gas);
         let shadow_pooled_tx = sign_tx(shadow_tx_raw, signer).await;
         Ok(shadow_pooled_tx)
     }
@@ -1868,7 +2319,7 @@ pub mod test_utils {
     ) -> eyre::Result<Vec<EthPooledTransaction>> {
         let mut txs = Vec::new();
         for _ in 0..count {
-            let tx = sign_shadow_tx(shadow_tx.clone(), signer).await?;
+            let tx = sign_shadow_tx(shadow_tx.clone(), signer, DEFAULT_PRIORITY_FEE).await?;
             txs.push(tx);
         }
         shadow_tx_store.set_shadow_txs(key, txs.clone());
@@ -2097,7 +2548,7 @@ pub mod test_utils {
     pub fn create_shadow_tx(tx_type: u8, address: Address) -> ShadowTransaction {
         use crate::shadow_tx::*;
         match tx_type {
-            BLOCK_REWARD_ID => block_reward(address),
+            BLOCK_REWARD_ID => block_reward(),
             UNSTAKE_ID => unstake(address),
             STAKE_ID => stake(address),
             STORAGE_FEES_ID => storage_fees(address),
@@ -2157,11 +2608,19 @@ pub mod test_utils {
             let mut shadow_txs = Vec::new();
             for shadow_tx in shadow_txs_raw {
                 // Use the shadow tx directly since metadata fields are removed
-                let updated_shadow_tx = match shadow_tx {
-                    ShadowTransaction::V1 { packet } => ShadowTransaction::new_v1(packet),
+                let updated_shadow_tx = match &shadow_tx {
+                    ShadowTransaction::V1 { packet } => ShadowTransaction::new_v1(packet.clone()),
                 };
 
-                let shadow_tx = sign_shadow_tx(updated_shadow_tx, signer).await?;
+                // Block rewards must have 0 priority fee, others can use default
+                let priority_fee = match &shadow_tx {
+                    ShadowTransaction::V1 { packet } => match packet {
+                        TransactionPacket::BlockReward(_) => 0,
+                        _ => DEFAULT_PRIORITY_FEE,
+                    },
+                };
+
+                let shadow_tx = sign_shadow_tx(updated_shadow_tx, signer, priority_fee).await?;
                 shadow_txs.push(shadow_tx);
             }
 
@@ -2184,12 +2643,9 @@ pub mod test_utils {
     }
 
     /// Compose a shadow tx for block reward.
-    pub fn block_reward(address: Address) -> ShadowTransaction {
+    pub fn block_reward() -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-            shadow_tx::BlockRewardIncrement {
-                amount: U256::ONE,
-                target: address,
-            },
+            shadow_tx::BlockRewardIncrement { amount: U256::ONE },
         ))
     }
 
@@ -2295,12 +2751,25 @@ pub mod test_utils {
     }
 
     /// Sign a legacy transaction with the provided signer.
-    pub async fn sign_tx(
+    pub async fn sign_tx_legacy(
         mut tx_raw: TxLegacy,
         new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
     ) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
         let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
         let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
+            .try_into_recovered()
+            .unwrap();
+
+        EthPooledTransaction::new(tx, 300)
+    }
+
+    /// Sign an EIP-1559 transaction with the provided signer.
+    pub async fn sign_tx(
+        mut tx_raw: TxEip1559,
+        new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
+    ) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
+        let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
+        let tx = alloy_consensus::EthereumTxEnvelope::Eip1559(tx_raw.into_signed(signed_tx))
             .try_into_recovered()
             .unwrap();
 
@@ -2423,6 +2892,21 @@ pub mod test_utils {
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
     }
 
+    /// Returns payload attributes with a custom beneficiary address.
+    pub fn eth_payload_attributes_with_beneficiary(
+        timestamp: u64,
+        beneficiary: Address,
+    ) -> EthPayloadBuilderAttributes {
+        let attributes = PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: beneficiary,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::ZERO),
+        };
+        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+    }
+
     /// Returns payload attributes for a given timestamp and parent block hash.
     pub fn eth_payload_attributes_with_parent(
         timestamp: u64,
@@ -2454,7 +2938,7 @@ pub mod test_utils {
         num_nodes: &[Address],
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
-        attributes_generator: impl Fn(u64) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
+        attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
     ) -> eyre::Result<(
         Vec<(NodeHelperType<IrysEthereumNode>, ShadowTxStore)>,
         TaskManager,
@@ -2481,7 +2965,7 @@ pub mod test_utils {
         let mut nodes: Vec<(NodeTestContext<_, _>, ShadowTxStore)> =
             Vec::with_capacity(num_nodes.len());
 
-        for (idx, _producer) in num_nodes.iter().enumerate() {
+        for (idx, producer) in num_nodes.iter().enumerate() {
             let node_config = NodeConfig::new(chain_spec.clone())
                 .with_network(network_config.clone())
                 .with_unused_ports()
@@ -2505,7 +2989,14 @@ pub mod test_utils {
                 .launch()
                 .await?;
 
-            let mut node = NodeTestContext::new(node, attributes_generator.clone()).await?;
+            // Create a closure that passes the producer address
+            let node_attributes_generator = {
+                let attributes_generator = attributes_generator.clone();
+                let producer_address = *producer;
+                move |timestamp| attributes_generator(timestamp, producer_address)
+            };
+
+            let mut node = NodeTestContext::new(node, node_attributes_generator).await?;
 
             // Connect each node in a chain.
             if let Some(previous_node) = nodes.last_mut() {

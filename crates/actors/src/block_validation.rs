@@ -586,6 +586,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     );
     let shadow_txs = shadow_txs
         .generate_all(&commitment_txs, &data_txs)
+        .map(|result| result.map(|metadata| metadata.shadow_tx))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(shadow_txs)
 }
