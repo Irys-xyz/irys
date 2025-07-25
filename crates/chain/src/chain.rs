@@ -31,8 +31,8 @@ use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
-    CommitmentSnapshotStatus, EpochReplayData, ExecutionPayloadCache, IrysRethProvider,
-    IrysRethProviderInner, PeerList, StorageModule, StorageModuleInfo, StorageModulesReadGuard,
+    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
+    StorageModule, StorageModuleInfo, StorageModulesReadGuard,
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
@@ -1671,7 +1671,7 @@ async fn stake_and_pledge(
 
     // now check the canonical state
 
-    let (is_historically_staked, mut commitment_snapshot) = {
+    let (is_historically_staked, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
         let is_historically_staked = epoch_snapshot.is_staked(address);

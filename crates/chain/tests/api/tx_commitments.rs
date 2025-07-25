@@ -6,7 +6,9 @@ use irys_actors::packing::wait_for_packing;
 use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
+use irys_types::{
+    irys::IrysSigner, Address, CommitmentTransaction, CommitmentType, NodeConfig, H256,
+};
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
@@ -460,13 +462,21 @@ async fn post_stake_commitment(
     node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
 ) -> CommitmentTransaction {
+    // Get stake price from API
+    let price_info = node
+        .get_stake_price()
+        .await
+        .expect("Failed to get stake price from API");
+
     let consensus = &node.node_ctx.config.consensus;
-    info!("Node consensus stake_fee: {:?}", consensus.stake_value);
-    info!(
-        "Node consensus stake_fee amount: {}",
-        consensus.stake_value.amount
-    );
-    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
+    let stake_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Stake,
+        anchor: H256::default(),
+        fee: price_info.fee,
+        value: price_info.value,
+        ..CommitmentTransaction::new(consensus)
+    };
+
     info!("Created stake_tx with value: {:?}", stake_tx.value);
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
     info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
@@ -483,16 +493,21 @@ async fn post_pledge_commitment(
     signer: &IrysSigner,
     anchor: H256,
 ) -> CommitmentTransaction {
+    // Get pledge price from API
+    let price_info = node
+        .get_pledge_price(signer.address())
+        .await
+        .expect("Failed to get pledge price from API");
+
     let consensus = &node.node_ctx.config.consensus;
-    // Get the CommitmentSnapshot from the latest canonical block
-    let pledge_tx = CommitmentTransaction::new_pledge(
-        consensus,
+    let pledge_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Pledge,
         anchor,
-        1,
-        node.node_ctx.mempool_pledge_provider.as_ref(),
-        signer.address(),
-    )
-    .await;
+        fee: price_info.fee,
+        value: price_info.value,
+        ..CommitmentTransaction::new(consensus)
+    };
+
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 

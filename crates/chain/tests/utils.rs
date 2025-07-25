@@ -13,7 +13,6 @@ use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
-use irys_actors::mempool_service::MempoolPledgeProvider;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     block_producer::BlockProducerCommand,
@@ -22,6 +21,7 @@ use irys_actors::{
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
 };
+use irys_api_server::routes::price::CommitmentPriceInfo;
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::{
@@ -32,8 +32,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshot,
-    CommitmentSnapshotStatus, EmaSnapshot,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
+    EmaSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -49,7 +49,7 @@ use irys_types::{
 use irys_types::{
     Base64, CommitmentTransaction, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode,
-    PackedChunk, PeerAddress, PledgeDataProvider, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -1529,6 +1529,47 @@ impl IrysNodeTest<IrysNodeCtx> {
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
             .await
+    }
+
+    pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/price/commitment/stake", api_uri);
+
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get stake price: {}", e))?;
+
+        let price_info: CommitmentPriceInfo = response
+            .json()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to parse stake price response: {}", e))?;
+
+        Ok(price_info)
+    }
+
+    pub async fn get_pledge_price(
+        &self,
+        user_address: Address,
+    ) -> eyre::Result<CommitmentPriceInfo> {
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/price/commitment/pledge/{}", api_uri, user_address);
+
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get pledge price: {}", e))?;
+
+        let price_info: CommitmentPriceInfo = response
+            .json()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to parse pledge price response: {}", e))?;
+
+        Ok(price_info)
     }
 
     pub async fn post_commitment_tx_raw_without_gossip(
