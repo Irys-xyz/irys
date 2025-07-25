@@ -51,15 +51,6 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
 
     let config = genesis_node.node_ctx.config.consensus.clone();
 
-    // Get the commitment snapshot from this block
-    let mut commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_commitment_snapshot(&blk.block_hash)?
-        .as_ref()
-        .clone();
-
     if stake {
         let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero(), 1);
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
@@ -77,11 +68,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         let anchor = H256::zero();
         for _idx in 0..pledges {
             genesis_node
-                .post_pledge_commitment_with_snapshot(
-                    &peer_signer,
-                    anchor,
-                    &mut commitment_snapshot,
-                )
+                .post_pledge_commitment_with_signer(&peer_signer, anchor)
                 .await;
             already_processed_count += 1;
             // don't wait if we haven't posted a stake (stuck in the LRU)

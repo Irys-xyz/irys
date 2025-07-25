@@ -91,30 +91,13 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // Create stake commitment for first test signer
         let stake_tx1 = post_stake_commitment(&node, &signer1).await;
 
-        // Get the CommitmentSnapshot from the latest canonical block
-        let mut commitment_snapshot = node
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .canonical_commitment_snapshot()
-            .as_ref()
-            .clone();
-
         // Create two pledge commitments for first test signer
         let pledge1 = &node
-            .post_pledge_commitment_with_snapshot(
-                &signer1,
-                H256::default(),
-                &mut commitment_snapshot,
-            )
+            .post_pledge_commitment_with_signer(&signer1, H256::default())
             .await;
 
         let pledge2 = &node
-            .post_pledge_commitment_with_snapshot(
-                &signer1,
-                H256::default(),
-                &mut commitment_snapshot,
-            )
+            .post_pledge_commitment_with_signer(&signer1, H256::default())
             .await;
 
         // Create stake commitment for second test signer
@@ -397,15 +380,14 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address
-    use irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot;
-    let empty_snapshot = CommitmentSnapshot::default();
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         H256::default(),
         1,
-        &empty_snapshot,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
-    );
+    )
+    .await;
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -450,9 +432,10 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
         consensus,
         H256::default(),
         1,
-        &empty_snapshot,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
-    );
+    )
+    .await;
     let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
@@ -478,10 +461,10 @@ async fn post_stake_commitment(
     signer: &IrysSigner,
 ) -> CommitmentTransaction {
     let consensus = &node.node_ctx.config.consensus;
-    info!("Node consensus stake_fee: {:?}", consensus.stake_fee);
+    info!("Node consensus stake_fee: {:?}", consensus.stake_value);
     info!(
         "Node consensus stake_fee amount: {}",
-        consensus.stake_fee.amount
+        consensus.stake_value.amount
     );
     let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
     info!("Created stake_tx with value: {:?}", stake_tx.value);
@@ -502,18 +485,14 @@ async fn post_pledge_commitment(
 ) -> CommitmentTransaction {
     let consensus = &node.node_ctx.config.consensus;
     // Get the CommitmentSnapshot from the latest canonical block
-    let commitment_snapshot = node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         anchor,
         1,
-        &*commitment_snapshot,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
-    );
+    )
+    .await;
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 

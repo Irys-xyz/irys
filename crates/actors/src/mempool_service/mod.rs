@@ -4,11 +4,13 @@ pub mod data_txs;
 pub mod facade;
 pub mod inner;
 pub mod lifecycle;
+pub mod pledge_provider;
 
 pub use chunks::*;
 pub use facade::*;
 pub use inner::*;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
+pub use pledge_provider::*;
 
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::services::ServiceSenders;
