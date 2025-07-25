@@ -49,8 +49,8 @@ impl EpochReplayData {
 
         // Calculate how many epoch blocks should exist in the chain
         let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
-        let num_blocks = block_index.num_blocks();
-        let num_epoch_blocks = (num_blocks / num_blocks_in_epoch) + 1;
+        let latest_height = block_index.latest_height();
+        let num_epoch_blocks = (latest_height / num_blocks_in_epoch) + 1;
         let mut epoch_block_data: VecDeque<EpochBlockData> = VecDeque::new();
         // Process each epoch block from genesis to the latest
         for i in 0..num_epoch_blocks {
