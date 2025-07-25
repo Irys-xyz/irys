@@ -87,7 +87,7 @@ impl ApiClient for MockApiClient {
 
 fn create_test_config() -> Config {
     let temp_dir = setup_tracing_and_temp_dir(None, false);
-    let mut node_config = NodeConfig::testnet();
+    let mut node_config = NodeConfig::testing();
     node_config.base_directory = temp_dir.path().to_path_buf();
     node_config.trusted_peers = vec![];
     Config::new(node_config)

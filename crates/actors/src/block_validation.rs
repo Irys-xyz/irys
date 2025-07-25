@@ -736,17 +736,17 @@ mod tests {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
                 num_chunks_in_partition: 100,
-                ..ConsensusConfig::testnet()
+                ..ConsensusConfig::testing()
             }),
             base_directory: data_dir.path().to_path_buf(),
-            ..NodeConfig::testnet()
+            ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         let chunk_size = 32;
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.storage.num_writes_before_sync = 1;
         node_config.base_directory = data_dir.path().to_path_buf();
         let consensus_config = ConsensusConfig {

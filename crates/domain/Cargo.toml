@@ -9,23 +9,31 @@ test-utils = ["irys-types/test-utils"]
 
 [dependencies]
 actix.workspace = true
-openssl.workspace = true
+alloy-core.workspace = true
+atomic-write-file = "0.2"
+base58.workspace = true
+derive_more.workspace = true
 eyre.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-config.workspace = true
 irys-database.workspace = true
+irys-packing.workspace = true
 irys-primitives.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
+nodit.workspace = true
+openssl.workspace = true
+serde.workspace = true
 tracing.workspace = true
-base58.workspace = true
+rand.workspace = true
 reth-db.workspace = true
 rust_decimal.workspace = true
 tokio.workspace = true
-alloy-core.workspace = true
 lru.workspace = true
 alloy-rpc-types.workspace = true
 reth.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 test-log.workspace = true

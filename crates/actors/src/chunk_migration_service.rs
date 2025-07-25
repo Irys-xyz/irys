@@ -5,11 +5,10 @@ use irys_database::{
     db::IrysDatabaseExt as _,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
 };
-use irys_domain::BlockIndex;
-use irys_storage::{
-    get_overlapped_storage_modules, ie, ii, InclusiveInterval as _, StorageModule,
-    StorageModulesReadGuard,
+use irys_domain::{
+    get_overlapped_storage_modules, BlockIndex, StorageModule, StorageModulesReadGuard,
 };
+use irys_storage::{ie, ii, InclusiveInterval as _};
 use irys_types::{
     app_state::DatabaseProvider, Base64, Config, DataLedger, DataRoot, DataTransactionHeader,
     DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,

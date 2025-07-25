@@ -333,7 +333,7 @@ impl GossipServiceTestFixture {
     pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.base_directory = temp_dir.path().to_path_buf();
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
         node_config.mining_key = random_signer.signer;
@@ -584,8 +584,8 @@ fn random_free_port() -> u16 {
 /// Can panic
 #[must_use]
 pub(crate) fn generate_test_tx() -> DataTransaction {
-    let testnet_config = NodeConfig::testnet();
-    let config = Config::new(testnet_config);
+    let testing_config = NodeConfig::testing();
+    let config = Config::new(testing_config);
     let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();

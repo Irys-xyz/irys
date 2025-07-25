@@ -906,7 +906,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testnet().into();
+        let config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -959,7 +959,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_peer_score_management() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testnet().into();
+        let config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1017,7 +1017,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_active_peers_request() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testnet().into();
+        let config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1083,7 +1083,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_edge_cases() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testnet().into();
+        let config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1166,7 +1166,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_periodic_flush() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testnet().into();
+        let config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1228,7 +1228,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_load_from_database() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testnet().into();
+        let config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1328,7 +1328,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_announce_yourself_to_all_peers() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
 
@@ -1383,7 +1383,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_update_address_in_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = Config::new(NodeConfig::testnet());
+        let config = Config::new(NodeConfig::testing());
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1483,7 +1483,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_reth_actor_receives_reth_peer_info() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testnet().into();
+        let config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1558,7 +1558,7 @@ mod tests {
     #[actix_rt::test]
     async fn should_perform_handshake_when_adding_a_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
 
@@ -1620,7 +1620,7 @@ mod tests {
     #[actix_rt::test]
     async fn should_prevent_infinite_handshake_loop() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
 
@@ -1723,7 +1723,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_wait_for_active_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
 
@@ -1797,7 +1797,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_wait_for_active_peer_no_peers() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
 
@@ -1875,7 +1875,7 @@ mod tests {
         };
 
         // Create config with trusted peers
-        let mut node_config = NodeConfig::testnet();
+        let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![trusted_peer1, trusted_peer2];
         let config = Config::new(node_config);
 

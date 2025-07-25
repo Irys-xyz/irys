@@ -34,7 +34,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
-    let mut config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // set block_migration depth to one less than epoch depth
     let block_migration_depth = num_blocks_in_epoch - 1;
     // set block migration depth so epoch blocks go to index correctly
@@ -92,10 +92,13 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         let stake_tx1 = post_stake_commitment(&node, &signer1).await;
 
         // Create two pledge commitments for first test signer
-        let pledge1 = post_pledge_commitment(&node, &signer1, H256::default()).await;
+        let pledge1 = &node
+            .post_pledge_commitment_with_signer(&signer1, H256::default())
+            .await;
 
-        // TODO: once tx anchors have full support for single-block inclusion, re-enable pledge2
-        // let pledge2 = post_pledge_commitment(&node, &signer1, pledge1.id).await;
+        let pledge2 = &node
+            .post_pledge_commitment_with_signer(&signer1, H256::default())
+            .await;
 
         // Create stake commitment for second test signer
         let stake_tx2 = post_stake_commitment(&node, &signer2).await;
@@ -105,16 +108,16 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         node.mine_blocks(num_blocks_in_epoch).await?;
 
         debug!(
-            "Post Commitments:\nstake1: {:?}\nstake2: {:?}\npledge1: {:?}",
-            stake_tx1.id, stake_tx2.id, pledge1.id, /*  pledge2.id */
+            "Post Commitments:\nstake1: {:?}\nstake2: {:?}\npledge1: {:?}\npledge2: {:?}\n",
+            stake_tx1.id, stake_tx2.id, pledge1.id, pledge2.id
         );
 
         // Block height: 1 should have two stake and two pledge commitments
-        let expected_ids = [stake_tx1.id, stake_tx2.id, pledge1.id /* pledge2.id */];
+        let expected_ids = [stake_tx1.id, stake_tx2.id, pledge1.id, pledge2.id];
         let block_1 = node.get_block_by_height(1).await.unwrap();
         let commitments_1 = block_1.get_commitment_ledger_tx_ids();
         debug!("Block - height: {:?}\n{:#?}", block_1.height, commitments_1,);
-        assert_eq!(commitments_1.len(), expected_ids.len());
+        assert_eq!(commitments_1.len(), 4);
         assert!(expected_ids.iter().all(|id| commitments_1.contains(id)));
 
         // Block height: 2 is an epoch block and should have the same commitments and no more
@@ -161,8 +164,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .expect("Expected signer1 miner pledges!");
         assert_eq!(
             pledges.len(),
-            1,
-            "Signer1 should have 1 pledges after first epoch"
+            2,
+            "Signer1 should have 2 pledges after first epoch"
         );
 
         let stake = commitment_state.stake_commitments.get(&signer1.address());
@@ -223,7 +226,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let block_tree_guard = &restarted_node.node_ctx.block_tree_guard;
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
 
-    // Make sure genesis has 3 commitments (3 pledge)
+    // Make sure genesis has 3 commitments (1 stake, 2 pledge)
     assert_eq!(
         epoch_snapshot
             .commitment_state
@@ -234,7 +237,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         3
     );
 
-    // Make sure signer1 has 1 commitments (1 pledge)
+    // Make sure signer1 has 2 commitments (1 stake, 1 pledge)
     assert_eq!(
         epoch_snapshot
             .commitment_state
@@ -242,10 +245,10 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .get(&signer1.address())
             .expect("commitments for genesis miner")
             .len(),
-        1
+        2
     );
 
-    // Make sure signer2 has 1 commitments (1 pledge)
+    // Make sure signer2 has 1 commitments (1 stake, 0 pledge)
     assert_eq!(
         epoch_snapshot
             .commitment_state
@@ -298,7 +301,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
     // Start the genesis node and wait for packing
@@ -307,7 +310,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
         .await;
 
     // Initialize the peer with our keypair/signer
-    let peer_config = genesis_node.testnet_peer();
+    let peer_config = genesis_node.testing_peer();
 
     // Start the peer: No packing on the peer, it doesn't have partition assignments yet
     let peer_node = IrysNodeTest::new(peer_config.clone())
@@ -340,7 +343,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // tracing
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
-    let mut config = NodeConfig::testnet();
+    let mut config = NodeConfig::testing();
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.fund_genesis_accounts(vec![&signer]);
 

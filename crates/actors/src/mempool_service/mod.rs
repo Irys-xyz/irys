@@ -9,13 +9,12 @@ pub mod pledge_provider;
 pub use chunks::*;
 pub use facade::*;
 pub use inner::*;
-use irys_domain::BlockTreeReadGuard;
+use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 pub use pledge_provider::*;
 
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::services::ServiceSenders;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_storage::StorageModulesReadGuard;
 use irys_types::{app_state::DatabaseProvider, Config, TokioServiceHandle};
 use reth::tasks::{shutdown::Shutdown, TaskExecutor};
 use std::{pin::pin, sync::Arc};

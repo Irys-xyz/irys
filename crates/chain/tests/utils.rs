@@ -13,6 +13,7 @@ use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
+use irys_actors::mempool_service::MempoolPledgeProvider;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     block_producer::BlockProducerCommand,
@@ -31,8 +32,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
-    EmaSnapshot,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshot,
+    CommitmentSnapshotStatus, EmaSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -48,7 +49,7 @@ use irys_types::{
 use irys_types::{
     Base64, CommitmentTransaction, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode,
-    PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    PackedChunk, PeerAddress, PledgeDataProvider, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -191,7 +192,7 @@ pub struct IrysNodeTest<T = ()> {
 
 impl IrysNodeTest<()> {
     pub fn default_async() -> Self {
-        let config = NodeConfig::testnet();
+        let config = NodeConfig::testing();
         Self::new_genesis(config)
     }
 
@@ -247,14 +248,14 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
-    pub fn testnet_peer(&self) -> NodeConfig {
+    pub fn testing_peer(&self) -> NodeConfig {
         let node_config = &self.node_ctx.config.node_config;
         // Initialize the peer with a random signer, copying the genesis config
         let peer_signer = IrysSigner::random_signer(&node_config.consensus_config());
-        self.testnet_peer_with_signer(&peer_signer)
+        self.testing_peer_with_signer(&peer_signer)
     }
 
-    pub fn testnet_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
+    pub fn testing_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
         use irys_types::{PeerAddress, RethPeerInfo};
 
         let node_config = &self.node_ctx.config.node_config;
@@ -297,15 +298,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config
     }
 
-    pub async fn testnet_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
+    pub async fn testing_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
         // Create a new peer config using the provided signer
-        let peer_config = self.testnet_peer_with_signer(peer_signer);
+        let peer_config = self.testing_peer_with_signer(peer_signer);
 
-        self.testnet_peer_with_assignments_and_name(peer_config, "PEER")
+        self.testing_peer_with_assignments_and_name(peer_config, "PEER")
             .await
     }
 
-    pub async fn testnet_peer_with_assignments_and_name(
+    pub async fn testing_peer_with_assignments_and_name(
         &self,
         config: NodeConfig,
         name: &'static str,
@@ -1539,6 +1540,48 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let result = self
+            .node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::IngestDataTx(data_tx, oneshot_tx));
+        if let Err(e) = result {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+
+        match oneshot_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(tx_error)) => Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => Err(AddTxError::Mailbox(e)),
+        }
+    }
+
+    pub async fn ingest_commitment_tx(
+        &self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), AddTxError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let result =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestCommitmentTx(
+                    commitment_tx,
+                    oneshot_tx,
+                ));
+        if let Err(e) = result {
+            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
+        }
+
+        match oneshot_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(tx_error)) => Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => Err(AddTxError::Mailbox(e)),
+        }
+    }
+
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let config = &self.node_ctx.config.consensus;
         let signer = self.cfg.signer();
@@ -1556,6 +1599,32 @@ impl IrysNodeTest<IrysNodeCtx> {
         // Submit pledge commitment via API
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, &pledge_tx)
+            .await
+            .expect("posted commitment tx");
+
+        pledge_tx
+    }
+
+    pub async fn post_pledge_commitment_with_signer(
+        &self,
+        signer: &IrysSigner,
+        anchor: H256,
+    ) -> CommitmentTransaction {
+        let consensus = &self.node_ctx.config.consensus;
+
+        let pledge_tx = CommitmentTransaction::new_pledge(
+            consensus,
+            anchor,
+            1,
+            self.node_ctx.mempool_pledge_provider.as_ref(),
+            signer.address(),
+        )
+        .await;
+        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+
+        // Submit pledge commitment via API
+        self.post_commitment_tx(&pledge_tx)
             .await
             .expect("posted commitment tx");
 

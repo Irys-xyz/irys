@@ -19,7 +19,7 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     let num_blocks_in_epoch = 13;
     let seconds_to_wait = 20;
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
     genesis_config
@@ -34,7 +34,7 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     node_1.start_public_api().await;
-    let mut peer_config = node_1.testnet_peer_with_signer(&peer_signer);
+    let mut peer_config = node_1.testing_peer_with_signer(&peer_signer);
     peer_config.oracle = OracleConfig::Mock {
         initial_price: Amount::token(dec!(1.01)).unwrap(),
         incremental_change: Amount::token(dec!(0.005)).unwrap(),
@@ -42,7 +42,7 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     };
 
     let node_2 = node_1
-        .testnet_peer_with_assignments_and_name(peer_config, "PEER")
+        .testing_peer_with_assignments_and_name(peer_config, "PEER")
         .await;
 
     let common_height = node_1.get_max_difficulty_block();

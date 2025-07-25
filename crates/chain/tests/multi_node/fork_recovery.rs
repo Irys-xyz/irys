@@ -23,7 +23,7 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     let seconds_to_wait = 15;
     // setup config / testnet
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
@@ -39,8 +39,8 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     genesis_node.start_public_api().await;
 
     // Initialize peer configs with their keypair/signer
-    let peer1_config = genesis_node.testnet_peer_with_signer(&peer1_signer);
-    let peer2_config = genesis_node.testnet_peer_with_signer(&peer2_signer);
+    let peer1_config = genesis_node.testing_peer_with_signer(&peer1_signer);
+    let peer2_config = genesis_node.testing_peer_with_signer(&peer2_signer);
 
     // Start the peers: No packing on the peers, they don't have partition assignments yet
     let peer1_node = IrysNodeTest::new(peer1_config.clone())
@@ -356,7 +356,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
@@ -371,8 +371,8 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
         .await;
 
     // additional configs for peers
-    let config_b = node_a.testnet_peer_with_signer(&c_signer);
-    let config_c = node_a.testnet_peer_with_signer(&b_signer);
+    let config_b = node_a.testing_peer_with_signer(&c_signer);
+    let config_c = node_a.testing_peer_with_signer(&b_signer);
 
     // start peer nodes
     let node_b = IrysNodeTest::new(config_b)
@@ -430,9 +430,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     // Stage 4: GENERATE ISOLATED txs
     //
 
-    // TODO: once get_best_mempool_txs allows for anchor chained txs to be in the same block,
-    // change these commitments back to using the stake as their anchor.
-
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
         .post_stake_commitment_without_gossip(block_height_1.block_hash)
@@ -445,7 +442,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     let peer_c_b2_stake_tx = node_c
         .post_stake_commitment_without_gossip(block_height_1.block_hash)
         .await;
-
     let peer_c_b2_pledge_tx = node_c
         .post_pledge_commitment_without_gossip(block_height_1.block_hash)
         .await;
@@ -671,7 +667,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = DATA_CHUNK_SIZE as u64;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
@@ -690,8 +686,8 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         .await;
 
     // additional configs for peers
-    let config_b = node_a.testnet_peer_with_signer(&b_signer);
-    let config_c = node_a.testnet_peer_with_signer(&c_signer);
+    let config_b = node_a.testing_peer_with_signer(&b_signer);
+    let config_c = node_a.testing_peer_with_signer(&c_signer);
 
     // start peer nodes
     let node_b = IrysNodeTest::new(config_b)
@@ -1177,7 +1173,7 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testnet_with_epochs(num_blocks_in_epoch);
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
@@ -1191,7 +1187,7 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         .await;
 
     // additional configs for peers
-    let config_b = node_a.testnet_peer_with_signer(&b_signer);
+    let config_b = node_a.testing_peer_with_signer(&b_signer);
 
     // start peer nodes
     let node_b = IrysNodeTest::new(config_b)
@@ -1238,9 +1234,6 @@ async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     //
     // Stage 4: GENERATE ISOLATED txs
     //
-
-    // TODO: once get_best_mempool_txs allows for anchor chained txs to be in the same block,
-    // change these commitments back to using the stake as their anchor.
 
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
