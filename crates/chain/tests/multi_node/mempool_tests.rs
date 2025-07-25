@@ -1740,18 +1740,13 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
 
     let tx_ids: Vec<H256> = vec![H256::zero()]; // txs used for anchor chain and later to check mempool ingress
 
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
-
     let pledge_tx = new_pledge_tx(
         tx_ids.last().expect("valid tx id for use as anchor"),
         &signer,
         &genesis_config.consensus_config(),
-        &commitment_snapshot,
-    );
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+    )
+    .await;
     let mut pledge_tx_invalid_pending_anchor = pledge_tx.clone();
     let mut bytes = pledge_tx_invalid_pending_anchor.id.to_fixed_bytes();
     bytes[0] ^= 0x01; // flip first bit
