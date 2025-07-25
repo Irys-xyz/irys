@@ -1,8 +1,8 @@
 mode = "PeerSync"
 base_directory = ""
-mining_key = ""
+mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
 trusted_peers = []
-reward_address = ""
+reward_address = "0x0000000000000000000000000000000000000000"
 stake_pledge_drives = false
 genesis_peer_discovery_timeout_millis = 10000
 
@@ -59,8 +59,8 @@ num_partitions_per_slot = 1
 entropy_packing_iterations = 1000
 number_of_ingress_proofs = 10
 safe_minimum_number_of_years = 200
-stake_fee = 20000.0
-pledge_base_fee = 950.0
+stake_value = 20000.0
+pledge_base_value = 950.0
 pledge_decay = 0.9
 
 [consensus.Custom.reth]
@@ -97,6 +97,7 @@ max_pending_chunk_items = 30
 max_chunks_per_item = 500
 max_valid_items = 10000
 max_invalid_items = 10000
+commitment_fee = 100
 
 [consensus.Custom.difficulty_adjustment]
 block_time = 12

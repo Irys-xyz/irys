@@ -100,14 +100,15 @@ impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
 ///
 /// # Panics
 /// Panics if signing the commitment transaction fails
-fn create_pledge_commitment_transaction(
+async fn create_pledge_commitment_transaction(
     signer: &IrysSigner,
     anchor: H256,
     config: &Config,
     provider: &impl PledgeDataProvider,
 ) -> CommitmentTransaction {
     let pledge_commitment =
-        CommitmentTransaction::new_pledge(&config.consensus, anchor, 1, provider, signer.address());
+        CommitmentTransaction::new_pledge(&config.consensus, anchor, 1, provider, signer.address())
+            .await;
 
     signer
         .sign_commitment(pledge_commitment)
@@ -134,12 +135,13 @@ fn create_pledge_commitment_transaction(
 /// # Panics
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
-pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
+pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     // Empty pledge data provider for genesis block creation
     struct EmptyPledgeProvider;
 
+    #[async_trait::async_trait]
     impl PledgeDataProvider for EmptyPledgeProvider {
-        fn pledge_count(&self, _user_address: Address) -> usize {
+        async fn pledge_count(&self, _user_address: Address) -> usize {
             0
         }
     }
@@ -176,7 +178,7 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     let empty_provider = EmptyPledgeProvider;
     for _i in 0..num_submodules {
         let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
+            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider).await;
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
@@ -221,11 +223,11 @@ fn get_or_create_commitment_ledger(
 /// to the Commitments system ledger.
 ///
 /// Returns the list of commitment transactions.
-pub fn add_genesis_commitments(
+pub async fn add_genesis_commitments(
     genesis_block: &mut IrysBlockHeader,
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
-    let commitments = get_genesis_commitments(config);
+    let commitments = get_genesis_commitments(config).await;
     let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
 
     // Add the commitment txids to the commitment ledger one by one
@@ -259,7 +261,7 @@ pub fn add_genesis_commitments(
 /// # Note
 /// This function is only available when compiled with test or test-utils features
 #[cfg(any(test, feature = "test-utils"))]
-pub fn add_test_commitments(
+pub async fn add_test_commitments(
     block_header: &mut IrysBlockHeader,
     pledge_count: u8,
     config: &Config,
@@ -267,8 +269,9 @@ pub fn add_test_commitments(
     // Empty pledge data provider for test commitments
     struct EmptyPledgeProvider;
 
+    #[async_trait::async_trait]
     impl PledgeDataProvider for EmptyPledgeProvider {
-        fn pledge_count(&self, _user_address: Address) -> usize {
+        async fn pledge_count(&self, _user_address: Address) -> usize {
             0
         }
     }
@@ -293,7 +296,7 @@ pub fn add_test_commitments(
     let empty_provider = EmptyPledgeProvider;
     for _i in 0..pledge_count {
         let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider);
+            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider).await;
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;

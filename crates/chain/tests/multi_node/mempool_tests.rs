@@ -120,13 +120,14 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 
     // Create stake and pledge commitments for the signer
     let config = &genesis_node.node_ctx.config.consensus;
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
     let stake_tx = new_stake_tx(&H256::zero(), &signer, config);
-    let pledge_tx = new_pledge_tx(&H256::zero(), &signer, config, &commitment_snapshot);
+    let pledge_tx = new_pledge_tx(
+        &H256::zero(),
+        &signer,
+        config,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+    )
+    .await;
 
     // Post the pledge before the stake
     genesis_node.post_commitment_tx(&pledge_tx).await?;
@@ -187,12 +188,13 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     assert!(result.is_ok());
 
     //create and post pledge commitment for the signer
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
-    let pledge_tx = new_pledge_tx(&H256::zero(), &signer, config, &commitment_snapshot);
+    let pledge_tx = new_pledge_tx(
+        &H256::zero(),
+        &signer,
+        config,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+    )
+    .await;
     genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     // test storage data
@@ -1676,19 +1678,13 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     //
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
-
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
-
     let pledge_tx = new_pledge_tx(
         &H256::zero(),
         &signer,
         &genesis_config.consensus_config(),
-        &commitment_snapshot,
-    );
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+    )
+    .await;
 
     // mine a block so we get some more anchors that are not pending
     genesis_node.mine_block().await?;

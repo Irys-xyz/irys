@@ -4999,6 +4999,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
+ "async-trait",
  "bytes",
  "eyre",
  "irys-config",
@@ -5268,6 +5269,7 @@ dependencies = [
  "color-eyre",
  "tempfile",
  "tracing",
+ "tracing-error",
  "tracing-subscriber 0.3.19",
 ]
 
@@ -5285,6 +5287,7 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "arbitrary",
+ "async-trait",
  "base58",
  "base64-url",
  "borsh",

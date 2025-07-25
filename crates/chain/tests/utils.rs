@@ -21,6 +21,7 @@ use irys_actors::{
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
 };
+use irys_api_server::routes::price::CommitmentPriceInfo;
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::{
@@ -31,8 +32,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshot,
-    CommitmentSnapshotStatus, EmaSnapshot,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
+    EmaSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -1530,6 +1531,47 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/price/commitment/stake", api_uri);
+
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get stake price: {}", e))?;
+
+        let price_info: CommitmentPriceInfo = response
+            .json()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to parse stake price response: {}", e))?;
+
+        Ok(price_info)
+    }
+
+    pub async fn get_pledge_price(
+        &self,
+        user_address: Address,
+    ) -> eyre::Result<CommitmentPriceInfo> {
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/price/commitment/pledge/{}", api_uri, user_address);
+
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get pledge price: {}", e))?;
+
+        let price_info: CommitmentPriceInfo = response
+            .json()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to parse pledge price response: {}", e))?;
+
+        Ok(price_info)
+    }
+
     pub async fn post_commitment_tx_raw_without_gossip(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -1584,13 +1626,14 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let config = &self.node_ctx.config.consensus;
         let signer = self.cfg.signer();
-        let snapshot = self
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .canonical_commitment_snapshot();
-        let pledge_tx =
-            CommitmentTransaction::new_pledge(config, anchor, 1, &*snapshot, signer.address());
+        let pledge_tx = CommitmentTransaction::new_pledge(
+            config,
+            anchor,
+            1,
+            self.node_ctx.mempool_pledge_provider.as_ref(),
+            signer.address(),
+        )
+        .await;
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
@@ -1603,16 +1646,21 @@ impl IrysNodeTest<IrysNodeCtx> {
         pledge_tx
     }
 
-    pub async fn post_pledge_commitment_with_snapshot(
+    pub async fn post_pledge_commitment_with_signer(
         &self,
         signer: &IrysSigner,
         anchor: H256,
-        snapshot: &mut CommitmentSnapshot,
     ) -> CommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
 
-        let pledge_tx =
-            CommitmentTransaction::new_pledge(consensus, anchor, 1, snapshot, signer.address());
+        let pledge_tx = CommitmentTransaction::new_pledge(
+            consensus,
+            anchor,
+            1,
+            self.node_ctx.mempool_pledge_provider.as_ref(),
+            signer.address(),
+        )
+        .await;
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
 
@@ -1620,9 +1668,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.post_commitment_tx(&pledge_tx)
             .await
             .expect("posted commitment tx");
-
-        // TODO: this is a hack, don't do this! should be removed by #559
-        snapshot.add_commitment(&pledge_tx, true);
 
         pledge_tx
     }
@@ -2109,19 +2154,15 @@ pub fn new_stake_tx(
     signer.sign_commitment(stake_tx).unwrap()
 }
 
-pub fn new_pledge_tx(
+pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     anchor: &H256,
     signer: &IrysSigner,
     config: &ConsensusConfig,
-    commitment_snapshot: &irys_domain::snapshots::commitment_snapshot::CommitmentSnapshot,
+    pledge_provider: &P,
 ) -> CommitmentTransaction {
-    let pledge_tx = CommitmentTransaction::new_pledge(
-        config,
-        *anchor,
-        1,
-        commitment_snapshot,
-        signer.address(),
-    );
+    let pledge_tx =
+        CommitmentTransaction::new_pledge(config, *anchor, 1, pledge_provider, signer.address())
+            .await;
     signer.sign_commitment(pledge_tx).unwrap()
 }
 

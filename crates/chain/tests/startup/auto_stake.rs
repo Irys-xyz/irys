@@ -19,6 +19,7 @@ use tracing::debug;
 #[actix_web::test]
 async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> eyre::Result<()> {
     use irys_testing_utils::initialize_tracing_with_backtrace;
+    use irys_types::U256;
 
     std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,storage::db::mdbx=off,reth_basic_payload_builder=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::vdf_service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off,irys_p2p::peer_list=error");
     initialize_tracing_with_backtrace();
@@ -51,15 +52,6 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
 
     let config = genesis_node.node_ctx.config.consensus.clone();
 
-    // Get the commitment snapshot from this block
-    let mut commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .get_commitment_snapshot(&blk.block_hash)?
-        .as_ref()
-        .clone();
-
     if stake {
         let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero(), 1);
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
@@ -75,14 +67,16 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
 
     if pledges > 0 {
         let anchor = H256::zero();
+        let mut prev_price = U256::MAX;
         for _idx in 0..pledges {
-            genesis_node
-                .post_pledge_commitment_with_snapshot(
-                    &peer_signer,
-                    anchor,
-                    &mut commitment_snapshot,
-                )
+            let tx = genesis_node
+                .post_pledge_commitment_with_signer(&peer_signer, anchor)
                 .await;
+            assert!(
+                tx.value < prev_price,
+                "the price we pay for a pledge should go down with every tx"
+            );
+            prev_price = tx.value;
             already_processed_count += 1;
             // don't wait if we haven't posted a stake (stuck in the LRU)
             if stake {

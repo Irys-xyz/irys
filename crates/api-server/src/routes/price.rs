@@ -9,9 +9,11 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    DataLedger, U256,
+    transaction::PledgeDataProvider as _,
+    Address, DataLedger, U256,
 };
 use serde::{Deserialize, Serialize};
+use std::str::FromStr as _;
 
 use crate::ApiState;
 
@@ -21,6 +23,14 @@ pub struct PriceInfo {
     pub cost_in_irys: U256,
     pub ledger: u32,
     pub bytes: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitmentPriceInfo {
+    pub value: U256,
+    pub fee: u64,
+    pub user_address: Option<Address>,
 }
 
 pub async fn get_price(
@@ -86,4 +96,100 @@ fn cost_of_perm_storage(
         .add_multiplier(state.config.node_config.pricing.fee_percentage)?;
 
     Ok(price_with_network_reward)
+}
+
+pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {
+    let stake_value = state.config.consensus.stake_value;
+    let commitment_fee = state.config.consensus.mempool.commitment_fee;
+
+    Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
+        value: stake_value.amount,
+        fee: commitment_fee,
+        user_address: None,
+    }))
+}
+
+pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {
+    let stake_value = state.config.consensus.stake_value;
+    let commitment_fee = state.config.consensus.mempool.commitment_fee;
+
+    Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
+        value: stake_value.amount,
+        fee: commitment_fee,
+        user_address: None,
+    }))
+}
+
+/// Parse and validate a user address from a string
+fn parse_user_address(address_str: &str) -> Result<Address, actix_web::Error> {
+    Address::from_str(address_str).map_err(|_| ErrorBadRequest("Invalid address format"))
+}
+
+/// Calculate the pledge value based on the pledge count and decay rate
+fn calculate_pledge_value(
+    base_value: Amount<Irys>,
+    decay_rate: Amount<irys_types::storage_pricing::phantoms::Percentage>,
+    pledge_count: usize,
+) -> U256 {
+    base_value
+        .apply_pledge_decay(pledge_count, decay_rate)
+        .map(|a| a.amount)
+        .unwrap_or(base_value.amount)
+}
+
+pub async fn get_pledge_price(
+    path: Path<String>,
+    state: web::Data<ApiState>,
+) -> ActixResult<HttpResponse> {
+    let user_address_str = path.into_inner();
+    let user_address = parse_user_address(&user_address_str)?;
+
+    // Use the MempoolPledgeProvider to get accurate pledge count
+    let pledge_count = state
+        .mempool_pledge_provider
+        .pledge_count(user_address)
+        .await;
+
+    // Calculate the pledge value with decay
+    let pledge_value = calculate_pledge_value(
+        state.config.consensus.pledge_base_value,
+        state.config.consensus.pledge_decay,
+        pledge_count,
+    );
+
+    let commitment_fee = state.config.consensus.mempool.commitment_fee;
+
+    Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
+        value: pledge_value,
+        fee: commitment_fee,
+        user_address: Some(user_address),
+    }))
+}
+
+pub async fn get_unpledge_price(
+    path: Path<String>,
+    state: web::Data<ApiState>,
+) -> ActixResult<HttpResponse> {
+    let user_address_str = path.into_inner();
+    let user_address = parse_user_address(&user_address_str)?;
+
+    // Use the MempoolPledgeProvider to get accurate pledge count
+    let pledge_count = state
+        .mempool_pledge_provider
+        .pledge_count(user_address)
+        .await;
+
+    let refund_amount = calculate_pledge_value(
+        state.config.consensus.pledge_base_value,
+        state.config.consensus.pledge_decay,
+        pledge_count.saturating_sub(1),
+    );
+
+    let commitment_fee = state.config.consensus.mempool.commitment_fee;
+
+    Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
+        value: refund_amount,
+        fee: commitment_fee,
+        user_address: Some(user_address),
+    }))
 }

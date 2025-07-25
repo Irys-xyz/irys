@@ -31,8 +31,8 @@ use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
-    CommitmentSnapshotStatus, EpochReplayData, ExecutionPayloadCache, IrysRethProvider,
-    IrysRethProviderInner, PeerList, StorageModule, StorageModuleInfo, StorageModulesReadGuard,
+    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
+    StorageModule, StorageModuleInfo, StorageModulesReadGuard,
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
@@ -105,6 +105,7 @@ pub struct IrysNodeCtx {
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
+    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 
 impl IrysNodeCtx {
@@ -120,6 +121,7 @@ impl IrysNodeCtx {
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
             sync_state: self.sync_state.clone(),
+            mempool_pledge_provider: self.mempool_pledge_provider.clone(),
         }
     }
 
@@ -344,7 +346,7 @@ impl IrysNode {
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                self.create_new_genesis_block(genesis_block.clone())
+                self.create_new_genesis_block(genesis_block.clone()).await
             }
             NodeMode::PeerSync | NodeMode::TrustedPeerSync => {
                 // Fetch genesis data from trusted peer when joining network
@@ -392,12 +394,12 @@ impl IrysNode {
         (genesis_block, commitments)
     }
 
-    fn create_new_genesis_block(
+    async fn create_new_genesis_block(
         &self,
         mut genesis_block: IrysBlockHeader,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
         // Generate genesis commitments from configuration
-        let commitments = get_genesis_commitments(&self.config);
+        let commitments = get_genesis_commitments(&self.config).await;
 
         // Calculate initial difficulty based on number of storage modules
         let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
@@ -412,7 +414,7 @@ impl IrysNode {
         genesis_block.last_diff_timestamp = timestamp;
 
         // Add commitment transactions to genesis block
-        add_genesis_commitments(&mut genesis_block, &self.config);
+        add_genesis_commitments(&mut genesis_block, &self.config).await;
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
@@ -612,7 +614,8 @@ impl IrysNode {
         )
         .await?;
 
-        if config.node_config.stake_pledge_drives {
+        // Call stake_and_pledge after mempool service is initialized
+        if ctx.config.node_config.stake_pledge_drives {
             const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
             let mut validation_tracker = BlockValidationTracker::new(
                 ctx.block_tree_guard.clone(),
@@ -633,10 +636,11 @@ impl IrysNode {
             // TODO: add code to proactively grab the latest head block from peers
             // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
             stake_and_pledge(
-                config,
+                &ctx.config,
                 ctx.block_tree_guard.clone(),
                 ctx.storage_modules_guard.clone(),
                 latest_hash,
+                ctx.mempool_pledge_provider.clone(),
             )
             .await?;
         }
@@ -951,6 +955,24 @@ impl IrysNode {
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
+        // Get the mempool state to create the pledge provider
+        let (tx, rx) = oneshot::channel();
+        service_senders
+            .mempool
+            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
+            .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
+
+        let mempool_state = rx
+            .await
+            .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
+
+        // Create the MempoolPledgeProvider
+        let mempool_pledge_provider =
+            Arc::new(irys_actors::mempool_service::MempoolPledgeProvider::new(
+                mempool_state,
+                block_tree_guard.clone(),
+            ));
+
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
             &config,
@@ -1129,6 +1151,7 @@ impl IrysNode {
             block_pool,
             validation_enabled,
             storage_modules_guard,
+            mempool_pledge_provider: mempool_pledge_provider.clone(),
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1216,7 +1239,7 @@ impl IrysNode {
                 peer_list: peer_list_guard,
                 db: irys_db,
                 reth_provider: reth_node.clone(),
-                block_tree: block_tree_guard,
+                block_tree: block_tree_guard.clone(),
                 block_index: block_index_guard.clone(),
                 config: config.clone(),
                 reth_http_url: reth_node
@@ -1224,6 +1247,7 @@ impl IrysNode {
                     .http_url()
                     .expect("Missing reth rpc url!"),
                 sync_state,
+                mempool_pledge_provider: mempool_pledge_provider.clone(),
             },
             http_listener,
         );
@@ -1627,6 +1651,7 @@ async fn stake_and_pledge(
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
     latest_block_hash: BlockHash,
+    mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
@@ -1640,12 +1665,13 @@ async fn stake_and_pledge(
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
+
         client.post(url).send_json(commitment_tx).await
     };
 
     // now check the canonical state
 
-    let (is_historically_staked, mut commitment_snapshot) = {
+    let (is_historically_staked, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
         let is_historically_staked = epoch_snapshot.is_staked(address);
@@ -1705,18 +1731,12 @@ async fn stake_and_pledge(
             &config.consensus,
             latest_block_hash,
             1,
-            &commitment_snapshot,
+            mempool_pledge_provider.as_ref(),
             address,
-        );
+        )
+        .await;
 
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
-
-        // TODO: this is a hack, don't do this! should be removed by #559
-        let status = commitment_snapshot.add_commitment(&pledge_tx, true); // so the pledge value updates
-        if !matches!(status, CommitmentSnapshotStatus::Accepted) {
-            warn!("Unable verify pledge {} - {:?}", &pledge_tx.id, &status);
-            return Ok(());
-        }
 
         post_commitment_tx(&pledge_tx).await.unwrap();
         debug!(
