@@ -48,7 +48,6 @@ impl<'a> ShadowTxGenerator<'a> {
         std::iter::once(Ok(ShadowTransaction::new_v1(
             TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: (*self.reward_amount).into(),
-                target: *self.reward_address,
             }),
         )))
     }
