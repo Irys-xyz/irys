@@ -1,9 +1,8 @@
-use std::collections::VecDeque;
-
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_storage::RecoveredMempoolState;
 use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
 use reth_db::Database as _;
+use std::collections::VecDeque;
 
 use crate::block_index_guard::BlockIndexReadGuard;
 
@@ -50,10 +49,9 @@ impl EpochReplayData {
 
         // Calculate how many epoch blocks should exist in the chain
         let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
-        let num_blocks = block_index.num_blocks();
-        let num_epoch_blocks = (num_blocks / num_blocks_in_epoch).max(1);
+        let latest_height = block_index.latest_height();
+        let num_epoch_blocks = (latest_height / num_blocks_in_epoch) + 1;
         let mut epoch_block_data: VecDeque<EpochBlockData> = VecDeque::new();
-
         // Process each epoch block from genesis to the latest
         for i in 0..num_epoch_blocks {
             let block_height = i * num_blocks_in_epoch;

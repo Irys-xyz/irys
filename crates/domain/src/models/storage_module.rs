@@ -37,7 +37,6 @@
 //! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
 
 use atomic_write_file::AtomicWriteFile;
-use base58::ToBase58 as _;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{ensure, eyre, Context as _, OptionExt as _, Result};
 use irys_database::{
@@ -280,7 +279,8 @@ impl StorageModule {
                 params.write_to_disk(&params_path);
             } else {
                 // Load the packing params and check to see if they match
-                let params = PackingParams::from_toml(params_path).expect("packing params to load");
+                let mut params =
+                    PackingParams::from_toml(&params_path).expect("packing params to load");
 
                 ensure!(
                     params.packing_address == config.node_config.miner_address(),
@@ -291,14 +291,25 @@ impl StorageModule {
 
                 // check the partition assignment if it's present
                 if let Some(pa) = storage_module_info.partition_assignment {
-                    ensure!(
+                    match params.partition_hash {
+                        Some(ph) => {
+                            ensure!(
                         params.partition_hash == Some(pa.partition_hash),
                         "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
                         This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
                         assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                        pa.partition_hash.0.to_base58(),
-                        params.partition_hash.unwrap().0.to_base58(),
-                    );
+                        pa.partition_hash,
+                        ph,
+                    )
+                        }
+                        None => {
+                            // need to write the new params to disk
+                            params.partition_hash = Some(pa.partition_hash);
+                            params.ledger = pa.ledger_id;
+                            params.slot = pa.slot_index;
+                            params.write_to_disk(&params_path);
+                        }
+                    }
                 }
             }
 
