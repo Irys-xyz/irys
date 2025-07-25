@@ -57,6 +57,7 @@ alloy-signer-local.workspace = true
 reth.workspace = true
 futures.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 test-fuzz.workspace = true

@@ -23,6 +23,7 @@ impl MempoolPledgeProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl PledgeDataProvider for MempoolPledgeProvider {
     async fn pledge_count(&self, user_address: Address) -> usize {
         // Get the canonical pledge count from the blockchain state

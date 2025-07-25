@@ -139,6 +139,7 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     // Empty pledge data provider for genesis block creation
     struct EmptyPledgeProvider;
 
+    #[async_trait::async_trait]
     impl PledgeDataProvider for EmptyPledgeProvider {
         async fn pledge_count(&self, _user_address: Address) -> usize {
             0
@@ -268,6 +269,7 @@ pub async fn add_test_commitments(
     // Empty pledge data provider for test commitments
     struct EmptyPledgeProvider;
 
+    #[async_trait::async_trait]
     impl PledgeDataProvider for EmptyPledgeProvider {
         async fn pledge_count(&self, _user_address: Address) -> usize {
             0

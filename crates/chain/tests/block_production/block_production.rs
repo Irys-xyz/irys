@@ -1314,13 +1314,6 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
     genesis_node.post_commitment_tx(&stake_tx).await?;
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
-    let mut commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot()
-        .as_ref()
-        .clone();
     for _ in 0..11 {
         let tx = genesis_node
             .post_pledge_commitment_with_signer(&signer, H256::zero())

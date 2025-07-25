@@ -611,6 +611,7 @@ impl From<DataTransactionHeader> for IrysTransactionResponse {
 }
 
 /// Trait for providing pledge count information for dynamic fee calculation
+#[async_trait::async_trait]
 pub trait PledgeDataProvider {
     /// Returns the number of existing pledges for a given user address
     async fn pledge_count(&self, user_address: Address) -> usize;
@@ -638,6 +639,7 @@ mod test_helpers {
         }
     }
 
+    #[async_trait::async_trait]
     impl PledgeDataProvider for MockPledgeProvider {
         async fn pledge_count(&self, user_address: Address) -> usize {
             self.pledge_counts.get(&user_address).copied().unwrap_or(0)
