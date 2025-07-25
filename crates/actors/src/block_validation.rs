@@ -759,7 +759,7 @@ mod tests {
             ..node_config.consensus_config()
         };
 
-        let commitments = add_genesis_commitments(&mut genesis_block, &config);
+        let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
 
         let arc_genesis = Arc::new(genesis_block.clone());
         let signer = config.irys_signer();
