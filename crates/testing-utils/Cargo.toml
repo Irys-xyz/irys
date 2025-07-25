@@ -9,5 +9,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tempfile.workspace = true
 color-eyre.workspace = true
+tracing-error.workspace = true
+
 [lints]
 workspace = true
