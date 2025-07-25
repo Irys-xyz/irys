@@ -148,14 +148,14 @@ pub struct ConsensusConfig {
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
     )]
-    pub stake_fee: Amount<Irys>,
+    pub stake_value: Amount<Irys>,
 
     /// Base fee required for pledging operations in Irys tokens
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
     )]
-    pub pledge_base_fee: Amount<Irys>,
+    pub pledge_base_value: Amount<Irys>,
 
     /// Decay rate for pledge fees - subsequent pledges become cheaper
     #[serde(
@@ -451,6 +451,9 @@ pub struct MempoolConfig {
     /// Maximum number of invalid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
     pub max_invalid_items: usize,
+
+    /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
+    pub commitment_fee: u64,
 }
 
 /// # Gossip Network Configuration
@@ -572,6 +575,7 @@ impl ConsensusConfig {
                 max_chunks_per_item: 500,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
+                commitment_fee: 100,
             },
             vdf: VdfConfig {
                 // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
@@ -643,8 +647,8 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
-            stake_fee: Amount::token(dec!(20000)).expect("valid token amount"),
-            pledge_base_fee: Amount::token(dec!(950)).expect("valid token amount"),
+            stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
         }
     }
@@ -672,10 +676,9 @@ impl ConsensusConfig {
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
-            stake_fee: Amount::token(dec!(20000)).expect("valid token amount"),
-            pledge_base_fee: Amount::token(dec!(950)).expect("valid token amount"),
+            stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
-
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
@@ -687,6 +690,7 @@ impl ConsensusConfig {
                 max_chunks_per_item: 500,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
+                commitment_fee: 100,
             },
             vdf: VdfConfig {
                 // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
@@ -1140,8 +1144,8 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        stake_fee = 20000.0
-        pledge_base_fee = 950.0
+        stake_value = 20000.0
+        pledge_base_value = 950.0
         pledge_decay = 0.9
 
         [reth]
@@ -1178,6 +1182,7 @@ mod tests {
         max_pending_anchor_items = 100
         max_invalid_items = 10000
         max_valid_items = 10000
+        commitment_fee = 100
 
 
 

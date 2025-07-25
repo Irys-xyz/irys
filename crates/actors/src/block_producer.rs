@@ -414,11 +414,11 @@ pub trait BlockProdStrategy {
             .generate_all(commitment_txs_to_bill, submit_txs)
             .map(|tx_result| {
                 let tx = tx_result?;
-                let mut tx_raw = compose_shadow_tx(self.inner().config.consensus.chain_id, &tx);
+                let mut tx_raw = compose_shadow_tx(self.inner().config.consensus.chain_id, &tx, 0);
                 let signature = local_signer
                     .sign_transaction_sync(&mut tx_raw)
                     .expect("shadow tx must always be signable");
-                let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
+                let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
                     .try_into_recovered()
                     .expect("shadow tx must always be signable");
 
