@@ -87,20 +87,22 @@ type SubmoduleMap =
 /// Tracks storage state of chunk ranges across all submodules
 type StorageIntervals = NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, ChunkType>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChunkTimeRecord {
+    pub chunk_offset: PartitionChunkOffset,
     pub start_time: Instant,
     pub completion_time: Instant,
-    pub total_duration: Duration,
+    pub duration: Duration,
 }
 
 impl Default for ChunkTimeRecord {
     fn default() -> Self {
         let now = Instant::now();
         Self {
+            chunk_offset: PartitionChunkOffset::from(0),
             start_time: now,
             completion_time: now,
-            total_duration: Duration::ZERO,
+            duration: Duration::ZERO,
         }
     }
 }
@@ -1136,9 +1138,10 @@ impl StorageModule {
         let completion_time = Instant::now();
 
         let chunk_time_record = ChunkTimeRecord {
+            chunk_offset,
             start_time,
             completion_time,
-            total_duration: completion_time - start_time,
+            duration: completion_time - start_time,
         };
 
         self.recent_chunk_times
@@ -1147,25 +1150,6 @@ impl StorageModule {
             .push(chunk_time_record);
 
         Ok(())
-    }
-
-    /// Returns the average completion time for chunks in the buffer.
-    /// Returns Duration::ZERO if no chunks are recorded.
-    pub fn average_chunk_completion_time(&self) -> Duration {
-        let recent_chunk_times = self.recent_chunk_times.read().unwrap();
-        if recent_chunk_times.is_empty() {
-            return Duration::ZERO;
-        }
-
-        // Calculate average duration from all records
-        let total_duration_nanos: u128 = recent_chunk_times
-            .iter()
-            .map(|record| record.total_duration.as_nanos())
-            .sum();
-
-        let avg_duration_nanos = total_duration_nanos / recent_chunk_times.len() as u128;
-
-        Duration::from_nanos(avg_duration_nanos as u64)
     }
 
     /// Calculate write throughput in bytes per second based on chunk records
