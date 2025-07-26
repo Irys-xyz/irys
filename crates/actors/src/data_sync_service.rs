@@ -2,9 +2,12 @@ pub mod chunk_orchestrator;
 pub mod peer_bandwidth_manager;
 pub mod peer_stats;
 
+use crate::services::ServiceSenders;
+use chunk_orchestrator::ChunkOrchestrator;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
 use irys_types::{Address, Config, PackedChunk, PartitionChunkOffset, TokioServiceHandle};
+use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
@@ -13,11 +16,6 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::warn;
-
-use chunk_orchestrator::ChunkOrchestrator;
-use peer_bandwidth_manager::PeerBandwidthManager;
-
-use crate::services::ServiceSenders;
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -102,7 +100,7 @@ impl DataSyncServiceInner {
                 storage_module_id,
                 chunk_offset,
                 peer_addr,
-            } => self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr)?,
+            } => self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr)?,
             DataSyncServiceMessage::PeerDisconnected { peer_addr } => {
                 self.handle_peer_disconnection(peer_addr);
             }
@@ -154,6 +152,19 @@ impl DataSyncServiceInner {
         chunk_offset: PartitionChunkOffset,
         peer_addr: Address,
     ) -> eyre::Result<()> {
+        if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+            orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
+        }
+        Ok(())
+    }
+
+    fn on_chunk_timeout(
+        &mut self,
+        storage_module_id: usize,
+        chunk_offset: PartitionChunkOffset,
+        peer_addr: Address,
+    ) -> eyre::Result<()> {
+        // TODO: Opportunity to do custom timeout tracking/handling here
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
         }
