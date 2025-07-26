@@ -16,6 +16,7 @@ irys-efficient-sampling.workspace = true
 irys-vdf.workspace = true
 
 actix.workspace = true
+awc.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
 priority-queue.workspace = true
@@ -32,6 +33,7 @@ irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
+reqwest.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 irys-reward-curve.workspace = true
 async-trait.workspace = true

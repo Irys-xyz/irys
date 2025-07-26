@@ -1174,6 +1174,7 @@ impl IrysNode {
             block_tree_guard.clone(),
             storage_modules.clone(),
             peer_list_guard.clone(),
+            &service_senders,
             &config,
             runtime_handle.clone(),
         );
