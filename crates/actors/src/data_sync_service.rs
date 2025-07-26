@@ -74,8 +74,8 @@ impl DataSyncServiceInner {
             peer_list,
             all_peers: Default::default(),
             chunk_orchestrators: Default::default(),
-            service_senders: service_senders.clone(),
-            config: config.clone(),
+            service_senders,
+            config,
         };
         data_sync.initialize_peers_and_orchestrators();
         data_sync

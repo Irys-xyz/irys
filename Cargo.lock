@@ -4798,7 +4798,6 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-signer-local",
  "async-trait",
- "awc",
  "base58",
  "eyre",
  "futures",

@@ -449,7 +449,7 @@ impl ChunkOrchestrator {
             self.current_peers
                 .iter()
                 .filter_map(|addr| peers.get(addr))
-                .map(|pm| pm.current_bandwidth_bps())
+                .map(PeerBandwidthManager::current_bandwidth_bps)
                 .sum()
         } else {
             0

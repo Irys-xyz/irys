@@ -118,7 +118,7 @@ impl PeerStats {
 
     /// Update the running average of chunk completion times
     pub fn average_completion_time(&self) -> Duration {
-        if self.completion_time_samples.len() == 0 {
+        if self.completion_time_samples.is_empty() {
             return Duration::from_millis(100); // Default to 100ms as a baseline
         }
 
