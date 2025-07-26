@@ -166,7 +166,7 @@ async fn test_health_score_calculation() {
     assert!(bad_score < good_score);
 
     // Health score should be clamped between 0.0 and 1.0
-    assert!(bad_score >= 0.0 && bad_score <= 1.0);
+    assert!((0.0..=1.0).contains(&bad_score));
 }
 
 #[test]
