@@ -4800,6 +4800,7 @@ dependencies = [
  "async-trait",
  "base58",
  "eyre",
+ "fastrand",
  "futures",
  "irys-api-client",
  "irys-config",

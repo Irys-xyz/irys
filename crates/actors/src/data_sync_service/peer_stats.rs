@@ -1,5 +1,8 @@
 use irys_domain::{ChunkTimeRecord, CircularBuffer};
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, PartialEq)]
 pub enum BandwidthRating {
@@ -32,22 +35,31 @@ pub struct PeerStats {
 
 impl PeerStats {
     pub fn new(target_bandwidth_mbps: usize, chunk_size: u64, timeout: Duration) -> Self {
-        // Convert target bandwidth from MB/s to bytes/s, then calculate how many
-        // chunks per second we need to process to achieve that bandwidth
-        let target_bandwidth_bps = target_bandwidth_mbps * 1024 * 1024;
-        let chunks_per_second = target_bandwidth_bps as f64 / chunk_size as f64;
-        let chunk_download_time = Duration::from_secs_f64(1.0 / chunks_per_second);
+        // Assume a gigabit connection (1000 Mbps = 125 MB/s max)
+        let connection_limit_mbps = 125;
+        let effective_target = target_bandwidth_mbps.min(connection_limit_mbps);
 
-        // Assume 100ms of connection overhead for each chunk HTTP request
-        // TODO: This estimate will have to change with socket based communication
-        let estimated_chunk_download_time = chunk_download_time + Duration::from_millis(100);
+        // Calculate what fraction of the connection bandwidth we want to use
+        let bandwidth_fraction = effective_target as f64 / connection_limit_mbps as f64;
 
-        // Calculate max concurrent requests needed to sustain the target rate
+        // Scale concurrency based on bandwidth fraction
+        // More bandwidth usage = more concurrent connections needed
+        let base_concurrency = (bandwidth_fraction * 24.0).ceil() as u32; // Scale from 1-24 connections
+        let base_concurrency = base_concurrency.clamp(2, 24); // Minimum 2, maximum 24
+
+        // Small chunks might need more concurrency due to per-request overhead
+        // (chunks smaller than 245KiB only used in testing)
+        let chunk_multiplier = if chunk_size < 1024 {
+            // < 1KiB
+            1.5
+        } else {
+            1.0
+        };
+
         let max_concurrency =
-            (estimated_chunk_download_time.as_secs_f64() * chunks_per_second).ceil() as u32;
+            ((base_concurrency as f64 * chunk_multiplier).round() as u32).clamp(1, 32);
 
-        // Clamp to reasonable bounds
-        let baseline_concurrency = (max_concurrency / 2).max(1); // 50% of max
+        let baseline_concurrency = (max_concurrency / 2).max(1);
 
         Self {
             chunk_size,
@@ -197,41 +209,71 @@ impl PeerStats {
         variance_ratio < 0.15 // Within 15% is considered stable
     }
 }
-
 #[derive(Debug)]
 pub struct BandwidthWindow {
-    pub bytes_transferred: u64,
-    pub window_start: Instant,
-    pub window_duration: Duration,
+    buckets: VecDeque<(Instant, u64)>, // (timestamp, bytes)
+    bucket_duration: Duration,         // Duration per bucket (e.g., 1 second)
+    window_duration: Duration,         // Total window duration (e.g., 10 seconds)
 }
 
 impl BandwidthWindow {
-    pub fn new(duration: Duration) -> Self {
+    pub fn new(window_duration: Duration) -> Self {
+        // Use 1-second buckets for good granularity and intuitive behavior
+        let bucket_duration = Duration::from_secs(1);
+        let bucket_count = window_duration.as_secs().max(1) as usize; // At least 1 bucket
+
         Self {
-            bytes_transferred: 0,
-            window_start: Instant::now(),
-            window_duration: duration,
+            buckets: VecDeque::with_capacity(bucket_count + 2), // +2 for safety margin
+            bucket_duration,
+            window_duration,
         }
     }
 
     pub fn add_bytes(&mut self, bytes: u64) {
         let now = Instant::now();
 
-        // Reset window if it's expired
-        if now.duration_since(self.window_start) > self.window_duration {
-            self.bytes_transferred = bytes;
-            self.window_start = now;
+        // Remove expired buckets from the front
+        while let Some((timestamp, _)) = self.buckets.front() {
+            if now.duration_since(*timestamp) > self.window_duration {
+                self.buckets.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Add to current bucket or create new one
+        if let Some((last_timestamp, last_bytes)) = self.buckets.back_mut() {
+            if now.duration_since(*last_timestamp) < self.bucket_duration {
+                // Add to current bucket (within the same 1-second period)
+                *last_bytes += bytes;
+            } else {
+                // Create new bucket (new 1-second period)
+                self.buckets.push_back((now, bytes));
+            }
         } else {
-            self.bytes_transferred += bytes;
+            // First bucket
+            self.buckets.push_back((now, bytes));
         }
     }
 
     pub fn bytes_per_second(&self) -> u64 {
-        let elapsed = Instant::now().duration_since(self.window_start);
-        if elapsed.as_secs() == 0 {
+        if self.buckets.is_empty() {
             return 0;
         }
 
-        self.bytes_transferred / elapsed.as_secs()
+        let total_bytes: u64 = self.buckets.iter().map(|(_, bytes)| bytes).sum();
+        let now = Instant::now();
+
+        // Calculate elapsed time from oldest bucket to now
+        if let Some((oldest_timestamp, _)) = self.buckets.front() {
+            let elapsed = now.duration_since(*oldest_timestamp);
+            let elapsed_secs = elapsed.as_secs_f64();
+
+            if elapsed_secs > 0.001 {
+                return (total_bytes as f64 / elapsed_secs) as u64;
+            }
+        }
+
+        0
     }
 }
