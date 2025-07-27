@@ -4,8 +4,6 @@ use irys_types::PartitionChunkOffset;
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-
 /// Simulate a realistic chunk processing pattern for a fixed chunk size
 struct ChunkSimulator {
     chunk_size: u64,
@@ -191,7 +189,7 @@ fn run_burst_test(chunk_size: u64, target_bandwidth_mbps: usize) {
     let start_time = Instant::now();
     let mut total_chunks = 0;
     let mut failed_chunks = 0;
-    let mut total_bytes = 0u64;
+    let mut total_bytes = 0_u64;
     let duration = Duration::from_secs(8);
 
     while start_time.elapsed() < duration {
@@ -264,7 +262,7 @@ fn run_degrading_test(chunk_size: u64, target_bandwidth_mbps: usize) {
     let start_time = Instant::now();
     let mut total_chunks = 0;
     let mut failed_chunks = 0;
-    let mut total_bytes = 0u64;
+    let mut total_bytes = 0_u64;
     let duration = Duration::from_secs(10);
 
     while start_time.elapsed() < duration {
@@ -312,11 +310,11 @@ fn run_scenario(
     let start_time = Instant::now();
     let mut total_chunks = 0;
     let mut failed_chunks = 0;
-    let mut total_bytes = 0u64;
+    let mut total_bytes = 0_u64;
 
     // Track pending requests for realistic concurrency simulation
     let mut pending_requests: Vec<(Instant, Duration, u64)> = Vec::new();
-    let mut next_chunk_id = 0u64;
+    let mut next_chunk_id = 0_u64;
 
     // Calculate realistic request rate
     let target_bandwidth_bps = (stats.max_concurrency as f64 * simulator.chunk_size as f64) / 0.1; // Rough estimate

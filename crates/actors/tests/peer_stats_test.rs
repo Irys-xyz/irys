@@ -235,11 +235,8 @@ async fn test_throughput_stability_detection() {
     }
 
     // After establishing some data across time windows, check stability
-    // Note: This test is timing-dependent and may need adjustment
     let is_stable = stats.is_throughput_stable();
-    // We don't assert true/false here as it depends on exact timing,
-    // but we verify the method doesn't panic and returns a boolean
-    assert!(is_stable == true || is_stable == false);
+    assert!(is_stable);
 }
 
 #[test]
@@ -249,30 +246,54 @@ async fn test_throughput_improvement_detection() {
     // Initially should not be improving (no baseline)
     assert!(!stats.is_throughput_improving());
 
-    // Establish a baseline with slower completions in medium-term window
+    // Establish a baseline in the medium/long-term windows with slower completions
+    // We need to space these out over a longer period to ensure they establish
+    // a different baseline than the short-term window
     for _ in 0..5 {
         stats.record_request_started();
         let chunk_record = create_chunk_time_record(200); // Slower
         stats.record_request_completed(chunk_record);
 
-        // Space out the requests to establish medium-term baseline
-        actix_rt::time::sleep(Duration::from_millis(100)).await;
+        // Space out requests significantly to establish different time windows
+        // We need gaps large enough that the later "fast" requests won't be
+        // averaged with these early "slow" requests in the short-term window
+        actix_rt::time::sleep(Duration::from_millis(2500)).await; // 2.5 seconds between requests
     }
 
-    // Wait to ensure we have medium-term data
-    actix_rt::time::sleep(Duration::from_millis(500)).await;
+    // At this point we've taken ~12.5 seconds, so the medium-term window
+    // should have a good baseline of slow requests
 
-    // Add faster completions to short-term window
-    for _ in 0..3 {
+    // Now add much faster completions to the short-term window
+    // Do these quickly so they establish a different short-term average
+    for _ in 0..5 {
         stats.record_request_started();
         let chunk_record = create_chunk_time_record(50); // Much faster
         stats.record_request_completed(chunk_record);
+
+        // Small delay between fast requests
+        actix_rt::time::sleep(Duration::from_millis(100)).await;
     }
+
+    // Give a moment for the windows to update
+    actix_rt::time::sleep(Duration::from_millis(100)).await;
+
+    // Debug the actual throughput values
+    let short = stats.short_term_bandwidth_bps();
+    let medium = stats.medium_term_bandwidth_bps();
+    let long = stats.long_term_bandwidth_bps();
+
+    println!("Throughput values:");
+    println!("  Short term (10s): {} bytes/s", short);
+    println!("  Medium term (30s): {} bytes/s", medium);
+    println!("  Long term (300s): {} bytes/s", long);
 
     // Check improvement detection
     let is_improving = stats.is_throughput_improving();
-    // Similar to stability test, we verify the method works without asserting specific result
-    assert!(is_improving == true || is_improving == false);
+    println!("  Is improving: {}", is_improving);
+
+    // Now we should see improvement since recent performance (fast requests)
+    // should be better than the earlier baseline (slow requests)
+    assert!(is_improving);
 }
 
 #[test]
@@ -418,7 +439,4 @@ async fn test_multi_window_bandwidth_tracking() {
     assert!(short_term > 0);
     assert!(medium_term > 0);
     assert!(long_term > 0);
-
-    // At least one window should have recorded throughput
-    assert!(short_term > 0 || medium_term > 0 || long_term > 0);
 }

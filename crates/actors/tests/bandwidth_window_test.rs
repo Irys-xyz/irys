@@ -6,7 +6,7 @@ use irys_actors::peer_stats::BandwidthWindow;
 #[test]
 fn test_bandwidth_window_load_test() {
     let mut window = BandwidthWindow::new(Duration::from_secs(5));
-    let bytes_per_addition = 1024u64;
+    let bytes_per_addition = 1024_u64;
     let target_interval = Duration::from_millis(3);
 
     // Run for 6 seconds to test window reset
@@ -70,7 +70,7 @@ fn test_bandwidth_window_load_test() {
             // but should stabilize to a reasonable value similar to before reset
             if current_bps == 0 {
                 println!("✓ Window reset detected (momentary BPS = 0)");
-            } else if current_bps >= 200_000 && current_bps <= 500_000 {
+            } else if (200_000..=500_000).contains(&current_bps) {
                 println!("✓ Window reset working correctly, BPS stabilized after reset");
             } else {
                 println!("ℹ Window reset behavior - BPS: {} (may be spiking due to very small elapsed time)", current_bps);
@@ -121,7 +121,7 @@ fn test_bandwidth_window_load_test() {
 #[test]
 fn test_bandwidth_window_precise_timing() {
     let mut window = BandwidthWindow::new(Duration::from_secs(5));
-    let bytes_per_addition = 1024u64;
+    let bytes_per_addition = 1024_u64;
 
     // Add exactly 10 additions over 1 second
     let start = Instant::now();
