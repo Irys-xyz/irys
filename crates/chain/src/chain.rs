@@ -4,6 +4,7 @@ use actix_web::dev::Server;
 use base58::ToBase58 as _;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
+use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
@@ -1169,11 +1170,16 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
+        // Production chunk fetcher is the HTTP chunk fetcher
+        let http_factory: ChunkFetcherFactory =
+            Box::new(|ledger_id| Arc::new(HttpChunkFetcher::new(ledger_id)));
+
         let data_sync_handle = DataSyncService::spawn_service(
             receivers.data_sync,
             block_tree_guard.clone(),
             storage_modules.clone(),
             peer_list_guard.clone(),
+            http_factory,
             &service_senders,
             &config,
             runtime_handle.clone(),

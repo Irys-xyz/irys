@@ -1,19 +1,19 @@
 use crate::{
-    data_sync_service::peer_bandwidth_manager::PeerBandwidthManager, services::ServiceSenders,
+    chunk_fetcher::{ChunkFetchError, ChunkFetcher},
+    data_sync_service::peer_bandwidth_manager::PeerBandwidthManager,
+    services::ServiceSenders,
     DataSyncServiceMessage,
 };
 use irys_domain::{ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
-use irys_types::{Address, LedgerChunkOffset, PackedChunk, PartitionChunkOffset};
+use irys_types::{Address, LedgerChunkOffset, PartitionChunkOffset};
 use std::{
     collections::{hash_map, HashMap},
-    net::SocketAddr,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
-use tokio::{sync::mpsc::UnboundedSender, time::timeout};
 
 const BYTES_IN_200_MB: u64 = 200 * 1024 * 1024;
-const TARGET_QUEUE_DEPTH: usize = 1000;
+const TARGET_REQUEST_QUEUE_DEPTH: usize = 1000;
 const BANDWIDTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq)]
@@ -42,6 +42,7 @@ pub struct ChunkOrchestrator {
     slot_index: usize,
     timeout_duration: Duration,
     last_bandwidth_check: Instant,
+    chunk_fetcher: Arc<dyn ChunkFetcher>,
 }
 
 impl ChunkOrchestrator {
@@ -49,6 +50,7 @@ impl ChunkOrchestrator {
         storage_module: Arc<StorageModule>,
         all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
         service_senders: &ServiceSenders,
+        chunk_fetcher: Arc<dyn ChunkFetcher>,
     ) -> Self {
         let slot_index = storage_module
             .partition_assignment()
@@ -66,6 +68,7 @@ impl ChunkOrchestrator {
             slot_index,
             timeout_duration: Duration::from_secs(15),
             last_bandwidth_check: Instant::now(),
+            chunk_fetcher, // Store the chunk fetcher
         }
     }
 
@@ -101,7 +104,7 @@ impl ChunkOrchestrator {
             .filter(|r| r.request_state == ChunkRequestState::Pending)
             .count();
 
-        let mut requests_to_add = TARGET_QUEUE_DEPTH.saturating_sub(pending_count);
+        let mut requests_to_add = TARGET_REQUEST_QUEUE_DEPTH.saturating_sub(pending_count);
         if requests_to_add == 0 {
             return;
         }
@@ -207,11 +210,9 @@ impl ChunkOrchestrator {
             return;
         }
 
-        let client = reqwest::Client::new();
-
         for chunk_offset in pending_offsets {
             if let Some(peer_addr) = self.find_best_peer() {
-                self.dispatch_chunk_request(client.clone(), chunk_offset, peer_addr);
+                self.dispatch_chunk_request(chunk_offset, peer_addr);
             } else {
                 break;
             }
@@ -228,18 +229,13 @@ impl ChunkOrchestrator {
             .map(|(addr, _, _)| addr)
     }
 
-    fn dispatch_chunk_request(
-        &mut self,
-        client: reqwest::Client,
-        chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
-    ) {
+    fn dispatch_chunk_request(&mut self, chunk_offset: PartitionChunkOffset, peer_addr: Address) {
         let request = match self.chunk_requests.get_mut(&chunk_offset) {
             Some(req) => req,
             None => return,
         };
 
-        let (ledger_id, api_addr) = {
+        let api_addr = {
             let mut peers = match self.all_peers.write() {
                 Ok(p) => p,
                 Err(_) => return,
@@ -251,7 +247,7 @@ impl ChunkOrchestrator {
             };
 
             peer_manager.on_chunk_request_started();
-            (request.ledger_id, peer_manager.peer_address.api)
+            peer_manager.peer_address.api
         };
 
         let start_instant = Instant::now();
@@ -266,61 +262,30 @@ impl ChunkOrchestrator {
 
         request.request_state = ChunkRequestState::Requested(peer_addr, start_instant);
 
-        Self::spawn_chunk_request(
-            client,
-            self.service_senders.data_sync.clone(),
-            chunk_offset,
-            ledger_chunk_offset,
-            self.storage_module.id,
-            ledger_id,
-            peer_addr,
-            api_addr,
-        );
-    }
+        // Use the injected chunk fetcher instead of spawning HTTP directly
+        let chunk_fetcher = self.chunk_fetcher.clone();
+        let tx = self.service_senders.data_sync.clone();
+        let storage_module_id = self.storage_module.id;
+        let timeout = self.timeout_duration;
 
-    fn spawn_chunk_request(
-        client: reqwest::Client,
-        tx: UnboundedSender<DataSyncServiceMessage>,
-        chunk_offset: PartitionChunkOffset,
-        ledger_chunk_offset: LedgerChunkOffset,
-        storage_module_id: usize,
-        ledger_id: usize,
-        peer_addr: Address,
-        api_addr: SocketAddr,
-    ) {
         tokio::spawn(async move {
-            let url = format!(
-                "http://{}/v1/chunk/ledger/{}/{}",
-                api_addr, ledger_id, ledger_chunk_offset
-            );
-
-            let result = timeout(Duration::from_secs(15), async {
-                let response = client
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| eyre::eyre!("Request failed: {}", e))?;
-                let chunk: PackedChunk = response
-                    .json()
-                    .await
-                    .map_err(|e| eyre::eyre!("JSON parsing failed: {}", e))?;
-                eyre::Ok(chunk)
-            })
-            .await;
+            let result = chunk_fetcher
+                .fetch_chunk(ledger_chunk_offset, api_addr, timeout)
+                .await;
 
             let message = match result {
-                Ok(Ok(chunk)) => DataSyncServiceMessage::ChunkCompleted {
+                Ok(chunk) => DataSyncServiceMessage::ChunkCompleted {
                     storage_module_id,
                     chunk_offset,
                     peer_addr,
                     chunk,
                 },
-                Ok(Err(_)) => DataSyncServiceMessage::ChunkFailed {
+                Err(ChunkFetchError::Timeout) => DataSyncServiceMessage::ChunkTimedOut {
                     storage_module_id,
                     chunk_offset,
                     peer_addr,
                 },
-                Err(_) => DataSyncServiceMessage::ChunkTimedOut {
+                Err(_) => DataSyncServiceMessage::ChunkFailed {
                     storage_module_id,
                     chunk_offset,
                     peer_addr,

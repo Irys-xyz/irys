@@ -1,8 +1,9 @@
+pub mod chunk_fetcher;
 pub mod chunk_orchestrator;
 pub mod peer_bandwidth_manager;
 pub mod peer_stats;
 
-use crate::services::ServiceSenders;
+use crate::{chunk_fetcher::ChunkFetcherFactory, services::ServiceSenders};
 use chunk_orchestrator::ChunkOrchestrator;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
@@ -31,6 +32,7 @@ pub struct DataSyncServiceInner {
     pub all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     pub chunk_orchestrators: HashMap<StorageModuleId, ChunkOrchestrator>,
     pub peer_list: PeerList,
+    pub chunk_fetcher_factory: ChunkFetcherFactory,
     pub service_senders: ServiceSenders,
     pub config: Config,
 }
@@ -63,6 +65,7 @@ impl DataSyncServiceInner {
         block_tree: BlockTreeReadGuard,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         peer_list: PeerList,
+        chunk_fetcher_factory: ChunkFetcherFactory,
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
@@ -71,6 +74,7 @@ impl DataSyncServiceInner {
             storage_modules,
             peer_list,
             all_peers: Default::default(),
+            chunk_fetcher_factory,
             chunk_orchestrators: Default::default(),
             service_senders,
             config,
@@ -272,9 +276,16 @@ impl DataSyncServiceInner {
                 continue;
             }
 
+            // Use the factory to create a chunk_fetcher (allows mock chunk fetchers for testing)
+            let chunk_fetcher = (self.chunk_fetcher_factory)(pa.ledger_id.unwrap());
+
             // Create orchestrator for storage modules that needs to sync data
-            let orchestrator =
-                ChunkOrchestrator::new(sm.clone(), self.all_peers.clone(), &self.service_senders);
+            let orchestrator = ChunkOrchestrator::new(
+                sm.clone(),
+                self.all_peers.clone(),
+                &self.service_senders,
+                chunk_fetcher,
+            );
 
             self.chunk_orchestrators.insert(sm_id, orchestrator);
         }
@@ -374,6 +385,7 @@ impl DataSyncService {
         block_tree: BlockTreeReadGuard,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         peer_list: PeerList,
+        chunk_fetcher_factory: ChunkFetcherFactory,
         service_senders: &ServiceSenders,
         config: &Config,
         runtime_handle: tokio::runtime::Handle,
@@ -390,6 +402,7 @@ impl DataSyncService {
                     block_tree,
                     storage_modules,
                     peer_list,
+                    chunk_fetcher_factory,
                     service_senders,
                     config,
                 ),
