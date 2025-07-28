@@ -14,7 +14,6 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{BlockIndexReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_reth::alloy_rlp::Decodable as _;
 use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
@@ -523,13 +522,13 @@ pub async fn shadow_transactions_are_valid(
                     return Ok(None);
                 }
                 let input = tx.input();
-                let Some(stripped) = input.strip_prefix(IRYS_SHADOW_EXEC) else {
+                if input.strip_prefix(IRYS_SHADOW_EXEC).is_none() {
                     // after reaching first non-shadow tx, we scan the rest of the
                     // txs to check if we don't have any stray shadow txs in there
                     expect_shadow_txs = false;
                     return Ok(None);
                 };
-                let shadow_tx = ShadowTransaction::decode(&mut &stripped[..])
+                let shadow_tx = ShadowTransaction::decode_prefixed(&mut &input[..])
                     .map_err(|e| eyre::eyre!("failed to decode shadow tx: {e}"))?;
                 let tx_signer = tx.into_signed().recover_signer()?;
 
