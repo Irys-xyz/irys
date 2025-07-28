@@ -291,7 +291,7 @@ impl ActiveValidations {
 
             VdfValidationTask {
                 block_hash: *pending.0,
-                fut: // TOOD: figure out how to remove this `clone`
+                fut: // TODO: figure out how to remove this `clone`
                 pending.1.clone().0.execute_vdf().boxed(),
                 cancel: Arc::new(AtomicU8::new(0)),
             }
