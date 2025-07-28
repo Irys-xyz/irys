@@ -6,8 +6,40 @@ use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub type IrysTransactionId = H256;
+
+/// Errors that can occur during commitment transaction validation
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CommitmentValidationError {
+    /// The provided fee is insufficient
+    #[error("Insufficient fee: {provided} < required {required}")]
+    InsufficientFee {
+        provided: u64,
+        required: u64,
+    },
+    /// Invalid stake or unstake value
+    #[error("Invalid stake value: {provided} != expected {expected}")]
+    InvalidStakeValue {
+        provided: U256,
+        expected: U256,
+    },
+    /// Invalid pledge value
+    #[error("Invalid pledge value: {provided} != expected {expected} (pledge_count: {pledge_count})")]
+    InvalidPledgeValue {
+        provided: U256,
+        expected: U256,
+        pledge_count: usize,
+    },
+    /// Invalid unpledge value
+    #[error("Invalid unpledge value: {provided} != expected {expected} (pledge_count: {pledge_count})")]
+    InvalidUnpledgeValue {
+        provided: U256,
+        expected: U256,
+        pledge_count: usize,
+    },
+}
 
 #[derive(
     Clone,
@@ -242,6 +274,17 @@ impl CommitmentTransaction {
         }
     }
 
+    /// Calculate the value for a pledge at the given index
+    /// For pledge N, use count = N
+    /// For unpledge refund, use count = N - 1 (to get the value of the most recent pledge)
+    pub fn calculate_pledge_value_at_index(config: &ConsensusConfig, pledge_index: usize) -> U256 {
+        config
+            .pledge_base_value
+            .apply_pledge_decay(pledge_index, config.pledge_decay)
+            .map(|a| a.amount)
+            .unwrap_or(config.pledge_base_value.amount)
+    }
+
     /// Create a new stake transaction with the configured stake fee as value
     pub fn new_stake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
         Self {
@@ -275,13 +318,7 @@ impl CommitmentTransaction {
         signer_address: Address,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
-
-        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
-        let value = config
-            .pledge_base_value
-            .apply_pledge_decay(count, config.pledge_decay)
-            .map(|a| a.amount)
-            .unwrap_or(config.pledge_base_value.amount);
+        let value = Self::calculate_pledge_value_at_index(config, count);
 
         Self {
             commitment_type: CommitmentType::Pledge,
@@ -309,12 +346,7 @@ impl CommitmentTransaction {
             U256::zero()
         } else {
             // Calculate the value of the most recent pledge (count - 1)
-            // This ensures unpledge matches the cost of the last pledge made
-            config
-                .pledge_base_value
-                .apply_pledge_decay(count - 1, config.pledge_decay)
-                .map(|a| a.amount)
-                .unwrap_or(config.pledge_base_value.amount)
+            Self::calculate_pledge_value_at_index(config, count - 1)
         };
 
         Self {
@@ -353,6 +385,75 @@ impl CommitmentTransaction {
             && self
                 .signature
                 .validate_signature(self.signature_hash(), self.signer)
+    }
+
+    /// Validates that the commitment transaction has a sufficient fee
+    pub fn validate_fee(&self, config: &ConsensusConfig) -> Result<(), CommitmentValidationError> {
+        let required_fee = config.mempool.commitment_fee;
+        
+        if self.fee < required_fee {
+            return Err(CommitmentValidationError::InsufficientFee {
+                provided: self.fee,
+                required: required_fee,
+            });
+        }
+        
+        Ok(())
+    }
+
+    /// Validates the value field based on commitment type
+    pub async fn validate_value(
+        &self,
+        config: &ConsensusConfig,
+        provider: &impl PledgeDataProvider,
+    ) -> Result<(), CommitmentValidationError> {
+        match self.commitment_type {
+            CommitmentType::Stake | CommitmentType::Unstake => {
+                // For stake/unstake, value must match configured stake value
+                let expected_value = config.stake_value.amount;
+                if self.value != expected_value {
+                    return Err(CommitmentValidationError::InvalidStakeValue {
+                        provided: self.value,
+                        expected: expected_value,
+                    });
+                }
+            }
+            CommitmentType::Pledge => {
+                // For pledge, recompute expected value based on existing pledges
+                let pledge_count = provider.pledge_count(self.signer).await;
+                let expected_value = Self::calculate_pledge_value_at_index(config, pledge_count);
+                
+                if self.value != expected_value {
+                    return Err(CommitmentValidationError::InvalidPledgeValue {
+                        provided: self.value,
+                        expected: expected_value,
+                        pledge_count,
+                    });
+                }
+            }
+            CommitmentType::Unpledge => {
+                // For unpledge, recompute refund value based on existing pledges
+                let pledge_count = provider.pledge_count(self.signer).await;
+                
+                // Calculate expected refund value
+                let expected_value = if pledge_count == 0 {
+                    U256::zero()
+                } else {
+                    // Value of the most recent pledge (count - 1)
+                    Self::calculate_pledge_value_at_index(config, pledge_count - 1)
+                };
+                
+                if self.value != expected_value {
+                    return Err(CommitmentValidationError::InvalidUnpledgeValue {
+                        provided: self.value,
+                        expected: expected_value,
+                        pledge_count,
+                    });
+                }
+            }
+        }
+        
+        Ok(())
     }
 }
 

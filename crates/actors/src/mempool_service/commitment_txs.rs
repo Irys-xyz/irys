@@ -27,6 +27,32 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
+        // Validate fee
+        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
+            let mut mempool_state_guard = mempool_state.write().await;
+            mempool_state_guard.recent_invalid_tx.put(commitment_tx.id, ());
+            drop(mempool_state_guard);
+            tracing::warn!(
+                "Commitment tx {} failed fee validation: {}",
+                commitment_tx.id.0.to_base58(),
+                e
+            );
+            return Err(TxIngressError::Other(e.to_string()));
+        }
+
+        // Validate value based on commitment type
+        if let Err(e) = commitment_tx.validate_value(&self.config.consensus, &self.pledge_provider).await {
+            let mut mempool_state_guard = mempool_state.write().await;
+            mempool_state_guard.recent_invalid_tx.put(commitment_tx.id, ());
+            drop(mempool_state_guard);
+            tracing::warn!(
+                "Commitment tx {} failed value validation: {}",
+                commitment_tx.id.0.to_base58(),
+                e
+            );
+            return Err(TxIngressError::Other(e.to_string()));
+        }
+
         // Early out if we already know about this transaction in mempool (recent valid)
         if mempool_state_guard
             .recent_valid_tx

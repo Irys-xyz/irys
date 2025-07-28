@@ -1,5 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::mempool_service::ChunkIngressError;
+use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
 use eyre::eyre;
@@ -51,6 +51,8 @@ pub struct Inner {
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     pub storage_modules_guard: StorageModulesReadGuard,
+    /// Pledge provider for commitment transaction validation
+    pub pledge_provider: MempoolPledgeProvider,
 }
 
 /// Messages that the Mempool Service handler supports
