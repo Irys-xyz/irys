@@ -14,7 +14,7 @@ pub enum BandwidthRating {
 #[derive(Debug)]
 pub struct PeerStats {
     pub chunk_size: u64,
-    pub baseline_concurrency: u32, // Starting point for adjustments
+    pub baseline_concurrency: u32,
     pub current_max_concurrency: u32,
     pub max_concurrency: u32,
     pub bandwidth_rating: BandwidthRating,
@@ -24,10 +24,8 @@ pub struct PeerStats {
     pub consecutive_failures: u32,
     pub active_requests: usize,
 
-    // Multi-window throughput tracking for better trend analysis
-    pub short_term_window: BandwidthWindow, // resets every 10 seconds - immediate performance
-    pub medium_term_window: BandwidthWindow, // resets every 30 seconds - recent trend
-    pub long_term_window: BandwidthWindow,  // resets every 300 seconds - stable baseline
+    // Bandwidth tracking for the last 5 min
+    pub bandwidth_window: BandwidthWindow,
 
     // Track average chunk completion time for better concurrency calculations
     pub completion_time_samples: CircularBuffer<Duration>,
@@ -43,18 +41,12 @@ impl PeerStats {
         let bandwidth_fraction = effective_target as f64 / connection_limit_mbps as f64;
 
         // Scale concurrency based on bandwidth fraction
-        // More bandwidth usage = more concurrent connections needed
         let base_concurrency = (bandwidth_fraction * 24.0).ceil() as u32; // Scale from 1-24 connections
         let base_concurrency = base_concurrency.clamp(2, 24); // Minimum 2, maximum 24
 
         // Small chunks might need more concurrency due to per-request overhead
         // (chunks smaller than 245KiB only used in testing)
-        let chunk_multiplier = if chunk_size < 1024 {
-            // < 1KiB
-            1.5
-        } else {
-            1.0
-        };
+        let chunk_multiplier = if chunk_size < 1024 { 1.5 } else { 1.0 };
 
         let max_concurrency =
             ((base_concurrency as f64 * chunk_multiplier).round() as u32).clamp(1, 32);
@@ -70,10 +62,9 @@ impl PeerStats {
             timeout,
             consecutive_failures: 0,
             active_requests: 0,
-            short_term_window: BandwidthWindow::new(Duration::from_secs(10)),
-            medium_term_window: BandwidthWindow::new(Duration::from_secs(30)),
-            long_term_window: BandwidthWindow::new(Duration::from_secs(300)),
-            completion_time_samples: CircularBuffer::new(50), // Track last 50 completion times
+            // Use 300-second window (5 minutes) to capture bandwidth throughput
+            bandwidth_window: BandwidthWindow::new(Duration::from_secs(300)),
+            completion_time_samples: CircularBuffer::new(50),
         }
     }
 
@@ -81,7 +72,7 @@ impl PeerStats {
     /// current_max_concurrency based on recent bandwidth measurements
     pub fn available_concurrency(&self) -> u32 {
         let expected_bytes_per_sec = self.expected_bandwidth_bps();
-        let observed_bytes_per_sec = self.short_term_window.bytes_per_second() as f64;
+        let observed_bytes_per_sec = self.short_term_bandwidth_bps() as f64;
 
         // Only add concurrency if we have unused bandwidth
         let unused_bandwidth = expected_bytes_per_sec - observed_bytes_per_sec;
@@ -93,16 +84,15 @@ impl PeerStats {
         let bytes_per_stream = expected_bytes_per_sec;
         let additional_streams = unused_bandwidth / bytes_per_stream;
 
-        additional_streams as u32 // Truncates to whole streams
+        additional_streams as u32
     }
 
     pub fn expected_bandwidth_bps(&self) -> f64 {
-        // Convert to bandwidth: chunk_size (bytes) / time (seconds)
         let time_seconds = self.average_completion_time().as_secs_f64();
         if time_seconds > 0.0 {
             self.chunk_size as f64 / time_seconds
         } else {
-            0.0 // or handle zero time case appropriately
+            0.0
         }
     }
 
@@ -117,10 +107,8 @@ impl PeerStats {
         self.active_requests -= 1;
         self.consecutive_failures = 0;
 
-        // Add bytes to all throughput windows
-        self.short_term_window.add_bytes(self.chunk_size);
-        self.medium_term_window.add_bytes(self.chunk_size);
-        self.long_term_window.add_bytes(self.chunk_size);
+        // Add bytes to the bandwidth window
+        self.bandwidth_window.add_bytes(self.chunk_size);
     }
 
     pub fn record_request_failed(&mut self) {
@@ -128,7 +116,6 @@ impl PeerStats {
         self.consecutive_failures += 1;
     }
 
-    /// Update the running average of chunk completion times
     pub fn average_completion_time(&self) -> Duration {
         if self.completion_time_samples.is_empty() {
             return Duration::from_millis(100); // Default to 100ms as a baseline
@@ -144,9 +131,8 @@ impl PeerStats {
         Duration::from_millis(average_millis)
     }
 
-    /// Calculate a health score for the peer (0.0 = worst, 1.0 = best)
     pub fn health_score(&self) -> f64 {
-        let mut score = 0.5; // Start at neutral baseline
+        let mut score = 0.5;
 
         // Failure impact (-0.5 to +0.2) - most critical factor
         if self.consecutive_failures == 0 {
@@ -173,17 +159,20 @@ impl PeerStats {
 
     /// Get short-term bandwidth throughput (10s window)
     pub fn short_term_bandwidth_bps(&self) -> u64 {
-        self.short_term_window.bytes_per_second()
+        self.bandwidth_window
+            .bytes_per_second_in_window(Duration::from_secs(10))
     }
 
-    /// Get medium-term bandwidth throughput (30s window) - good for recent trends
+    /// Get medium-term bandwidth throughput (30s window)
     pub fn medium_term_bandwidth_bps(&self) -> u64 {
-        self.medium_term_window.bytes_per_second()
+        self.bandwidth_window
+            .bytes_per_second_in_window(Duration::from_secs(30))
     }
 
-    /// Get long-term bandwidth throughput (300s window) - good for stable baseline
+    /// Get long-term bandwidth throughput (300s window)
     pub fn long_term_bandwidth_bps(&self) -> u64 {
-        self.long_term_window.bytes_per_second()
+        self.bandwidth_window
+            .bytes_per_second_in_window(Duration::from_secs(300))
     }
 
     /// Check if bandwidth throughput is currently trending upward
@@ -192,7 +181,6 @@ impl PeerStats {
         let medium = self.medium_term_bandwidth_bps();
         let long = self.long_term_bandwidth_bps();
 
-        // Consider improving if recent performance is better than medium and long term
         short > medium && medium >= long && short > 0
     }
 
@@ -209,6 +197,7 @@ impl PeerStats {
         variance_ratio < 0.15 // Within 15% is considered stable
     }
 }
+
 #[derive(Debug)]
 pub struct BandwidthWindow {
     buckets: VecDeque<(Instant, u64)>, // (timestamp, bytes)
@@ -220,7 +209,7 @@ impl BandwidthWindow {
     pub fn new(window_duration: Duration) -> Self {
         // Use 1-second buckets for good granularity and intuitive behavior
         let bucket_duration = Duration::from_secs(1);
-        let bucket_count = window_duration.as_secs().max(1) as usize; // At least 1 bucket
+        let bucket_count = window_duration.as_secs().max(1) as usize;
 
         Self {
             buckets: VecDeque::with_capacity(bucket_count + 2), // +2 for safety margin
@@ -256,16 +245,34 @@ impl BandwidthWindow {
         }
     }
 
+    /// Get bytes per second for the full window duration
     pub fn bytes_per_second(&self) -> u64 {
+        self.bytes_per_second_in_window(self.window_duration)
+    }
+
+    /// Get bytes per second for the specified time window (must be <= window_duration)
+    pub fn bytes_per_second_in_window(&self, window: Duration) -> u64 {
         if self.buckets.is_empty() {
             return 0;
         }
 
-        let total_bytes: u64 = self.buckets.iter().map(|(_, bytes)| bytes).sum();
         let now = Instant::now();
+        let cutoff_time = now - window.min(self.window_duration);
 
-        // Calculate elapsed time from oldest bucket to now
-        if let Some((oldest_timestamp, _)) = self.buckets.front() {
+        // Sum bytes from buckets within the specified window
+        let total_bytes: u64 = self
+            .buckets
+            .iter()
+            .filter(|(timestamp, _)| *timestamp >= cutoff_time)
+            .map(|(_, bytes)| bytes)
+            .sum();
+
+        // Find the oldest bucket within our window for elapsed time calculation
+        if let Some((oldest_timestamp, _)) = self
+            .buckets
+            .iter()
+            .find(|(timestamp, _)| *timestamp >= cutoff_time)
+        {
             let elapsed = now.duration_since(*oldest_timestamp);
             let elapsed_secs = elapsed.as_secs_f64();
 
