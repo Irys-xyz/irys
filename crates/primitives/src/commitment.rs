@@ -85,18 +85,23 @@ impl Decodable for CommitmentStatus {
     Clone,
     Copy,
     Hash,
-    Compact,
     serde::Serialize,
     serde::Deserialize,
     arbitrary::Arbitrary,
 )]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", tag = "type")]
 pub enum CommitmentType {
     #[default]
-    Stake = 1,
-    Pledge = 2,
-    Unpledge = 3,
-    Unstake = 4,
+    Stake,
+    Pledge {
+        #[serde(rename = "pledgeCountBeforeExecuting")]
+        pledge_count_before_executing: usize,
+    },
+    Unpledge {
+        #[serde(rename = "pledgeCountBeforeExecuting")]
+        pledge_count_before_executing: usize,
+    },
+    Unstake,
 }
 
 // TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
@@ -107,41 +112,124 @@ pub enum CommitmentTypeDecodeError {
     UnknownCommitmentType(u8),
 }
 
-impl TryFrom<u8> for CommitmentType {
-    type Error = CommitmentTypeDecodeError;
-    fn try_from(id: u8) -> Result<Self, Self::Error> {
-        match id {
-            1 => Ok(Self::Stake),
-            2 => Ok(Self::Pledge),
-            3 => Ok(Self::Unpledge),
-            4 => Ok(Self::Unstake),
-            _ => Err(CommitmentTypeDecodeError::UnknownCommitmentType(id)),
-        }
-    }
-}
-
 impl Encodable for CommitmentType {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
-            Self::Stake => out.put_u8(Self::Stake as u8),
-            Self::Pledge => out.put_u8(Self::Pledge as u8),
-            Self::Unpledge => out.put_u8(Self::Unpledge as u8),
-            Self::Unstake => out.put_u8(Self::Unstake as u8),
+            Self::Stake => {
+                out.put_u8(1);
+            }
+            Self::Pledge {
+                pledge_count_before_executing,
+            } => {
+                out.put_u8(2);
+                (*pledge_count_before_executing as u64).encode(out);
+            }
+            Self::Unpledge {
+                pledge_count_before_executing,
+            } => {
+                out.put_u8(3);
+                (*pledge_count_before_executing as u64).encode(out);
+            }
+            Self::Unstake => {
+                out.put_u8(4);
+            }
         };
     }
+
     fn length(&self) -> usize {
-        1
+        match self {
+            Self::Stake | Self::Unstake => 1,
+            Self::Pledge {
+                pledge_count_before_executing,
+            }
+            | Self::Unpledge {
+                pledge_count_before_executing,
+            } => 1 + (*pledge_count_before_executing as u64).length(),
+        }
     }
 }
 
 impl Decodable for CommitmentType {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let _v = buf.to_vec();
-        let enc_commitment_type = u8::decode(&mut &buf[..])?;
-        let commitment_type = Self::try_from(enc_commitment_type)
-            .or(Err(RlpError::Custom("unknown commitment status")))?;
+        if buf.is_empty() {
+            return Err(RlpError::InputTooShort);
+        }
 
+        let type_id = buf[0];
         buf.advance(1);
-        Ok(commitment_type)
+
+        match type_id {
+            1 => Ok(Self::Stake),
+            2 => {
+                let count = u64::decode(buf)? as usize;
+                Ok(Self::Pledge {
+                    pledge_count_before_executing: count,
+                })
+            }
+            3 => {
+                let count = u64::decode(buf)? as usize;
+                Ok(Self::Unpledge {
+                    pledge_count_before_executing: count,
+                })
+            }
+            4 => Ok(Self::Unstake),
+            _ => Err(RlpError::Custom("unknown commitment type")),
+        }
+    }
+}
+
+// Manual implementation of Compact for CommitmentType
+impl reth_codecs::Compact for CommitmentType {
+    fn to_compact<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) -> usize {
+        match self {
+            Self::Stake => {
+                buf.put_u8(1);
+                1
+            }
+            Self::Pledge {
+                pledge_count_before_executing,
+            } => {
+                buf.put_u8(2);
+                buf.put_u64(*pledge_count_before_executing as u64);
+                9
+            }
+            Self::Unpledge {
+                pledge_count_before_executing,
+            } => {
+                buf.put_u8(3);
+                buf.put_u64(*pledge_count_before_executing as u64);
+                9
+            }
+            Self::Unstake => {
+                buf.put_u8(4);
+                1
+            }
+        }
+    }
+
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        match buf[0] {
+            1 => (Self::Stake, &buf[1..]),
+            2 => {
+                let count = u64::from_le_bytes(buf[1..9].try_into().unwrap()) as usize;
+                (
+                    Self::Pledge {
+                        pledge_count_before_executing: count,
+                    },
+                    &buf[9..],
+                )
+            }
+            3 => {
+                let count = u64::from_le_bytes(buf[1..9].try_into().unwrap()) as usize;
+                (
+                    Self::Unpledge {
+                        pledge_count_before_executing: count,
+                    },
+                    &buf[9..],
+                )
+            }
+            4 => (Self::Unstake, &buf[1..]),
+            _ => panic!("unknown commitment type in compact encoding"),
+        }
     }
 }

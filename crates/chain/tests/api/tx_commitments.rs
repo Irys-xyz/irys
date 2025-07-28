@@ -501,7 +501,9 @@ async fn post_pledge_commitment(
 
     let consensus = &node.node_ctx.config.consensus;
     let pledge_tx = CommitmentTransaction {
-        commitment_type: CommitmentType::Pledge,
+        commitment_type: CommitmentType::Pledge {
+            pledge_count_before_executing: 0, // First pledge
+        },
         anchor,
         fee: price_info.fee,
         value: price_info.value,

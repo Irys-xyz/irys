@@ -15,25 +15,23 @@ pub type IrysTransactionId = H256;
 pub enum CommitmentValidationError {
     /// The provided fee is insufficient
     #[error("Insufficient fee: {provided} < required {required}")]
-    InsufficientFee {
-        provided: u64,
-        required: u64,
-    },
+    InsufficientFee { provided: u64, required: u64 },
     /// Invalid stake or unstake value
     #[error("Invalid stake value: {provided} != expected {expected}")]
-    InvalidStakeValue {
-        provided: U256,
-        expected: U256,
-    },
+    InvalidStakeValue { provided: U256, expected: U256 },
     /// Invalid pledge value
-    #[error("Invalid pledge value: {provided} != expected {expected} (pledge_count: {pledge_count})")]
+    #[error(
+        "Invalid pledge value: {provided} != expected {expected} (pledge_count: {pledge_count})"
+    )]
     InvalidPledgeValue {
         provided: U256,
         expected: U256,
         pledge_count: usize,
     },
     /// Invalid unpledge value
-    #[error("Invalid unpledge value: {provided} != expected {expected} (pledge_count: {pledge_count})")]
+    #[error(
+        "Invalid unpledge value: {provided} != expected {expected} (pledge_count: {pledge_count})"
+    )]
     InvalidUnpledgeValue {
         provided: U256,
         expected: U256,
@@ -278,6 +276,10 @@ impl CommitmentTransaction {
     /// For pledge N, use count = N
     /// For unpledge refund, use count = N - 1 (to get the value of the most recent pledge)
     pub fn calculate_pledge_value_at_index(config: &ConsensusConfig, pledge_index: usize) -> U256 {
+        if pledge_index == 0 {
+            return U256::zero();
+        };
+
         config
             .pledge_base_value
             .apply_pledge_decay(pledge_index, config.pledge_decay)
@@ -321,7 +323,9 @@ impl CommitmentTransaction {
         let value = Self::calculate_pledge_value_at_index(config, count);
 
         Self {
-            commitment_type: CommitmentType::Pledge,
+            commitment_type: CommitmentType::Pledge {
+                pledge_count_before_executing: count,
+            },
             anchor,
             fee,
             value,
@@ -342,15 +346,12 @@ impl CommitmentTransaction {
         let count = provider.pledge_count(signer_address).await;
 
         // If user has no pledges, they get 0 back
-        let value = if count == 0 {
-            U256::zero()
-        } else {
-            // Calculate the value of the most recent pledge (count - 1)
-            Self::calculate_pledge_value_at_index(config, count - 1)
-        };
+        let value = Self::calculate_pledge_value_at_index(config, count.saturating_sub(1));
 
         Self {
-            commitment_type: CommitmentType::Unpledge,
+            commitment_type: CommitmentType::Unpledge {
+                pledge_count_before_executing: count,
+            },
             anchor,
             fee,
             value,
@@ -390,24 +391,23 @@ impl CommitmentTransaction {
     /// Validates that the commitment transaction has a sufficient fee
     pub fn validate_fee(&self, config: &ConsensusConfig) -> Result<(), CommitmentValidationError> {
         let required_fee = config.mempool.commitment_fee;
-        
+
         if self.fee < required_fee {
             return Err(CommitmentValidationError::InsufficientFee {
                 provided: self.fee,
                 required: required_fee,
             });
         }
-        
+
         Ok(())
     }
 
     /// Validates the value field based on commitment type
-    pub async fn validate_value(
+    pub fn validate_value(
         &self,
         config: &ConsensusConfig,
-        provider: &impl PledgeDataProvider,
     ) -> Result<(), CommitmentValidationError> {
-        match self.commitment_type {
+        match &self.commitment_type {
             CommitmentType::Stake | CommitmentType::Unstake => {
                 // For stake/unstake, value must match configured stake value
                 let expected_value = config.stake_value.amount;
@@ -418,41 +418,41 @@ impl CommitmentTransaction {
                     });
                 }
             }
-            CommitmentType::Pledge => {
-                // For pledge, recompute expected value based on existing pledges
-                let pledge_count = provider.pledge_count(self.signer).await;
-                let expected_value = Self::calculate_pledge_value_at_index(config, pledge_count);
-                
+            CommitmentType::Pledge {
+                pledge_count_before_executing,
+            } => {
+                // For pledge, validate using the embedded pledge count
+                let expected_value =
+                    Self::calculate_pledge_value_at_index(config, *pledge_count_before_executing);
+
                 if self.value != expected_value {
                     return Err(CommitmentValidationError::InvalidPledgeValue {
                         provided: self.value,
                         expected: expected_value,
-                        pledge_count,
+                        pledge_count: *pledge_count_before_executing,
                     });
                 }
             }
-            CommitmentType::Unpledge => {
-                // For unpledge, recompute refund value based on existing pledges
-                let pledge_count = provider.pledge_count(self.signer).await;
-                
+            CommitmentType::Unpledge {
+                pledge_count_before_executing,
+            } => {
+                // For unpledge, validate using the embedded pledge count
                 // Calculate expected refund value
-                let expected_value = if pledge_count == 0 {
-                    U256::zero()
-                } else {
-                    // Value of the most recent pledge (count - 1)
-                    Self::calculate_pledge_value_at_index(config, pledge_count - 1)
-                };
-                
+                let expected_value = Self::calculate_pledge_value_at_index(
+                    config,
+                    pledge_count_before_executing - 1,
+                );
+
                 if self.value != expected_value {
                     return Err(CommitmentValidationError::InvalidUnpledgeValue {
                         provided: self.value,
                         expected: expected_value,
-                        pledge_count,
+                        pledge_count: *pledge_count_before_executing,
                     });
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -533,10 +533,10 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn total_cost(&self) -> U256 {
-        let additional_fee = match self.commitment_type {
+        let additional_fee = match &self.commitment_type {
             CommitmentType::Stake => self.value,
-            CommitmentType::Pledge => self.value,
-            CommitmentType::Unpledge => U256::zero(),
+            CommitmentType::Pledge { .. } => self.value,
+            CommitmentType::Unpledge { .. } => U256::zero(),
             CommitmentType::Unstake => U256::zero(),
         };
         U256::from(self.fee).saturating_add(additional_fee)
@@ -1031,7 +1031,10 @@ mod pledge_decay_parametrized_tests {
         .await;
 
         // Verify the commitment type is correct
-        assert_eq!(unpledge_tx.commitment_type, CommitmentType::Unpledge);
+        assert!(matches!(
+            unpledge_tx.commitment_type,
+            CommitmentType::Unpledge { .. }
+        ));
 
         // Verify unpledge total cost only includes fee (not value)
         assert_eq!(

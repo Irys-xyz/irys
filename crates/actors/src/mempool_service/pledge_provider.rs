@@ -47,7 +47,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
                 .get(&user_address)
                 .map(|txs| {
                     txs.iter()
-                        .filter(|tx| tx.commitment_type == CommitmentType::Pledge)
+                        .filter(|tx| matches!(tx.commitment_type, CommitmentType::Pledge { .. }))
                         .count()
                 })
                 .unwrap_or(0)
@@ -61,7 +61,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
                 .get(&user_address)
                 .map(|txs| {
                     txs.iter()
-                        .filter(|tx| tx.commitment_type == CommitmentType::Unpledge)
+                        .filter(|tx| matches!(tx.commitment_type, CommitmentType::Unpledge { .. }))
                         .count()
                 })
                 .unwrap_or(0)

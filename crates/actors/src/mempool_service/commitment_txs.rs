@@ -30,7 +30,9 @@ impl Inner {
         // Validate fee
         if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
             let mut mempool_state_guard = mempool_state.write().await;
-            mempool_state_guard.recent_invalid_tx.put(commitment_tx.id, ());
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
             drop(mempool_state_guard);
             tracing::warn!(
                 "Commitment tx {} failed fee validation: {}",
@@ -41,9 +43,11 @@ impl Inner {
         }
 
         // Validate value based on commitment type
-        if let Err(e) = commitment_tx.validate_value(&self.config.consensus, &self.pledge_provider).await {
+        if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
             let mut mempool_state_guard = mempool_state.write().await;
-            mempool_state_guard.recent_invalid_tx.put(commitment_tx.id, ());
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
             drop(mempool_state_guard);
             tracing::warn!(
                 "Commitment tx {} failed value validation: {}",
@@ -360,7 +364,7 @@ impl Inner {
                 // Check if there's at least one pending stake transaction
                 if pending
                     .iter()
-                    .any(|c| c.commitment_type == CommitmentType::Stake)
+                    .any(|c| matches!(c.commitment_type, CommitmentType::Stake))
                 {
                     return CommitmentSnapshotStatus::Accepted;
                 }

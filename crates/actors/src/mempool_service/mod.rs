@@ -70,7 +70,7 @@ impl MempoolService {
                     mempool_state.clone(),
                     block_tree_read_guard.clone(),
                 );
-                
+
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,

@@ -306,14 +306,19 @@ impl Inner {
         // This order ensures stake transactions are processed before pledges
         let mempool_state_guard = mempool_state.read().await;
 
-        'outer: for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+        // Process in two phases: stakes first, then pledges
+        'outer: for phase in &["stake", "pledge"] {
             // Gather all commitments of current type from all addresses
             let mut sorted_commitments: Vec<_> = mempool_state_guard
                 .valid_commitment_tx
                 .values()
                 .flat_map(|txs| {
                     txs.iter()
-                        .filter(|tx| tx.commitment_type == *commitment_type)
+                        .filter(|tx| match (*phase, &tx.commitment_type) {
+                            ("stake", CommitmentType::Stake) => true,
+                            ("pledge", CommitmentType::Pledge { .. }) => true,
+                            _ => false,
+                        })
                         .cloned()
                 })
                 .collect();
@@ -337,7 +342,7 @@ impl Inner {
                 }
 
                 // signer stake status check
-                if tx.commitment_type == CommitmentType::Stake {
+                if matches!(tx.commitment_type, CommitmentType::Stake) {
                     let epoch_snapshot = self
                         .block_tree_read_guard
                         .read()
