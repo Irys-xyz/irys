@@ -351,14 +351,16 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // We expect 3 receipts: storage tx, evm tx, and block reward
     assert_eq!(block_txs.len(), 3);
     // Assert block reward (should be the first receipt)
-    let block_reward_systx = ShadowTransaction::decode_prefixed(&mut block_txs[0].input().as_ref()).unwrap();
+    let block_reward_systx =
+        ShadowTransaction::decode_prefixed(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(matches!(
         block_reward_systx.as_v1().unwrap(),
         TransactionPacket::BlockReward(_)
     ));
 
     // Assert storage tx is included in the receipts (should be the second receipt)
-    let storage_tx_systx = ShadowTransaction::decode_prefixed(&mut block_txs[1].input().as_ref()).unwrap();
+    let storage_tx_systx =
+        ShadowTransaction::decode_prefixed(&mut block_txs[1].input().as_ref()).unwrap();
     assert!(matches!(
         storage_tx_systx.as_v1().unwrap(),
         TransactionPacket::StorageFees(_)
