@@ -76,6 +76,7 @@ impl Decodable for CommitmentStatus {
 }
 
 // TODO: these need to be redone!
+// these do NOT start with 0, as RLP does not like "leading zeros"
 #[derive(
     PartialEq,
     Debug,
@@ -89,8 +90,7 @@ impl Decodable for CommitmentStatus {
     serde::Deserialize,
     arbitrary::Arbitrary,
 )]
-
-// these do NOT start with 0, as RLP does not like "leading zeros"
+#[serde(rename_all = "camelCase")]
 pub enum CommitmentType {
     #[default]
     Stake = 1,

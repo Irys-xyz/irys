@@ -1,10 +1,10 @@
-use crate::{
+pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
-use irys_primitives::CommitmentType;
+pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
 pub type IrysTransactionId = H256;
@@ -248,7 +248,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Stake,
             anchor,
             fee,
-            value: config.stake_fee.amount,
+            value: config.stake_value.amount,
             ..Self::new(config)
         }
     }
@@ -259,7 +259,7 @@ impl CommitmentTransaction {
             commitment_type: CommitmentType::Unstake,
             anchor,
             fee,
-            value: config.stake_fee.amount,
+            value: config.stake_value.amount,
             ..Self::new(config)
         }
     }
@@ -267,21 +267,21 @@ impl CommitmentTransaction {
     /// Create a new pledge transaction with decreasing cost per pledge.
     /// Cost = pledge_base_fee / ((existing_pledges + 1) ^ pledge_decay)
     /// The calculated cost is stored in the transaction's `value` field.
-    pub fn new_pledge(
+    pub async fn new_pledge(
         config: &ConsensusConfig,
         anchor: H256,
         fee: u64,
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
-        let count = provider.pledge_count(signer_address);
+        let count = provider.pledge_count(signer_address).await;
 
         // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
         let value = config
-            .pledge_base_fee
+            .pledge_base_value
             .apply_pledge_decay(count, config.pledge_decay)
             .map(|a| a.amount)
-            .unwrap_or(config.pledge_base_fee.amount);
+            .unwrap_or(config.pledge_base_value.amount);
 
         Self {
             commitment_type: CommitmentType::Pledge,
@@ -295,14 +295,14 @@ impl CommitmentTransaction {
     /// Create a new unpledge transaction that refunds the most recent pledge's cost.
     /// Refund = cost of the last pledge made (existing_pledges - 1)
     /// Returns 0 if user has no pledges. The refund is in the `value` field.
-    pub fn new_unpledge(
+    pub async fn new_unpledge(
         config: &ConsensusConfig,
         anchor: H256,
         fee: u64,
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
-        let count = provider.pledge_count(signer_address);
+        let count = provider.pledge_count(signer_address).await;
 
         // If user has no pledges, they get 0 back
         let value = if count == 0 {
@@ -311,10 +311,10 @@ impl CommitmentTransaction {
             // Calculate the value of the most recent pledge (count - 1)
             // This ensures unpledge matches the cost of the last pledge made
             config
-                .pledge_base_fee
+                .pledge_base_value
                 .apply_pledge_decay(count - 1, config.pledge_decay)
                 .map(|a| a.amount)
-                .unwrap_or(config.pledge_base_fee.amount)
+                .unwrap_or(config.pledge_base_value.amount)
         };
 
         Self {
@@ -611,9 +611,10 @@ impl From<DataTransactionHeader> for IrysTransactionResponse {
 }
 
 /// Trait for providing pledge count information for dynamic fee calculation
+#[async_trait::async_trait]
 pub trait PledgeDataProvider {
     /// Returns the number of existing pledges for a given user address
-    fn pledge_count(&self, user_address: Address) -> usize;
+    async fn pledge_count(&self, user_address: Address) -> usize;
 }
 
 #[cfg(test)]
@@ -638,8 +639,9 @@ mod test_helpers {
         }
     }
 
+    #[async_trait::async_trait]
     impl PledgeDataProvider for MockPledgeProvider {
-        fn pledge_count(&self, user_address: Address) -> usize {
+        async fn pledge_count(&self, user_address: Address) -> usize {
             self.pledge_counts.get(&user_address).copied().unwrap_or(0)
         }
     }
@@ -822,6 +824,7 @@ mod pledge_decay_parametrized_tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    #[tokio::test]
     #[rstest]
     #[case(0, dec!(20000.0))]
     #[case(1, dec!(10717.7))]
@@ -848,13 +851,13 @@ mod pledge_decay_parametrized_tests {
     #[case(22, dec!(1189.8))]
     #[case(23, dec!(1145.0))]
     #[case(24, dec!(1103.7))]
-    fn test_pledge_cost_with_decay(
+    async fn test_pledge_cost_with_decay(
         #[case] existing_pledges: usize,
         #[case] expected_cost: Decimal,
     ) {
         // Setup config with $20,000 base fee and 0.9 decay rate
         let mut config = ConsensusConfig::testing();
-        config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
         // Create provider with existing pledge count
@@ -864,7 +867,8 @@ mod pledge_decay_parametrized_tests {
 
         // Create a new pledge transaction
         let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address);
+            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address)
+                .await;
 
         // Convert actual value to decimal for comparison
         let actual_amount = Amount::<()>::new(pledge_tx.value)
@@ -874,6 +878,7 @@ mod pledge_decay_parametrized_tests {
         assert_eq!(actual_amount.round_dp(0), expected_cost.round_dp(0));
     }
 
+    #[tokio::test]
     #[rstest]
     #[case(0, dec!(0))]
     #[case(1, dec!(20000.0))]
@@ -900,13 +905,13 @@ mod pledge_decay_parametrized_tests {
     #[case(22,dec!(1238.3))]
     #[case(23,dec!(1189.8))]
     #[case(24,dec!(1145.0))]
-    fn test_unpledge_cost(
+    async fn test_unpledge_cost(
         #[case] existing_pledges: usize,
         #[case] expected_unpledge_value: Decimal,
     ) {
         // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
         let mut config = ConsensusConfig::testing();
-        config.pledge_base_fee = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
+        config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
         // Create provider with existing pledge count
@@ -921,7 +926,8 @@ mod pledge_decay_parametrized_tests {
             1,
             &provider,
             signer_address,
-        );
+        )
+        .await;
 
         // Verify the commitment type is correct
         assert_eq!(unpledge_tx.commitment_type, CommitmentType::Unpledge);
