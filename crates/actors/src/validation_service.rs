@@ -279,6 +279,8 @@ impl ValidationServiceInner {
         block: &IrysBlockHeader,
         cancel: Arc<AtomicU8>,
     ) -> eyre::Result<()> {
+        debug!("Verifying VDF info");
+
         let vdf_info = block.vdf_limiter_info.clone();
 
         // First, wait for the previous VDF step to be available

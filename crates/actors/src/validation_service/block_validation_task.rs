@@ -107,12 +107,15 @@ impl BlockValidationTask {
         self.send_validation_result(validation_result);
     }
 
+    #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
     pub(crate) async fn execute_vdf(self) -> VdfValidationResult {
         let cancel = Arc::clone(&self.cancel);
         // run the VDF validation
-        Arc::clone(&self.service_inner)
+        let res = Arc::clone(&self.service_inner)
             .ensure_vdf_is_valid(&self.block, cancel.clone())
-            .await
+            .await;
+
+        let mapped_res = res
             .map(|()| VdfValidationResult::Valid)
             .unwrap_or_else(|e| {
                 // use the value of `cancel` to figure out if we errored because we were cancelled
@@ -122,7 +125,9 @@ impl BlockValidationTask {
                 } else {
                     VdfValidationResult::Invalid(e)
                 }
-            })
+            });
+        debug!("Finished validating with result {:?}", &mapped_res);
+        mapped_res
     }
 
     /// Wait for parent validation to complete
