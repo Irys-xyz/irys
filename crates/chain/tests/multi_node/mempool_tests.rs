@@ -1769,3 +1769,98 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// Test mempool rejects stake transactions with invalid fee or value
+#[rstest::rstest]
+#[case::invalid_fee_less_than_required(
+    |tx: &mut CommitmentTransaction, required_fee: u64, _required_value: irys_types::U256| {
+        tx.fee = required_fee / 2; // 50 instead of 100
+    },
+)]
+#[case::invalid_fee_zero(
+    |tx: &mut CommitmentTransaction, _required_fee: u64, _required_value: irys_types::U256| {
+        tx.fee = 0;
+    },
+)]
+#[case::invalid_value_less_than_required(
+    |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
+        tx.value = required_value / irys_types::U256::from(2); // 10000 instead of 20000
+    },
+)]
+#[case::invalid_value_more_than_required(
+    |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
+        tx.value = required_value + irys_types::U256::from(10000); // 30000 instead of 20000
+    },
+)]
+#[test_log::test(actix_web::test)]
+async fn stake_tx_fee_and_value_validation_test(
+    #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
+) -> eyre::Result<()> {
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let config = &genesis_config.consensus_config();
+    let required_fee = config.mempool.commitment_fee;
+    let required_value = config.stake_value.amount;
+
+    // Create stake transaction and apply the modifier
+    let mut stake_tx = CommitmentTransaction::new_stake(config, H256::zero());
+    tx_modifier(&mut stake_tx, required_fee, required_value);
+    let stake_tx = signer.sign_commitment(stake_tx)?;
+
+    // Test that the transaction is rejected with the expected error
+    let res = genesis_node
+        .ingest_commitment_tx(stake_tx.clone())
+        .await
+        .expect_err("expected failure but got success");
+
+    assert!(matches!(
+        res,
+        AddTxError::TxIngress(TxIngressError::Other(_))
+    ));
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+/// Test mempool accepts stake transaction with valid higher fee
+async fn stake_tx_valid_higher_fee_test() -> eyre::Result<()> {
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let config = &genesis_config.consensus_config();
+    let required_fee = config.mempool.commitment_fee;
+
+    // Create stake transaction with higher fee
+    let mut stake_tx_high_fee = CommitmentTransaction::new_stake(config, H256::zero());
+    stake_tx_high_fee.fee = required_fee * 2; // 200 instead of 100
+    let stake_tx_high_fee = signer.sign_commitment(stake_tx_high_fee)?;
+
+    // Should be accepted
+    genesis_node
+        .ingest_commitment_tx(stake_tx_high_fee.clone())
+        .await?;
+
+    // Wait for tx to appear in mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(vec![stake_tx_high_fee.id], 10)
+        .await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
