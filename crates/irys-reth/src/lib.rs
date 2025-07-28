@@ -15,7 +15,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use alloy_consensus::TxEip1559;
 use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
-use alloy_primitives::{Address, TxKind, U256};
+use alloy_primitives::{TxKind, U256};
 use borsh::BorshSerialize as _;
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
@@ -71,7 +71,11 @@ pub mod shadow_tx;
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 
 #[must_use]
-pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction, max_priority_fee_per_gas: u128,) -> TxLegacy {
+pub fn compose_shadow_tx(
+    chain_id: u64,
+    shadow_tx: &ShadowTransaction,
+    max_priority_fee_per_gas: u128,
+) -> TxEip1559 {
     // allocating additional 512 bytes for the shadow tx borsh buffer, misc optimisation
     let mut shadow_tx_buf = Vec::with_capacity(IRYS_SHADOW_EXEC.len() + 512);
     shadow_tx_buf.extend_from_slice(IRYS_SHADOW_EXEC);
@@ -80,13 +84,9 @@ pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction, max_prior
         .expect("borsh serialization should not fail");
     TxEip1559 {
         access_list: AccessList::default(),
-        // large enough to not be rejected by the payload builder
-        gas_limit: MINIMUM_GAS_LIMIT,
         chain_id,
         // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
-        // large enough to not be rejected by the payload builder
-        gas_price: DEFAULT_TX_FEE_CAP_WEI,
         input: shadow_tx_buf.into(),
         // large enough to not be rejected by the payload builder
         max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,

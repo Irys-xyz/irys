@@ -446,7 +446,6 @@ pub struct BlockRewardIncrement {
 impl BorshSerialize for BlockRewardIncrement {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         writer.write_all(&self.amount.to_be_bytes::<32>())?;
-        writer.write_all(self.target.as_slice())?;
         Ok(())
     }
 }
@@ -458,8 +457,7 @@ impl BorshDeserialize for BlockRewardIncrement {
         let amount = U256::from_be_bytes(amount_buf);
         let mut addr = [0_u8; 20];
         reader.read_exact(&mut addr)?;
-        let target = Address::from_slice(&addr);
-        Ok(Self { amount, target })
+        Ok(Self { amount })
     }
 }
 
@@ -474,7 +472,6 @@ mod tests {
     fn block_reward_roundtrip() {
         let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
             amount: U256::from(123_u64),
-            target: Address::repeat_byte(0x11),
         }));
         let mut buf = Vec::new();
         tx.serialize(&mut buf).unwrap();
@@ -516,7 +513,6 @@ mod tests {
     fn decode_prefixed_roundtrip() {
         let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
             amount: U256::from(1_u64),
-            target: Address::repeat_byte(0x33),
         }));
         let mut buf = Vec::from(IRYS_SHADOW_EXEC.as_slice());
         tx.serialize(&mut buf).unwrap();
