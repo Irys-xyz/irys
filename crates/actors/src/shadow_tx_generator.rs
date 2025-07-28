@@ -9,6 +9,12 @@ use irys_types::{
 };
 use reth::revm::primitives::ruint::Uint;
 
+#[derive(Debug)]
+pub struct ShadowMetadata {
+    pub shadow_tx: ShadowTransaction,
+    pub transaction_fee: u128,
+}
+
 pub struct ShadowTxGenerator<'a> {
     pub block_height: &'a u64,
     pub reward_address: &'a Address,
@@ -35,7 +41,7 @@ impl<'a> ShadowTxGenerator<'a> {
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
-    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
+    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
         self.generate_shadow_tx_header()
             .chain(self.generate_commitment_shadow_transactions(commitment_txs))
             .chain(self.generate_data_storage_shadow_transactions(submit_txs))
@@ -44,29 +50,37 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Generates the expected header shadow transactions for a given block
     pub fn generate_shadow_tx_header(
         &self,
-    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> {
-        std::iter::once(Ok(ShadowTransaction::new_v1(
-            TransactionPacket::BlockReward(BlockRewardIncrement {
-                amount: (*self.reward_amount).into(),
-                target: *self.reward_address,
-            }),
-        )))
+    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> {
+        std::iter::once(Ok(ShadowMetadata {
+            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                BlockRewardIncrement {
+                    amount: (*self.reward_amount).into(),
+                },
+            )),
+            transaction_fee: 0, // Block rewards have no fee
+        }))
     }
 
     /// Generates the expected data shadow transactions for a given block
     pub fn generate_data_storage_shadow_transactions(
         &'a self,
         submit_txs: &'a [DataTransactionHeader],
-    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
+    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
         // create a storage fee shadow txs
         submit_txs.iter().map(move |tx| {
-            Ok(ShadowTransaction::new_v1(TransactionPacket::StorageFees(
-                BalanceDecrement {
-                    amount: Uint::from_le_bytes(tx.total_cost().to_le_bytes()),
-                    target: tx.signer,
-                    irys_ref: tx.id.into(),
-                },
-            )))
+            let total_cost = tx.total_cost();
+            Ok(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
+                    BalanceDecrement {
+                        amount: Uint::from_le_bytes(total_cost.to_le_bytes()),
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    },
+                )),
+                // todo: We need to update DataTransactionHeader - separate out the fee that
+                // the miner receiver from the fee that gets burned from users account
+                transaction_fee: 0,
+            })
         })
     }
 
@@ -74,7 +88,7 @@ impl<'a> ShadowTxGenerator<'a> {
     pub fn generate_commitment_shadow_transactions(
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
-    ) -> impl std::iter::Iterator<Item = Result<ShadowTransaction>> + use<'a> {
+    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
         commitment_txs.iter().map(move |tx| {
             let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
             let fee = Uint::from(tx.fee);
@@ -110,29 +124,40 @@ impl<'a> ShadowTxGenerator<'a> {
                     }
                 };
 
+            let transaction_fee = tx.fee as u128;
+
             match tx.commitment_type {
-                irys_primitives::CommitmentType::Stake => Ok(ShadowTransaction::new_v1(
-                    TransactionPacket::Stake(BalanceDecrement {
-                        amount: total_cost,
-                        target: tx.signer,
-                        irys_ref: tx.id.into(),
-                    }),
-                )),
-                irys_primitives::CommitmentType::Pledge => Ok(ShadowTransaction::new_v1(
-                    TransactionPacket::Pledge(BalanceDecrement {
-                        amount: total_cost,
-                        target: tx.signer,
-                        irys_ref: tx.id.into(),
-                    }),
-                )),
+                irys_primitives::CommitmentType::Stake => Ok(ShadowMetadata {
+                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Stake(
+                        BalanceDecrement {
+                            amount: total_cost,
+                            target: tx.signer,
+                            irys_ref: tx.id.into(),
+                        },
+                    )),
+                    transaction_fee,
+                }),
+                irys_primitives::CommitmentType::Pledge => Ok(ShadowMetadata {
+                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Pledge(
+                        BalanceDecrement {
+                            amount: total_cost,
+                            target: tx.signer,
+                            irys_ref: tx.id.into(),
+                        },
+                    )),
+                    transaction_fee,
+                }),
                 irys_primitives::CommitmentType::Unpledge => {
-                    create_increment_or_decrement("unpledge").map(|result| {
-                        ShadowTransaction::new_v1(TransactionPacket::Unpledge(result))
+                    create_increment_or_decrement("unpledge").map(|result| ShadowMetadata {
+                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unpledge(result)),
+                        transaction_fee,
                     })
                 }
                 irys_primitives::CommitmentType::Unstake => {
-                    create_increment_or_decrement("unstake")
-                        .map(|result| ShadowTransaction::new_v1(TransactionPacket::Unstake(result)))
+                    create_increment_or_decrement("unstake").map(|result| ShadowMetadata {
+                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unstake(result)),
+                        transaction_fee,
+                    })
                 }
             }
         })
