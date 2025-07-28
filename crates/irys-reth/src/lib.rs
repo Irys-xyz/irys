@@ -69,7 +69,7 @@ pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod shadow_tx;
-pub use shadow_tx::IRYS_SHADOW_EXEC;
+pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 
 #[must_use]
 pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLegacy {
@@ -86,7 +86,7 @@ pub fn compose_shadow_tx(chain_id: u64, shadow_tx: &ShadowTransaction) -> TxLega
         // large enough to not be rejected by the payload builder
         gas_price: DEFAULT_TX_FEE_CAP_WEI,
         chain_id: Some(chain_id),
-        to: TxKind::Call(Address::ZERO),
+        to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
         input: shadow_tx_rlp.into(),
     }
 }

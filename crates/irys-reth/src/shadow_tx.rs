@@ -29,6 +29,13 @@ pub const CURRENT_SHADOW_TX_VERSION: u8 = SHADOW_TX_VERSION_V1;
 /// transaction's input field.
 pub const IRYS_SHADOW_EXEC: &[u8; 16] = b"irys-shadow-exec";
 
+/// Address that all shadow transactions must target.
+///
+/// This ensures shadow transactions cannot be executed accidentally by regular
+/// EVM tooling.
+pub static SHADOW_TX_DESTINATION_ADDR: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_shadow_tx_processor")));
+
 /// A versioned shadow transaction, valid for a single block, encoding a protocol-level action.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 #[non_exhaustive]
