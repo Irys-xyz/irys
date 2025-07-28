@@ -565,9 +565,15 @@ impl EpochSnapshot {
 
         let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
 
-        // each slot is a unique partition
-        // a partition is a replication of slot data
-        // therefore the number of partitions does not factor into the max_ledger_capacity calculation
+        // Ledger Partitioning Model:
+        //
+        // - Ledgers are divided into 16TB "slots" containing the canonical data
+        // - Each slot is replicated across multiple "partitions" stored by different miners
+        // - Ledger capacity is calculated from canonical data size, not total replica storage
+        // - New slots are added when canonical data approaches capacity limits
+        //
+        // Example: A ledger with 32TB of data uses 2 slots, regardless of whether
+        // there are 2 or 10 partition replicas of each slot across the network.
         let max_ledger_capacity = num_slots * num_chunks_in_partition;
 
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
