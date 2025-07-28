@@ -27,6 +27,24 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
+        // Early out if we already know about this transaction in mempool (recent valid)
+        if mempool_state_guard
+            .recent_valid_tx
+            .contains(&commitment_tx.id)
+        {
+            return Err(TxIngressError::Skipped);
+        }
+
+        //  Early out if the transaction already exists in valid_commitment_tx
+        if mempool_state_guard
+            .valid_commitment_tx
+            .get(&commitment_tx.signer)
+            .is_some_and(|txs| txs.iter().any(|c| c.id == commitment_tx.id))
+        {
+            return Err(TxIngressError::Skipped);
+        }
+        drop(mempool_state_guard);
+
         // Validate fee
         if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
             let mut mempool_state_guard = mempool_state.write().await;
@@ -56,25 +74,6 @@ impl Inner {
             );
             return Err(TxIngressError::Other(e.to_string()));
         }
-
-        // Early out if we already know about this transaction in mempool (recent valid)
-        if mempool_state_guard
-            .recent_valid_tx
-            .contains(&commitment_tx.id)
-        {
-            return Err(TxIngressError::Skipped);
-        }
-
-        //  Early out if the transaction already exists in valid_commitment_tx
-        if mempool_state_guard
-            .valid_commitment_tx
-            .get(&commitment_tx.signer)
-            .is_some_and(|txs| txs.iter().any(|c| c.id == commitment_tx.id))
-        {
-            return Err(TxIngressError::Skipped);
-        }
-
-        drop(mempool_state_guard);
 
         // Early out if we already know about this transaction in index / database
         if self

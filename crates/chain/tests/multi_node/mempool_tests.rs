@@ -12,8 +12,8 @@ use irys_reth_node_bridge::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataLedger, DataTransaction, IngressProofsList,
-    IrysBlockHeader, NodeConfig, TxIngressProof, H256,
+    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
+    IngressProofsList, IrysBlockHeader, NodeConfig, TxIngressProof, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -1796,8 +1796,6 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 async fn stake_tx_fee_and_value_validation_test(
     #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
-    initialize_tracing();
-
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -1830,11 +1828,46 @@ async fn stake_tx_fee_and_value_validation_test(
     Ok(())
 }
 
+/// Test mempool validates pledge transaction fees and values correctly
+#[rstest::rstest]
+#[case::invalid_fee_less_than_required(
+    0_usize, // pledge count
+    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: usize, required_fee: u64| {
+        tx.fee = required_fee / 2; // 50 instead of 100
+    },
+)]
+#[case::invalid_fee_zero(
+    0_usize, // pledge count
+    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: usize, _required_fee: u64| {
+        tx.fee = 0;
+    },
+)]
+#[case::invalid_value_too_low(
+    0_usize, // pledge count
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: usize, _required_fee: u64| {
+        let expected = CommitmentTransaction::calculate_pledge_value_at_index(config, count);
+        tx.value = expected / irys_types::U256::from(2); // Half the expected value
+    },
+)]
+#[case::invalid_value_too_high(
+    1_usize, // pledge count
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: usize, _required_fee: u64| {
+        let expected = CommitmentTransaction::calculate_pledge_value_at_index(config, count);
+        tx.value = expected * irys_types::U256::from(2); // Double the expected value
+    },
+)]
+#[case::invalid_value_wrong_count(
+    2_usize, // pledge count
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: usize, _required_fee: u64| {
+        // Set value that would be correct for pledge count 0, but we're using count 2
+        tx.value = CommitmentTransaction::calculate_pledge_value_at_index(config, 0);
+    },
+)]
 #[test_log::test(actix_web::test)]
-/// Test mempool accepts stake transaction with valid higher fee
-async fn stake_tx_valid_higher_fee_test() -> eyre::Result<()> {
-    initialize_tracing();
-
+async fn pledge_tx_fee_validation_test(
+    #[case] pledge_count: usize,
+    #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, usize, u64),
+) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -1846,19 +1879,93 @@ async fn stake_tx_valid_higher_fee_test() -> eyre::Result<()> {
     let config = &genesis_config.consensus_config();
     let required_fee = config.mempool.commitment_fee;
 
-    // Create stake transaction with higher fee
-    let mut stake_tx_high_fee = CommitmentTransaction::new_stake(config, H256::zero());
-    stake_tx_high_fee.fee = required_fee * 2; // 200 instead of 100
-    let stake_tx_high_fee = signer.sign_commitment(stake_tx_high_fee)?;
+    // Mine a block first to get valid anchors for pledge
+    genesis_node.mine_block().await?;
+
+    // // Create pledge transaction with modifications
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
+        config,
+        H256::zero(),
+        &pledge_count, // Using usize as PledgeDataProvider
+        signer.address(),
+    )
+    .await;
+
+    // Apply the modification (fee or value)
+    tx_modifier(&mut pledge_tx, config, pledge_count, required_fee);
+    let pledge_tx = signer.sign_commitment(pledge_tx)?;
+
+    // Test that the transaction is rejected with the expected error
+    let res = genesis_node
+        .ingest_commitment_tx(pledge_tx.clone())
+        .await
+        .expect_err("expected failure but got success");
+
+    assert!(matches!(
+        res,
+        AddTxError::TxIngress(TxIngressError::Other(_))
+    ));
+    genesis_node.stop().await;
+    Ok(())
+}
+
+/// Enum to specify commitment type for higher fee testing
+#[derive(Debug, Clone, Copy)]
+enum CommitmentType {
+    Stake,
+    Pledge(usize), // usize is the pledge count
+}
+
+/// Test mempool accepts stake and pledge transactions with valid higher fees
+#[rstest::rstest]
+#[case::stake_double_fee(CommitmentType::Stake, 2)] // 200 instead of 100
+#[case::stake_triple_fee(CommitmentType::Stake, 3)] // 300 instead of 100
+#[case::stake_exact_fee(CommitmentType::Stake, 1)] // 100 (exact required fee)
+#[case::pledge_double_fee(CommitmentType::Pledge(0), 2)] // First pledge, 200 instead of 100
+#[case::pledge_triple_fee(CommitmentType::Pledge(1), 3)] // Second pledge, 300 instead of 100
+#[case::pledge_exact_fee(CommitmentType::Pledge(0), 1)] // First pledge, 100 (exact required fee)
+#[test_log::test(actix_web::test)]
+async fn commitment_tx_valid_higher_fee_test(
+    #[case] commitment_type: CommitmentType,
+    #[case] fee_multiplier: u64,
+) -> eyre::Result<()> {
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let config = &genesis_config.consensus_config();
+    let required_fee = config.mempool.commitment_fee;
+
+    // For pledge transactions, we need to mine a block first to get valid anchors
+    if matches!(commitment_type, CommitmentType::Pledge(_)) {
+        genesis_node.mine_block().await?;
+    }
+
+    // Create the appropriate transaction type with higher fee
+    let mut commitment_tx = match commitment_type {
+        CommitmentType::Stake => CommitmentTransaction::new_stake(config, H256::zero()),
+        CommitmentType::Pledge(count) => {
+            // Use usize as PledgeDataProvider
+            CommitmentTransaction::new_pledge(config, H256::zero(), &count, signer.address()).await
+        }
+    };
+
+    // Apply the fee multiplier
+    commitment_tx.fee = required_fee * fee_multiplier;
+    let commitment_tx = signer.sign_commitment(commitment_tx)?;
 
     // Should be accepted
     genesis_node
-        .ingest_commitment_tx(stake_tx_high_fee.clone())
+        .ingest_commitment_tx(commitment_tx.clone())
         .await?;
 
     // Wait for tx to appear in mempool
     genesis_node
-        .wait_for_mempool_commitment_txs(vec![stake_tx_high_fee.id], 10)
+        .wait_for_mempool_commitment_txs(vec![commitment_tx.id], 10)
         .await?;
 
     genesis_node.stop().await;
