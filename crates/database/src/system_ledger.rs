@@ -107,7 +107,7 @@ async fn create_pledge_commitment_transaction(
     provider: &impl PledgeDataProvider,
 ) -> CommitmentTransaction {
     let pledge_commitment =
-        CommitmentTransaction::new_pledge(&config.consensus, anchor, 1, provider, signer.address())
+        CommitmentTransaction::new_pledge(&config.consensus, anchor, provider, signer.address())
             .await;
 
     signer
@@ -159,7 +159,7 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     let signer = config.irys_signer();
 
     // Create a stake commitment tx for the genesis block producer.
-    let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default(), 1);
+    let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
 
     let stake_tx = signer
         .sign_commitment(stake_commitment)
@@ -283,7 +283,7 @@ pub async fn add_test_commitments(
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
         let stake_commitment =
-            CommitmentTransaction::new_stake(&config.consensus, H256::default(), 1);
+            CommitmentTransaction::new_stake(&config.consensus, H256::default());
 
         let stake_tx = signer
             .sign_commitment(stake_commitment)

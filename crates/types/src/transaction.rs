@@ -276,10 +276,6 @@ impl CommitmentTransaction {
     /// For pledge N, use count = N
     /// For unpledge refund, use count = N - 1 (to get the value of the most recent pledge)
     pub fn calculate_pledge_value_at_index(config: &ConsensusConfig, pledge_index: usize) -> U256 {
-        if pledge_index == 0 {
-            return U256::zero();
-        };
-
         config
             .pledge_base_value
             .apply_pledge_decay(pledge_index, config.pledge_decay)
@@ -288,22 +284,22 @@ impl CommitmentTransaction {
     }
 
     /// Create a new stake transaction with the configured stake fee as value
-    pub fn new_stake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+    pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
         Self {
             commitment_type: CommitmentType::Stake,
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value: config.stake_value.amount,
             ..Self::new(config)
         }
     }
 
     /// Create a new unstake transaction with the configured stake fee as value
-    pub fn new_unstake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+    pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
         Self {
             commitment_type: CommitmentType::Unstake,
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value: config.stake_value.amount,
             ..Self::new(config)
         }
@@ -315,7 +311,6 @@ impl CommitmentTransaction {
     pub async fn new_pledge(
         config: &ConsensusConfig,
         anchor: H256,
-        fee: u64,
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
@@ -327,7 +322,7 @@ impl CommitmentTransaction {
                 pledge_count_before_executing: count,
             },
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value,
             ..Self::new(config)
         }
@@ -339,21 +334,24 @@ impl CommitmentTransaction {
     pub async fn new_unpledge(
         config: &ConsensusConfig,
         anchor: H256,
-        fee: u64,
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
 
         // If user has no pledges, they get 0 back
-        let value = Self::calculate_pledge_value_at_index(config, count.saturating_sub(1));
+        let value = if count == 0 {
+            U256::zero()
+        } else {
+            Self::calculate_pledge_value_at_index(config, count - 1)
+        };
 
         Self {
             commitment_type: CommitmentType::Unpledge {
                 pledge_count_before_executing: count,
             },
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value,
             ..Self::new(config)
         }
@@ -718,6 +716,13 @@ pub trait PledgeDataProvider {
     async fn pledge_count(&self, user_address: Address) -> usize;
 }
 
+#[async_trait::async_trait]
+impl PledgeDataProvider for usize {
+    async fn pledge_count(&self, _user_address: Address) -> usize {
+        *self
+    }
+}
+
 #[cfg(test)]
 mod test_helpers {
     use super::*;
@@ -908,7 +913,7 @@ mod tests {
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
-        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]), 1);
+        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]));
         tx.id = H256::from([255_u8; 32]);
         tx.signer = Address::default();
         tx.signature = Signature::test_signature().into();
@@ -968,7 +973,7 @@ mod pledge_decay_parametrized_tests {
 
         // Create a new pledge transaction
         let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address)
+            CommitmentTransaction::new_pledge(&config, H256::zero(), &provider, signer_address)
                 .await;
 
         // Convert actual value to decimal for comparison
@@ -1021,14 +1026,9 @@ mod pledge_decay_parametrized_tests {
             MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
 
         // Create an unpledge transaction
-        let unpledge_tx = CommitmentTransaction::new_unpledge(
-            &config,
-            H256::zero(),
-            1,
-            &provider,
-            signer_address,
-        )
-        .await;
+        let unpledge_tx =
+            CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer_address)
+                .await;
 
         // Verify the commitment type is correct
         assert!(matches!(

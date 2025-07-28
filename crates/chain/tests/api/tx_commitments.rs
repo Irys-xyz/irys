@@ -361,7 +361,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
     let consensus = &node.node_ctx.config.consensus;
-    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
+    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default());
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
 
     info!("Generated stake_tx.id: {}", stake_tx.id);
@@ -385,7 +385,6 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         H256::default(),
-        1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
     )
@@ -433,7 +432,6 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         H256::default(),
-        1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
     )

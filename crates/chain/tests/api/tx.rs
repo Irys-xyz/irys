@@ -42,7 +42,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     info!("Generated storage_tx.id: {}", storage_tx.id);
 
     let consensus = &node.node_ctx.config.consensus;
-    let mut commitment_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
+    let mut commitment_tx = CommitmentTransaction::new_stake(consensus, H256::default());
     commitment_tx.id = H256::random();
     info!("Generated commitment_tx.id: {}", commitment_tx.id);
 
