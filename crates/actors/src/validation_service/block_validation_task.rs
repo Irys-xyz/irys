@@ -16,9 +16,12 @@ use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
     is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
 };
-use crate::validation_service::ValidationServiceInner;
+use crate::validation_service::active_validations::BlockPriorityMeta;
+use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
+use irys_vdf::state::CancelEnum;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
 
@@ -32,12 +35,34 @@ enum ParentValidationResult {
 }
 
 /// Handles the execution of a single block validation task
+#[derive(Clone)]
 pub(crate) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
-    pub block_hash: BlockHash,
+    pub block_hash: BlockHash, // TODO: remove
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
+    pub cancel: Arc<AtomicU8>,
+    pub meta: BlockPriorityMeta,
 }
+
+impl Ord for BlockValidationTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.meta.cmp(&other.meta)
+    }
+}
+impl PartialOrd for BlockValidationTask {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for BlockValidationTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.meta == other.meta // captures the block, so this should be good enough
+    }
+}
+
+impl Eq for BlockValidationTask {}
 
 impl BlockValidationTask {
     pub(crate) fn new(
@@ -45,18 +70,21 @@ impl BlockValidationTask {
         block_hash: BlockHash,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
+        meta: BlockPriorityMeta,
     ) -> Self {
         Self {
             block,
             block_hash,
             service_inner,
             block_tree_guard,
+            cancel: Arc::new(AtomicU8::new(0)),
+            meta,
         }
     }
 
-    /// Execute the complete validation task
+    /// Execute the parallel validation task
     #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute(self) {
+    pub(crate) async fn execute_parallel(self) {
         let validation_result = self
             .validate_block()
             .await
@@ -79,7 +107,26 @@ impl BlockValidationTask {
         self.send_validation_result(validation_result);
     }
 
+    pub(crate) async fn execute_vdf(self) -> VdfValidationResult {
+        let cancel = Arc::clone(&self.cancel);
+        // run the VDF validation
+        Arc::clone(&self.service_inner)
+            .ensure_vdf_is_valid(&self.block, cancel.clone())
+            .await
+            .map(|()| VdfValidationResult::Valid)
+            .unwrap_or_else(|e| {
+                // use the value of `cancel` to figure out if we errored because we were cancelled
+                let cancel_state = cancel.load(Ordering::Relaxed);
+                if cancel_state == CancelEnum::InvalidStep as u8 {
+                    VdfValidationResult::Cancelled
+                } else {
+                    VdfValidationResult::Invalid(e)
+                }
+            })
+    }
+
     /// Wait for parent validation to complete
+    /// We do this because just because a block is valid internally, if it's not connected to a valid chain it's still not valid
     #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
@@ -142,7 +189,7 @@ impl BlockValidationTask {
     }
 
     /// Send the validation result to the block tree service
-    fn send_validation_result(&self, validation_result: ValidationResult) {
+    pub(crate) fn send_validation_result(&self, validation_result: ValidationResult) {
         if let Err(e) = self.service_inner.service_senders.block_tree.send(
             BlockTreeServiceMessage::BlockValidationFinished {
                 block_hash: self.block_hash,
@@ -198,6 +245,7 @@ impl BlockValidationTask {
             })
             .instrument(tracing::info_span!("poa_validation", block_hash = %block_hash, block_height = %block_height))
         };
+
         let poa_task = async move {
             let res = poa_task.await;
 
