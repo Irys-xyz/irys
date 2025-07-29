@@ -295,11 +295,16 @@ impl ActiveValidations {
         } else if let Some((pending_hash, pending_task)) = peek {
             // Create new task from highest priority pending task
             debug!("Created VDF validation task for  {}", &pending_hash);
+            let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
             VdfValidationTask {
                 block_hash: *pending_hash,
-                fut: pending_task.clone().0.execute_vdf().boxed(),
-                cancel: Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+                fut: pending_task
+                    .0
+                    .clone()
+                    .execute_vdf(Arc::clone(&cancel))
+                    .boxed(),
+                cancel,
             }
         } else {
             // Nothing to process

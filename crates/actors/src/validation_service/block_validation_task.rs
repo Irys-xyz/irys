@@ -41,7 +41,6 @@ pub(crate) struct BlockValidationTask {
     pub block_hash: BlockHash, // TODO: remove
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
-    pub cancel: Arc<AtomicU8>,
     pub meta: BlockPriorityMeta,
 }
 
@@ -77,7 +76,6 @@ impl BlockValidationTask {
             block_hash,
             service_inner,
             block_tree_guard,
-            cancel: Arc::new(AtomicU8::new(0)),
             meta,
         }
     }
@@ -108,17 +106,15 @@ impl BlockValidationTask {
     }
 
     #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_vdf(self) -> VdfValidationResult {
-        let cancel = Arc::clone(&self.cancel);
+    pub(crate) async fn execute_vdf(self, cancel: Arc<AtomicU8>) -> VdfValidationResult {
         let inner = Arc::clone(&self.service_inner);
         let block = Arc::clone(&self.block);
 
         // run the VDF validation
         // we use a task here as it'll drive the future more consistently than `poll_immediate`
-
+        let cancel2 = Arc::clone(&cancel);
         let res = tokio::spawn(
-            async move { inner.ensure_vdf_is_valid(&block, cancel.clone()).await }
-                .in_current_span(),
+            async move { inner.ensure_vdf_is_valid(&block, cancel2).await }.in_current_span(),
         )
         .await
         .expect("Failed to join ensure_vdf_is_valid task");
@@ -127,8 +123,9 @@ impl BlockValidationTask {
             .map(|()| VdfValidationResult::Valid)
             .unwrap_or_else(|e| {
                 // use the value of `cancel` to figure out if we errored because we were cancelled
-                let cancel_state = self.cancel.load(Ordering::Relaxed);
-                if cancel_state == CancelEnum::InvalidStep as u8 {
+                // TODO: switch this out for a definite Result type
+                let cancel_state = cancel.load(Ordering::Relaxed);
+                if cancel_state == CancelEnum::Cancelled as u8 {
                     VdfValidationResult::Cancelled
                 } else {
                     VdfValidationResult::Invalid(e)
