@@ -455,8 +455,6 @@ impl BorshDeserialize for BlockRewardIncrement {
         let mut amount_buf = [0_u8; 32];
         reader.read_exact(&mut amount_buf)?;
         let amount = U256::from_be_bytes(amount_buf);
-        let mut addr = [0_u8; 20];
-        reader.read_exact(&mut addr)?;
         Ok(Self { amount })
     }
 }
@@ -478,7 +476,6 @@ mod tests {
         let expected = hex!(
             "01" "02"
             "000000000000000000000000000000000000000000000000000000000000007b"
-            "1111111111111111111111111111111111111111"
         );
         assert_eq!(buf, expected);
         let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
