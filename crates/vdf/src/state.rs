@@ -1,5 +1,5 @@
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
-use eyre::eyre;
+use eyre::{bail, eyre};
 use irys_database::block_header_by_hash;
 use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
@@ -190,7 +190,7 @@ impl VdfStateReadonly {
     /// Instead, we should check that the `desired_step_number` is a reasonable number of steps
     /// to wait for. This should be ensured before calling this function
     pub async fn wait_for_step(&self, desired_step_number: u64) {
-        debug!("Waiting for step {}", desired_step_number);
+        debug!("Waiting for step {}", &desired_step_number);
         let retries_per_second = 20;
         loop {
             if self.read().global_step >= desired_step_number {
@@ -335,14 +335,11 @@ pub fn vdf_steps_are_valid(
     // Calculate the step number of the first step in the blocks sequence
     let start_step_number: u64 = vdf_info.global_step_number - vdf_info.steps.len() as u64;
 
-    // Atomic flag to signal all threads to stop
-    // let should_stop = AtomicBool::new(false);
     let last_step_checkpoints = Arc::new(RwLock::new(None::<H256List>));
 
     if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
-        return Err(eyre::eyre!("Cancelled"));
+        bail!("Cancelled");
     }
-
     // We must calculate the checkpoint iterations for each step sequentially
     // because we only have the first and last checkpoint of each step, but we
     // can calculate each of the steps in parallel
@@ -355,9 +352,11 @@ pub fn vdf_steps_are_valid(
                 x if x == CancelEnum::InvalidStep as u8 => {
                     return Err(eyre::eyre!(
                     "One of the previous threads found a mismatch, stopping further calculations"
-                ))
+                ));
                 }
-                x if x == CancelEnum::Cancelled as u8 => return Err(eyre::eyre!("Cancelled")),
+                x if x == CancelEnum::Cancelled as u8 => {
+                    bail!("Cancelled");
+                }
                 _ => {}
             }
 

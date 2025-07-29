@@ -13,7 +13,7 @@
 use crate::{block_tree_service::ReorgEvent, services::ServiceSenders};
 use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
-use eyre::ensure;
+use eyre::{bail, ensure};
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader, TokioServiceHandle};
@@ -32,7 +32,7 @@ use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver},
     time::{interval, Duration},
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 mod active_validations;
 mod block_validation_task;
@@ -112,33 +112,37 @@ impl ValidationService {
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
 
-        let handle = runtime_handle.spawn(async move {
-            let validation_service = Self {
-                shutdown: shutdown_rx,
-                msg_rx: rx,
-                reorg_rx,
-                inner: Arc::new(ValidationServiceInner {
-                    pool: rayon::ThreadPoolBuilder::new()
-                        .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
-                        .build()
-                        .expect("to be able to build vdf validation pool"),
-                    block_index_guard,
-                    vdf_state: vdf_state_readonly,
-                    config,
-                    service_senders,
-                    block_tree_guard,
-                    reth_node_adapter,
-                    db,
-                    execution_payload_provider,
-                    validation_enabled: validation_enabled_clone,
-                }),
-            };
+        let handle = runtime_handle.spawn(
+            async move {
+                let validation_service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    reorg_rx,
+                    inner: Arc::new(ValidationServiceInner {
+                        pool: rayon::ThreadPoolBuilder::new()
+                            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+                            .build()
+                            .expect("to be able to build vdf validation pool"),
+                        block_index_guard,
+                        vdf_state: vdf_state_readonly,
+                        config,
+                        service_senders,
+                        block_tree_guard,
+                        reth_node_adapter,
+                        db,
+                        execution_payload_provider,
+                        validation_enabled: validation_enabled_clone,
+                    }),
+                };
 
-            validation_service
-                .start()
-                .await
-                .expect("validation service encountered an irrecoverable error")
-        });
+                validation_service
+                    .start()
+                    .in_current_span()
+                    .await
+                    .expect("validation service encountered an irrecoverable error")
+            }
+            .in_current_span(),
+        );
 
         let service_handle = TokioServiceHandle {
             name: "validation_service".to_string(),
@@ -174,8 +178,8 @@ impl ValidationService {
                     info!("Shutdown signal received for validation service");
                     // cancel the VDF task if it's `Some`
                      if let Some(task) = &active_validations.vdf_task {
-                        Arc::clone(&task.cancel).store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
-                    }
+                        task.cancel.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
+                    };
                     break;
                 }
 
@@ -263,11 +267,35 @@ impl ValidationServiceInner {
                 // schedule validation task
                 let block_tree_guard = self.block_tree_guard.clone();
 
-                let priority = active_validations.calculate_priority(&block);
+                let priority: std::cmp::Reverse<active_validations::BlockPriorityMeta> =
+                    active_validations.calculate_priority(&block);
                 let task =
                     BlockValidationTask::new(block, block_hash, self, block_tree_guard, priority.0);
                 Some(task)
             }
+        }
+    }
+
+    #[instrument(skip_all, fields(%step=desired_step_number))]
+    async fn wait_for_step_with_cancel(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+    ) -> eyre::Result<()> {
+        debug!("Waiting for step");
+
+        let retries_per_second = 20;
+        loop {
+            if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                bail!("Cancelled");
+            }
+            let read = self.vdf_state.read().global_step;
+
+            if read >= desired_step_number {
+                debug!("VDF Step is available");
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(1000 / retries_per_second)).await;
         }
     }
 
@@ -287,7 +315,8 @@ impl ValidationServiceInner {
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
 
-        self.vdf_state.wait_for_step(prev_output_step_number).await;
+        self.wait_for_step_with_cancel(prev_output_step_number, Arc::clone(&cancel))
+            .await?;
         let stored_previous_step = self
             .vdf_state
             .get_step(prev_output_step_number)

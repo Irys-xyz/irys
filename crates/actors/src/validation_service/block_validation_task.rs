@@ -110,16 +110,24 @@ impl BlockValidationTask {
     #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
     pub(crate) async fn execute_vdf(self) -> VdfValidationResult {
         let cancel = Arc::clone(&self.cancel);
+        let inner = Arc::clone(&self.service_inner);
+        let block = Arc::clone(&self.block);
+
         // run the VDF validation
-        let res = Arc::clone(&self.service_inner)
-            .ensure_vdf_is_valid(&self.block, cancel.clone())
-            .await;
+        // we use a task here as it'll drive the future more consistently than `poll_immediate`
+
+        let res = tokio::spawn(
+            async move { inner.ensure_vdf_is_valid(&block, cancel.clone()).await }
+                .in_current_span(),
+        )
+        .await
+        .expect("Failed to join ensure_vdf_is_valid task");
 
         let mapped_res = res
             .map(|()| VdfValidationResult::Valid)
             .unwrap_or_else(|e| {
                 // use the value of `cancel` to figure out if we errored because we were cancelled
-                let cancel_state = cancel.load(Ordering::Relaxed);
+                let cancel_state = self.cancel.load(Ordering::Relaxed);
                 if cancel_state == CancelEnum::InvalidStep as u8 {
                     VdfValidationResult::Cancelled
                 } else {

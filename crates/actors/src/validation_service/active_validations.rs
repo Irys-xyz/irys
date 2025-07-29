@@ -61,10 +61,10 @@ impl Ord for BlockPriorityMeta {
         // if two blocks have the same `BlockState` (primary ordering)
         self.state
             .cmp(&other.state)
-            // and the same height
+            // and the same height (prefer lower height blocks)
             .then_with(|| self.height.cmp(&other.height))
             // prefer the one with the fewest VDF steps
-            .then_with(|| other.vdf_step_count.cmp(&self.vdf_step_count))
+            .then_with(|| self.vdf_step_count.cmp(&other.vdf_step_count))
     }
 }
 
@@ -260,8 +260,12 @@ impl ActiveValidations {
 
         let mut task = if let Some(task) = self.vdf_task.take() {
             // if cancelling, return current task (it'll poll to completion once cancellation completes)
-            if task.cancel.load(Ordering::Relaxed) != CancelEnum::Continue as u8 {
-                debug!("VDF task is being cancelled...");
+            let current_cancel_state = task.cancel.load(Ordering::Relaxed);
+            if current_cancel_state != CancelEnum::Continue as u8 {
+                debug!(
+                    "VDF task {} is being cancelled ({:?})",
+                    &task.block_hash, &current_cancel_state
+                );
                 task
             } else if let Some(p) = peek {
                 // check if task needs to be replaced by a higher priority task
@@ -302,8 +306,8 @@ impl ActiveValidations {
 
         // process the provided task
         // either 1.) a previously produced task, 2.) a previously produced task that is getting cancelled, or 3.) a new task
-
         let poll_res = poll_immediate(&mut task.fut).await;
+
         let has_completed = poll_res.is_some();
 
         if let Some(result) = poll_res {
@@ -961,6 +965,22 @@ mod tests {
             Reverse(mkprio(BlockPriority::Fork, 10, 0))
                 > Reverse(mkprio(BlockPriority::Fork, 11, 0))
         );
+
+        // create a priority queue
+        let mut queue: PriorityQueue<BlockHash, Reverse<BlockPriorityMeta>> = PriorityQueue::new();
+        let expected_order = [
+            Reverse(mkprio(BlockPriority::CanonicalExtension, 9, 0)),
+            Reverse(mkprio(BlockPriority::CanonicalExtension, 10, 0)),
+            Reverse(mkprio(BlockPriority::CanonicalExtension, 10, 9999)),
+            Reverse(mkprio(BlockPriority::Canonical, 9, 1)), // should not be prioritised despite being height 9 & having just one step
+        ];
+        for prio in expected_order.iter() {
+            queue.push(BlockHash::random(), prio.clone());
+        }
+
+        for (idx, itm) in queue.into_sorted_iter().enumerate() {
+            assert_eq!(*(expected_order.get(idx).unwrap()), itm.1)
+        }
     }
 
     /// Tests priority reevaluation when a fork becomes the canonical chain.
