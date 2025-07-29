@@ -313,6 +313,7 @@ pub fn vdf_steps_are_valid(
             tracing::debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err.to_string())
     };
 
+    // Если юзер еб
     let mut step_hashes = vdf_info.steps.clone();
 
     // Add the seed from the previous nonce info to the steps
