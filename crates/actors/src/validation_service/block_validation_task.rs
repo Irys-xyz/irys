@@ -4,7 +4,7 @@
 //!
 //! ## Stage 1: VDF validation (execute_vdf)
 //! - **VDF**: Verifies VDF steps are valid & fast-forwards the node if they are
-//! Uses a single preemptable task slot to prevent thread overutilisation
+//! Uses a single preemptible task slot to prevent thread overutilisation
 //!
 //! ## Stage 2: Concurrent Validation (execute_concurrent)
 //! Three concurrent validation stages:

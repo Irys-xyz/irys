@@ -5,7 +5,7 @@
 //!
 //! ## Flow
 //! 1. **VDF Validation**: Initial check using thread pool, fast-forward VDF state.
-//!     Done using a priority-queue backed preemptable task slot
+//!     Done using a priority-queue backed preemptible task slot
 //! 2. **Task Creation**: Create BlockValidationTask, add to priority queue
 //! 3. **Concurrent Validation**: Three concurrent stages (recall, POA, reth state)
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
