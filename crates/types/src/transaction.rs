@@ -26,7 +26,7 @@ pub enum CommitmentValidationError {
     InvalidPledgeValue {
         provided: U256,
         expected: U256,
-        pledge_count: usize,
+        pledge_count: u64,
     },
     /// Invalid unpledge value
     #[error(
@@ -35,7 +35,7 @@ pub enum CommitmentValidationError {
     InvalidUnpledgeValue {
         provided: U256,
         expected: U256,
-        pledge_count: usize,
+        pledge_count: u64,
     },
 }
 
@@ -275,7 +275,7 @@ impl CommitmentTransaction {
     /// Calculate the value for a pledge at the given count
     /// For pledge N, use count = N
     /// For unpledge refund, use count = N - 1 (to get the value of the most recent pledge)
-    pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: usize) -> U256 {
+    pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: u64) -> U256 {
         config
             .pledge_base_value
             .apply_pledge_decay(pledge_count, config.pledge_decay)
@@ -713,11 +713,11 @@ impl From<DataTransactionHeader> for IrysTransactionResponse {
 #[async_trait::async_trait]
 pub trait PledgeDataProvider {
     /// Returns the number of existing pledges for a given user address
-    async fn pledge_count(&self, user_address: Address) -> usize;
+    async fn pledge_count(&self, user_address: Address) -> u64;
 }
 
 #[async_trait::async_trait]
-impl PledgeDataProvider for usize {
+impl PledgeDataProvider for u64 {
     async fn pledge_count(&self, _user_address: Address) -> Self {
         *self
     }
@@ -729,7 +729,7 @@ mod test_helpers {
     use std::collections::HashMap;
 
     pub(super) struct MockPledgeProvider {
-        pub pledge_counts: HashMap<Address, usize>,
+        pub pledge_counts: HashMap<Address, u64>,
     }
 
     impl MockPledgeProvider {
@@ -739,7 +739,7 @@ mod test_helpers {
             }
         }
 
-        pub(super) fn with_pledge_count(mut self, address: Address, count: usize) -> Self {
+        pub(super) fn with_pledge_count(mut self, address: Address, count: u64) -> Self {
             self.pledge_counts.insert(address, count);
             self
         }
@@ -747,7 +747,7 @@ mod test_helpers {
 
     #[async_trait::async_trait]
     impl PledgeDataProvider for MockPledgeProvider {
-        async fn pledge_count(&self, user_address: Address) -> usize {
+        async fn pledge_count(&self, user_address: Address) -> u64 {
             self.pledge_counts.get(&user_address).copied().unwrap_or(0)
         }
     }
@@ -958,7 +958,7 @@ mod pledge_decay_parametrized_tests {
     #[case(23, dec!(1145.0))]
     #[case(24, dec!(1103.7))]
     async fn test_pledge_cost_with_decay(
-        #[case] existing_pledges: usize,
+        #[case] existing_pledges: u64,
         #[case] expected_cost: Decimal,
     ) {
         // Setup config with $20,000 base fee and 0.9 decay rate
@@ -1012,7 +1012,7 @@ mod pledge_decay_parametrized_tests {
     #[case(23,dec!(1189.8))]
     #[case(24,dec!(1145.0))]
     async fn test_unpledge_cost(
-        #[case] existing_pledges: usize,
+        #[case] existing_pledges: u64,
         #[case] expected_unpledge_value: Decimal,
     ) {
         // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)

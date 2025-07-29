@@ -75,8 +75,16 @@ impl Decodable for CommitmentStatus {
     }
 }
 
-// TODO: these need to be redone!
-// these do NOT start with 0, as RLP does not like "leading zeros"
+// Type discriminants for CommitmentType encoding
+const COMMITMENT_TYPE_STAKE: u8 = 1;
+const COMMITMENT_TYPE_PLEDGE: u8 = 2;
+const COMMITMENT_TYPE_UNPLEDGE: u8 = 3;
+const COMMITMENT_TYPE_UNSTAKE: u8 = 4;
+
+// Size constants
+const TYPE_DISCRIMINANT_SIZE: usize = 1;
+const U64_SIZE: usize = 8;
+
 #[derive(
     PartialEq,
     Debug,
@@ -95,11 +103,11 @@ pub enum CommitmentType {
     Stake,
     Pledge {
         #[serde(rename = "pledgeCountBeforeExecuting")]
-        pledge_count_before_executing: usize,
+        pledge_count_before_executing: u64,
     },
     Unpledge {
         #[serde(rename = "pledgeCountBeforeExecuting")]
-        pledge_count_before_executing: usize,
+        pledge_count_before_executing: u64,
     },
     Unstake,
 }
@@ -116,22 +124,22 @@ impl Encodable for CommitmentType {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
             Self::Stake => {
-                out.put_u8(1);
+                out.put_u8(COMMITMENT_TYPE_STAKE);
             }
             Self::Pledge {
                 pledge_count_before_executing,
             } => {
-                out.put_u8(2);
-                (*pledge_count_before_executing as u64).encode(out);
+                out.put_u8(COMMITMENT_TYPE_PLEDGE);
+                pledge_count_before_executing.encode(out);
             }
             Self::Unpledge {
                 pledge_count_before_executing,
             } => {
-                out.put_u8(3);
-                (*pledge_count_before_executing as u64).encode(out);
+                out.put_u8(COMMITMENT_TYPE_UNPLEDGE);
+                pledge_count_before_executing.encode(out);
             }
             Self::Unstake => {
-                out.put_u8(4);
+                out.put_u8(COMMITMENT_TYPE_UNSTAKE);
             }
         };
     }
@@ -144,7 +152,7 @@ impl Encodable for CommitmentType {
             }
             | Self::Unpledge {
                 pledge_count_before_executing,
-            } => 1 + (*pledge_count_before_executing as u64).length(),
+            } => 1 + pledge_count_before_executing.length(),
         }
     }
 }
@@ -159,20 +167,20 @@ impl Decodable for CommitmentType {
         buf.advance(1);
 
         match type_id {
-            1 => Ok(Self::Stake),
-            2 => {
-                let count = u64::decode(buf)? as usize;
+            COMMITMENT_TYPE_STAKE => Ok(Self::Stake),
+            COMMITMENT_TYPE_PLEDGE => {
+                let count = u64::decode(buf)?;
                 Ok(Self::Pledge {
                     pledge_count_before_executing: count,
                 })
             }
-            3 => {
-                let count = u64::decode(buf)? as usize;
+            COMMITMENT_TYPE_UNPLEDGE => {
+                let count = u64::decode(buf)?;
                 Ok(Self::Unpledge {
                     pledge_count_before_executing: count,
                 })
             }
-            4 => Ok(Self::Unstake),
+            COMMITMENT_TYPE_UNSTAKE => Ok(Self::Unstake),
             _ => Err(RlpError::Custom("unknown commitment type")),
         }
     }
@@ -183,53 +191,91 @@ impl reth_codecs::Compact for CommitmentType {
     fn to_compact<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) -> usize {
         match self {
             Self::Stake => {
-                buf.put_u8(1);
-                1
+                buf.put_u8(COMMITMENT_TYPE_STAKE);
+                TYPE_DISCRIMINANT_SIZE
             }
             Self::Pledge {
                 pledge_count_before_executing,
             } => {
-                buf.put_u8(2);
-                buf.put_u64(*pledge_count_before_executing as u64);
-                9
+                buf.put_u8(COMMITMENT_TYPE_PLEDGE);
+                buf.put_u64(*pledge_count_before_executing);
+                TYPE_DISCRIMINANT_SIZE + U64_SIZE
             }
             Self::Unpledge {
                 pledge_count_before_executing,
             } => {
-                buf.put_u8(3);
-                buf.put_u64(*pledge_count_before_executing as u64);
-                9
+                buf.put_u8(COMMITMENT_TYPE_UNPLEDGE);
+                buf.put_u64(*pledge_count_before_executing);
+                TYPE_DISCRIMINANT_SIZE + U64_SIZE
             }
             Self::Unstake => {
-                buf.put_u8(4);
-                1
+                buf.put_u8(COMMITMENT_TYPE_UNSTAKE);
+                TYPE_DISCRIMINANT_SIZE
             }
         }
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        match buf[0] {
-            1 => (Self::Stake, &buf[1..]),
-            2 => {
-                let count = u64::from_le_bytes(buf[1..9].try_into().unwrap()) as usize;
+        // Check minimum buffer size
+        if buf.is_empty() {
+            panic!("CommitmentType::from_compact: buffer too short, expected at least 1 byte for type discriminant");
+        }
+
+        let type_id = buf[0];
+
+        match type_id {
+            COMMITMENT_TYPE_STAKE => (Self::Stake, &buf[TYPE_DISCRIMINANT_SIZE..]),
+            COMMITMENT_TYPE_PLEDGE => {
+                let required_size = TYPE_DISCRIMINANT_SIZE + U64_SIZE;
+                if buf.len() < required_size {
+                    panic!(
+                        "CommitmentType::from_compact: buffer too short for Pledge variant, \
+                         expected at least {} bytes but got {}",
+                        required_size,
+                        buf.len()
+                    );
+                }
+
+                let count_bytes: [u8; 8] = buf[TYPE_DISCRIMINANT_SIZE..required_size]
+                    .try_into()
+                    .expect("slice has correct length");
+                let count = u64::from_le_bytes(count_bytes);
+
                 (
                     Self::Pledge {
                         pledge_count_before_executing: count,
                     },
-                    &buf[9..],
+                    &buf[required_size..],
                 )
             }
-            3 => {
-                let count = u64::from_le_bytes(buf[1..9].try_into().unwrap()) as usize;
+            COMMITMENT_TYPE_UNPLEDGE => {
+                let required_size = TYPE_DISCRIMINANT_SIZE + U64_SIZE;
+                if buf.len() < required_size {
+                    panic!(
+                        "CommitmentType::from_compact: buffer too short for Unpledge variant, \
+                         expected at least {} bytes but got {}",
+                        required_size,
+                        buf.len()
+                    );
+                }
+
+                let count_bytes: [u8; 8] = buf[TYPE_DISCRIMINANT_SIZE..required_size]
+                    .try_into()
+                    .expect("slice has correct length");
+                let count = u64::from_le_bytes(count_bytes);
+
                 (
                     Self::Unpledge {
                         pledge_count_before_executing: count,
                     },
-                    &buf[9..],
+                    &buf[required_size..],
                 )
             }
-            4 => (Self::Unstake, &buf[1..]),
-            _ => panic!("unknown commitment type in compact encoding"),
+            COMMITMENT_TYPE_UNSTAKE => (Self::Unstake, &buf[TYPE_DISCRIMINANT_SIZE..]),
+            _ => panic!(
+                "CommitmentType::from_compact: unknown commitment type discriminant: {}",
+                type_id
+            ),
         }
     }
 }

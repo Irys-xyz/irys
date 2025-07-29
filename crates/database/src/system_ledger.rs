@@ -166,7 +166,8 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     // will have to be updated.
     let mut anchor = stake_tx.id;
     for i in 0..num_submodules {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &i).await;
+        let pledge_tx =
+            create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
@@ -271,7 +272,8 @@ pub async fn add_test_commitments(
     }
 
     for i in 0..(pledge_count as usize) {
-        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &i).await;
+        let pledge_tx =
+            create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;

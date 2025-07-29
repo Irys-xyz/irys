@@ -1832,42 +1832,42 @@ async fn stake_tx_fee_and_value_validation_test(
 /// Test mempool validates pledge transaction fees and values correctly
 #[rstest::rstest]
 #[case::invalid_fee_less_than_required(
-    0_usize, // pledge count
-    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: usize, required_fee: u64| {
+    0_u64, // pledge count
+    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, required_fee: u64| {
         tx.fee = required_fee / 2; // 50 instead of 100
     },
 )]
 #[case::invalid_fee_zero(
-    0_usize, // pledge count
-    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: usize, _required_fee: u64| {
+    0_u64, // pledge count
+    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
         tx.fee = 0;
     },
 )]
 #[case::invalid_value_too_low(
-    0_usize, // pledge count
-    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: usize, _required_fee: u64| {
+    0_u64, // pledge count
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
         let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected / irys_types::U256::from(2); // Half the expected value
     },
 )]
 #[case::invalid_value_too_high(
-    1_usize, // pledge count
-    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: usize, _required_fee: u64| {
+    1_u64, // pledge count
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
         let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected * irys_types::U256::from(2); // Double the expected value
     },
 )]
 #[case::invalid_value_wrong_count(
-    2_usize, // pledge count
-    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: usize, _required_fee: u64| {
+    2_u64, // pledge count
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: u64, _required_fee: u64| {
         // Set value that would be correct for pledge count 0, but we're using count 2
         tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
     },
 )]
 #[test_log::test(actix_web::test)]
 async fn pledge_tx_fee_validation_test(
-    #[case] pledge_count: usize,
-    #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, usize, u64),
+    #[case] pledge_count: u64,
+    #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
@@ -1881,13 +1881,9 @@ async fn pledge_tx_fee_validation_test(
     let required_fee = config.mempool.commitment_fee;
 
     // Create pledge transaction with modifications
-    let mut pledge_tx = CommitmentTransaction::new_pledge(
-        config,
-        H256::zero(),
-        &pledge_count, // Using usize as PledgeDataProvider
-        signer.address(),
-    )
-    .await;
+    let mut pledge_tx =
+        CommitmentTransaction::new_pledge(config, H256::zero(), &pledge_count, signer.address())
+            .await;
 
     // Apply the modification (fee or value)
     tx_modifier(&mut pledge_tx, config, pledge_count, required_fee);
@@ -1937,7 +1933,8 @@ async fn commitment_tx_valid_higher_fee_test(
         CommitmentType::Pledge {
             pledge_count_before_executing: count,
         } => {
-            CommitmentTransaction::new_pledge(config, H256::zero(), &count, signer.address()).await
+            CommitmentTransaction::new_pledge(config, H256::zero(), &{ count }, signer.address())
+                .await
         }
         _ => unreachable!(),
     };
