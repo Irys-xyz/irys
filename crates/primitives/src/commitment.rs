@@ -114,10 +114,10 @@ pub enum CommitmentType {
 
 impl CommitmentType {
     pub fn is_stake(&self) -> bool {
-        matches!(self, &CommitmentType::Stake)
+        matches!(self, &Self::Stake)
     }
     pub fn is_pledge(&self) -> bool {
-        matches!(self, &CommitmentType::Pledge { .. })
+        matches!(self, &Self::Pledge { .. })
     }
 }
 
