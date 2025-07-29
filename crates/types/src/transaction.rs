@@ -438,7 +438,7 @@ impl CommitmentTransaction {
                 // Calculate expected refund value
                 let expected_value = Self::calculate_pledge_value_at_count(
                     config,
-                    pledge_count_before_executing - 1,
+                    pledge_count_before_executing.saturating_sub(1),
                 );
 
                 if self.value != expected_value {
