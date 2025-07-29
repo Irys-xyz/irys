@@ -57,7 +57,8 @@ impl Ranges {
         let range = if self.last_range_pos == 0 {
             let range = self.ranges[0];
             // This call is safe because we know last_range_pos == 0, meaning ranges are fully consumed
-            self.reinitialize().expect("Reinitialize should succeed when last_range_pos == 0");
+            self.reinitialize()
+                .expect("Reinitialize should succeed when last_range_pos == 0");
             range
         } else {
             let mut hasher = sha::Sha256::new();
@@ -248,7 +249,10 @@ mod tests {
         // Should fail when ranges are not fully consumed
         let result = ranges.reinitialize();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ranges not fully consumed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ranges not fully consumed"));
 
         // Consume all ranges except the last one
         for i in 0..9 {
