@@ -1,5 +1,7 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::mempool_service::{prioritized_commitment::PrioritizedCommitment, ChunkIngressError, MempoolPledgeProvider};
+use crate::mempool_service::{
+    prioritized_commitment::PrioritizedCommitment, ChunkIngressError, MempoolPledgeProvider,
+};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
 use eyre::eyre;
@@ -306,7 +308,7 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         // Collect all stake and pledge commitments from mempool
-        let mut sorted_commitments: Vec<PrioritizedCommitment> = mempool_state_guard
+        let mut sorted_commitments = mempool_state_guard
             .valid_commitment_tx
             .values()
             .flat_map(|txs| {
@@ -317,9 +319,9 @@ impl Inner {
                             CommitmentType::Stake | CommitmentType::Pledge { .. }
                         )
                     })
-                    .map(|tx| PrioritizedCommitment(tx.clone()))
+                    .map(PrioritizedCommitment)
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         // Sort all commitments according to our priority rules in a single pass
         sorted_commitments.sort();
@@ -337,7 +339,7 @@ impl Inner {
             }
 
             // Check funding before simulation
-            if !check_funding(&tx) {
+            if !check_funding(tx) {
                 continue;
             }
 
@@ -383,7 +385,7 @@ impl Inner {
             }
 
             debug!("best_mempool_txs: adding commitment tx {}", tx.id);
-            commitment_tx.push(tx);
+            commitment_tx.push(tx.clone());
 
             // if we have reached the maximum allowed number of commitment txs per block
             // do not push anymore

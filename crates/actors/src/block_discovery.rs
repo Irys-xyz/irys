@@ -502,6 +502,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                                         ),
                                     ));
                                 }
+                                CommitmentSnapshotStatus::InvalidPledgeCount => {
+                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                        format!(
+                                            "Pledge tx {} has invalid pledge count",
+                                            commitment_tx.id
+                                        ),
+                                    ));
+                                }
                                 CommitmentSnapshotStatus::Unknown => {} // Success case
                             }
 

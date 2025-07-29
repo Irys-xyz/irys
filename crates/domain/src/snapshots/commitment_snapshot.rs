@@ -5,10 +5,10 @@ use tracing::debug;
 
 #[derive(Debug, PartialEq)]
 pub enum CommitmentSnapshotStatus {
-    Accepted,         // The commitment is valid and was added to the snapshot
-    Unknown,          // The commitment has no status in the snapshot
-    Unsupported,      // The commitment is an unsupported type (unstake/unpledge)
-    Unstaked,         // The pledge commitment doesn't have a corresponding stake
+    Accepted,           // The commitment is valid and was added to the snapshot
+    Unknown,            // The commitment has no status in the snapshot
+    Unsupported,        // The commitment is an unsupported type (unstake/unpledge)
+    Unstaked,           // The pledge commitment doesn't have a corresponding stake
     InvalidPledgeCount, // The pledge count doesn't match the actual number of pledges
 }
 
@@ -159,7 +159,9 @@ impl CommitmentSnapshot {
                 miner_commitments.stake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentType::Pledge { pledge_count_before_executing } => {
+            CommitmentType::Pledge {
+                pledge_count_before_executing,
+            } => {
                 // First, check if the address has a stake (either in current epoch or pending)
                 let has_stake = if is_staked_in_current_epoch {
                     true
@@ -236,7 +238,7 @@ impl CommitmentSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{H256, IrysSignature, U256};
+    use irys_types::{IrysSignature, H256, U256};
 
     fn create_test_commitment(
         signer: Address,
