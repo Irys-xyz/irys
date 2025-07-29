@@ -5,10 +5,11 @@ use tracing::debug;
 
 #[derive(Debug, PartialEq)]
 pub enum CommitmentSnapshotStatus {
-    Accepted,    // The commitment is valid and was added to the snapshot
-    Unknown,     // The commitment has no status in the snapshot
-    Unsupported, // The commitment is an unsupported type (unstake/unpledge)
-    Unstaked,    // The pledge commitment doesn't have a corresponding stake
+    Accepted,         // The commitment is valid and was added to the snapshot
+    Unknown,          // The commitment has no status in the snapshot
+    Unsupported,      // The commitment is an unsupported type (unstake/unpledge)
+    Unstaked,         // The pledge commitment doesn't have a corresponding stake
+    InvalidPledgeCount, // The pledge count doesn't match the actual number of pledges
 }
 
 #[derive(Debug, Default, Clone)]
@@ -137,57 +138,74 @@ impl CommitmentSnapshot {
             return CommitmentSnapshotStatus::Unsupported;
         }
 
-        // Handle stake commitments
-        if matches!(tx_type, CommitmentType::Stake) {
-            // Check existing commitments in epoch service
-            if is_staked_in_current_epoch {
-                // Already staked in current epoch, no need to add again
-                return CommitmentSnapshotStatus::Accepted;
-            }
+        // Handle commitment by type
+        match tx_type {
+            CommitmentType::Stake => {
+                // Check existing commitments in epoch service
+                if is_staked_in_current_epoch {
+                    // Already staked in current epoch, no need to add again
+                    return CommitmentSnapshotStatus::Accepted;
+                }
 
-            // Get or create miner commitments entry
-            let miner_commitments = self.commitments.entry(*signer).or_default();
-
-            // Check if already has pending stake
-            if miner_commitments.stake.is_some() {
-                return CommitmentSnapshotStatus::Accepted;
-            }
-
-            // Store new stake commitment
-            miner_commitments.stake = Some(commitment_tx.clone());
-            CommitmentSnapshotStatus::Accepted
-        } else {
-            // Handle pledge commitments - only accept if address has a stake
-
-            // First check if staked in current epoch
-            if is_staked_in_current_epoch {
-                // Address is staked in current epoch, add pledge
+                // Get or create miner commitments entry
                 let miner_commitments = self.commitments.entry(*signer).or_default();
 
+                // Check if already has pending stake
+                if miner_commitments.stake.is_some() {
+                    return CommitmentSnapshotStatus::Accepted;
+                }
+
+                // Store new stake commitment
+                miner_commitments.stake = Some(commitment_tx.clone());
+                CommitmentSnapshotStatus::Accepted
+            }
+            CommitmentType::Pledge { pledge_count_before_executing } => {
+                // First, check if the address has a stake (either in current epoch or pending)
+                let has_stake = if is_staked_in_current_epoch {
+                    true
+                } else if let Some(miner_commitments) = self.commitments.get(signer) {
+                    miner_commitments.stake.is_some()
+                } else {
+                    false
+                };
+
+                if !has_stake {
+                    return CommitmentSnapshotStatus::Unstaked;
+                }
+
+                // Get or create miner commitments
+                let miner_commitments = self.commitments.entry(*signer).or_default();
+
+                // Check for duplicate pledge first
                 let existing = miner_commitments
                     .pledges
                     .iter()
                     .find(|t| t.id == commitment_tx.id);
 
                 if let Some(existing) = existing {
-                    debug!("DUPLICATING PLEDGE: {}", existing.id)
-                }
-
-                miner_commitments.pledges.push(commitment_tx.clone());
-                return CommitmentSnapshotStatus::Accepted;
-            }
-
-            // Next check if there's a pending stake in the snapshots commitments
-            if let Some(miner_commitments) = self.commitments.get_mut(signer) {
-                if miner_commitments.stake.is_some() {
-                    // Has pending stake, can add pledge
-                    miner_commitments.pledges.push(commitment_tx.clone());
+                    debug!("DUPLICATING PLEDGE: {}", existing.id);
                     return CommitmentSnapshotStatus::Accepted;
                 }
-            }
 
-            // No stake found, reject pledge
-            CommitmentSnapshotStatus::Unstaked
+                // Validate pledge count matches actual number of existing pledges
+                let current_pledge_count = miner_commitments.pledges.len() as u64;
+                if *pledge_count_before_executing != current_pledge_count {
+                    debug!(
+                        "Invalid pledge count for {}: expected {}, but miner has {} pledges",
+                        commitment_tx.id, pledge_count_before_executing, current_pledge_count
+                    );
+                    return CommitmentSnapshotStatus::InvalidPledgeCount;
+                }
+
+                // Add the pledge
+                miner_commitments.pledges.push(commitment_tx.clone());
+                CommitmentSnapshotStatus::Accepted
+            }
+            _ => {
+                // This should not be reached due to the early return check,
+                // but we handle it for completeness
+                CommitmentSnapshotStatus::Unsupported
+            }
         }
     }
 
@@ -212,5 +230,200 @@ impl CommitmentSnapshot {
         }
 
         commitment_tx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{H256, IrysSignature, U256};
+
+    fn create_test_commitment(
+        signer: Address,
+        commitment_type: CommitmentType,
+    ) -> CommitmentTransaction {
+        let mut tx = CommitmentTransaction {
+            id: H256::zero(),
+            anchor: H256::zero(),
+            signer,
+            signature: IrysSignature::default(),
+            fee: 100,
+            value: U256::from(1000),
+            commitment_type,
+            version: 1,
+            chain_id: 1,
+        };
+        // Generate a proper ID for the transaction
+        tx.id = H256::random();
+        tx
+    }
+
+    #[test]
+    fn test_pledge_count_validation_success() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Add stake first
+        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        let status = snapshot.add_commitment(&stake, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Add first pledge with count 0
+        let pledge1 = create_test_commitment(
+            signer,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        );
+        let status = snapshot.add_commitment(&pledge1, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Add second pledge with count 1
+        let pledge2 = create_test_commitment(
+            signer,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 1,
+            },
+        );
+        let status = snapshot.add_commitment(&pledge2, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Verify the miner has 2 pledges
+        assert_eq!(snapshot.commitments[&signer].pledges.len(), 2);
+    }
+
+    #[test]
+    fn test_pledge_count_validation_failure() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Add stake first
+        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        let status = snapshot.add_commitment(&stake, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Try to add pledge with wrong count (should be 0, but using 1)
+        let pledge_wrong_count = create_test_commitment(
+            signer,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 1,
+            },
+        );
+        let status = snapshot.add_commitment(&pledge_wrong_count, false);
+        assert_eq!(status, CommitmentSnapshotStatus::InvalidPledgeCount);
+
+        // Verify no pledges were added
+        assert_eq!(snapshot.commitments[&signer].pledges.len(), 0);
+    }
+
+    #[test]
+    fn test_pledge_without_stake() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Try to add pledge without stake
+        let pledge = create_test_commitment(
+            signer,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        );
+        let status = snapshot.add_commitment(&pledge, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
+    }
+
+    #[test]
+    fn test_pledge_with_staked_in_epoch() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Add pledge when already staked in current epoch
+        let pledge = create_test_commitment(
+            signer,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        );
+        let status = snapshot.add_commitment(&pledge, true);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Add second pledge with correct count
+        let pledge2 = create_test_commitment(
+            signer,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 1,
+            },
+        );
+        let status = snapshot.add_commitment(&pledge2, true);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+    }
+
+    #[test]
+    fn test_duplicate_stake() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Add stake
+        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        let status = snapshot.add_commitment(&stake, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Try to add another stake (should be accepted but not added)
+        let stake2 = create_test_commitment(signer, CommitmentType::Stake);
+        let status = snapshot.add_commitment(&stake2, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Verify only one stake exists
+        assert!(snapshot.commitments[&signer].stake.is_some());
+    }
+
+    #[test]
+    fn test_duplicate_pledge() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Add stake
+        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        snapshot.add_commitment(&stake, false);
+
+        // Add pledge
+        let pledge = create_test_commitment(
+            signer,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        );
+        let pledge_id = pledge.id;
+        let status = snapshot.add_commitment(&pledge, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Try to add the same pledge again (should be accepted but not duplicated)
+        let status = snapshot.add_commitment(&pledge, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+        // Verify only one pledge exists
+        assert_eq!(snapshot.commitments[&signer].pledges.len(), 1);
+        assert_eq!(snapshot.commitments[&signer].pledges[0].id, pledge_id);
+    }
+
+    #[test]
+    fn test_unsupported_commitment_types() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Try to add unstake
+        let unstake = create_test_commitment(signer, CommitmentType::Unstake);
+        let status = snapshot.add_commitment(&unstake, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
+
+        // Try to add unpledge
+        let unpledge = create_test_commitment(
+            signer,
+            CommitmentType::Unpledge {
+                pledge_count_before_executing: 0,
+            },
+        );
+        let status = snapshot.add_commitment(&unpledge, false);
+        assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
     }
 }
