@@ -5,6 +5,7 @@ pub mod facade;
 pub mod inner;
 pub mod lifecycle;
 pub mod pledge_provider;
+pub mod prioritized_commitment;
 
 pub use chunks::*;
 pub use facade::*;

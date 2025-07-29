@@ -1,5 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
+use crate::mempool_service::{prioritized_commitment::PrioritizedCommitment, ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
 use eyre::eyre;
@@ -302,100 +302,93 @@ impl Inner {
             .as_ref()
             .clone();
 
-        // Process commitments in the mempool in priority order (stakes then pledges)
-        // This order ensures stake transactions are processed before pledges
+        // Process commitments in the mempool in priority order
         let mempool_state_guard = mempool_state.read().await;
 
-        // Process in two phases: stakes first, then pledges
-        'outer: for commitment_type in &[
-            // todo: will be refactored
-            CommitmentType::Stake,
-            CommitmentType::Pledge {
-                pledge_count_before_executing: 0,
-            },
-        ] {
-            // Gather all commitments of current type from all addresses
-            let mut sorted_commitments: Vec<_> = mempool_state_guard
-                .valid_commitment_tx
-                .values()
-                .flat_map(|txs| {
-                    txs.iter()
-                        .filter(|tx| {
-                            // todo: will be refactored
-                            (commitment_type.is_stake() && tx.commitment_type.is_stake())
-                                || (commitment_type.is_pledge() && tx.commitment_type.is_pledge())
-                        })
-                        .cloned()
-                })
-                .collect();
+        // Collect all stake and pledge commitments from mempool
+        let mut sorted_commitments: Vec<PrioritizedCommitment> = mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| {
+                txs.iter()
+                    .filter(|tx| {
+                        matches!(
+                            tx.commitment_type,
+                            CommitmentType::Stake | CommitmentType::Pledge { .. }
+                        )
+                    })
+                    .map(|tx| PrioritizedCommitment(tx.clone()))
+            })
+            .collect();
 
-            // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.user_fee()));
+        // Sort all commitments according to our priority rules in a single pass
+        sorted_commitments.sort();
 
-            // Select fundable commitments in fee-priority order
-            for tx in sorted_commitments {
-                if confirmed_commitments.contains(&tx.id) {
-                    debug!(
-                        "best_mempool_txs: skipping already confirmed commitment tx {}",
-                        tx.id
-                    );
-                    continue; // Skip tx already confirmed in the canonical chain
-                }
+        // Process sorted commitments
+        for prioritized_tx in sorted_commitments {
+            let tx = prioritized_tx.0;
 
-                // Check funding before simulation so we don't mutate the snapshot unnecessarily
-                if !check_funding(&tx) {
+            if confirmed_commitments.contains(&tx.id) {
+                debug!(
+                    "best_mempool_txs: skipping already confirmed commitment tx {}",
+                    tx.id
+                );
+                continue;
+            }
+
+            // Check funding before simulation
+            if !check_funding(&tx) {
+                continue;
+            }
+
+            // signer stake status check
+            if matches!(tx.commitment_type, CommitmentType::Stake) {
+                let epoch_snapshot = self
+                    .block_tree_read_guard
+                    .read()
+                    .get_epoch_snapshot(&last_block.block_hash)
+                    .expect("parent blocks epoch_snapshot should be retrievable");
+                let is_staked = epoch_snapshot.is_staked(tx.signer);
+                tracing::error!(
+                    "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
+                    tx.id,
+                    tx.signer,
+                    is_staked
+                );
+                if is_staked {
+                    // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
                     continue;
                 }
+            }
+            // simulation check
+            {
+                let is_staked = self
+                    .block_tree_read_guard
+                    .read()
+                    .canonical_epoch_snapshot()
+                    .is_staked(tx.signer);
 
-                // signer stake status check
-                if matches!(tx.commitment_type, CommitmentType::Stake) {
-                    let epoch_snapshot = self
-                        .block_tree_read_guard
-                        .read()
-                        .get_epoch_snapshot(&last_block.block_hash)
-                        .expect("parent blocks epoch_snapshot should be retrievable");
-                    let is_staked = epoch_snapshot.is_staked(tx.signer);
+                let simulation = simulation_commitment_snapshot.add_commitment(&tx, is_staked);
+
+                // skip commitments that would not be accepted
+                if simulation != CommitmentSnapshotStatus::Accepted {
                     tracing::error!(
-                        "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
+                        "tx {:?}:{:?} skipped: {:?}",
+                        tx.commitment_type,
                         tx.id,
-                        tx.signer,
-                        is_staked
+                        simulation
                     );
-                    if is_staked {
-                        // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
-                        continue;
-                    }
+                    continue;
                 }
-                // simulation check
-                {
-                    let is_staked = self
-                        .block_tree_read_guard
-                        .read()
-                        .canonical_epoch_snapshot()
-                        .is_staked(tx.signer);
+            }
 
-                    let simulation = simulation_commitment_snapshot.add_commitment(&tx, is_staked);
+            debug!("best_mempool_txs: adding commitment tx {}", tx.id);
+            commitment_tx.push(tx);
 
-                    // skip commitments that would not be accepted
-                    if simulation != CommitmentSnapshotStatus::Accepted {
-                        tracing::error!(
-                            "tx {:?}:{:?} skipped: {:?}",
-                            tx.commitment_type,
-                            tx.id,
-                            simulation
-                        );
-                        continue;
-                    }
-                }
-
-                debug!("best_mempool_txs: adding commitment tx {}", tx.id);
-                commitment_tx.push(tx);
-
-                // if we have reached the maximum allowed number of commitment txs per block
-                // do not push anymore
-                if commitment_tx.len() >= max_commitments {
-                    break 'outer;
-                }
+            // if we have reached the maximum allowed number of commitment txs per block
+            // do not push anymore
+            if commitment_tx.len() >= max_commitments {
+                break;
             }
         }
         drop(mempool_state_guard);
