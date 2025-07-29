@@ -258,6 +258,8 @@ impl ActiveValidations {
     pub(crate) async fn process_completed_vdf(&mut self) -> bool {
         let peek = self.vdf_pending_queue.peek();
 
+        // if we have an existing task, figure out if it's being cancelled
+        // if not, check if we need to cancel it (to replace it with a higher priority task)
         let mut task = if let Some(task) = self.vdf_task.take() {
             // if cancelling, return current task (it'll poll to completion once cancellation completes)
             let current_cancel_state = task.cancel.load(Ordering::Relaxed);
@@ -267,13 +269,13 @@ impl ActiveValidations {
                     &task.block_hash, &current_cancel_state
                 );
                 task
-            } else if let Some(p) = peek {
+            } else if let Some((high_prio_hash, high_prio_task)) = peek {
                 // check if task needs to be replaced by a higher priority task
                 // check the hash of the highest priority according to the queue against the hash of the task
-                if *p.0 != task.block_hash {
+                if *high_prio_hash != task.block_hash {
                     info!(
                         "Cancelling in-progress VDF validation for block {} in favour of block {:?} {}",
-                        &task.block_hash,&p.1.0.meta.state, &p.0,
+                        &task.block_hash,&high_prio_task.0.meta.state, &high_prio_hash,
                     );
                     // Cancel only if currently set to Continue
                     if let Err(e) = task.cancel.compare_exchange(
@@ -289,15 +291,15 @@ impl ActiveValidations {
             } else {
                 task
             }
-        } else if let Some(pending) = peek {
+            // if there is no active task, and we have a pending task in the queue, add it
+        } else if let Some((pending_hash, pending_task)) = peek {
             // Create new task from highest priority pending task
-            debug!("Created VDF validation task for  {}", &pending.0);
+            debug!("Created VDF validation task for  {}", &pending_hash);
 
             VdfValidationTask {
-                block_hash: *pending.0,
-                fut: // TODO: figure out how to remove this `clone`
-                pending.1.clone().0.execute_vdf().boxed(),
-                cancel: Arc::new(AtomicU8::new(0)),
+                block_hash: *pending_hash,
+                fut: pending_task.clone().0.execute_vdf().boxed(),
+                cancel: Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
             }
         } else {
             // Nothing to process
@@ -306,6 +308,7 @@ impl ActiveValidations {
 
         // process the provided task
         // either 1.) a previously produced task, 2.) a previously produced task that is getting cancelled, or 3.) a new task
+        // we still poll cancelling tasks to ensure they stop correctly
         let poll_res = poll_immediate(&mut task.fut).await;
 
         let has_completed = poll_res.is_some();
@@ -314,29 +317,29 @@ impl ActiveValidations {
             match result {
                 VdfValidationResult::Valid => {
                     // remove task from the vdf_pending queue
-                    let item = self.vdf_pending_queue.remove(&task.block_hash).unwrap_or_else(|| panic!("Expected processing task for {} to have an entry in the vdf_pending queue",
+                    let (hash, task) = self.vdf_pending_queue.remove(&task.block_hash).unwrap_or_else(|| panic!("Expected processing task for {} to have an entry in the vdf_pending queue",
                         &task.block_hash));
                     // do NOT send anything to the block tree
 
-                    // add to active parallel validations (this also adds to the parallel queue)
                     debug!(
                         "Processed VDF task for block {}, spawning parallel validation task",
-                        &item.0
+                        &hash
                     );
 
-                    self.push_parallel_fut(
-                        item.1 .0.block.clone(),
-                        item.1 .0.execute_parallel().boxed(),
-                    )
+                    // add to active parallel validations (this also adds to the parallel queue)
+                    self.push_parallel_fut(task.0.block.clone(), task.0.execute_parallel().boxed())
                 }
                 VdfValidationResult::Invalid(err) => {
                     // remove task from the vdf_pending queue
-                    let item = self.vdf_pending_queue.remove(&task.block_hash).expect(
-                        "Expected processing task to have an entry in the vdf_pending queue",
-                    );
-                    error!(block_hash = %item.0, "Error validating VDF - {}", &err);
+                    let (invalid_hash, invalid_item) =
+                        self.vdf_pending_queue.remove(&task.block_hash).expect(
+                            "Expected processing task to have an entry in the vdf_pending queue",
+                        );
+                    error!(block_hash = %invalid_hash, "Error validating VDF - {}", &err);
                     // notify the block tree
-                    item.1 .0.send_validation_result(ValidationResult::Invalid);
+                    invalid_item
+                        .0
+                        .send_validation_result(ValidationResult::Invalid);
                 }
                 VdfValidationResult::Cancelled => {
                     debug!("VDF task {} was cancelled", &task.block_hash);
