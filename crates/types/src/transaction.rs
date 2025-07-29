@@ -272,13 +272,13 @@ impl CommitmentTransaction {
         }
     }
 
-    /// Calculate the value for a pledge at the given index
+    /// Calculate the value for a pledge at the given count
     /// For pledge N, use count = N
     /// For unpledge refund, use count = N - 1 (to get the value of the most recent pledge)
-    pub fn calculate_pledge_value_at_index(config: &ConsensusConfig, pledge_index: usize) -> U256 {
+    pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: usize) -> U256 {
         config
             .pledge_base_value
-            .apply_pledge_decay(pledge_index, config.pledge_decay)
+            .apply_pledge_decay(pledge_count, config.pledge_decay)
             .map(|a| a.amount)
             .unwrap_or(config.pledge_base_value.amount)
     }
@@ -315,7 +315,7 @@ impl CommitmentTransaction {
         signer_address: Address,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
-        let value = Self::calculate_pledge_value_at_index(config, count);
+        let value = Self::calculate_pledge_value_at_count(config, count);
 
         Self {
             commitment_type: CommitmentType::Pledge {
@@ -343,7 +343,7 @@ impl CommitmentTransaction {
         let value = if count == 0 {
             U256::zero()
         } else {
-            Self::calculate_pledge_value_at_index(config, count - 1)
+            Self::calculate_pledge_value_at_count(config, count - 1)
         };
 
         Self {
@@ -421,7 +421,7 @@ impl CommitmentTransaction {
             } => {
                 // For pledge, validate using the embedded pledge count
                 let expected_value =
-                    Self::calculate_pledge_value_at_index(config, *pledge_count_before_executing);
+                    Self::calculate_pledge_value_at_count(config, *pledge_count_before_executing);
 
                 if self.value != expected_value {
                     return Err(CommitmentValidationError::InvalidPledgeValue {
@@ -436,7 +436,7 @@ impl CommitmentTransaction {
             } => {
                 // For unpledge, validate using the embedded pledge count
                 // Calculate expected refund value
-                let expected_value = Self::calculate_pledge_value_at_index(
+                let expected_value = Self::calculate_pledge_value_at_count(
                     config,
                     pledge_count_before_executing - 1,
                 );

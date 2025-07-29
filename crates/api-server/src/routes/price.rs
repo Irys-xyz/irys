@@ -139,7 +139,7 @@ pub async fn get_pledge_price(
         .await;
 
     // Calculate the pledge value using the same logic as CommitmentTransaction
-    let pledge_value = CommitmentTransaction::calculate_pledge_value_at_index(
+    let pledge_value = CommitmentTransaction::calculate_pledge_value_at_count(
         &state.config.consensus,
         pledge_count,
     );
@@ -170,7 +170,7 @@ pub async fn get_unpledge_price(
     let refund_amount = if pledge_count == 0 {
         U256::zero()
     } else {
-        CommitmentTransaction::calculate_pledge_value_at_index(
+        CommitmentTransaction::calculate_pledge_value_at_count(
             &state.config.consensus,
             pledge_count.saturating_sub(1),
         )

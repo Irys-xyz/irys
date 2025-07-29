@@ -1845,14 +1845,14 @@ async fn stake_tx_fee_and_value_validation_test(
 #[case::invalid_value_too_low(
     0_usize, // pledge count
     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: usize, _required_fee: u64| {
-        let expected = CommitmentTransaction::calculate_pledge_value_at_index(config, count);
+        let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected / irys_types::U256::from(2); // Half the expected value
     },
 )]
 #[case::invalid_value_too_high(
     1_usize, // pledge count
     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: usize, _required_fee: u64| {
-        let expected = CommitmentTransaction::calculate_pledge_value_at_index(config, count);
+        let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected * irys_types::U256::from(2); // Double the expected value
     },
 )]
@@ -1860,7 +1860,7 @@ async fn stake_tx_fee_and_value_validation_test(
     2_usize, // pledge count
     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: usize, _required_fee: u64| {
         // Set value that would be correct for pledge count 0, but we're using count 2
-        tx.value = CommitmentTransaction::calculate_pledge_value_at_index(config, 0);
+        tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
     },
 )]
 #[test_log::test(actix_web::test)]

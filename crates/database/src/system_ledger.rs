@@ -1,8 +1,8 @@
 use eyre::eyre;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
-    irys::IrysSigner, transaction::PledgeDataProvider, Address, CommitmentTransaction, Compact,
-    Config, H256List, IrysBlockHeader, SystemTransactionLedger, H256,
+    irys::IrysSigner, transaction::PledgeDataProvider, CommitmentTransaction, Compact, Config,
+    H256List, IrysBlockHeader, SystemTransactionLedger, H256,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
@@ -136,16 +136,6 @@ async fn create_pledge_commitment_transaction(
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
 pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
-    // Empty pledge data provider for genesis block creation
-    struct EmptyPledgeProvider;
-
-    #[async_trait::async_trait]
-    impl PledgeDataProvider for EmptyPledgeProvider {
-        async fn pledge_count(&self, _user_address: Address) -> usize {
-            0
-        }
-    }
-
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
@@ -175,10 +165,8 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
     // will have to be updated.
     let mut anchor = stake_tx.id;
-    let empty_provider = EmptyPledgeProvider;
-    for _i in 0..num_submodules {
-        let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider).await;
+    for i in 0..num_submodules {
+        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &i).await;
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
@@ -266,16 +254,6 @@ pub async fn add_test_commitments(
     pledge_count: u8,
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
-    // Empty pledge data provider for test commitments
-    struct EmptyPledgeProvider;
-
-    #[async_trait::async_trait]
-    impl PledgeDataProvider for EmptyPledgeProvider {
-        async fn pledge_count(&self, _user_address: Address) -> usize {
-            0
-        }
-    }
-
     let signer = config.irys_signer();
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
@@ -292,10 +270,8 @@ pub async fn add_test_commitments(
         commitments.push(stake_tx);
     }
 
-    let empty_provider = EmptyPledgeProvider;
-    for _i in 0..pledge_count {
-        let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &empty_provider).await;
+    for i in 0..(pledge_count as usize) {
+        let pledge_tx = create_pledge_commitment_transaction(&signer, anchor, config, &i).await;
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;
