@@ -194,7 +194,7 @@ impl ValidationService {
                             };
 
                             // push this task to the VDF pending queue
-                            active_validations.vdf_pending_queue.push(task.block_hash, std::cmp::Reverse(task));
+                            active_validations.vdf_pending_queue.push(task.block.block_hash, std::cmp::Reverse(task));
 
                         }
                         None => {
@@ -269,8 +269,7 @@ impl ValidationServiceInner {
 
                 let priority: std::cmp::Reverse<active_validations::BlockPriorityMeta> =
                     active_validations.calculate_priority(&block);
-                let task =
-                    BlockValidationTask::new(block, block_hash, self, block_tree_guard, priority.0);
+                let task = BlockValidationTask::new(block, self, block_tree_guard, priority.0);
                 Some(task)
             }
         }
