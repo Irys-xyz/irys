@@ -282,8 +282,7 @@ pub async fn add_test_commitments(
 
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
-        let stake_commitment =
-            CommitmentTransaction::new_stake(&config.consensus, H256::default());
+        let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
 
         let stake_tx = signer
             .sign_commitment(stake_commitment)

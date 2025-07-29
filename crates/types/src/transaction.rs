@@ -718,7 +718,7 @@ pub trait PledgeDataProvider {
 
 #[async_trait::async_trait]
 impl PledgeDataProvider for usize {
-    async fn pledge_count(&self, _user_address: Address) -> usize {
+    async fn pledge_count(&self, _user_address: Address) -> Self {
         *self
     }
 }

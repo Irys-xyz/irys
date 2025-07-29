@@ -314,10 +314,12 @@ impl Inner {
                 .values()
                 .flat_map(|txs| {
                     txs.iter()
-                        .filter(|tx| match (*phase, &tx.commitment_type) {
-                            ("stake", CommitmentType::Stake) => true,
-                            ("pledge", CommitmentType::Pledge { .. }) => true,
-                            _ => false,
+                        .filter(|tx| {
+                            matches!(
+                                (*phase, &tx.commitment_type),
+                                ("stake", CommitmentType::Stake)
+                                    | ("pledge", CommitmentType::Pledge { .. })
+                            )
                         })
                         .cloned()
                 })
