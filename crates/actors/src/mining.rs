@@ -99,7 +99,7 @@ impl PartitionMiningActor {
                     "Step {} is too far ahead of last processed step {}, reinitializing ranges ...",
                     step, self.ranges.last_step_num
                 );
-                self.ranges.reinitialize();
+                self.ranges.reinitialize().expect("Reinitializing ranges failed");
                 self.ranges.last_step_num = reset_step - 1; // advance last step number calculated by ranges to (reset_step - 1), so ranges next step will be reset_step line
                 reset_step
             } else {

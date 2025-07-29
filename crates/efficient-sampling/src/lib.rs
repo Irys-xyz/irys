@@ -56,7 +56,8 @@ impl Ranges {
 
         let range = if self.last_range_pos == 0 {
             let range = self.ranges[0];
-            self.reinitialize();
+            // This call is safe because we know last_range_pos == 0, meaning ranges are fully consumed
+            self.reinitialize().expect("Reinitialize should succeed when last_range_pos == 0");
             range
         } else {
             let mut hasher = sha::Sha256::new();
@@ -79,7 +80,15 @@ impl Ranges {
         range
     }
 
-    pub fn reinitialize(&mut self) {
+    pub fn reinitialize(&mut self) -> Result<()> {
+        // Validate that previous ranges have been fully consumed before reinitialization
+        if self.last_range_pos != 0 {
+            return Err(eyre::eyre!(
+                "Cannot reinitialize: ranges not fully consumed. Current position: {}, expected: 0",
+                self.last_range_pos
+            ));
+        }
+
         info!("Reinitializing ranges");
         self.ranges.clear();
         for i in 0..self.num_recall_ranges_in_partition {
@@ -90,6 +99,8 @@ impl Ranges {
         let last_step_to_keep = self.last_step_num.saturating_sub(NUMBER_OF_KEPT_LAST_STEPS);
         self.last_recall_ranges
             .retain(|k, _| *k > last_step_to_keep);
+
+        Ok(())
     }
 
     pub fn new(num_recall_ranges_in_partition: usize) -> Self {
@@ -228,5 +239,31 @@ mod tests {
             );
             assert!(res.is_ok());
         }
+    }
+
+    #[test]
+    fn test_reinitialize_validation() {
+        let mut ranges = Ranges::new(10);
+
+        // Should fail when ranges are not fully consumed
+        let result = ranges.reinitialize();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ranges not fully consumed"));
+
+        // Consume all ranges except the last one
+        for i in 0..9 {
+            ranges.last_range_pos = 9 - i;
+        }
+
+        // Should still fail when last_range_pos is not 0
+        ranges.last_range_pos = 1;
+        let result = ranges.reinitialize();
+        assert!(result.is_err());
+
+        // Should succeed when last_range_pos is 0
+        ranges.last_range_pos = 0;
+        let result = ranges.reinitialize();
+        assert!(result.is_ok());
+        assert_eq!(ranges.last_range_pos, 9); // Should be reset to num_ranges - 1
     }
 }
