@@ -112,6 +112,15 @@ pub enum CommitmentType {
     Unstake,
 }
 
+impl CommitmentType {
+    pub fn is_stake(&self) -> bool {
+        matches!(self, &CommitmentType::Stake)
+    }
+    pub fn is_pledge(&self) -> bool {
+        matches!(self, &CommitmentType::Pledge { .. })
+    }
+}
+
 // TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
 
 #[derive(thiserror::Error, Debug)]

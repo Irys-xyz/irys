@@ -307,7 +307,13 @@ impl Inner {
         let mempool_state_guard = mempool_state.read().await;
 
         // Process in two phases: stakes first, then pledges
-        'outer: for phase in &["stake", "pledge"] {
+        'outer: for commitment_type in &[
+            // todo: will be refactored
+            CommitmentType::Stake,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        ] {
             // Gather all commitments of current type from all addresses
             let mut sorted_commitments: Vec<_> = mempool_state_guard
                 .valid_commitment_tx
@@ -315,11 +321,9 @@ impl Inner {
                 .flat_map(|txs| {
                     txs.iter()
                         .filter(|tx| {
-                            matches!(
-                                (*phase, &tx.commitment_type),
-                                ("stake", CommitmentType::Stake)
-                                    | ("pledge", CommitmentType::Pledge { .. })
-                            )
+                            // todo: will be refactored
+                            (commitment_type.is_stake() && tx.commitment_type.is_stake())
+                                || (commitment_type.is_pledge() && tx.commitment_type.is_pledge())
                         })
                         .cloned()
                 })
