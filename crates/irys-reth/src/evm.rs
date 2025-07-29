@@ -8,7 +8,7 @@ use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnState
 use alloy_evm::eth::receipt_builder::ReceiptBuilder as _;
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{Bytes, FixedBytes, Log, LogData};
+use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
 
 // External crate imports - Reth
 use reth::primitives::{SealedBlock, SealedHeader};
@@ -153,6 +153,10 @@ where
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
         let rlp_decoded_shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..]);
+        let beneficiary = {
+            use revm::context::Block as _;
+            self.inner().evm().block().beneficiary()
+        };
 
         let Ok(shadow_tx) = rlp_decoded_shadow_tx else {
             // if the tx is not a shadow tx, execute it as a regular transaction
@@ -162,11 +166,51 @@ where
         };
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing shadow transaction");
 
+        // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx
+        let priority_fee = tx_envelope.max_priority_fee_per_gas().unwrap_or(0);
+        let total_fee = U256::from(priority_fee);
+
+        // Get the target address from the shadow transaction
+        let fee_payer_address = match &shadow_tx {
+            ShadowTransaction::V1 { packet } => packet.fee_payer_address(),
+        };
+
+        // Check if this is a block reward transaction
+        let is_block_reward = matches!(
+            &shadow_tx,
+            ShadowTransaction::V1 {
+                packet: shadow_tx::TransactionPacket::BlockReward(_),
+                ..
+            }
+        );
+
+        // Block reward transactions MUST have 0 priority fee
+        if is_block_reward && !total_fee.is_zero() {
+            tracing::error!(
+                tx_hash = %tx_envelope.hash(),
+                priority_fee = %total_fee,
+                "Block reward transaction with non-zero priority fee"
+            );
+            return Err(create_invalid_tx_error(
+                *tx_envelope.hash(),
+                InvalidTransaction::PriorityFeeGreaterThanMaxFee,
+            ));
+        }
+
+        // Distribute priority fees
+        self.distribute_priority_fee(
+            total_fee,
+            fee_payer_address,
+            beneficiary,
+            tx_envelope.hash(),
+        )?;
+
         // Process the shadow transaction
         let (new_account_state, target) =
-            self.process_shadow_transaction(&shadow_tx, tx_envelope.hash())?;
+            self.process_shadow_transaction(&shadow_tx, tx_envelope.hash(), beneficiary)?;
 
         let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+
         // at this point, the shadow tx has been processed, and it was valid *enough*
         // that we should generate a receipt for it even in a failure state
         let execution_result = match new_account_state {
@@ -186,14 +230,13 @@ where
                     status |= AccountStatus::Created;
                 };
 
-                new_state.insert(
-                    target,
-                    Account {
-                        info: plain_account.info,
-                        storage,
-                        status,
-                    },
-                );
+                let account = Account {
+                    info: plain_account.info,
+                    storage,
+                    status,
+                };
+
+                new_state.insert(target, account);
 
                 execution_result
             }
@@ -256,6 +299,7 @@ where
         &mut self,
         shadow_tx: &ShadowTransaction,
         tx_envelope_hash: &FixedBytes<32>,
+        beneficiary: Address,
     ) -> Result<(ShadowTransactionResult<<E as Evm>::HaltReason>, Address), BlockExecutionError>
     {
         let topic = shadow_tx.topic();
@@ -306,17 +350,17 @@ where
                 },
                 shadow_tx::TransactionPacket::BlockReward(block_reward_increment) => {
                     let log = Self::create_shadow_log(
-                        block_reward_increment.target,
+                        beneficiary,
                         vec![topic],
                         vec![
                             DynSolValue::Uint(block_reward_increment.amount, 256),
-                            DynSolValue::Address(block_reward_increment.target),
+                            DynSolValue::Address(beneficiary),
                         ],
                     );
-                    let target = block_reward_increment.target;
+                    let target = beneficiary;
                     let balance_increment = shadow_tx::BalanceIncrement {
                         amount: block_reward_increment.amount,
-                        target: block_reward_increment.target,
+                        target: beneficiary,
                         irys_ref: alloy_primitives::FixedBytes::ZERO,
                     };
                     let (plain_account, execution_result, account_existed) =
@@ -479,6 +523,242 @@ where
         let execution_result = Self::create_success_result(log);
 
         Ok(Ok((new_account_info, execution_result)))
+    }
+
+    /// Distributes priority fees from shadow transactions to the block beneficiary.
+    ///
+    /// # Priority Fee Distribution Flow
+    ///
+    /// Shadow transactions support EIP-1559 style priority fees that are distributed
+    /// to the block beneficiary (miner) BEFORE the shadow transaction is executed.
+    ///
+    /// ## Process:
+    /// 1. Calculate total fee from `max_priority_fee_per_gas` (direct value, no gas multiplication)
+    /// 2. Validate target has sufficient balance
+    /// 3. Deduct fee from target account
+    /// 4. Add fee to beneficiary account (create a new one if needed)
+    /// 5. Commit state changes
+    ///
+    /// ## Early Returns:
+    /// - No fee to distribute (fee is zero).
+    ///   This is valid because enforcement of which shadow txs to include in the block is up to the consensus layer.
+    /// - No target address in shadow transaction
+    ///
+    /// ## Error Cases:
+    /// - Target account doesn't exist
+    /// - Target has insufficient balance
+    /// - Database operation failures
+    fn distribute_priority_fee(
+        &mut self,
+        total_fee: U256,
+        fee_payer_address: Option<Address>,
+        beneficiary: Address,
+        tx_hash: &FixedBytes<32>,
+    ) -> Result<(), BlockExecutionError> {
+        // Early return if no fee to distribute
+        if total_fee.is_zero() {
+            return Ok(());
+        }
+
+        // Early return if no target address
+        let Some(target) = fee_payer_address else {
+            tracing::trace!(
+                "No target address for shadow transaction, skipping priority fee distribution"
+            );
+            return Ok(());
+        };
+
+        tracing::debug!(
+            beneficiary = %beneficiary,
+            target = %target,
+            total_fee = %total_fee,
+            "Distributing priority fee"
+        );
+
+        // Prepare fee transfer
+        let (target_state, beneficiary_state) =
+            self.prepare_fee_transfer(target, beneficiary, total_fee, tx_hash)?;
+
+        // Commit the fee transfer
+        self.commit_fee_transfer(
+            target_state,
+            beneficiary_state,
+            target,
+            beneficiary,
+            total_fee,
+        );
+
+        Ok(())
+    }
+
+    /// Prepares the fee transfer by validating and creating state changes for both accounts.
+    ///
+    /// Returns the updated state for both target and beneficiary accounts.
+    fn prepare_fee_transfer(
+        &mut self,
+        target: Address,
+        beneficiary: Address,
+        total_fee: U256,
+        tx_hash: &FixedBytes<32>,
+    ) -> Result<(Account, Account), BlockExecutionError> {
+        let evm = self.inner.evm_mut();
+        let db = evm.db_mut();
+
+        // Deduct fee from target
+        let target_account = Self::deduct_fee_from_target(db, target, total_fee, tx_hash)?;
+        let target_state = Self::create_account_state(target_account, AccountStatus::Touched);
+
+        // Add fee to beneficiary
+        let (beneficiary_account, is_new) =
+            Self::add_fee_to_beneficiary(db, beneficiary, total_fee)?;
+        let mut status = AccountStatus::Touched;
+        if is_new {
+            status |= AccountStatus::Created;
+        }
+        let beneficiary_state = Self::create_account_state(beneficiary_account, status);
+
+        Ok((target_state, beneficiary_state))
+    }
+
+    /// Deducts the fee from the target account after validating sufficient balance.
+    ///
+    /// # Errors
+    /// - Returns `InvalidTransaction::NonceTooHigh` if target account doesn't exist
+    /// - Returns `InvalidTransaction::LackOfFundForMaxFee` if insufficient balance
+    fn deduct_fee_from_target(
+        db: &mut State<DB>,
+        target: Address,
+        fee: U256,
+        tx_hash: &FixedBytes<32>,
+    ) -> Result<PlainAccount, BlockExecutionError> {
+        // Load target account
+        let target_state = db
+            .load_cache_account(target)
+            .map_err(|_| create_internal_error("Could not load target account"))?;
+
+        // Validate account exists
+        let Some(existing) = target_state.account.as_ref() else {
+            tracing::warn!(
+                target = %target,
+                "Target account does not exist, cannot deduct priority fee"
+            );
+            return Err(create_invalid_tx_error(
+                *tx_hash,
+                InvalidTransaction::NonceTooHigh { tx: 0, state: 0 }, // Proxy for "account doesn't exist"
+            ));
+        };
+
+        let mut account = existing.clone();
+
+        // Validate sufficient balance
+        if account.info.balance < fee {
+            tracing::warn!(
+                target = %target,
+                balance = %account.info.balance,
+                required_fee = %fee,
+                "Target has insufficient balance for priority fee"
+            );
+            return Err(create_invalid_tx_error(
+                *tx_hash,
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(fee),
+                    balance: Box::new(account.info.balance),
+                },
+            ));
+        }
+
+        // Deduct fee
+        account.info.balance = account.info.balance.saturating_sub(fee);
+
+        tracing::trace!(
+            target = %target,
+            fee = %fee,
+            "Deducting priority fee from target"
+        );
+
+        Ok(account)
+    }
+
+    /// Adds the fee to the beneficiary account, creating it if necessary.
+    ///
+    /// Returns tuple of (account, is_new_account).
+    fn add_fee_to_beneficiary(
+        db: &mut State<DB>,
+        beneficiary: Address,
+        fee: U256,
+    ) -> Result<(PlainAccount, bool), BlockExecutionError> {
+        // Load beneficiary account
+        let beneficiary_state = db
+            .load_cache_account(beneficiary)
+            .map_err(|_| create_internal_error("Could not load beneficiary account"))?;
+
+        if let Some(existing) = beneficiary_state.account.as_ref() {
+            // Update existing account
+            let mut account = existing.clone();
+            let original_balance = account.info.balance;
+            account.info.balance = account.info.balance.saturating_add(fee);
+
+            tracing::trace!(
+                beneficiary = %beneficiary,
+                original_balance = %original_balance,
+                new_balance = %account.info.balance,
+                fee_amount = %fee,
+                "Incrementing beneficiary balance with priority fee"
+            );
+
+            Ok((account, false))
+        } else {
+            // Create new account
+            let mut account = PlainAccount::new_empty_with_storage(PlainStorage::default());
+            account.info.balance = fee;
+
+            tracing::debug!(
+                beneficiary = %beneficiary,
+                balance = %fee,
+                "Creating new beneficiary account with priority fee"
+            );
+
+            Ok((account, true))
+        }
+    }
+
+    /// Creates an Account state entry from a PlainAccount for database commit.
+    fn create_account_state(account: PlainAccount, status: AccountStatus) -> Account {
+        let storage = account
+            .storage
+            .iter()
+            .map(|(key, val)| (*key, EvmStorageSlot::new(*val)))
+            .collect();
+
+        Account {
+            info: account.info,
+            storage,
+            status,
+        }
+    }
+
+    /// Commits the fee transfer state changes to the database.
+    fn commit_fee_transfer(
+        &mut self,
+        target_state: Account,
+        beneficiary_state: Account,
+        target: Address,
+        beneficiary: Address,
+        total_fee: U256,
+    ) {
+        let mut state_changes = alloy_primitives::map::foldhash::HashMap::default();
+        state_changes.insert(target, target_state);
+        state_changes.insert(beneficiary, beneficiary_state);
+
+        let db = self.inner.evm_mut().db_mut();
+        db.commit(state_changes);
+
+        tracing::trace!(
+            beneficiary = %beneficiary,
+            target = %target,
+            fee = %total_fee,
+            "Committed priority fee distribution"
+        );
     }
 }
 

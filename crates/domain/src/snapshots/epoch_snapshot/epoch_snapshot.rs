@@ -564,11 +564,17 @@ impl EpochSnapshot {
         let num_slots = data_ledger.slot_count() as u64;
 
         let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
-        let num_partitions_per_slot = self.config.consensus.num_partitions_per_slot;
 
-        // Each slot can store multiple partitions, we account for that in the
-        // max_ledger_capacity calculation.
-        let max_ledger_capacity = num_slots * num_partitions_per_slot * num_chunks_in_partition;
+        // Ledger Partitioning Model:
+        //
+        // - Ledgers are divided into 16TB "slots" containing the canonical data
+        // - Each slot is replicated across multiple "partitions" stored by different miners
+        // - Ledger capacity is calculated from canonical data size, not total replica storage
+        // - New slots are added when canonical data approaches capacity limits
+        //
+        // Example: A ledger with 32TB of data uses 2 slots, regardless of whether
+        // there are 2 or 10 partition replicas of each slot across the network.
+        let max_ledger_capacity = num_slots * num_chunks_in_partition;
 
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
@@ -933,4 +939,75 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
 
 fn truncate_to_3_decimals(value: f64) -> f64 {
     (value * 1000.0).trunc() / 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CommitmentState, PartitionAssignments};
+    use irys_database::data_ledger::Ledgers;
+    use irys_types::{
+        Config, ConsensusConfig, ConsensusOptions, DataLedger, IrysBlockHeader, NodeConfig,
+    };
+
+    /// Validate that `calculate_additional_slots` allocates new slots when the
+    /// ledger usage reaches the capacity threshold.
+    #[test]
+    fn threshold_based_allocation() {
+        // Build a snapshot with a custom consensus configuration where each
+        // slot can hold two partitions
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
+            num_partitions_per_slot: 2,
+            ..node_config.consensus_config()
+        });
+        let config = Config::new(node_config);
+        let mut snapshot = EpochSnapshot {
+            ledgers: Ledgers::new(&config.consensus),
+            partition_assignments: PartitionAssignments::new(),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: None,
+            config: config.clone(),
+            commitment_state: CommitmentState::default(),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_hashes: Vec::new(),
+        };
+
+        // Allocate four slots in the submit ledger so `slot_count()` returns 4.
+        snapshot.ledgers[DataLedger::Submit].allocate_slots(4, 0);
+
+        // mock header
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = 0;
+        // Modify mock block so the submit ledger has an offset up to 34 chunks. With the
+        // correct capacity formula (4 slots * 10 chunks), this is below the
+        // allocation threshold and should trigger two additional slots.
+        for offset in 1..=34 {
+            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            let slots_to_add =
+                snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
+            assert_eq!(slots_to_add, 0, "offset: {:?}", offset);
+        }
+
+        // Modify mock block so the submit ledger has an offset between 35 and 40 chunks. With the
+        // correct capacity formula (4 slots * 10 chunks), this is above the
+        // allocation threshold and should trigger two additional slots.
+        for offset in 35..=40 {
+            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            let slots_to_add =
+                snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
+            assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
+        }
+
+        // and test for more than 40 chunks
+        // should produce the same result as 35..=40 as new slots are capped at 2 using the Threshold-based capacity expansion
+        for offset in 41..=99 {
+            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            let slots_to_add =
+                snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
+            assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
+        }
+    }
 }

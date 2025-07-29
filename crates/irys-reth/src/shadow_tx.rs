@@ -59,6 +59,27 @@ pub enum EitherIncrementOrDecrement {
     BalanceDecrement(BalanceDecrement),
 }
 
+impl TransactionPacket {
+    /// Returns the target address for this transaction packet, if any.
+    /// Returns None for BlockReward since it has no explicit target (uses beneficiary).
+    pub fn fee_payer_address(&self) -> Option<Address> {
+        match self {
+            Self::Unstake(either) => match either {
+                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
+                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
+            },
+            Self::BlockReward(_) => None, // No target, uses beneficiary
+            Self::Stake(dec) => Some(dec.target),
+            Self::StorageFees(dec) => Some(dec.target),
+            Self::Pledge(dec) => Some(dec.target),
+            Self::Unpledge(either) => match either {
+                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
+                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
+            },
+        }
+    }
+}
+
 /// Topics for shadow transaction logs
 #[expect(
     clippy::module_name_repetitions,
@@ -393,6 +414,7 @@ pub struct BalanceIncrement {
 }
 
 /// Block reward increment: used for block reward shadow txs (no irys_ref needed).
+/// The target is always the block beneficiary and is determined during execution.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -408,8 +430,6 @@ pub struct BalanceIncrement {
     arbitrary::Arbitrary,
 )]
 pub struct BlockRewardIncrement {
-    /// Amount to increment to the target account.
+    /// Amount to increment to the beneficiary account.
     pub amount: U256,
-    /// Target account address.
-    pub target: Address,
 }
