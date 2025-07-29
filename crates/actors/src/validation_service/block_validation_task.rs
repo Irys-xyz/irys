@@ -2,13 +2,17 @@
 //!
 //! Handles individual block validation through a two-stage pipeline:
 //!
-//! ## Stage 1: Parallel Validation
+//! ## Stage 1: VDF validation (execute_vdf)
+//! - **VDF**: Verifies VDF steps are valid & fast-forwards the node if they are
+//! Uses a single preemptable task slot to prevent thread overutilisation
+//!
+//! ## Stage 2: Concurrent Validation (execute_concurrent)
 //! Three concurrent validation stages:
 //! - **Recall Range**: Async data recall and storage proof verification
 //! - **POA**: Blocking cryptographic proof-of-access validation
 //! - **Shadow Transactions**: Async Reth integration validation
 //!
-//! ## Stage 2: Parent Dependency Resolution  
+//! ## Stage 3: Parent Dependency Resolution  
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
@@ -41,12 +45,12 @@ pub(crate) struct BlockValidationTask {
     pub block_hash: BlockHash, // TODO: remove
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
-    pub meta: BlockPriorityMeta,
+    pub priority: BlockPriorityMeta,
 }
 
 impl Ord for BlockValidationTask {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.meta.cmp(&other.meta)
+        self.priority.cmp(&other.priority)
     }
 }
 impl PartialOrd for BlockValidationTask {
@@ -57,7 +61,7 @@ impl PartialOrd for BlockValidationTask {
 
 impl PartialEq for BlockValidationTask {
     fn eq(&self, other: &Self) -> bool {
-        self.meta == other.meta // captures the block, so this should be good enough
+        self.priority == other.priority // captures the block, so this should be good enough
     }
 }
 
@@ -76,13 +80,13 @@ impl BlockValidationTask {
             block_hash,
             service_inner,
             block_tree_guard,
-            meta,
+            priority: meta,
         }
     }
 
-    /// Execute the parallel validation task
+    /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_parallel(self) {
+    pub(crate) async fn execute_concurrent(self) {
         let validation_result = self
             .validate_block()
             .await

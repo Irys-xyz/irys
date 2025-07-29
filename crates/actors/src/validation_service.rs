@@ -5,9 +5,9 @@
 //!
 //! ## Flow
 //! 1. **VDF Validation**: Initial check using thread pool, fast-forward VDF state.
-//!     Always done immediately for every block that's provided.
+//!     Done using a priority-queue backed preemptable task slot
 //! 2. **Task Creation**: Create BlockValidationTask, add to priority queue
-//! 3. **Parallel Validation**: Three concurrent stages (recall, POA, reth state)
+//! 3. **Concurrent Validation**: Three concurrent stages (recall, POA, reth state)
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
 use crate::{block_tree_service::ReorgEvent, services::ServiceSenders};
@@ -209,7 +209,7 @@ impl ValidationService {
                 _ = validation_timer.tick(), if !active_validations.is_empty()   => {
 
                     // Poll the VDF task & Process any completed validations (non-blocking)
-                    let tasks_completed = active_validations.process_completed_vdf().await || active_validations.process_completed_parallel().await;
+                    let tasks_completed = active_validations.process_completed_vdf().await || active_validations.process_completed_concurrent().await;
                     if tasks_completed {
                         // we may have unblocked one or more blocks from sending the validation message
                         validation_timer.reset();
@@ -237,9 +237,9 @@ impl ValidationService {
         // If a task is awaiting on something and is not yet ready, it will be discarded.
         info!(
             "draining {} active validations before shutdown",
-            active_validations.parallel_len()
+            active_validations.concurrent_len()
         );
-        active_validations.process_completed_parallel().await;
+        active_validations.process_completed_concurrent().await;
 
         info!("shutting down validation service");
         Ok(())

@@ -109,14 +109,14 @@ pub(crate) struct ActiveValidations {
     pub(crate) vdf_pending_queue: PriorityQueue<BlockHash, Reverse<BlockValidationTask>>,
 
     /// the currently executing VDF task
-    /// VDF validation is not parallel
+    /// VDF validation is not concurrent
     pub(crate) vdf_task: Option<VdfValidationTask>,
 
-    /// Priority queue of (block_hash, meta) with  priority ordering of tasks that are ready for parallel validation
-    pub(crate) parallel_queue: PriorityQueue<BlockHash, Reverse<BlockPriorityMeta>>,
+    /// Priority queue of (block_hash, meta) with  priority ordering of tasks that are ready for concurrent validation
+    pub(crate) concurrent_queue: PriorityQueue<BlockHash, Reverse<BlockPriorityMeta>>,
 
-    /// Map from block hash to the parallelisable tasks
-    pub(crate) parallel_tasks:
+    /// Map from block hash to the concurrent tasks
+    pub(crate) concurrent_tasks:
         std::collections::HashMap<BlockHash, Pin<Box<dyn Future<Output = ()> + Send>>>,
     pub(crate) block_tree_guard: BlockTreeReadGuard,
 }
@@ -125,8 +125,8 @@ impl ActiveValidations {
     pub(crate) fn new(block_tree_guard: BlockTreeReadGuard) -> Self {
         Self {
             vdf_pending_queue: PriorityQueue::new(),
-            parallel_queue: PriorityQueue::new(),
-            parallel_tasks: std::collections::HashMap::new(),
+            concurrent_queue: PriorityQueue::new(),
+            concurrent_tasks: std::collections::HashMap::new(),
             block_tree_guard,
             vdf_task: None,
         }
@@ -183,51 +183,51 @@ impl ActiveValidations {
     }
 
     #[instrument(skip_all, fields(block_hash = %block.block_hash))]
-    pub(crate) fn push_parallel_fut(
+    pub(crate) fn push_concurrent_fut(
         &mut self,
         block: Arc<IrysBlockHeader>,
         future: Pin<Box<dyn Future<Output = ()> + Send>>,
     ) {
         let priority = self.calculate_priority(&block);
         debug!(
-            "adding parallel validation task with priority: {:?}",
+            "adding concurrent validation task with priority: {:?}",
             priority.0.state
         );
-        self.parallel_tasks.insert(block.block_hash, future);
-        self.parallel_queue.push(block.block_hash, priority);
+        self.concurrent_tasks.insert(block.block_hash, future);
+        self.concurrent_queue.push(block.block_hash, priority);
     }
 
-    pub(crate) fn parallel_len(&self) -> usize {
-        self.parallel_queue.len()
+    pub(crate) fn concurrent_len(&self) -> usize {
+        self.concurrent_queue.len()
     }
 
-    pub(crate) fn parallel_is_empty(&self) -> bool {
-        self.parallel_queue.is_empty()
+    pub(crate) fn concurrent_is_empty(&self) -> bool {
+        self.concurrent_queue.is_empty()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.parallel_is_empty() && self.vdf_pending_queue.is_empty()
+        self.concurrent_is_empty() && self.vdf_pending_queue.is_empty()
     }
 
-    /// Process completed parallel validations and remove them from the active set
+    /// Process completed concurrent validations and remove them from the active set
     /// returns `true` if any of the block validation tasks succeeded
-    #[instrument(skip_all, fields(active_count = self.parallel_len()))]
-    pub(crate) async fn process_completed_parallel(&mut self) -> bool {
+    #[instrument(skip_all, fields(active_count = self.concurrent_len()))]
+    pub(crate) async fn process_completed_concurrent(&mut self) -> bool {
         let mut completed_blocks = Vec::new();
 
         assert_eq!(
-            self.parallel_queue.len(),
-            self.parallel_tasks.len(),
+            self.concurrent_queue.len(),
+            self.concurrent_tasks.len(),
             "validations and futures out of sync"
         );
 
-        if self.parallel_queue.is_empty() {
+        if self.concurrent_queue.is_empty() {
             return false;
         }
 
         // Check futures in priority order using poll_immediate for non-blocking check
-        for (block_hash, _priority) in self.parallel_queue.clone().iter() {
-            if let Some(future) = self.parallel_tasks.get_mut(block_hash) {
+        for (block_hash, _priority) in self.concurrent_queue.clone().iter() {
+            if let Some(future) = self.concurrent_tasks.get_mut(block_hash) {
                 // Use poll_immediate to check if future is ready without blocking
                 if poll_immediate(future).await.is_some() {
                     completed_blocks.push(*block_hash);
@@ -238,14 +238,14 @@ impl ActiveValidations {
         // Remove completed validations
         for block_hash in &completed_blocks {
             debug!(block_hash = %block_hash, "validation task completed");
-            self.parallel_queue.remove(block_hash);
-            self.parallel_tasks.remove(block_hash);
+            self.concurrent_queue.remove(block_hash);
+            self.concurrent_tasks.remove(block_hash);
         }
         let tasks_completed = !completed_blocks.is_empty();
         if tasks_completed {
             debug!(
                 completed_count = completed_blocks.len(),
-                remaining_count = self.parallel_len(),
+                remaining_count = self.concurrent_len(),
                 "processed completed validations"
             );
         }
@@ -275,7 +275,7 @@ impl ActiveValidations {
                 if *high_prio_hash != task.block_hash {
                     info!(
                         "Cancelling in-progress VDF validation for block {} in favour of block {:?} {}",
-                        &task.block_hash,&high_prio_task.0.meta.state, &high_prio_hash,
+                        &task.block_hash,&high_prio_task.0.priority.state, &high_prio_hash,
                     );
                     // Cancel only if currently set to Continue
                     if let Err(e) = task.cancel.compare_exchange(
@@ -327,12 +327,15 @@ impl ActiveValidations {
                     // do NOT send anything to the block tree
 
                     debug!(
-                        "Processed VDF task for block {}, spawning parallel validation task",
+                        "Processed VDF task for block {}, spawning concurrent validation task",
                         &hash
                     );
 
-                    // add to active parallel validations (this also adds to the parallel queue)
-                    self.push_parallel_fut(task.0.block.clone(), task.0.execute_parallel().boxed())
+                    // add to active concurrent validations (this also adds to the concurrent queue)
+                    self.push_concurrent_fut(
+                        task.0.block.clone(),
+                        task.0.execute_concurrent().boxed(),
+                    )
                 }
                 VdfValidationResult::Invalid(err) => {
                     // remove task from the vdf_pending queue
@@ -361,7 +364,7 @@ impl ActiveValidations {
 
     /// Reevaluate priorities for all active validations after a reorg
     /// This recalculates priorities based on the new canonical chain state
-    #[instrument(skip_all, fields(validation_count = self.parallel_len()))]
+    #[instrument(skip_all, fields(validation_count = self.concurrent_len()))]
     pub(crate) fn reevaluate_priorities(&mut self) {
         debug!("reevaluating priorities after reorg");
 
@@ -372,7 +375,7 @@ impl ActiveValidations {
             // Recalculate priority for each block hash and update the queue
             for (block_hash, mut task) in old_queue {
                 let new_priority = self.calculate_priority(&task.0.block);
-                task.0.meta = new_priority.0;
+                task.0.priority = new_priority.0;
                 self.vdf_pending_queue.push(block_hash, task);
             }
         }
@@ -383,16 +386,16 @@ impl ActiveValidations {
                 PriorityQueue::new();
 
             // Recalculate priority for each block hash and update the queue
-            for (block_hash, old_priority) in self.parallel_queue.iter() {
+            for (block_hash, old_priority) in self.concurrent_queue.iter() {
                 let new_priority = self.calculate_priority(&old_priority.0.block);
                 new_validations.push(*block_hash, new_priority);
             }
 
             // Replace the old priority queue with the updated one
-            self.parallel_queue = new_validations;
+            self.concurrent_queue = new_validations;
 
             debug!(
-                validation_count = self.parallel_len(),
+                validation_count = self.concurrent_len(),
                 "completed priority reevaluation after reorg"
             );
         }
@@ -491,7 +494,7 @@ mod tests {
                 .expect("Block should exist");
 
             expected_hashes.push(block_hash);
-            active_validations.push_parallel_fut(
+            active_validations.push_concurrent_fut(
                 get_block_from_blocks(&blocks, block_hash),
                 create_pending_future(),
             );
@@ -499,7 +502,7 @@ mod tests {
 
         // Verify priority ordering - lower heights should have higher priority
         let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.parallel_queue.pop() {
+        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
             actual_order.push(hash);
         }
 
@@ -531,7 +534,7 @@ mod tests {
                 .expect("Block should exist");
 
             block_hashes.push(block_hash);
-            active_validations.push_parallel_fut(
+            active_validations.push_concurrent_fut(
                 get_block_from_blocks(&blocks, block_hash),
                 create_pending_future(),
             );
@@ -539,7 +542,7 @@ mod tests {
 
         // Verify priority ordering - should still be by height regardless of input order
         let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.parallel_queue.pop() {
+        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
             actual_order.push(hash);
         }
 
@@ -574,7 +577,7 @@ mod tests {
                 .expect("Block should exist");
 
             height_to_hash.insert(height, block_hash);
-            active_validations.push_parallel_fut(
+            active_validations.push_concurrent_fut(
                 get_block_from_blocks(&blocks, block_hash),
                 create_pending_future(),
             );
@@ -585,7 +588,7 @@ mod tests {
         sorted_heights.sort();
 
         let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.parallel_queue.pop() {
+        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
             actual_order.push(hash);
         }
 
@@ -706,15 +709,15 @@ mod tests {
 
         // Add blocks to active validations in mixed order to test priority sorting
         for (block, _) in &fork_blocks {
-            active_validations.push_parallel_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
         }
         for (block, _) in &extension_blocks {
-            active_validations.push_parallel_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
         }
 
         // Verify priority ordering
         let mut actual_order = Vec::new();
-        while let Some((hash, priority)) = active_validations.parallel_queue.pop() {
+        while let Some((hash, priority)) = active_validations.concurrent_queue.pop() {
             actual_order.push((hash, priority.0));
         }
 
@@ -799,18 +802,18 @@ mod tests {
 
         for &height in &shuffled_heights {
             let block_hash = height_to_hash[&height];
-            active_validations.push_parallel_fut(
+            active_validations.push_concurrent_fut(
                 get_block_from_blocks(&blocks, block_hash),
                 create_pending_future(),
             );
         }
 
         // Verify all blocks are present
-        assert_eq!(active_validations.parallel_len(), heights.len());
+        assert_eq!(active_validations.concurrent_len(), heights.len());
 
         // Verify they come out in correct priority order
         let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.parallel_queue.pop() {
+        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
             actual_order.push(hash);
         }
 
@@ -857,18 +860,18 @@ mod tests {
             };
 
             active_validations
-                .push_parallel_fut(get_block_from_blocks(&blocks, block_hash), future);
+                .push_concurrent_fut(get_block_from_blocks(&blocks, block_hash), future);
         }
 
         // Process completed validations
-        active_validations.process_completed_parallel().await;
+        active_validations.process_completed_concurrent().await;
 
         // Should have removed the ready futures (heights 5 and 15)
-        assert_eq!(active_validations.parallel_len(), 2);
+        assert_eq!(active_validations.concurrent_len(), 2);
 
         // Remaining blocks should still be in priority order
         let mut remaining_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.parallel_queue.pop() {
+        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
             remaining_order.push(hash);
         }
 
@@ -887,12 +890,12 @@ mod tests {
         let (block_tree_guard, blocks) = setup_canonical_chain_scenario(10);
         let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
 
-        assert!(active_validations.parallel_is_empty());
-        assert_eq!(active_validations.parallel_len(), 0);
+        assert!(active_validations.concurrent_is_empty());
+        assert_eq!(active_validations.concurrent_len(), 0);
 
         // Process completed on empty queue should not panic
-        active_validations.process_completed_parallel().await;
-        assert!(active_validations.parallel_is_empty());
+        active_validations.process_completed_concurrent().await;
+        assert!(active_validations.concurrent_is_empty());
 
         // Test with genesis block
         let tree = block_tree_guard.read();
@@ -900,7 +903,7 @@ mod tests {
         let genesis_hash = chain[0].block_hash;
         let genesis_block = get_block_from_blocks(&blocks, genesis_hash);
 
-        active_validations.push_parallel_fut(Arc::clone(&genesis_block), create_pending_future());
+        active_validations.push_concurrent_fut(Arc::clone(&genesis_block), create_pending_future());
 
         // Genesis block should have priority based on height 0 and Canonical status
         let priority = active_validations.calculate_priority(&genesis_block);
@@ -909,8 +912,8 @@ mod tests {
             std::cmp::Reverse((BlockPriority::Canonical, genesis_block).into())
         );
 
-        assert_eq!(active_validations.parallel_len(), 1);
-        assert!(!active_validations.parallel_is_empty());
+        assert_eq!(active_validations.concurrent_len(), 1);
+        assert!(!active_validations.concurrent_is_empty());
     }
 
     /// Tests BlockPriority enum ordering and Reverse wrapper behavior.
@@ -1037,7 +1040,7 @@ mod tests {
 
         // Add extension blocks to active validations
         for block in &extension_blocks {
-            active_validations.push_parallel_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
         }
 
         // Verify initial priorities - extension blocks should be CanonicalExtension
@@ -1083,7 +1086,7 @@ mod tests {
 
         // Add fork blocks to active validations
         for block in &fork_blocks {
-            active_validations.push_parallel_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
         }
 
         // Action: Make the fork chain canonical by marking blocks as valid and advancing tip
@@ -1108,7 +1111,7 @@ mod tests {
         // Verify: Extension blocks (4-5) are now Fork priority (no longer extend canonical tip)
         for block in &extension_blocks {
             let priority = active_validations
-                .parallel_queue
+                .concurrent_queue
                 .get_priority(&block.block_hash)
                 .unwrap();
             assert_eq!(
@@ -1122,7 +1125,7 @@ mod tests {
         // Verify: Fork blocks 3-5 are now Canonical priority (part of canonical chain)
         for block in &fork_blocks[..6] {
             let priority = active_validations
-                .parallel_queue
+                .concurrent_queue
                 .get_priority(&block.block_hash)
                 .unwrap();
             assert_eq!(
@@ -1136,7 +1139,7 @@ mod tests {
         // Verify: Remaining fork blocks (6-10) are now CanonicalExtension priority
         for block in &fork_blocks[6..] {
             let priority = active_validations
-                .parallel_queue
+                .concurrent_queue
                 .get_priority(&block.block_hash)
                 .unwrap();
             assert_eq!(
