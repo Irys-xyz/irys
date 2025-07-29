@@ -153,11 +153,6 @@ where
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
 
-        let beneficiary = {
-            use revm::context::Block as _;
-            self.inner().evm().block().beneficiary()
-        };
-
         if tx_envelope.to() != Some(*SHADOW_TX_DESTINATION_ADDR) {
             // if the tx is not a shadow tx, execute it as a regular transaction
             return self
@@ -174,8 +169,10 @@ where
                 .inner
                 .execute_transaction_with_commit_condition(tx, on_result_f);
         };
+
         let shadow_tx = ShadowTransaction::decode_prefixed(&mut &tx_envelope_input_buf[..])
             .map_err(|e| create_internal_error(&format!("failed to decode shadow tx: {e}")))?;
+
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing shadow transaction");
 
         // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx
@@ -208,6 +205,11 @@ where
                 InvalidTransaction::PriorityFeeGreaterThanMaxFee,
             ));
         }
+
+        let beneficiary = {
+            use revm::context::Block as _;
+            self.inner().evm().block().beneficiary()
+        };
 
         // Distribute priority fees
         self.distribute_priority_fee(
