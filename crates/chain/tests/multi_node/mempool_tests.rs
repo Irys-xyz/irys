@@ -11,6 +11,7 @@ use irys_reth_node_bridge::{
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
+use irys_types::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
     IngressProofsList, IrysBlockHeader, NodeConfig, TxIngressProof, H256,
@@ -1879,10 +1880,7 @@ async fn pledge_tx_fee_validation_test(
     let config = &genesis_config.consensus_config();
     let required_fee = config.mempool.commitment_fee;
 
-    // Mine a block first to get valid anchors for pledge
-    genesis_node.mine_block().await?;
-
-    // // Create pledge transaction with modifications
+    // Create pledge transaction with modifications
     let mut pledge_tx = CommitmentTransaction::new_pledge(
         config,
         H256::zero(),
@@ -1909,21 +1907,14 @@ async fn pledge_tx_fee_validation_test(
     Ok(())
 }
 
-/// Enum to specify commitment type for higher fee testing
-#[derive(Debug, Clone, Copy)]
-enum CommitmentType {
-    Stake,
-    Pledge(usize), // usize is the pledge count
-}
-
 /// Test mempool accepts stake and pledge transactions with valid higher fees
 #[rstest::rstest]
 #[case::stake_double_fee(CommitmentType::Stake, 2)] // 200 instead of 100
 #[case::stake_triple_fee(CommitmentType::Stake, 3)] // 300 instead of 100
 #[case::stake_exact_fee(CommitmentType::Stake, 1)] // 100 (exact required fee)
-#[case::pledge_double_fee(CommitmentType::Pledge(0), 2)] // First pledge, 200 instead of 100
-#[case::pledge_triple_fee(CommitmentType::Pledge(1), 3)] // Second pledge, 300 instead of 100
-#[case::pledge_exact_fee(CommitmentType::Pledge(0), 1)] // First pledge, 100 (exact required fee)
+#[case::pledge_double_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 2)] // First pledge, 200 instead of 100
+#[case::pledge_triple_fee(CommitmentType::Pledge {pledge_count_before_executing: 1 }, 3)] // Second pledge, 300 instead of 100
+#[case::pledge_exact_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 1)] // First pledge, 100 (exact required fee)
 #[test_log::test(actix_web::test)]
 async fn commitment_tx_valid_higher_fee_test(
     #[case] commitment_type: CommitmentType,
@@ -1940,18 +1931,15 @@ async fn commitment_tx_valid_higher_fee_test(
     let config = &genesis_config.consensus_config();
     let required_fee = config.mempool.commitment_fee;
 
-    // For pledge transactions, we need to mine a block first to get valid anchors
-    if matches!(commitment_type, CommitmentType::Pledge(_)) {
-        genesis_node.mine_block().await?;
-    }
-
     // Create the appropriate transaction type with higher fee
     let mut commitment_tx = match commitment_type {
         CommitmentType::Stake => CommitmentTransaction::new_stake(config, H256::zero()),
-        CommitmentType::Pledge(count) => {
-            // Use usize as PledgeDataProvider
+        CommitmentType::Pledge {
+            pledge_count_before_executing: count,
+        } => {
             CommitmentTransaction::new_pledge(config, H256::zero(), &count, signer.address()).await
         }
+        _ => unreachable!(),
     };
 
     // Apply the fee multiplier
