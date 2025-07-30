@@ -239,8 +239,7 @@ mod tests {
             "Expected an error from update_eyre closure"
         );
 
-        // Verify no commit has occurred, i.e. there are still zero rows in the db table
-        std::thread::sleep(Duration::from_secs(1));
+        // Verify no commit has occurred, i.e. there are still initial_db_rows rows in the db table
         assert_eq!(
             read_tx
                 .cursor_read::<DataSizeByDataRoot>()?
