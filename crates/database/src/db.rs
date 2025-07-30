@@ -208,13 +208,13 @@ mod tests {
 
     use super::*;
     use crate::submodule::{create_or_open_submodule_db, tables::DataSizeByDataRoot};
-    use eyre::WrapErr;
+    use eyre::WrapErr as _;
     use irys_types::H256;
-    use reth_db::transaction::DbTxMut; // for demonstration
+    use reth_db::transaction::DbTxMut as _;
 
     #[test]
     fn update_eyre_no_commit_on_error() -> eyre::Result<()> {
-        // We'll need a test instance of DatabaseEnv
+        //create instance of DatabaseEnv with a test database
         let db = create_or_open_submodule_db("test_database")
             .wrap_err("Failed to open test DB")
             .unwrap();
