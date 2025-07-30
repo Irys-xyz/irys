@@ -1,7 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::mempool_service::{
-    prioritized_commitment::PrioritizedCommitment, ChunkIngressError, MempoolPledgeProvider,
-};
+use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
 use eyre::eyre;
@@ -10,7 +8,8 @@ use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
 use irys_domain::{
-    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
+    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, PrioritizedCommitment,
+    StorageModulesReadGuard,
 };
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};

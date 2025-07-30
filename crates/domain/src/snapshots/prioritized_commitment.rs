@@ -60,7 +60,6 @@ impl PartialEq for PrioritizedCommitment<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_signer::Signature;
     use irys_types::{Address, IrysSignature, H256, U256};
 
     fn create_test_commitment(
@@ -72,7 +71,7 @@ mod tests {
             id: H256::from_slice(&[id.as_bytes()[0]; 32]),
             anchor: H256::zero(),
             signer: Address::default(),
-            signature: IrysSignature::new(Signature::test_signature()),
+            signature: IrysSignature::default(),
             fee,
             value: U256::zero(),
             commitment_type,
@@ -204,7 +203,7 @@ mod tests {
         // 5. pledge_5 (Pledge count=5, fee=100)
         // 6. pledge_10 (Pledge count=10, fee=300)
         // 7. unstake (Other type, fee=75)
-        
+
         assert_eq!(commitments[0].0.id, stake_high.id);
         assert_eq!(commitments[1].0.id, stake_low.id);
         assert_eq!(commitments[2].0.id, pledge_2_high.id);
