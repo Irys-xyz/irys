@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     // test macro ledger_chunk_offset_ii
-    fn ledger_chunk_offset_ii_builds_inclusive_exclusive_range() {
+    fn ledger_chunk_offset_ii_builds_inclusive_inclusive_range() {
         let interval: Interval<LedgerChunkOffset> = ledger_chunk_offset_ii!(0u64, 10u64);
         let expected = ii(
             LedgerChunkOffset::from(0u64),
