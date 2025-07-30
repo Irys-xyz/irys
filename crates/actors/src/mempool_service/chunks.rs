@@ -11,6 +11,7 @@ use irys_types::{
     GossipBroadcastMessage, H256,
 };
 use lru::LruCache;
+use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
@@ -263,10 +264,18 @@ impl Inner {
             let db = self.irys_db.clone();
             let signer = self.config.irys_signer();
             let latest_height = latest.height;
+            let chain_id = self.config.consensus.chain_id;
             self.exec.clone().spawn_blocking(async move {
-                generate_ingress_proof(db.clone(), root_hash, data_size, chunk_size, signer)
-                    // TODO: handle results instead of unwrapping
-                    .unwrap();
+                generate_ingress_proof(
+                    db.clone(),
+                    root_hash,
+                    data_size,
+                    chunk_size,
+                    signer,
+                    chain_id,
+                )
+                // TODO: handle results instead of unwrapping
+                .unwrap();
                 db.update(|wtx| {
                     wtx.put::<DataRootLRU>(
                         root_hash,
@@ -332,6 +341,7 @@ pub fn generate_ingress_proof(
     size: u64,
     chunk_size: u64,
     signer: IrysSigner,
+    chain_id: ChainId,
 ) -> eyre::Result<()> {
     // load the chunks from the DB
     // TODO: for now we assume the chunks all all in the DB chunk cache
@@ -389,7 +399,7 @@ pub fn generate_ingress_proof(
     });
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, iter)?;
+    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, iter, chain_id)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
