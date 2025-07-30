@@ -1,5 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::mempool_service::ChunkIngressError;
+use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
 use eyre::eyre;
@@ -18,8 +18,8 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    Address, Base64, CommitmentTransaction, DataRoot, DataTransactionHeader, MempoolConfig,
-    TxChunkOffset, TxIngressProof, UnpackedChunk,
+    Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -51,6 +51,8 @@ pub struct Inner {
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     pub storage_modules_guard: StorageModulesReadGuard,
+    /// Pledge provider for commitment transaction validation
+    pub pledge_provider: MempoolPledgeProvider,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -304,14 +306,25 @@ impl Inner {
         // This order ensures stake transactions are processed before pledges
         let mempool_state_guard = mempool_state.read().await;
 
-        'outer: for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+        // Process in two phases: stakes first, then pledges
+        'outer: for commitment_type in &[
+            // todo: will be refactored
+            CommitmentType::Stake,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        ] {
             // Gather all commitments of current type from all addresses
             let mut sorted_commitments: Vec<_> = mempool_state_guard
                 .valid_commitment_tx
                 .values()
                 .flat_map(|txs| {
                     txs.iter()
-                        .filter(|tx| tx.commitment_type == *commitment_type)
+                        .filter(|tx| {
+                            // todo: will be refactored
+                            (commitment_type.is_stake() && tx.commitment_type.is_stake())
+                                || (commitment_type.is_pledge() && tx.commitment_type.is_pledge())
+                        })
                         .cloned()
                 })
                 .collect();
@@ -335,7 +348,7 @@ impl Inner {
                 }
 
                 // signer stake status check
-                if tx.commitment_type == CommitmentType::Stake {
+                if matches!(tx.commitment_type, CommitmentType::Stake) {
                     let epoch_snapshot = self
                         .block_tree_read_guard
                         .read()
@@ -839,24 +852,34 @@ impl TxReadError {
 }
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
+    #[error("Transaction signature is invalid")]
     InvalidSignature,
     /// The account does not have enough tokens to fund this transaction
+    #[error("Account has insufficient funds for this transaction")]
     Unfunded,
     /// This transaction id is already in the cache
+    #[error("Transaction already exists in cache")]
     Skipped,
     /// Invalid anchor value (unknown or too old)
+    #[error("Anchor is either unknown or has expired")]
     InvalidAnchor,
     // /// Unknown anchor value (could be valid)
     // PendingAnchor,
     /// Some database error occurred
+    #[error("Database operation failed")]
     DatabaseError,
     /// The service is uninitialized
+    #[error("Mempool service is not initialized")]
     ServiceUninitialized,
     /// Catch-all variant for other errors.
+    #[error("Transaction ingress error: {0}")]
     Other(String),
+    /// Commitment transaction validation error
+    #[error("Commitment validation failed: {0}")]
+    CommitmentValidationError(#[from] CommitmentValidationError),
 }
 
 impl TxIngressError {

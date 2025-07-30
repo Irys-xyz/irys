@@ -14,8 +14,7 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{BlockIndexReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_reth::alloy_rlp::Decodable as _;
-use irys_reth::shadow_tx::ShadowTransaction;
+use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
@@ -512,14 +511,26 @@ pub async fn shadow_transactions_are_valid(
         .into_iter()
         .map(|tx| {
             if expect_shadow_txs {
-                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
-                let tx_signer = tx.into_signed().recover_signer()?;
-                let Ok(shadow_tx) = shadow_tx else {
+                if Some(*SHADOW_TX_DESTINATION_ADDR) != tx.to() {
+                    // after reaching first non-shadow tx, we scan the rest of the
+                    // txs to check if we don't have any stray shadow txs in there
+                    expect_shadow_txs = false;
+                    ensure!(
+                        !tx.input().starts_with(IRYS_SHADOW_EXEC),
+                        "shadow tx injected in the middle of the block",
+                    );
+                    return Ok(None);
+                }
+                let input = tx.input();
+                if input.strip_prefix(IRYS_SHADOW_EXEC).is_none() {
                     // after reaching first non-shadow tx, we scan the rest of the
                     // txs to check if we don't have any stray shadow txs in there
                     expect_shadow_txs = false;
                     return Ok(None);
                 };
+                let shadow_tx = ShadowTransaction::decode(&mut &input[..])
+                    .map_err(|e| eyre::eyre!("failed to decode shadow tx: {e}"))?;
+                let tx_signer = tx.into_signed().recover_signer()?;
 
                 ensure!(
                     block.miner_address == tx_signer,
@@ -528,10 +539,10 @@ pub async fn shadow_transactions_are_valid(
                 Ok(Some(shadow_tx))
             } else {
                 // ensure that no other shadow txs are present in the block
-                let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref());
+                let input = tx.input();
                 ensure!(
-                    shadow_tx.is_err(),
-                    "shadow tx injected in the middle of the block"
+                    !(input.starts_with(IRYS_SHADOW_EXEC)),
+                    "shadow tx injected in the middle of the block",
                 );
                 Ok(None)
             }

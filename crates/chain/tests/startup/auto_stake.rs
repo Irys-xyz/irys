@@ -53,7 +53,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     let config = genesis_node.node_ctx.config.consensus.clone();
 
     if stake {
-        let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero(), 1);
+        let stake_tx = CommitmentTransaction::new_stake(&config, H256::zero());
         let stake_tx = peer_signer.sign_commitment(stake_tx)?;
 
         genesis_node.post_commitment_tx(&stake_tx).await?;
