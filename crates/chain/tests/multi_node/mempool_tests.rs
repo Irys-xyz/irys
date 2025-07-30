@@ -1822,7 +1822,7 @@ async fn stake_tx_fee_and_value_validation_test(
 
     assert!(matches!(
         res,
-        AddTxError::TxIngress(TxIngressError::Other(_))
+        AddTxError::TxIngress(TxIngressError::CommitmentValidationError(_))
     ));
 
     genesis_node.stop().await;
@@ -1897,7 +1897,7 @@ async fn pledge_tx_fee_validation_test(
 
     assert!(matches!(
         res,
-        AddTxError::TxIngress(TxIngressError::Other(_))
+        AddTxError::TxIngress(TxIngressError::CommitmentValidationError(_))
     ));
     genesis_node.stop().await;
     Ok(())

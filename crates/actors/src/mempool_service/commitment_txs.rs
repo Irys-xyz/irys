@@ -57,7 +57,7 @@ impl Inner {
                 commitment_tx.id.0.to_base58(),
                 e
             );
-            return Err(TxIngressError::Other(e.to_string()));
+            return Err(TxIngressError::CommitmentValidationError(e));
         }
 
         // Validate value based on commitment type
@@ -72,7 +72,7 @@ impl Inner {
                 commitment_tx.id.0.to_base58(),
                 e
             );
-            return Err(TxIngressError::Other(e.to_string()));
+            return Err(TxIngressError::CommitmentValidationError(e));
         }
 
         // Early out if we already know about this transaction in index / database
@@ -363,7 +363,7 @@ impl Inner {
                 // Check if there's at least one pending stake transaction
                 if pending
                     .iter()
-                    .any(|c| matches!(c.commitment_type, CommitmentType::Stake))
+                    .any(|c| c.commitment_type == CommitmentType::Stake)
                 {
                     return CommitmentSnapshotStatus::Accepted;
                 }

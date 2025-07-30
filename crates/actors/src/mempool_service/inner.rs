@@ -18,8 +18,8 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    Address, Base64, CommitmentTransaction, DataRoot, DataTransactionHeader, MempoolConfig,
-    TxChunkOffset, TxIngressProof, UnpackedChunk,
+    Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -852,24 +852,34 @@ impl TxReadError {
 }
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
+    #[error("Transaction signature is invalid")]
     InvalidSignature,
     /// The account does not have enough tokens to fund this transaction
+    #[error("Account has insufficient funds for this transaction")]
     Unfunded,
     /// This transaction id is already in the cache
+    #[error("Transaction already exists in cache")]
     Skipped,
     /// Invalid anchor value (unknown or too old)
+    #[error("Anchor is either unknown or has expired")]
     InvalidAnchor,
     // /// Unknown anchor value (could be valid)
     // PendingAnchor,
     /// Some database error occurred
+    #[error("Database operation failed")]
     DatabaseError,
     /// The service is uninitialized
+    #[error("Mempool service is not initialized")]
     ServiceUninitialized,
     /// Catch-all variant for other errors.
+    #[error("Transaction ingress error: {0}")]
     Other(String),
+    /// Commitment transaction validation error
+    #[error("Commitment validation failed: {0}")]
+    CommitmentValidationError(#[from] CommitmentValidationError),
 }
 
 impl TxIngressError {
