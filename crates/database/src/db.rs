@@ -204,8 +204,6 @@ impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::submodule::{create_or_open_submodule_db, tables::DataSizeByDataRoot};
     use eyre::WrapErr as _;
