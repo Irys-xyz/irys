@@ -330,7 +330,7 @@ macro_rules! ledger_chunk_offset_ii {
 #[macro_export]
 macro_rules! ledger_chunk_offset_ie {
     ($start:expr, $end:expr) => {
-        ii(
+        ie(
             LedgerChunkOffset::from($start),
             LedgerChunkOffset::from($end),
         )
