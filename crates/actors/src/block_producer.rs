@@ -935,7 +935,12 @@ pub trait BlockProdStrategy {
                 }
             }
         }
-        .expect("Should be able to get the parent EVM block");
+        .unwrap_or_else(|| {
+            panic!(
+                "Should be able to get the parent EVM block {} {}",
+                &prev_block_header.evm_block_hash, &prev_block_header.height
+            )
+        });
         // TODO: fix genesis hash computation when using init-state (persist modified chainspec?)
         // for now we just skip the check for the genesis block
         if prev_block_header.height > 0 {
