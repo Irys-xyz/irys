@@ -7,7 +7,6 @@ use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, Produ
 use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
-use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };

@@ -41,7 +41,7 @@ use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
 // External crate imports - Other
 
 use super::*;
-use crate::shadow_tx::{self, ShadowTransaction};
+use crate::shadow_tx::{self, ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 
 /// Constants for shadow transaction processing
 mod constants {
@@ -152,18 +152,27 @@ where
     ) -> Result<Option<u64>, BlockExecutionError> {
         let tx_envelope = tx.tx();
         let tx_envelope_input_buf = tx_envelope.input();
-        let rlp_decoded_shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..]);
-        let beneficiary = {
-            use revm::context::Block as _;
-            self.inner().evm().block().beneficiary()
-        };
 
-        let Ok(shadow_tx) = rlp_decoded_shadow_tx else {
+        if tx_envelope.to() != Some(*SHADOW_TX_DESTINATION_ADDR) {
             // if the tx is not a shadow tx, execute it as a regular transaction
             return self
                 .inner
                 .execute_transaction_with_commit_condition(tx, on_result_f);
+        }
+
+        if tx_envelope_input_buf
+            .strip_prefix(IRYS_SHADOW_EXEC)
+            .is_none()
+        {
+            // if the tx does not contain the shadow prefix, treat it as a regular transaction
+            return self
+                .inner
+                .execute_transaction_with_commit_condition(tx, on_result_f);
         };
+
+        let shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..])
+            .map_err(|e| create_internal_error(&format!("failed to decode shadow tx: {e}")))?;
+
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing shadow transaction");
 
         // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx
@@ -196,6 +205,11 @@ where
                 InvalidTransaction::PriorityFeeGreaterThanMaxFee,
             ));
         }
+
+        let beneficiary = {
+            use revm::context::Block as _;
+            self.inner().evm().block().beneficiary()
+        };
 
         // Distribute priority fees
         self.distribute_priority_fee(
