@@ -139,10 +139,9 @@ impl IrysDatabaseExt for DatabaseEnv {
     {
         let tx = self.tx_mut()?;
 
-        let res = f(&tx);
+        let res = f(&tx)?;
         tx.commit()?;
-
-        res
+        Ok(res)
     }
 
     /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
@@ -153,10 +152,9 @@ impl IrysDatabaseExt for DatabaseEnv {
     {
         let tx = self.tx()?;
 
-        let res = f(&tx);
+        let res = f(&tx)?;
         tx.commit()?;
-
-        res
+        Ok(res)
     }
 }
 
