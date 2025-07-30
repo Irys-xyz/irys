@@ -305,6 +305,7 @@ impl BlockValidationTask {
                 service_senders,
                 block,
                 &self.service_inner.db,
+                &self.block_tree_guard,
             )
             .instrument(tracing::info_span!("commitment_ordering_validation", block_hash = %self.block_hash, block_height = %self.block.height))
             .await

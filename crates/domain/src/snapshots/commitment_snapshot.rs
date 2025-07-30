@@ -213,25 +213,29 @@ impl CommitmentSnapshot {
 
     /// Collects all commitment transactions from the snapshot for epoch processing
     pub fn get_epoch_commitments(&self) -> Vec<CommitmentTransaction> {
-        let mut commitment_tx: Vec<CommitmentTransaction> = Vec::new();
+        let mut all_commitments: Vec<CommitmentTransaction> = Vec::new();
 
-        // First collect all stake transactions in address order
-        // BTreeMap is already ordered by keys (addresses)
+        // Collect all commitments from all miners
         for miner_commitments in self.commitments.values() {
             if let Some(stake) = &miner_commitments.stake {
-                commitment_tx.push(stake.clone());
+                all_commitments.push(stake.clone());
             }
-        }
 
-        // Then collect all pledge transactions in address order
-        for miner_commitments in self.commitments.values() {
-            // Add all pledges for this miner
             for pledge in &miner_commitments.pledges {
-                commitment_tx.push(pledge.clone());
+                all_commitments.push(pledge.clone());
             }
         }
 
-        commitment_tx
+        // Sort using PrioritizedCommitment wrapper
+        let mut prioritized: Vec<_> = all_commitments
+            .iter()
+            .map(|tx| super::PrioritizedCommitment(tx))
+            .collect();
+
+        prioritized.sort();
+
+        // Convert back to Vec<CommitmentTransaction>
+        prioritized.into_iter().map(|p| p.0.clone()).collect()
     }
 }
 
@@ -427,5 +431,73 @@ mod tests {
         );
         let status = snapshot.add_commitment(&unpledge, false);
         assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
+    }
+
+    #[test]
+    fn test_get_epoch_commitments_ordering() {
+        let mut snapshot = CommitmentSnapshot::default();
+
+        // Create multiple signers
+        let signer1 = Address::random();
+        let signer2 = Address::random();
+        let signer3 = Address::random();
+
+        // Add stakes with different fees
+        let mut stake1 = create_test_commitment(signer1, CommitmentType::Stake);
+        stake1.fee = 100;
+        snapshot.add_commitment(&stake1, false);
+
+        let mut stake2 = create_test_commitment(signer2, CommitmentType::Stake);
+        stake2.fee = 200;
+        snapshot.add_commitment(&stake2, false);
+
+        // Add pledges with different counts and fees
+        let mut pledge1_count0 = create_test_commitment(
+            signer1,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        );
+        pledge1_count0.fee = 50;
+        snapshot.add_commitment(&pledge1_count0, false);
+
+        let mut pledge2_count0 = create_test_commitment(
+            signer2,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 0,
+            },
+        );
+        pledge2_count0.fee = 150;
+        snapshot.add_commitment(&pledge2_count0, false);
+
+        // Add another stake after some pledges
+        let mut stake3 = create_test_commitment(signer3, CommitmentType::Stake);
+        stake3.fee = 50;
+        snapshot.add_commitment(&stake3, false);
+
+        // Add pledge with higher count
+        let mut pledge1_count1 = create_test_commitment(
+            signer1,
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 1,
+            },
+        );
+        pledge1_count1.fee = 300;
+        snapshot.add_commitment(&pledge1_count1, false);
+
+        // Get commitments and verify order
+        let commitments = snapshot.get_epoch_commitments();
+
+        // Should be ordered as:
+        // 1. All stakes (by fee descending): stake2 (200), stake1 (100), stake3 (50)
+        // 2. Pledges count 0 (by fee descending): pledge2_count0 (150), pledge1_count0 (50)
+        // 3. Pledges count 1: pledge1_count1 (300)
+        assert_eq!(commitments.len(), 6);
+        assert_eq!(commitments[0].id, stake2.id); // Stake with fee 200
+        assert_eq!(commitments[1].id, stake1.id); // Stake with fee 100
+        assert_eq!(commitments[2].id, stake3.id); // Stake with fee 50
+        assert_eq!(commitments[3].id, pledge2_count0.id); // Pledge count 0, fee 150
+        assert_eq!(commitments[4].id, pledge1_count0.id); // Pledge count 0, fee 50
+        assert_eq!(commitments[5].id, pledge1_count1.id); // Pledge count 1, fee 300
     }
 }
