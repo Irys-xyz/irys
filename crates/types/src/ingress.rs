@@ -77,7 +77,12 @@ pub fn generate_ingress_proof(
 pub fn verify_ingress_proof(
     proof: IngressProof,
     chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    chain_id: ChainId,
 ) -> eyre::Result<bool> {
+    if chain_id != proof.chain_id {
+        return Ok(false); // Chain ID mismatch
+    }
+
     let mut hasher = sha::Sha256::new();
     hasher.update(&proof.proof.0);
     hasher.update(&proof.data_root.0);
@@ -179,11 +184,16 @@ mod tests {
         // Verify the ingress proof
         assert!(verify_ingress_proof(
             proof.clone(),
-            chunks.clone().into_iter().map(Ok)
+            chunks.clone().into_iter().map(Ok),
+            chain_id
         )?);
         let mut reversed = chunks;
         reversed.reverse();
-        assert!(!verify_ingress_proof(proof, reversed.into_iter().map(Ok))?);
+        assert!(!verify_ingress_proof(
+            proof,
+            reversed.into_iter().map(Ok),
+            chain_id
+        )?);
 
         Ok(())
     }
@@ -232,13 +242,15 @@ mod tests {
         // Verify that testnet proof is valid for testnet
         assert!(verify_ingress_proof(
             testnet_proof.clone(),
-            chunks.clone().into_iter().map(Ok)
+            chunks.clone().into_iter().map(Ok),
+            testnet_chain_id
         )?);
 
         // Verify that mainnet proof is valid for mainnet
         assert!(verify_ingress_proof(
             mainnet_proof,
-            chunks.clone().into_iter().map(Ok)
+            chunks.clone().into_iter().map(Ok),
+            mainnet_chain_id
         )?);
 
         // Create a modified proof where we try to use testnet proof with mainnet chain_id
@@ -248,8 +260,17 @@ mod tests {
         // This should fail verification because the signature was created with testnet chain_id
         // but we're trying to verify it with mainnet chain_id
         assert!(!verify_ingress_proof(
+            replay_attack_proof.clone(),
+            chunks.clone().into_iter().map(Ok),
+            mainnet_chain_id
+        )?);
+
+        // This should fail verification because there's going to be a mismatch in chain_id
+        // even if the proof is valid for testnet
+        assert!(!verify_ingress_proof(
             replay_attack_proof,
-            chunks.into_iter().map(Ok)
+            chunks.into_iter().map(Ok),
+            testnet_chain_id
         )?);
 
         Ok(())
