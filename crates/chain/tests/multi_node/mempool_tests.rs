@@ -1738,10 +1738,8 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
     // Test case 1: unstaked pledge commitment txs
     //
 
-    let tx_ids: Vec<H256> = vec![H256::zero()]; // txs used for anchor chain and later to check mempool ingress
-
     let pledge_tx = new_pledge_tx(
-        tx_ids.last().expect("valid tx id for use as anchor"),
+        &H256::zero(), // use genesis block for anchor
         &signer,
         &genesis_config.consensus_config(),
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
