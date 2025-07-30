@@ -7,7 +7,6 @@ use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, Produ
 use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
-use irys_reth_node_bridge::irys_reth::alloy_rlp::Decodable as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
@@ -15,6 +14,7 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
+use reth::rpc::types::TransactionTrait as _;
 use reth::{
     providers::{
         AccountReader as _, BlockReader as _, ReceiptProvider as _, TransactionsProvider as _,
@@ -26,12 +26,9 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, new_pledge_tx, new_stake_tx,
-    read_block_from_state, solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
+    mine_block, mine_block_and_wait_for_validation, new_stake_tx, read_block_from_state,
+    solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
 };
-
-// Test fee constants
-const DEFAULT_TX_FEE: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 // EVM test constants
 const EVM_GAS_PRICE: u128 = 20_000_000_000; // 20 gwei
@@ -351,18 +348,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // We expect 3 receipts: storage tx, evm tx, and block reward
     assert_eq!(block_txs.len(), 3);
     // Assert block reward (should be the first receipt)
-    let block_reward_systx =
-        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let block_reward_systx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(matches!(
         block_reward_systx.as_v1().unwrap(),
         TransactionPacket::BlockReward(_)
     ));
 
     // Assert storage tx is included in the receipts (should be the second receipt)
-    let storage_tx_systx =
-        ShadowTransaction::decode(&mut block_txs[1].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let storage_tx_systx = ShadowTransaction::decode(&mut block_txs[1].input().as_ref()).unwrap();
     assert!(matches!(
         storage_tx_systx.as_v1().unwrap(),
         TransactionPacket::StorageFees(_)
@@ -492,9 +485,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward shadow transaction
-    let shadow_tx =
-        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
             shadow_tx.as_v1().unwrap(),
@@ -574,9 +565,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward shadow transaction
-    let shadow_tx =
-        ShadowTransaction::decode(&mut block_txs[0].as_legacy().unwrap().tx().input.as_ref())
-            .unwrap();
+    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
             shadow_tx.as_v1().unwrap(),
@@ -751,6 +740,16 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let stake_tx = peer_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
     let pledge_tx = peer_node.post_pledge_commitment(H256::zero()).await;
 
+    // Assert that the fees are greater than 0
+    assert!(
+        stake_tx.fee > 0,
+        "Stake transaction fee should be greater than 0"
+    );
+    assert!(
+        pledge_tx.fee > 0,
+        "Pledge transaction fee should be greater than 0"
+    );
+
     // Wait for commitment tx to show up in the genesis_node's mempool
     genesis_node
         .wait_for_mempool(stake_tx.id, seconds_to_wait)
@@ -835,30 +834,36 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Calculate expected balance change based on consensus config
     let consensus_config = genesis_config.consensus_config();
-    let stake_fee_amount = consensus_config.stake_fee.amount; // 0.1 token = 10^17 in U256
-    let pledge_fee_amount = consensus_config.pledge_base_fee.amount; // 0.1 token = 10^17 in U256
+    let stake_fee_amount = consensus_config.stake_value.amount; // 0.1 token = 10^17 in U256
+    let pledge_fee_amount = consensus_config.pledge_base_value.amount; // 0.1 token = 10^17 in U256
 
     // Each commitment transaction has:
-    // - fee: DEFAULT_TX_FEE (passed to post_stake_commitment and post_pledge_commitment)
+    // - fee: actual fee from the transaction (includes priority fees)
     // - value: stake_fee.amount or pledge_fee.amount
     // Total cost per transaction = fee + value
-    let stake_tx_fee = DEFAULT_TX_FEE;
+    let stake_tx_fee = U256::from(stake_tx.fee);
     let stake_config_amount = U256::from_le_bytes(stake_fee_amount.to_le_bytes());
     let stake_total_cost = stake_tx_fee + stake_config_amount;
 
-    let pledge_tx_fee = DEFAULT_TX_FEE;
+    let pledge_tx_fee = U256::from(pledge_tx.fee);
     let pledge_config_amount = U256::from_le_bytes(pledge_fee_amount.to_le_bytes());
     let pledge_total_cost = pledge_tx_fee + pledge_config_amount;
 
     let total_decrease = stake_total_cost + pledge_total_cost;
 
+    // Priority fees are distributed from the commitment transaction submitter to the block beneficiary
+    // Each commitment transaction has a priority fee equal to its fee value
+    let priority_fees_distributed = stake_tx_fee + pledge_tx_fee;
+    let total_decrease_with_priority_fees = total_decrease + priority_fees_distributed;
+
     assert_eq!(
         balance_after_block1,
-        initial_balance - total_decrease,
-        "Balance should decrease by {} (stake: {} + pledge: {})",
-        total_decrease,
+        initial_balance - total_decrease_with_priority_fees,
+        "Balance should decrease by {} (stake: {} + pledge: {} + priority fees: {})",
+        total_decrease_with_priority_fees,
         stake_total_cost,
-        pledge_total_cost
+        pledge_total_cost,
+        priority_fees_distributed
     );
 
     // Mine another block to verify the system continues to work
@@ -907,9 +912,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // First transaction should be block reward
-    let block_reward_tx =
-        ShadowTransaction::decode(&mut block_txs1[0].as_legacy().unwrap().tx().input.as_ref())
-            .expect("First transaction should be decodable as shadow transaction");
+    let block_reward_tx = ShadowTransaction::decode(&mut block_txs1[0].input().as_ref())
+        .expect("First transaction should be decodable as shadow transaction");
     assert!(
         matches!(
             block_reward_tx.as_v1().unwrap(),
@@ -919,14 +923,13 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // Second transaction should be stake
-    let stake_tx =
-        ShadowTransaction::decode(&mut block_txs1[1].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Second transaction should be decodable as shadow transaction");
-    if let Some(TransactionPacket::Stake(bd)) = stake_tx.as_v1() {
+    let stake_shadow_tx = ShadowTransaction::decode(&mut block_txs1[1].input().as_ref())
+        .expect("Second transaction should be decodable as shadow transaction");
+    if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        // Expected amount is DEFAULT_TX_FEE + stake_fee.amount (0.1 token = 10^17)
-        let expected_stake_amount =
-            DEFAULT_TX_FEE + U256::from_le_bytes(consensus_config.stake_fee.amount.to_le_bytes());
+        // Expected amount is actual fee + stake_fee.amount (0.1 token = 10^17)
+        let expected_stake_amount = U256::from(stake_tx.fee)
+            + U256::from_le_bytes(consensus_config.stake_value.amount.to_le_bytes());
         assert_eq!(
             bd.amount, expected_stake_amount,
             "Stake amount should be fee + stake_fee.amount"
@@ -936,14 +939,13 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     }
 
     // Third transaction should be pledge
-    let pledge_tx =
-        ShadowTransaction::decode(&mut block_txs1[2].as_legacy().unwrap().tx().input.as_ref())
-            .expect("Third transaction should be decodable as shadow transaction");
-    if let Some(TransactionPacket::Pledge(bd)) = pledge_tx.as_v1() {
+    let pledge_shadow_tx = ShadowTransaction::decode(&mut block_txs1[2].input().as_ref())
+        .expect("Third transaction should be decodable as shadow transaction");
+    if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        // Expected amount is DEFAULT_TX_FEE + pledge_fee.amount (0.1 token = 10^17)
-        let expected_pledge_amount = DEFAULT_TX_FEE
-            + U256::from_le_bytes(consensus_config.pledge_base_fee.amount.to_le_bytes());
+        // Expected amount is actual fee + pledge_fee.amount (0.1 token = 10^17)
+        let expected_pledge_amount = U256::from(pledge_tx.fee)
+            + U256::from_le_bytes(consensus_config.pledge_base_value.amount.to_le_bytes());
         assert_eq!(
             bd.amount, expected_pledge_amount,
             "Pledge amount should be fee + pledge_fee.amount"
@@ -1312,48 +1314,23 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
         .mempool
         .max_commitment_txs_per_block = max_commitment_txs_per_block;
 
-    genesis_config
-        .consensus
-        .get_mut()
-        .mempool
-        .anchor_expiry_depth = 100;
-
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
 
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-
-    // mine enough blocks to serve as anchors for each commitment tx
-    // TODO: once tx anchors have full support for single-block inclusion, revert this test to it's original version
-    genesis_node.mine_blocks(10).await?;
-
-    assert_eq!(genesis_node.get_canonical_chain_height().await, 10);
+    let _ = genesis_node.start_public_api().await;
 
     // create and post stake commitment tx
     let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
     genesis_node.post_commitment_tx(&stake_tx).await?;
-
-    let mut tx_ids: Vec<H256> = vec![stake_tx.id];
-    let commitment_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_commitment_snapshot();
-
-    for height in 0..11 {
-        let hash = genesis_node.get_block_by_height(height).await?.block_hash;
-
-        let tx = new_pledge_tx(
-            &hash,
-            &signer,
-            &genesis_config.consensus_config(),
-            &commitment_snapshot,
-        );
-
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    for _ in 0..11 {
+        let tx = genesis_node
+            .post_pledge_commitment_with_signer(&signer, H256::zero())
+            .await;
         tx_ids.push(tx.id);
-        genesis_node.post_commitment_tx(&tx).await?;
     }
 
     // wait for all txs to ingress mempool
@@ -1362,12 +1339,9 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
         .await?;
 
     let mut counts = Vec::new();
-    let height_offset = genesis_node.get_canonical_chain_height().await;
-
-    assert!(height_offset % num_blocks_in_epoch == 0);
-
     for i in 1..=8 {
-        let block = genesis_node.mine_block().await?;
+        genesis_node.mine_block().await?;
+        let block = genesis_node.get_block_by_height(i).await?;
         let is_epoch_block = block.height > 0 && block.height % num_blocks_in_epoch == 0;
         counts.push(
             block
@@ -1393,7 +1367,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     // for 1 stake + 11 pledge total commitment txs with a limit of two per block, we should see 2 + 2 + 2 + 2 + 0 + 2 + 2
 
     for h in 1..num_blocks_in_epoch {
-        let block_n = genesis_node.get_block_by_height(height_offset + h).await?;
+        let block_n = genesis_node.get_block_by_height(h).await?;
         assert_eq!(
             2,
             block_n
@@ -1407,20 +1381,19 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     // epoch block rolls up previous txs
     let epoch_block = genesis_node
-        .get_block_by_height(height_offset + num_blocks_in_epoch)
+        .get_block_by_height(num_blocks_in_epoch)
         .await?;
     assert_eq!(epoch_block.height % num_blocks_in_epoch, 0);
     let epoch_tx_ids = epoch_block
         .system_ledgers
         .get(SystemLedger::Commitment as usize)
         .map_or(Vec::<H256>::new(), |l| l.tx_ids.0.clone());
-
     assert_eq!(epoch_tx_ids, tx_ids[..max_commitments_per_epoch as usize]);
 
     // some blocks after epoch should contain commitment txs
     // this will be a few blocks, as we posted enough txs above to populate two more blocks
     for h in 6..=7 {
-        let block_n = genesis_node.get_block_by_height(height_offset + h).await?;
+        let block_n = genesis_node.get_block_by_height(h).await?;
         assert_eq!(
             2,
             block_n
@@ -1433,9 +1406,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     // we have then used all commitment txs from mempool, so final block(s) are empty
     let final_height = 8;
-    let final_block = genesis_node
-        .get_block_by_height(height_offset + final_height)
-        .await?;
+    let final_block = genesis_node.get_block_by_height(final_height).await?;
     assert_eq!(
         0,
         final_block

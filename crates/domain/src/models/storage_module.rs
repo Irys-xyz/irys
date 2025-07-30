@@ -37,7 +37,6 @@
 //! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
 
 use atomic_write_file::AtomicWriteFile;
-use base58::ToBase58 as _;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{ensure, eyre, Context as _, OptionExt as _, Result};
 use irys_database::{
@@ -280,7 +279,8 @@ impl StorageModule {
                 params.write_to_disk(&params_path);
             } else {
                 // Load the packing params and check to see if they match
-                let params = PackingParams::from_toml(params_path).expect("packing params to load");
+                let mut params =
+                    PackingParams::from_toml(&params_path).expect("packing params to load");
 
                 ensure!(
                     params.packing_address == config.node_config.miner_address(),
@@ -291,14 +291,25 @@ impl StorageModule {
 
                 // check the partition assignment if it's present
                 if let Some(pa) = storage_module_info.partition_assignment {
-                    ensure!(
+                    match params.partition_hash {
+                        Some(ph) => {
+                            ensure!(
                         params.partition_hash == Some(pa.partition_hash),
                         "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
                         This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
                         assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                        pa.partition_hash.0.to_base58(),
-                        params.partition_hash.unwrap().0.to_base58(),
-                    );
+                        pa.partition_hash,
+                        ph,
+                    )
+                        }
+                        None => {
+                            // need to write the new params to disk
+                            params.partition_hash = Some(pa.partition_hash);
+                            params.ledger = pa.ledger_id;
+                            params.slot = pa.slot_index;
+                            params.write_to_disk(&params_path);
+                        }
+                    }
                 }
             }
 
@@ -455,7 +466,27 @@ impl StorageModule {
     /// The sync threshold is configured via `min_writes_before_sync` to optimize
     /// disk writes and minimize fragmentation.
     pub fn sync_pending_chunks(&self) -> eyre::Result<()> {
-        let threshold = self.config.node_config.storage.num_writes_before_sync;
+        self.sync_pending_chunks_inner(false)
+    }
+
+    /// Force syncs (writes) all pending writes for this SM
+    ///
+    /// Process:
+    /// 1. Collects pending writes for each submodule
+    /// 2. Acquires write lock only if some pending writes exist
+    /// 3. Writes chunks to disk and removes them from pending queue
+    ///
+    pub fn force_sync_pending_chunks(&self) -> eyre::Result<()> {
+        self.sync_pending_chunks_inner(true)
+    }
+
+    fn sync_pending_chunks_inner(&self, force: bool) -> eyre::Result<()> {
+        let threshold = if force {
+            0
+        } else {
+            self.config.node_config.storage.num_writes_before_sync
+        };
+
         let arc = self.pending_writes.clone();
 
         // First use read lock to check if we have work to do
@@ -1235,6 +1266,18 @@ impl StorageModule {
             );
             self.sync_pending_chunks().unwrap();
         }
+    }
+}
+
+impl Drop for StorageModule {
+    fn drop(&mut self) {
+        info!("Syncing SM {} to disk...", &self.id);
+        let _ = self.force_sync_pending_chunks().inspect_err(|e| {
+            error!(
+                "Unable to sync writes while dropping SM {} - {:?}",
+                &self.id, &e
+            )
+        });
     }
 }
 

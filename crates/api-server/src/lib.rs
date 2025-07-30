@@ -37,6 +37,7 @@ pub struct ApiState {
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
     pub sync_state: SyncState,
+    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 
 impl ApiState {
@@ -72,6 +73,22 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(network_config::get_network_config),
         )
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
+        .route(
+            "/price/commitment/stake",
+            web::get().to(price::get_stake_price),
+        )
+        .route(
+            "/price/commitment/unstake",
+            web::get().to(price::get_unstake_price),
+        )
+        .route(
+            "/price/commitment/pledge/{user_address}",
+            web::get().to(price::get_pledge_price),
+        )
+        .route(
+            "/price/commitment/unpledge/{user_address}",
+            web::get().to(price::get_unpledge_price),
+        )
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))

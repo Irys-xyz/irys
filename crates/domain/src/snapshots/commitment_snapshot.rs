@@ -1,5 +1,5 @@
 use irys_primitives::CommitmentType;
-use irys_types::{transaction::PledgeDataProvider, Address, CommitmentTransaction};
+use irys_types::{Address, CommitmentTransaction};
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -43,14 +43,14 @@ impl CommitmentSnapshot {
     ) -> CommitmentSnapshotStatus {
         debug!("GetCommitmentStatus message received");
 
-        let commitment_type = commitment_tx.commitment_type;
+        let commitment_type = &commitment_tx.commitment_type;
         let txid = commitment_tx.id;
         let signer = &commitment_tx.signer;
 
         // First handle unsupported commitment types
         if !matches!(
             commitment_type,
-            CommitmentType::Stake | CommitmentType::Pledge
+            CommitmentType::Stake | CommitmentType::Pledge { .. }
         ) {
             debug!(
                 "CommitmentStatus is Rejected: unsupported type: {:?}",
@@ -80,7 +80,7 @@ impl CommitmentSnapshot {
                     }
                 }
             }
-            CommitmentType::Pledge => {
+            CommitmentType::Pledge { .. } => {
                 // For pledges, we need to ensure there's a stake (either current epoch or local)
                 if is_staked_in_current_epoch {
                     // Has stake in current epoch, check for duplicate pledge locally
@@ -127,10 +127,13 @@ impl CommitmentSnapshot {
     ) -> CommitmentSnapshotStatus {
         debug!("add_commitment() called for {}", commitment_tx.id);
         let signer = &commitment_tx.signer;
-        let tx_type = commitment_tx.commitment_type;
+        let tx_type = &commitment_tx.commitment_type;
 
         // Early return for unsupported commitment types
-        if !matches!(tx_type, CommitmentType::Stake | CommitmentType::Pledge) {
+        if !matches!(
+            tx_type,
+            CommitmentType::Stake | CommitmentType::Pledge { .. }
+        ) {
             return CommitmentSnapshotStatus::Unsupported;
         }
 
@@ -209,14 +212,5 @@ impl CommitmentSnapshot {
         }
 
         commitment_tx
-    }
-}
-
-impl PledgeDataProvider for CommitmentSnapshot {
-    fn pledge_count(&self, user_address: Address) -> usize {
-        self.commitments
-            .get(&user_address)
-            .map(|c| c.pledges.len())
-            .unwrap_or(0)
     }
 }

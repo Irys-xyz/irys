@@ -1,6 +1,5 @@
 use irys_types::{NodeConfig, NodeMode};
-use std::{fs::File, io::Write as _, path::PathBuf};
-use tracing::warn;
+use std::path::PathBuf;
 
 pub fn load_config() -> eyre::Result<NodeConfig> {
     // load the config
@@ -14,14 +13,15 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
     {
         Ok(cfg) => cfg,
         Err(err) => {
-            warn!(
-                ?err,
-                "config file not provided, defaulting to testnet config"
+            eyre::bail!(
+                "Unable to load config file at {:?} - {:?}\nHave you followed the setup steps in SETUP.md?",
+                &config_path,
+                &err
             );
-            let config = NodeConfig::testnet();
-            let mut file = File::create(&config_path)?;
-            file.write_all(toml::to_string(&config)?.as_bytes())?;
-            eyre::bail!("Config file created - please edit it before restarting (see SETUP.md)")
+            // let config = NodeConfig::testnet();
+            // let mut file = File::create(&config_path)?;
+            // file.write_all(toml::to_string(&config)?.as_bytes())?;
+            // eyre::bail!("Config file created - please edit it before restarting (see SETUP.md)")
         }
     };
 
