@@ -15,16 +15,20 @@ use irys_domain::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, IrysBlockHeader, IrysTransactionId,
+    GossipBroadcastMessage, IrysBlockHeader, IrysTransactionId, TokioServiceHandle,
 };
 use irys_vdf::state::VdfStateReadonly;
+use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
-    sync::{mpsc::UnboundedSender, oneshot},
+    sync::{
+        mpsc::{self, error::SendError, UnboundedSender},
+        oneshot::{self, error::RecvError},
+    },
     time::timeout,
 };
-use tracing::{debug, error, info, Instrument as _, Span};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -81,7 +85,9 @@ pub enum BlockDiscoveryInternalError {
     #[error("Database error: {0:?}")]
     DatabaseError(eyre::Report),
     #[error("Failed to send message to the BlockDiscovery service: {0}")]
-    MailboxError(#[from] actix::MailboxError),
+    SenderError(#[from] SendError<BlockDiscoveryMessage>),
+    #[error("Failed to receive message from the BlockDiscovery service: {0}")]
+    RecvError(#[from] RecvError),
     #[error("Failed to send message to the epoch service: {0}")]
     EpochRequestFailed(String),
     #[error("Failed to send message to the block tree service: {0}")]
@@ -95,22 +101,24 @@ pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct BlockDiscoveryFacadeImpl {
-    addr: Addr<BlockDiscoveryActor>,
+    sender: mpsc::UnboundedSender<BlockDiscoveryMessage>,
 }
 
 impl BlockDiscoveryFacadeImpl {
-    pub fn new(addr: Addr<BlockDiscoveryActor>) -> Self {
-        Self { addr }
+    pub fn new(sender: mpsc::UnboundedSender<BlockDiscoveryMessage>) -> Self {
+        Self { sender }
     }
 }
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError> {
-        self.addr
-            .send(BlockDiscoveredMessage(block))
-            .await
-            .map_err(BlockDiscoveryInternalError::MailboxError)?
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(BlockDiscoveryMessage::BlockDiscovered(block, Some(tx)))
+            .map_err(BlockDiscoveryInternalError::SenderError)?;
+
+        rx.await.map_err(BlockDiscoveryInternalError::RecvError)?
     }
 }
 /// When a block is discovered, either produced locally or received from
@@ -131,14 +139,131 @@ impl Actor for BlockDiscoveryActor {
     type Context = Context<Self>;
 }
 
-impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
-    type Result = ResponseFuture<Result<(), BlockDiscoveryError>>;
+/// `BlockDiscoveryService` listens for discovered blocks & validates them.
+#[derive(Debug)]
+pub struct BlockDiscoveryServiceInner {
+    /// Read only view of the block index
+    pub block_index_guard: BlockIndexReadGuard,
+    /// Read only view of the block_tree
+    pub block_tree_guard: BlockTreeReadGuard,
+    /// Reference to the global config
+    pub config: Config,
+    /// The block reward curve
+    pub reward_curve: Arc<HalvingCurve>,
+    /// Database provider for accessing transaction headers and related data.
+    pub db: DatabaseProvider,
+    /// Store last VDF Steps
+    pub vdf_steps_guard: VdfStateReadonly,
+    /// Service Senders
+    pub service_senders: ServiceSenders,
+}
 
-    fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        let span = self.span.clone();
-        let _span = span.enter();
+#[derive(Debug)]
+
+pub struct BlockDiscoveryService {
+    shutdown: Shutdown,
+    msg_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+    inner: Arc<BlockDiscoveryServiceInner>,
+}
+
+impl BlockDiscoveryService {
+    #[tracing::instrument(skip_all)]
+    pub fn spawn_service(
+        inner: Arc<BlockDiscoveryServiceInner>,
+        rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        info!("Spawning block discovery service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(
+            async move {
+                let service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner,
+                };
+                service
+                    .start()
+                    .await
+                    .expect("Block discovery service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
+
+        TokioServiceHandle {
+            name: "block_discovery_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn start(mut self) -> eyre::Result<()> {
+        info!("Starting block discovery service");
+
+        loop {
+            tokio::select! {
+                biased; // enable bias so polling happens in definition order
+
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for block discovery service");
+                    break;
+                }
+                // Handle commands
+                cmd = self.msg_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            self.handle_message(cmd).await?;
+                        }
+                        None => {
+                            warn!("Command channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Shutting down block discovery service gracefully");
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
+        match msg {
+            BlockDiscoveryMessage::BlockDiscovered(irys_block_header, sender) => {
+                let result = self.inner.clone().block_discovered(irys_block_header).await;
+                if let Some(sender) = sender {
+                    if let Err(e) = sender.send(result) {
+                        tracing::error!("sender error: {:?}", e);
+                    };
+                }
+            }
+        };
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+
+pub enum BlockDiscoveryMessage {
+    BlockDiscovered(
+        Arc<IrysBlockHeader>,
+        Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
+    ),
+}
+
+impl BlockDiscoveryServiceInner {
+    pub async fn block_discovered(
+        &self,
+        block: Arc<IrysBlockHeader>,
+    ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
-        let new_block_header = msg.0;
+        let new_block_header = block;
         let parent_block_hash = new_block_header.previous_block_hash;
 
         //====================================
@@ -149,7 +274,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let db = self.db.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_config = self.config.consensus.epoch.clone();
-        let span2 = self.span.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
 
@@ -164,412 +288,404 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let reward_curve = Arc::clone(&self.reward_curve);
         let mempool = self.service_senders.mempool.clone();
         let mempool_config = self.config.consensus.mempool.clone();
-        Box::pin(async move {
-            let span3 = span2.clone();
-            let _span = span3.enter();
 
-            let previous_block_header = {
-                let (tx_prev, rx_prev) = oneshot::channel();
+        let previous_block_header = {
+            let (tx_prev, rx_prev) = oneshot::channel();
+            mempool_sender
+                .send(MempoolServiceMessage::GetBlockHeader(
+                    parent_block_hash,
+                    false,
+                    tx_prev,
+                ))
+                .map_err(|channel_error| {
+                    BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
+                })?;
+            match rx_prev
+                .await
+                .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(e.to_string()))?
+            {
+                Some(hdr) => hdr,
+                None => db
+                    .view_eyre(|tx| block_header_by_hash(tx, &parent_block_hash, false))
+                    .map_err(BlockDiscoveryInternalError::DatabaseError)?
+                    .ok_or_else(|| BlockDiscoveryError::PreviousBlockNotFound {
+                        previous_block_hash: parent_block_hash,
+                    })?,
+            }
+        };
+
+        //====================================
+        // Submit ledger TX validation
+        //------------------------------------
+        // Get all the submit ledger transactions for the new block, error if not found
+        // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
+        // If they are in our mempool and validated we know they are real, if not we have
+        // to retrieve and validate them from the block producer.
+        // TODO: in the future we'll retrieve the missing transactions from the block
+        // producer and validate them.
+
+        let submit_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .0
+            .clone();
+
+        let (tx, rx) = oneshot::channel();
+        mempool
+            .send(MempoolServiceMessage::GetDataTxs(
+                submit_tx_ids_to_check.clone(),
+                tx,
+            ))
+            .map_err(|channel_error| {
+                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
+            })?;
+
+        let submit_txs = rx
+            .await
+            .map_err(|e| {
+                BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                    "Mempool response error: {}",
+                    e
+                ))
+            })?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<DataTransactionHeader>>();
+
+        if submit_txs.len() != submit_tx_ids_to_check.len() {
+            return Err(BlockDiscoveryError::MissingTransactions(
+                submit_tx_ids_to_check
+                    .into_iter()
+                    .filter(|id| !submit_txs.iter().any(|tx| tx.id == *id))
+                    .collect(),
+            ));
+        }
+
+        //====================================
+        // Publish ledger TX Validation
+        //------------------------------------
+        // 1. Validate the proof
+        // 2. Validate the transaction
+        // 3. Update the local tx headers index to include the ingress-proof.
+        //    This keeps the transaction from getting re-promoted each block.
+        //    (this last step performed in mempool after the block is confirmed)
+
+        let publish_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Publish]
+            .tx_ids
+            .0
+            .clone();
+
+        let (tx, rx) = oneshot::channel();
+        mempool
+            .send(MempoolServiceMessage::GetDataTxs(
+                publish_tx_ids_to_check.clone(),
+                tx,
+            ))
+            .map_err(|channel_error| {
+                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
+            })?;
+
+        let publish_txs = rx
+            .await
+            .map_err(|e| {
+                BlockDiscoveryInternalError::MempoolRequestFailed(format!(
+                    "Mempool response error: {}",
+                    e
+                ))
+            })?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<DataTransactionHeader>>();
+
+        if publish_txs.len() != publish_tx_ids_to_check.len() {
+            let missing_txs = publish_tx_ids_to_check
+                .into_iter()
+                .filter(|id| !publish_txs.iter().any(|tx| tx.id == *id))
+                .collect();
+            return Err(BlockDiscoveryError::MissingTransactions(missing_txs));
+        }
+
+        if !publish_txs.is_empty() {
+            let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
+                Some(proofs) => proofs,
+                None => {
+                    return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
+                        "Ingress proofs missing"
+                    )));
+                }
+            };
+
+            // Pre-Validate the ingress-proof by verifying the signature
+            for (i, tx_header) in publish_txs.iter().enumerate() {
+                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                    return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
+                        "Invalid ingress proof signature: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        //====================================
+        // Commitment ledger TX Validation
+        //------------------------------------
+        // Extract the Commitment ledger from the block
+        let commitment_ledger = new_block_header
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+        // Validate commitments transactions exist (if there are commitment txids in the block)
+        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+        if let Some(commitment_ledger) = commitment_ledger {
+            debug!(
+                "incoming block commitment txids, height {}\n{:#?}",
+                new_block_header.height, commitment_ledger
+            );
+            match get_commitment_tx_in_parallel(
+                commitment_ledger.tx_ids.0.clone(),
+                &mempool_sender,
+                &db,
+            )
+            .await
+            {
+                Ok(tx) => {
+                    commitments = tx;
+                }
+                Err(e) => {
+                    error!("Failed to collect commitment transactions: {:?}", e);
+                    return Err(BlockDiscoveryError::MissingTransactions(
+                        commitment_ledger.tx_ids.0.clone(),
+                    ));
+                }
+            }
+        }
+
+        info!(
+            "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
+            new_block_header.block_hash,
+            new_block_header.height,
+            new_block_header.get_commitment_ledger_tx_ids(),
+            commitments.iter().map(|x| x.id).collect::<Vec<_>>()
+        );
+
+        // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
+        // have already been included in a recent parent.
+        let block_height = new_block_header.height;
+
+        let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
+        let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+        let mut parent_block = previous_block_header.clone();
+
+        let binding = new_block_header.get_data_ledger_tx_ids();
+        let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
+
+        if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
+            while parent_block.height >= min_anchor_height {
+                // Check to see if any data txids appeared in prior blocks
+                let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+
+                // Compare each ledger type between current and parent blocks
+                if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
+                    // Check for intersection between current and parent txids for this ledger
+                    for txid in incoming_data_tx_ids {
+                        if parent_txids.contains(txid) {
+                            return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
+                        }
+                    }
+                }
+
+                if parent_block.height == 0 {
+                    break;
+                }
+
+                // Continue the loop - get the next parent block
+                // Get the next parent block and own it
+                let previous_block_header = match db.view_eyre(|tx| {
+                    block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                }) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => break,
+                    Err(e) => {
+                        return Err(BlockDiscoveryError::InternalError(
+                            BlockDiscoveryInternalError::DatabaseError(e),
+                        ))
+                    }
+                };
+
+                parent_block = previous_block_header; // Move instead of borrow
+            }
+        }
+
+        let (parent_ema_snapshot, parent_epoch_snapshot) = {
+            let read = block_tree_guard.read();
+            let ema_snapshot = read
+                .get_ema_snapshot(&parent_block_hash)
+                .expect("parent block to be in block tree");
+            // FIXME: Does this need to be for the current block if it's an epoch block?
+            let epoch_snapshot = read
+                .get_epoch_snapshot(&parent_block_hash)
+                .expect("parent block to be in block_tree");
+            (ema_snapshot, epoch_snapshot)
+        };
+
+        let validation_result = prevalidate_block(
+            block_header,
+            previous_block_header,
+            parent_epoch_snapshot.clone(),
+            config,
+            reward_curve,
+            &parent_ema_snapshot,
+        )
+        .in_current_span()
+        .await;
+
+        match validation_result {
+            Ok(()) => {
+                // add block to mempool
                 mempool_sender
-                    .send(MempoolServiceMessage::GetBlockHeader(
-                        parent_block_hash,
-                        false,
-                        tx_prev,
-                    ))
+                    .send(MempoolServiceMessage::IngestBlocks {
+                        prevalidated_blocks: vec![new_block_header.clone()],
+                    })
                     .map_err(|channel_error| {
                         BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
                     })?;
-                match rx_prev
-                    .await
-                    .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(e.to_string()))?
-                {
-                    Some(hdr) => hdr,
-                    None => db
-                        .view_eyre(|tx| block_header_by_hash(tx, &parent_block_hash, false))
-                        .map_err(BlockDiscoveryInternalError::DatabaseError)?
-                        .ok_or_else(|| BlockDiscoveryError::PreviousBlockNotFound {
-                            previous_block_hash: parent_block_hash,
-                        })?,
-                }
-            };
 
-            //====================================
-            // Submit ledger TX validation
-            //------------------------------------
-            // Get all the submit ledger transactions for the new block, error if not found
-            // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
-            // If they are in our mempool and validated we know they are real, if not we have
-            // to retrieve and validate them from the block producer.
-            // TODO: in the future we'll retrieve the missing transactions from the block
-            // producer and validate them.
+                // all txs
+                let mut all_txs = submit_txs;
+                all_txs.extend_from_slice(&publish_txs);
 
-            let submit_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Submit]
-                .tx_ids
-                .0
-                .clone();
+                // Check if we've reached the end of an epoch and should finalize commitments
+                let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
+                let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
 
-            let (tx, rx) = oneshot::channel();
-            mempool
-                .send(MempoolServiceMessage::GetDataTxs(
-                    submit_tx_ids_to_check.clone(),
-                    tx,
-                ))
-                .map_err(|channel_error| {
-                    BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-                })?;
+                let arc_commitment_txs = Arc::new(commitments);
 
-            let submit_txs = rx
-                .await
-                .map_err(|e| {
-                    BlockDiscoveryInternalError::MempoolRequestFailed(format!(
-                        "Mempool response error: {}",
-                        e
-                    ))
-                })?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<DataTransactionHeader>>();
-
-            if submit_txs.len() != submit_tx_ids_to_check.len() {
-                return Err(BlockDiscoveryError::MissingTransactions(
-                    submit_tx_ids_to_check
-                        .into_iter()
-                        .filter(|id| !submit_txs.iter().any(|tx| tx.id == *id))
-                        .collect(),
-                ));
-            }
-
-            //====================================
-            // Publish ledger TX Validation
-            //------------------------------------
-            // 1. Validate the proof
-            // 2. Validate the transaction
-            // 3. Update the local tx headers index to include the ingress-proof.
-            //    This keeps the transaction from getting re-promoted each block.
-            //    (this last step performed in mempool after the block is confirmed)
-
-            let publish_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Publish]
-                .tx_ids
-                .0
-                .clone();
-
-            let (tx, rx) = oneshot::channel();
-            mempool
-                .send(MempoolServiceMessage::GetDataTxs(
-                    publish_tx_ids_to_check.clone(),
-                    tx,
-                ))
-                .map_err(|channel_error| {
-                    BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-                })?;
-
-            let publish_txs = rx
-                .await
-                .map_err(|e| {
-                    BlockDiscoveryInternalError::MempoolRequestFailed(format!(
-                        "Mempool response error: {}",
-                        e
-                    ))
-                })?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<DataTransactionHeader>>();
-
-            if publish_txs.len() != publish_tx_ids_to_check.len() {
-                let missing_txs = publish_tx_ids_to_check
-                    .into_iter()
-                    .filter(|id| !publish_txs.iter().any(|tx| tx.id == *id))
-                    .collect();
-                return Err(BlockDiscoveryError::MissingTransactions(missing_txs));
-            }
-
-            if !publish_txs.is_empty() {
-                let publish_proofs =
-                    match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
-                        Some(proofs) => proofs,
-                        None => {
-                            return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                                "Ingress proofs missing"
-                            )));
-                        }
-                    };
-
-                // Pre-Validate the ingress-proof by verifying the signature
-                for (i, tx_header) in publish_txs.iter().enumerate() {
-                    if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                        return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                            "Invalid ingress proof signature: {}",
-                            e
-                        )));
-                    }
-                }
-            }
-
-            //====================================
-            // Commitment ledger TX Validation
-            //------------------------------------
-            // Extract the Commitment ledger from the block
-            let commitment_ledger = new_block_header
-                .system_ledgers
-                .iter()
-                .find(|b| b.ledger_id == SystemLedger::Commitment);
-
-            // Validate commitments transactions exist (if there are commitment txids in the block)
-            let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-            if let Some(commitment_ledger) = commitment_ledger {
-                debug!(
-                    "incoming block commitment txids, height {}\n{:#?}",
-                    new_block_header.height, commitment_ledger
-                );
-                match get_commitment_tx_in_parallel(
-                    commitment_ledger.tx_ids.0.clone(),
-                    &mempool_sender,
-                    &db,
-                )
-                .await
-                {
-                    Ok(tx) => {
-                        commitments = tx;
-                    }
-                    Err(e) => {
-                        error!("Failed to collect commitment transactions: {:?}", e);
-                        return Err(BlockDiscoveryError::MissingTransactions(
-                            commitment_ledger.tx_ids.0.clone(),
-                        ));
-                    }
-                }
-            }
-
-            info!(
-                "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
-                new_block_header.block_hash,
-                new_block_header.height,
-                new_block_header.get_commitment_ledger_tx_ids(),
-                commitments.iter().map(|x| x.id).collect::<Vec<_>>()
-            );
-
-            // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
-            // have already been included in a recent parent.
-            let block_height = new_block_header.height;
-
-            let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
-            let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
-            let mut parent_block = previous_block_header.clone();
-
-            let binding = new_block_header.get_data_ledger_tx_ids();
-            let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
-
-            if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
-                while parent_block.height >= min_anchor_height {
-                    // Check to see if any data txids appeared in prior blocks
-                    let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
-
-                    // Compare each ledger type between current and parent blocks
-                    if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
-                        // Check for intersection between current and parent txids for this ledger
-                        for txid in incoming_data_tx_ids {
-                            if parent_txids.contains(txid) {
-                                return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
-                            }
-                        }
-                    }
-
-                    if parent_block.height == 0 {
-                        break;
-                    }
-
-                    // Continue the loop - get the next parent block
-                    // Get the next parent block and own it
-                    let previous_block_header = match db.view_eyre(|tx| {
-                        block_header_by_hash(tx, &parent_block.previous_block_hash, false)
-                    }) {
-                        Ok(Some(header)) => header,
-                        Ok(None) => break,
-                        Err(e) => {
-                            return Err(BlockDiscoveryError::InternalError(
-                                BlockDiscoveryInternalError::DatabaseError(e),
-                            ))
-                        }
-                    };
-
-                    parent_block = previous_block_header; // Move instead of borrow
-                }
-            }
-
-            let (parent_ema_snapshot, parent_epoch_snapshot) = {
-                let read = block_tree_guard.read();
-                let ema_snapshot = read
-                    .get_ema_snapshot(&parent_block_hash)
-                    .expect("parent block to be in block tree");
-                // FIXME: Does this need to be for the current block if it's an epoch block?
-                let epoch_snapshot = read
+                let epoch_snapshot = block_tree_guard
+                    .read()
                     .get_epoch_snapshot(&parent_block_hash)
-                    .expect("parent block to be in block_tree");
-                (ema_snapshot, epoch_snapshot)
-            };
+                    .expect("parent blocks epoch_snapshot should be retrievable");
 
-            let validation_result = prevalidate_block(
-                block_header,
-                previous_block_header,
-                parent_epoch_snapshot.clone(),
-                config,
-                reward_curve,
-                &parent_ema_snapshot,
-            )
-            .instrument(span2)
-            .await;
+                // Get the current epoch snapshot from the parent block
+                let mut parent_commitment_snapshot = block_tree_guard
+                    .read()
+                    .get_commitment_snapshot(&parent_block_hash)
+                    .expect("parent block to be in block_tree")
+                    .as_ref()
+                    .clone();
 
-            match validation_result {
-                Ok(()) => {
-                    // add block to mempool
-                    mempool_sender
-                        .send(MempoolServiceMessage::IngestBlocks {
-                            prevalidated_blocks: vec![new_block_header.clone()],
-                        })
-                        .map_err(|channel_error| {
-                            BlockDiscoveryInternalError::MempoolRequestFailed(
-                                channel_error.to_string(),
-                            )
-                        })?;
+                if is_epoch_block {
+                    let expected_commitment_tx = parent_commitment_snapshot.get_epoch_commitments();
 
-                    // all txs
-                    let mut all_txs = submit_txs;
-                    all_txs.extend_from_slice(&publish_txs);
-
-                    // Check if we've reached the end of an epoch and should finalize commitments
-                    let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
-                    let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
-
-                    let arc_commitment_txs = Arc::new(commitments);
-
-                    let epoch_snapshot = block_tree_guard
-                        .read()
-                        .get_epoch_snapshot(&parent_block_hash)
-                        .expect("parent blocks epoch_snapshot should be retrievable");
-
-                    // Get the current epoch snapshot from the parent block
-                    let mut parent_commitment_snapshot = block_tree_guard
-                        .read()
-                        .get_commitment_snapshot(&parent_block_hash)
-                        .expect("parent block to be in block_tree")
-                        .as_ref()
-                        .clone();
-
-                    if is_epoch_block {
-                        let expected_commitment_tx =
-                            parent_commitment_snapshot.get_epoch_commitments();
-
-                        // Validate epoch block has expected commitments in correct order
-                        let commitments_match =
-                            expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
-                        if !commitments_match {
-                            debug!(
+                    // Validate epoch block has expected commitments in correct order
+                    let commitments_match =
+                        expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
+                    if !commitments_match {
+                        debug!(
                                 "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
                                 expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
                                 arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
-                            return Err(BlockDiscoveryError::InvalidEpochBlock(
-                                "Epoch block commitments don't match expected".to_string(),
-                            ));
-                        }
-                    } else {
-                        // Validate and add each commitment transaction for non-epoch blocks
-                        for commitment_tx in arc_commitment_txs.iter() {
-                            let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
-                            let status = parent_commitment_snapshot
-                                .get_commitment_status(commitment_tx, is_staked);
+                        return Err(BlockDiscoveryError::InvalidEpochBlock(
+                            "Epoch block commitments don't match expected".to_string(),
+                        ));
+                    }
+                } else {
+                    // Validate and add each commitment transaction for non-epoch blocks
+                    for commitment_tx in arc_commitment_txs.iter() {
+                        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
+                        let status = parent_commitment_snapshot
+                            .get_commitment_status(commitment_tx, is_staked);
 
-                            // Ensure commitment is unknown (new) and from staked address
-                            match status {
-                                CommitmentSnapshotStatus::Accepted => {
-                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        format!(
-                                            "{:?} Commitment tx {:?} included in prior block",
-                                            commitment_tx.commitment_type, commitment_tx.id
-                                        ),
-                                    ));
-                                }
-                                CommitmentSnapshotStatus::Unsupported => {
-                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        "Commitment tx of unsupported type".to_string(),
-                                    ));
-                                }
-                                CommitmentSnapshotStatus::Unstaked => {
-                                    return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                        format!(
-                                            "Commitment tx {} from unstaked address {:?}",
-                                            commitment_tx.id, commitment_tx.signer
-                                        ),
-                                    ));
-                                }
-                                CommitmentSnapshotStatus::Unknown => {} // Success case
-                            }
-
-                            // Add commitment and validate it's accepted
-                            let is_staked_in_current_epoch =
-                                epoch_snapshot.is_staked(commitment_tx.signer);
-                            let add_status = parent_commitment_snapshot
-                                .add_commitment(commitment_tx, is_staked_in_current_epoch);
-                            if add_status != CommitmentSnapshotStatus::Accepted {
+                        // Ensure commitment is unknown (new) and from staked address
+                        match status {
+                            CommitmentSnapshotStatus::Accepted => {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                    "Commitment tx is invalid".to_string(),
+                                    format!(
+                                        "{:?} Commitment tx {:?} included in prior block",
+                                        commitment_tx.commitment_type, commitment_tx.id
+                                    ),
                                 ));
                             }
+                            CommitmentSnapshotStatus::Unsupported => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Commitment tx of unsupported type".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::Unstaked => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    format!(
+                                        "Commitment tx {} from unstaked address {:?}",
+                                        commitment_tx.id, commitment_tx.signer
+                                    ),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::Unknown => {} // Success case
+                        }
+
+                        // Add commitment and validate it's accepted
+                        let is_staked_in_current_epoch =
+                            epoch_snapshot.is_staked(commitment_tx.signer);
+                        let add_status = parent_commitment_snapshot
+                            .add_commitment(commitment_tx, is_staked_in_current_epoch);
+                        if add_status != CommitmentSnapshotStatus::Accepted {
+                            return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                "Commitment tx is invalid".to_string(),
+                            ));
                         }
                     }
-
-                    // WARNING: All block pre-validation needs to be completed before
-                    // sending this message.
-                    info!("Block is valid, sending to block tree");
-
-                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    block_tree_sender
-                        .send(BlockTreeServiceMessage::BlockPreValidated {
-                            block: new_block_header.clone(),
-                            commitment_txs: arc_commitment_txs,
-                            response: oneshot_tx,
-                        })
-                        .map_err(|channel_error| {
-                            BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
-                                "Failed to send BlockPreValidated message: {}",
-                                channel_error
-                            ))
-                        })?;
-
-                    oneshot_rx
-                        .await
-                        .map_err(|e| {
-                            BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
-                                "Failed to receive response for BlockPreValidated: {}",
-                                e
-                            ))
-                        })?
-                        .map_err(|e| {
-                            BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                                "Block pre-validation failed: {}",
-                                e
-                            ))
-                        })?;
-
-                    // Send the block to the gossip bus
-                    tracing::trace!(
-                        "sending block to bus: block height {:?}",
-                        &new_block_header.height
-                    );
-                    if let Err(error) =
-                        gossip_sender.send(GossipBroadcastMessage::from(new_block_header))
-                    {
-                        tracing::error!("Failed to send gossip message: {}", error);
-                    }
-
-                    Ok(())
                 }
-                Err(err) => {
-                    tracing::error!("Block validation error {:?}", err);
-                    Err(BlockDiscoveryError::BlockValidationError(err))
+
+                // WARNING: All block pre-validation needs to be completed before
+                // sending this message.
+                info!("Block is valid, sending to block tree");
+
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                block_tree_sender
+                    .send(BlockTreeServiceMessage::BlockPreValidated {
+                        block: new_block_header.clone(),
+                        commitment_txs: arc_commitment_txs,
+                        response: oneshot_tx,
+                    })
+                    .map_err(|channel_error| {
+                        BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
+                            "Failed to send BlockPreValidated message: {}",
+                            channel_error
+                        ))
+                    })?;
+
+                oneshot_rx
+                    .await
+                    .map_err(|e| {
+                        BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
+                            "Failed to receive response for BlockPreValidated: {}",
+                            e
+                        ))
+                    })?
+                    .map_err(|e| {
+                        BlockDiscoveryError::BlockValidationError(eyre::eyre!(
+                            "Block pre-validation failed: {}",
+                            e
+                        ))
+                    })?;
+
+                // Send the block to the gossip bus
+                tracing::trace!(
+                    "sending block to bus: block height {:?}",
+                    &new_block_header.height
+                );
+                if let Err(error) =
+                    gossip_sender.send(GossipBroadcastMessage::from(new_block_header))
+                {
+                    tracing::error!("Failed to send gossip message: {}", error);
                 }
+
+                Ok(())
             }
-        })
+            Err(err) => {
+                tracing::error!("Block validation error {:?}", err);
+                Err(BlockDiscoveryError::BlockValidationError(err))
+            }
+        }
     }
 }
 

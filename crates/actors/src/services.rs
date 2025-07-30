@@ -1,4 +1,5 @@
 use crate::{
+    block_discovery::BlockDiscoveryMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::{
         BlockMigratedEvent, BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent,
@@ -67,6 +68,7 @@ pub struct ServiceReceivers {
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
+    pub block_discovery: UnboundedReceiver<BlockDiscoveryMessage>,
 }
 
 #[derive(Debug)]
@@ -85,6 +87,7 @@ pub struct ServiceSendersInner {
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
     pub peer_network: PeerNetworkSender,
+    pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
 }
 
 impl ServiceSendersInner {
@@ -114,6 +117,8 @@ impl ServiceSendersInner {
         let (block_state_sender, block_state_receiver) =
             broadcast::channel::<BlockStateUpdated>(100);
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (block_discovery_sender, block_discovery_receiver) =
+            unbounded_channel::<BlockDiscoveryMessage>();
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -130,6 +135,7 @@ impl ServiceSendersInner {
             block_migrated_events: block_migrated_sender,
             block_state_events: block_state_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
+            block_discovery: block_discovery_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -146,6 +152,7 @@ impl ServiceSendersInner {
             block_migrated_events: block_migrated_receiver,
             block_state_events: block_state_receiver,
             peer_network: peer_network_receiver,
+            block_discovery: block_discovery_receiver,
         };
         (senders, receivers)
     }

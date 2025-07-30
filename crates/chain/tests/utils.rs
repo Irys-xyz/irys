@@ -13,8 +13,8 @@ use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
+use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::{
-    block_discovery::BlockDiscoveredMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::ReorgEvent,
     block_validation,
@@ -1271,11 +1271,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
     ) -> eyre::Result<()> {
-        match peer
-            .node_ctx
-            .actor_addresses
-            .block_discovery_addr
-            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
+        match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
+            .handle_block(Arc::new(irys_block_header.clone()))
             .await
         {
             Ok(_) => Ok(()),
@@ -1359,12 +1356,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         // Deliver block header
-        peer.node_ctx
-            .actor_addresses
-            .block_discovery_addr
-            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
+        BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
+            .handle_block(Arc::new(irys_block_header.clone()))
             .await
-            .map_err(|e| eyre::eyre!("{e:?}"))??;
+            .map_err(|e| eyre::eyre!("{e:?}"))?;
 
         // Send execution payload if available
         if let Some(evm_block) = self
