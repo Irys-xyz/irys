@@ -6,8 +6,38 @@ use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub type IrysTransactionId = H256;
+
+/// Errors that can occur during commitment transaction validation
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CommitmentValidationError {
+    /// The provided fee is insufficient
+    #[error("Insufficient fee: {provided} < required {required}")]
+    InsufficientFee { provided: u64, required: u64 },
+    /// Invalid stake or unstake value
+    #[error("Invalid stake value: {provided} != expected {expected}")]
+    InvalidStakeValue { provided: U256, expected: U256 },
+    /// Invalid pledge value
+    #[error(
+        "Invalid pledge value: {provided} != expected {expected} (pledge_count: {pledge_count})"
+    )]
+    InvalidPledgeValue {
+        provided: U256,
+        expected: U256,
+        pledge_count: u64,
+    },
+    /// Invalid unpledge value
+    #[error(
+        "Invalid unpledge value: {provided} != expected {expected} (pledge_count: {pledge_count})"
+    )]
+    InvalidUnpledgeValue {
+        provided: U256,
+        expected: U256,
+        pledge_count: u64,
+    },
+}
 
 #[derive(
     Clone,
@@ -242,23 +272,34 @@ impl CommitmentTransaction {
         }
     }
 
+    /// Calculate the value for a pledge at the given count
+    /// For pledge N, use count = N
+    /// For unpledge refund, use count = N - 1 (to get the value of the most recent pledge)
+    pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: u64) -> U256 {
+        config
+            .pledge_base_value
+            .apply_pledge_decay(pledge_count, config.pledge_decay)
+            .map(|a| a.amount)
+            .unwrap_or(config.pledge_base_value.amount)
+    }
+
     /// Create a new stake transaction with the configured stake fee as value
-    pub fn new_stake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+    pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
         Self {
             commitment_type: CommitmentType::Stake,
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value: config.stake_value.amount,
             ..Self::new(config)
         }
     }
 
     /// Create a new unstake transaction with the configured stake fee as value
-    pub fn new_unstake(config: &ConsensusConfig, anchor: H256, fee: u64) -> Self {
+    pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
         Self {
             commitment_type: CommitmentType::Unstake,
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value: config.stake_value.amount,
             ..Self::new(config)
         }
@@ -270,23 +311,18 @@ impl CommitmentTransaction {
     pub async fn new_pledge(
         config: &ConsensusConfig,
         anchor: H256,
-        fee: u64,
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
-
-        // Calculate: pledge_base_fee / ((count + 1) ^ pledge_decay)
-        let value = config
-            .pledge_base_value
-            .apply_pledge_decay(count, config.pledge_decay)
-            .map(|a| a.amount)
-            .unwrap_or(config.pledge_base_value.amount);
+        let value = Self::calculate_pledge_value_at_count(config, count);
 
         Self {
-            commitment_type: CommitmentType::Pledge,
+            commitment_type: CommitmentType::Pledge {
+                pledge_count_before_executing: count,
+            },
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value,
             ..Self::new(config)
         }
@@ -298,7 +334,6 @@ impl CommitmentTransaction {
     pub async fn new_unpledge(
         config: &ConsensusConfig,
         anchor: H256,
-        fee: u64,
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
@@ -308,19 +343,15 @@ impl CommitmentTransaction {
         let value = if count == 0 {
             U256::zero()
         } else {
-            // Calculate the value of the most recent pledge (count - 1)
-            // This ensures unpledge matches the cost of the last pledge made
-            config
-                .pledge_base_value
-                .apply_pledge_decay(count - 1, config.pledge_decay)
-                .map(|a| a.amount)
-                .unwrap_or(config.pledge_base_value.amount)
+            Self::calculate_pledge_value_at_count(config, count - 1)
         };
 
         Self {
-            commitment_type: CommitmentType::Unpledge,
+            commitment_type: CommitmentType::Unpledge {
+                pledge_count_before_executing: count,
+            },
             anchor,
-            fee,
+            fee: config.mempool.commitment_fee,
             value,
             ..Self::new(config)
         }
@@ -353,6 +384,74 @@ impl CommitmentTransaction {
             && self
                 .signature
                 .validate_signature(self.signature_hash(), self.signer)
+    }
+
+    /// Validates that the commitment transaction has a sufficient fee
+    pub fn validate_fee(&self, config: &ConsensusConfig) -> Result<(), CommitmentValidationError> {
+        let required_fee = config.mempool.commitment_fee;
+
+        if self.fee < required_fee {
+            return Err(CommitmentValidationError::InsufficientFee {
+                provided: self.fee,
+                required: required_fee,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validates the value field based on commitment type
+    pub fn validate_value(
+        &self,
+        config: &ConsensusConfig,
+    ) -> Result<(), CommitmentValidationError> {
+        match &self.commitment_type {
+            CommitmentType::Stake | CommitmentType::Unstake => {
+                // For stake/unstake, value must match configured stake value
+                let expected_value = config.stake_value.amount;
+                if self.value != expected_value {
+                    return Err(CommitmentValidationError::InvalidStakeValue {
+                        provided: self.value,
+                        expected: expected_value,
+                    });
+                }
+            }
+            CommitmentType::Pledge {
+                pledge_count_before_executing,
+            } => {
+                // For pledge, validate using the embedded pledge count
+                let expected_value =
+                    Self::calculate_pledge_value_at_count(config, *pledge_count_before_executing);
+
+                if self.value != expected_value {
+                    return Err(CommitmentValidationError::InvalidPledgeValue {
+                        provided: self.value,
+                        expected: expected_value,
+                        pledge_count: *pledge_count_before_executing,
+                    });
+                }
+            }
+            CommitmentType::Unpledge {
+                pledge_count_before_executing,
+            } => {
+                // For unpledge, validate using the embedded pledge count
+                // Calculate expected refund value
+                let expected_value = Self::calculate_pledge_value_at_count(
+                    config,
+                    pledge_count_before_executing.saturating_sub(1),
+                );
+
+                if self.value != expected_value {
+                    return Err(CommitmentValidationError::InvalidUnpledgeValue {
+                        provided: self.value,
+                        expected: expected_value,
+                        pledge_count: *pledge_count_before_executing,
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -432,10 +531,10 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn total_cost(&self) -> U256 {
-        let additional_fee = match self.commitment_type {
+        let additional_fee = match &self.commitment_type {
             CommitmentType::Stake => self.value,
-            CommitmentType::Pledge => self.value,
-            CommitmentType::Unpledge => U256::zero(),
+            CommitmentType::Pledge { .. } => self.value,
+            CommitmentType::Unpledge { .. } => U256::zero(),
             CommitmentType::Unstake => U256::zero(),
         };
         U256::from(self.fee).saturating_add(additional_fee)
@@ -614,7 +713,14 @@ impl From<DataTransactionHeader> for IrysTransactionResponse {
 #[async_trait::async_trait]
 pub trait PledgeDataProvider {
     /// Returns the number of existing pledges for a given user address
-    async fn pledge_count(&self, user_address: Address) -> usize;
+    async fn pledge_count(&self, user_address: Address) -> u64;
+}
+
+#[async_trait::async_trait]
+impl PledgeDataProvider for u64 {
+    async fn pledge_count(&self, _user_address: Address) -> Self {
+        *self
+    }
 }
 
 #[cfg(test)]
@@ -623,7 +729,7 @@ mod test_helpers {
     use std::collections::HashMap;
 
     pub(super) struct MockPledgeProvider {
-        pub pledge_counts: HashMap<Address, usize>,
+        pub pledge_counts: HashMap<Address, u64>,
     }
 
     impl MockPledgeProvider {
@@ -633,7 +739,7 @@ mod test_helpers {
             }
         }
 
-        pub(super) fn with_pledge_count(mut self, address: Address, count: usize) -> Self {
+        pub(super) fn with_pledge_count(mut self, address: Address, count: u64) -> Self {
             self.pledge_counts.insert(address, count);
             self
         }
@@ -641,7 +747,7 @@ mod test_helpers {
 
     #[async_trait::async_trait]
     impl PledgeDataProvider for MockPledgeProvider {
-        async fn pledge_count(&self, user_address: Address) -> usize {
+        async fn pledge_count(&self, user_address: Address) -> u64 {
             self.pledge_counts.get(&user_address).copied().unwrap_or(0)
         }
     }
@@ -807,7 +913,7 @@ mod tests {
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
-        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]), 1);
+        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]));
         tx.id = H256::from([255_u8; 32]);
         tx.signer = Address::default();
         tx.signature = Signature::test_signature().into();
@@ -852,7 +958,7 @@ mod pledge_decay_parametrized_tests {
     #[case(23, dec!(1145.0))]
     #[case(24, dec!(1103.7))]
     async fn test_pledge_cost_with_decay(
-        #[case] existing_pledges: usize,
+        #[case] existing_pledges: u64,
         #[case] expected_cost: Decimal,
     ) {
         // Setup config with $20,000 base fee and 0.9 decay rate
@@ -867,7 +973,7 @@ mod pledge_decay_parametrized_tests {
 
         // Create a new pledge transaction
         let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), 1, &provider, signer_address)
+            CommitmentTransaction::new_pledge(&config, H256::zero(), &provider, signer_address)
                 .await;
 
         // Convert actual value to decimal for comparison
@@ -906,7 +1012,7 @@ mod pledge_decay_parametrized_tests {
     #[case(23,dec!(1189.8))]
     #[case(24,dec!(1145.0))]
     async fn test_unpledge_cost(
-        #[case] existing_pledges: usize,
+        #[case] existing_pledges: u64,
         #[case] expected_unpledge_value: Decimal,
     ) {
         // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
@@ -920,17 +1026,15 @@ mod pledge_decay_parametrized_tests {
             MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
 
         // Create an unpledge transaction
-        let unpledge_tx = CommitmentTransaction::new_unpledge(
-            &config,
-            H256::zero(),
-            1,
-            &provider,
-            signer_address,
-        )
-        .await;
+        let unpledge_tx =
+            CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer_address)
+                .await;
 
         // Verify the commitment type is correct
-        assert_eq!(unpledge_tx.commitment_type, CommitmentType::Unpledge);
+        assert!(matches!(
+            unpledge_tx.commitment_type,
+            CommitmentType::Unpledge { .. }
+        ));
 
         // Verify unpledge total cost only includes fee (not value)
         assert_eq!(

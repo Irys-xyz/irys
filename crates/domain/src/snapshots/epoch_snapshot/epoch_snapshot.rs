@@ -620,7 +620,9 @@ impl EpochSnapshot {
         for commitment_tx in commitments {
             match commitment_tx.commitment_type {
                 irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
-                irys_primitives::CommitmentType::Pledge => pledge_commitments.push(commitment_tx),
+                irys_primitives::CommitmentType::Pledge { .. } => {
+                    pledge_commitments.push(commitment_tx)
+                }
                 _ => unimplemented!(),
             }
         }

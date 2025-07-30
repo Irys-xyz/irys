@@ -4999,7 +4999,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
- "async-trait",
  "bytes",
  "eyre",
  "irys-config",

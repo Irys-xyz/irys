@@ -137,7 +137,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     )),
                     transaction_fee,
                 }),
-                irys_primitives::CommitmentType::Pledge => Ok(ShadowMetadata {
+                irys_primitives::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
                     shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Pledge(
                         BalanceDecrement {
                             amount: total_cost,
@@ -147,7 +147,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     )),
                     transaction_fee,
                 }),
-                irys_primitives::CommitmentType::Unpledge => {
+                irys_primitives::CommitmentType::Unpledge { .. } => {
                     create_increment_or_decrement("unpledge").map(|result| ShadowMetadata {
                         shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unpledge(result)),
                         transaction_fee,

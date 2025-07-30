@@ -25,7 +25,7 @@ impl MempoolPledgeProvider {
 
 #[async_trait::async_trait]
 impl PledgeDataProvider for MempoolPledgeProvider {
-    async fn pledge_count(&self, user_address: Address) -> usize {
+    async fn pledge_count(&self, user_address: Address) -> u64 {
         // Get the canonical pledge count from the blockchain state
         let canonical_count = {
             let commitment_snapshot = self
@@ -47,7 +47,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
                 .get(&user_address)
                 .map(|txs| {
                     txs.iter()
-                        .filter(|tx| tx.commitment_type == CommitmentType::Pledge)
+                        .filter(|tx| matches!(tx.commitment_type, CommitmentType::Pledge { .. }))
                         .count()
                 })
                 .unwrap_or(0)
@@ -61,7 +61,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
                 .get(&user_address)
                 .map(|txs| {
                     txs.iter()
-                        .filter(|tx| tx.commitment_type == CommitmentType::Unpledge)
+                        .filter(|tx| matches!(tx.commitment_type, CommitmentType::Unpledge { .. }))
                         .count()
                 })
                 .unwrap_or(0)
@@ -69,8 +69,8 @@ impl PledgeDataProvider for MempoolPledgeProvider {
 
         // Calculate effective pledge count:
         // canonical pledges + pending pledges - pending unpledges
-        canonical_count
-            .saturating_add(pending_pledges)
-            .saturating_sub(pending_unpledges)
+        (canonical_count as u64)
+            .saturating_add(pending_pledges as u64)
+            .saturating_sub(pending_unpledges as u64)
     }
 }
