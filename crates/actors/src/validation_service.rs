@@ -38,7 +38,6 @@ mod active_validations;
 mod block_validation_task;
 
 #[derive(Debug)]
-
 pub enum VdfValidationResult {
     Valid,
     Invalid(eyre::Report),
