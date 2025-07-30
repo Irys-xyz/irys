@@ -201,3 +201,50 @@ impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::submodule::{create_or_open_submodule_db, tables::DataSizeByDataRoot};
+    use eyre::WrapErr;
+    use irys_types::H256;
+    use reth_db::transaction::DbTxMut; // for demonstration
+
+    #[test]
+    fn update_eyre_no_commit_on_error() -> eyre::Result<()> {
+        // We'll need a test instance of DatabaseEnv
+        let db = create_or_open_submodule_db("test_database")
+            .wrap_err("Failed to open test DB")
+            .unwrap();
+
+        // The closure intentionally returns an error, which should cause an early return in update_eyre, before the db commit inside update_eyre can happen
+        let result: Result<(), _> = db.update_eyre(|tx| {
+            // Insert row in the DataSizeByDataRoot table (table is not important for this test)
+            tx.put::<DataSizeByDataRoot>(H256::zero(), 1234_u64)?;
+            // Force an error
+            Err(eyre::eyre!("Simulated error in closure"))
+        });
+
+        // Confirm the error was returned
+        assert!(
+            result.is_err(),
+            "Expected an error from update_eyre closure"
+        );
+
+        // Verify no commit has occurred, i.e. there are still zero rows in the db table
+        let read_tx = db.tx().expect("Failed to create read-only transaction");
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(
+            read_tx
+                .cursor_read::<DataSizeByDataRoot>()?
+                .walk(None)?
+                .count(),
+            0,
+            "Expected zero rows in the table since the transaction should not commit"
+        );
+
+        Ok(())
+    }
+}
