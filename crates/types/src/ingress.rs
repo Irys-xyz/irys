@@ -1,4 +1,4 @@
-use alloy_primitives::Address;
+use alloy_primitives::{Address, ChainId};
 use alloy_signer::Signature;
 use eyre::OptionExt as _;
 use openssl::sha;
@@ -18,7 +18,7 @@ pub struct IngressProof {
     pub signature: IrysSignature,
     pub data_root: H256,
     pub proof: H256,
-    pub chain_id: u64,
+    pub chain_id: ChainId,
 }
 
 impl Compress for IngressProof {
@@ -237,12 +237,12 @@ mod tests {
 
         // Verify that mainnet proof is valid for mainnet
         assert!(verify_ingress_proof(
-            mainnet_proof.clone(),
+            mainnet_proof,
             chunks.clone().into_iter().map(Ok)
         )?);
 
         // Create a modified proof where we try to use testnet proof with mainnet chain_id
-        let mut replay_attack_proof = testnet_proof.clone();
+        let mut replay_attack_proof = testnet_proof;
         replay_attack_proof.chain_id = mainnet_chain_id;
 
         // This should fail verification because the signature was created with testnet chain_id
