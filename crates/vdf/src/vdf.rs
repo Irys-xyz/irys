@@ -238,10 +238,11 @@ fn store_step(
 mod tests {
     use super::*;
     use crate::state::test_helpers::mocked_vdf_service;
-    use crate::state::{vdf_steps_are_valid, VdfStateReadonly};
+    use crate::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
     use crate::vdf_sha_verification;
     use irys_types::*;
     use nodit::interval::ii;
+    use std::sync::atomic::AtomicU8;
     use std::{
         sync::{atomic::AtomicU64, Arc},
         time::Duration,
@@ -419,7 +420,14 @@ mod tests {
             .expect("to be able to build vdf validation pool");
 
         assert!(
-            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard,).is_ok(),
+            vdf_steps_are_valid(
+                &pool,
+                &vdf_info,
+                &config.consensus.vdf,
+                &vdf_steps_guard,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8))
+            )
+            .is_ok(),
             "Invalid VDF"
         );
 
@@ -525,7 +533,14 @@ mod tests {
             .expect("to be able to build vdf validation pool");
 
         assert!(
-            vdf_steps_are_valid(&pool, &vdf_info, &config.consensus.vdf, &vdf_steps_guard,).is_ok(),
+            vdf_steps_are_valid(
+                &pool,
+                &vdf_info,
+                &config.consensus.vdf,
+                &vdf_steps_guard,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8))
+            )
+            .is_ok(),
             "Invalid VDF"
         );
 

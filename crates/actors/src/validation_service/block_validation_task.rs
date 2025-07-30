@@ -2,13 +2,17 @@
 //!
 //! Handles individual block validation through a two-stage pipeline:
 //!
-//! ## Stage 1: Parallel Validation
+//! ## Stage 1: VDF validation (execute_vdf)
+//! - **VDF**: Verifies VDF steps are valid & fast-forwards the node if they are
+//! Uses a single preemptible task slot to prevent thread overutilisation
+//!
+//! ## Stage 2: Concurrent Validation (execute_concurrent)
 //! Three concurrent validation stages:
 //! - **Recall Range**: Async data recall and storage proof verification
 //! - **POA**: Blocking cryptographic proof-of-access validation
 //! - **Shadow Transactions**: Async Reth integration validation
 //!
-//! ## Stage 2: Parent Dependency Resolution  
+//! ## Stage 3: Parent Dependency Resolution  
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
@@ -16,9 +20,12 @@ use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
     is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
 };
-use crate::validation_service::ValidationServiceInner;
+use crate::validation_service::active_validations::BlockPriorityMeta;
+use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
+use irys_vdf::state::CancelEnum;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
 
@@ -32,31 +39,51 @@ enum ParentValidationResult {
 }
 
 /// Handles the execution of a single block validation task
+#[derive(Clone)]
 pub(crate) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
-    pub block_hash: BlockHash,
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
+    pub priority: BlockPriorityMeta,
 }
+
+impl Ord for BlockValidationTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority.cmp(&other.priority)
+    }
+}
+impl PartialOrd for BlockValidationTask {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for BlockValidationTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority // captures the block, so this should be good enough
+    }
+}
+
+impl Eq for BlockValidationTask {}
 
 impl BlockValidationTask {
     pub(crate) fn new(
         block: Arc<IrysBlockHeader>,
-        block_hash: BlockHash,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
+        meta: BlockPriorityMeta,
     ) -> Self {
         Self {
             block,
-            block_hash,
             service_inner,
             block_tree_guard,
+            priority: meta,
         }
     }
 
-    /// Execute the complete validation task
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute(self) {
+    /// Execute the concurrent validation task
+    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    pub(crate) async fn execute_concurrent(self) {
         let validation_result = self
             .validate_block()
             .await
@@ -79,15 +106,46 @@ impl BlockValidationTask {
         self.send_validation_result(validation_result);
     }
 
+    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    pub(crate) async fn execute_vdf(self, cancel: Arc<AtomicU8>) -> VdfValidationResult {
+        let inner = Arc::clone(&self.service_inner);
+        let block = Arc::clone(&self.block);
+
+        // run the VDF validation
+        // we use a task here as it'll drive the future more consistently than `poll_immediate`
+        let cancel2 = Arc::clone(&cancel);
+        let res = tokio::spawn(
+            async move { inner.ensure_vdf_is_valid(&block, cancel2).await }.in_current_span(),
+        )
+        .await
+        .expect("Failed to join ensure_vdf_is_valid task");
+
+        let mapped_res = res
+            .map(|()| VdfValidationResult::Valid)
+            .unwrap_or_else(|e| {
+                // use the value of `cancel` to figure out if we errored because we were cancelled
+                // TODO: switch this out for a definite Result type
+                let cancel_state = cancel.load(Ordering::Relaxed);
+                if cancel_state == CancelEnum::Cancelled as u8 {
+                    VdfValidationResult::Cancelled
+                } else {
+                    VdfValidationResult::Invalid(e)
+                }
+            });
+        debug!("Finished validating with result {:?}", &mapped_res);
+        mapped_res
+    }
+
     /// Wait for parent validation to complete
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
+    /// We do this because just because a block is valid internally, if it's not connected to a valid chain it's still not valid
+    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
 
         loop {
             // Check if block height is too far behind canonical tip
             if self.should_exit_due_to_height_diff() {
-                let _span = tracing::debug_span!("height_diff_exit", block_hash = %self.block_hash, block_height = %self.block.height).entered();
+                let _span = tracing::debug_span!("height_diff_exit", block_hash = %self.block.block_hash, block_height = %self.block.height).entered();
                 debug!("exiting validation task - block too far behind canonical tip");
                 return ParentValidationResult::Cancelled;
             }
@@ -142,10 +200,10 @@ impl BlockValidationTask {
     }
 
     /// Send the validation result to the block tree service
-    fn send_validation_result(&self, validation_result: ValidationResult) {
+    pub(crate) fn send_validation_result(&self, validation_result: ValidationResult) {
         if let Err(e) = self.service_inner.service_senders.block_tree.send(
             BlockTreeServiceMessage::BlockValidationFinished {
-                block_hash: self.block_hash,
+                block_hash: self.block.block_hash,
                 validation_result,
             },
         ) {
@@ -154,7 +212,7 @@ impl BlockValidationTask {
     }
 
     /// Perform block validation
-    #[tracing::instrument(skip_all, err, fields(block_hash = %self.block_hash, block_height = %self.block.height))]
+    #[tracing::instrument(skip_all, err, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
     async fn validate_block(&self) -> eyre::Result<ValidationResult> {
         let poa = self.block.poa.clone();
         let miner_address = self.block.miner_address;
@@ -171,7 +229,7 @@ impl BlockValidationTask {
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         }
-        .instrument(tracing::info_span!("recall_range_validation", block_hash = %self.block_hash, block_height = %self.block.height));
+        .instrument(tracing::info_span!("recall_range_validation", block_hash = %self.block.block_hash, block_height = %self.block.height));
 
         let epoch_snapshot = self
             .block_tree_guard
@@ -183,7 +241,7 @@ impl BlockValidationTask {
         let poa_task = {
             let consensus_config = self.service_inner.config.consensus.clone();
             let block_index_guard = self.service_inner.block_index_guard.clone();
-            let block_hash = self.block_hash;
+            let block_hash = self.block.block_hash;
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 poa_is_valid(
@@ -198,6 +256,7 @@ impl BlockValidationTask {
             })
             .instrument(tracing::info_span!("poa_validation", block_hash = %block_hash, block_height = %block_height))
         };
+
         let poa_task = async move {
             let res = poa_task.await;
 
@@ -222,7 +281,7 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
             )
-            .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block_hash, block_height = %self.block.height))
+            .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
             .map(|()| ValidationResult::Valid)

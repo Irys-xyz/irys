@@ -42,7 +42,7 @@ async fn genesis_test() {
     // genesis block
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let commitments = add_genesis_commitments(&mut genesis_block, &config);
+    let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
 
     // Create epoch service with random miner address
     let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
@@ -200,7 +200,7 @@ async fn add_slots_test() {
     genesis_block.height = 0;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
-    let commitments = add_genesis_commitments(&mut genesis_block, &config);
+    let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
 
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
@@ -304,7 +304,7 @@ async fn partition_expiration_and_repacking_test() {
 
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let commitments = add_test_commitments(&mut genesis_block, 5, &config);
+    let commitments = add_test_commitments(&mut genesis_block, 5, &config).await;
 
     // Create a storage config for testing
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
@@ -660,7 +660,7 @@ async fn epoch_blocks_reinitialization_test() {
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
     let pledge_count = config.consensus.epoch.num_capacity_partitions.unwrap_or(31) as u8;
-    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
+    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config).await;
 
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
@@ -848,7 +848,7 @@ async fn partitions_assignment_determinism_test() {
     genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
     genesis_block.height = 0;
     let pledge_count = 20;
-    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config);
+    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config).await;
 
     let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
 

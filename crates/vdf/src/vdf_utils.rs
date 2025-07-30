@@ -3,6 +3,7 @@ use irys_types::VDFLimiterInfo;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
+/// Assumes the provided steps have been *FULLY VALIDATED*
 #[tracing::instrument(err)]
 pub fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: &VDFLimiterInfo,

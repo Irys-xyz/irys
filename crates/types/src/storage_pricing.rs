@@ -223,7 +223,7 @@ impl Amount<Irys> {
     #[tracing::instrument(err)]
     pub fn apply_pledge_decay(
         self,
-        current_pledge_count: usize,
+        current_pledge_count: u64,
         decay_rate: Amount<Percentage>,
     ) -> Result<Self> {
         // The formula is: pledge_value = pledge_base_fee / ((count + 1) ^ decay_rate)
