@@ -1678,7 +1678,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     // Test case 2: staked pledge commitment txs
     //
 
-    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used to check mempool ingress
     let pledge_tx = new_pledge_tx(
         &H256::zero(),
         &signer,
