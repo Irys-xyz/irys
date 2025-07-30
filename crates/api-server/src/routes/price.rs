@@ -9,7 +9,7 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    transaction::PledgeDataProvider as _,
+    transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
 };
 use serde::{Deserialize, Serialize};
@@ -125,18 +125,6 @@ fn parse_user_address(address_str: &str) -> Result<Address, actix_web::Error> {
     Address::from_str(address_str).map_err(|_| ErrorBadRequest("Invalid address format"))
 }
 
-/// Calculate the pledge value based on the pledge count and decay rate
-fn calculate_pledge_value(
-    base_value: Amount<Irys>,
-    decay_rate: Amount<irys_types::storage_pricing::phantoms::Percentage>,
-    pledge_count: usize,
-) -> U256 {
-    base_value
-        .apply_pledge_decay(pledge_count, decay_rate)
-        .map(|a| a.amount)
-        .unwrap_or(base_value.amount)
-}
-
 pub async fn get_pledge_price(
     path: Path<String>,
     state: web::Data<ApiState>,
@@ -150,10 +138,9 @@ pub async fn get_pledge_price(
         .pledge_count(user_address)
         .await;
 
-    // Calculate the pledge value with decay
-    let pledge_value = calculate_pledge_value(
-        state.config.consensus.pledge_base_value,
-        state.config.consensus.pledge_decay,
+    // Calculate the pledge value using the same logic as CommitmentTransaction
+    let pledge_value = CommitmentTransaction::calculate_pledge_value_at_count(
+        &state.config.consensus,
         pledge_count,
     );
 
@@ -179,11 +166,15 @@ pub async fn get_unpledge_price(
         .pledge_count(user_address)
         .await;
 
-    let refund_amount = calculate_pledge_value(
-        state.config.consensus.pledge_base_value,
-        state.config.consensus.pledge_decay,
-        pledge_count.saturating_sub(1),
-    );
+    // Calculate refund amount using the same logic as CommitmentTransaction
+    let refund_amount = if pledge_count == 0 {
+        U256::zero()
+    } else {
+        CommitmentTransaction::calculate_pledge_value_at_count(
+            &state.config.consensus,
+            pledge_count.saturating_sub(1),
+        )
+    };
 
     let commitment_fee = state.config.consensus.mempool.commitment_fee;
 

@@ -65,6 +65,12 @@ impl MempoolService {
 
         let handle = runtime_handle.spawn(
             async move {
+                let mempool_state = Arc::new(RwLock::new(mempool_state));
+                let pledge_provider = MempoolPledgeProvider::new(
+                    mempool_state.clone(),
+                    block_tree_read_guard.clone(),
+                );
+
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
@@ -75,10 +81,11 @@ impl MempoolService {
                         config,
                         exec: TaskExecutor::current(),
                         irys_db,
-                        mempool_state: Arc::new(RwLock::new(mempool_state)),
+                        mempool_state,
                         reth_node_adapter,
                         service_senders,
                         storage_modules_guard,
+                        pledge_provider,
                     },
                 };
                 mempool_service
