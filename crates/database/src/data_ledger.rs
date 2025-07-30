@@ -117,6 +117,8 @@ pub trait LedgerCore {
     fn get_slot_needs(&self) -> Vec<(usize, usize)>;
 
     fn get_slots(&self) -> &Vec<LedgerSlot>;
+
+    fn num_partitions_per_slot(&self) -> u64;
 }
 
 impl LedgerCore for PermanentLedger {
@@ -156,6 +158,10 @@ impl LedgerCore for PermanentLedger {
     /// Returns a slice of the ledgers slots
     fn get_slots(&self) -> &Vec<LedgerSlot> {
         &self.slots
+    }
+
+    fn num_partitions_per_slot(&self) -> u64 {
+        self.num_partitions_per_slot
     }
 }
 
@@ -205,6 +211,10 @@ impl LedgerCore for TermLedger {
     /// Returns a slice of the ledgers slots
     fn get_slots(&self) -> &Vec<LedgerSlot> {
         &self.slots
+    }
+
+    fn num_partitions_per_slot(&self) -> u64 {
+        self.num_partitions_per_slot
     }
 }
 

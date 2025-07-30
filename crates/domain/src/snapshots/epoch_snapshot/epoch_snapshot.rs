@@ -574,7 +574,7 @@ impl EpochSnapshot {
         //
         // Example: A ledger with 32TB of data uses 2 slots, regardless of whether
         // there are 2 or 10 partition replicas of each slot across the network.
-        let max_ledger_capacity = num_slots * num_chunks_in_partition;
+        let max_ledger_capacity = num_slots * num_chunks_in_partition * data_ledger.num_partitions_per_slot();
 
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
