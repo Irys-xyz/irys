@@ -169,7 +169,12 @@ mod tests {
             .map(Vec::from)
             .collect();
         let chain_id = 1; // Example chain_id for testing
-        let proof = generate_ingress_proof(signer, data_root, chunks.clone().into_iter().map(Ok), chain_id)?;
+        let proof = generate_ingress_proof(
+            signer,
+            data_root,
+            chunks.clone().into_iter().map(Ok),
+            chain_id,
+        )?;
 
         // Verify the ingress proof
         assert!(verify_ingress_proof(
@@ -212,7 +217,7 @@ mod tests {
             signer.clone(),
             data_root,
             chunks.clone().into_iter().map(Ok),
-            testnet_chain_id
+            testnet_chain_id,
         )?;
 
         // Generate proof for mainnet (chain_id = 2)
@@ -221,7 +226,7 @@ mod tests {
             signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
-            mainnet_chain_id
+            mainnet_chain_id,
         )?;
 
         // Verify that testnet proof is valid for testnet
