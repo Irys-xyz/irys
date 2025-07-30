@@ -252,15 +252,14 @@ impl ActiveValidations {
         tasks_completed
     }
 
-    /// Process the vdf task
-    /// returns `true` if the current VDF task polled to completion and we should be run again
-    #[instrument(skip_all, fields(pending = self.vdf_pending_queue.len()))]
-    pub(crate) async fn process_completed_vdf(&mut self) -> bool {
+    /// Gets the current VDF task, or creates a new one.
+    /// also handles cancellation/preempting
+    pub(crate) fn get_or_create_vdf_task(&mut self) -> Option<VdfValidationTask> {
         let peek = self.vdf_pending_queue.peek();
 
         // if we have an existing task, figure out if it's being cancelled
         // if not, check if we need to cancel it (to replace it with a higher priority task)
-        let mut task = if let Some(task) = self.vdf_task.take() {
+        let task = if let Some(task) = self.vdf_task.take() {
             // if cancelling, return current task (it'll poll to completion once cancellation completes)
             let current_cancel_state = task.cancel.load(Ordering::Relaxed);
             if current_cancel_state != CancelEnum::Continue as u8 {
@@ -308,7 +307,58 @@ impl ActiveValidations {
             }
         } else {
             // Nothing to process
-            return false;
+            return None;
+        };
+        Some(task)
+    }
+
+    pub(crate) fn handle_vdf_validation_result(
+        &mut self,
+        task: &VdfValidationTask,
+        result: VdfValidationResult,
+    ) {
+        match result {
+            VdfValidationResult::Valid => {
+                // remove task from the vdf_pending queue
+                let (hash, task) = self.vdf_pending_queue.remove(&task.block_hash).unwrap_or_else(|| panic!("Expected processing task for {} to have an entry in the vdf_pending queue",
+                        &task.block_hash));
+                // do NOT send anything to the block tree
+
+                debug!(
+                    "Processed VDF task for block {}, spawning concurrent validation task",
+                    &hash
+                );
+
+                // add to active concurrent validations (this also adds to the concurrent queue)
+                self.push_concurrent_fut(task.0.block.clone(), task.0.execute_concurrent().boxed())
+            }
+            VdfValidationResult::Invalid(err) => {
+                // remove task from the vdf_pending queue
+                let (invalid_hash, invalid_item) = self
+                    .vdf_pending_queue
+                    .remove(&task.block_hash)
+                    .expect("Expected processing task to have an entry in the vdf_pending queue");
+                error!(block_hash = %invalid_hash, "Error validating VDF - {}", &err);
+                // notify the block tree
+                invalid_item
+                    .0
+                    .send_validation_result(ValidationResult::Invalid);
+            }
+            VdfValidationResult::Cancelled => {
+                debug!("VDF task {} was cancelled", &task.block_hash);
+                // do nothing, leave the task in the pending queue
+            }
+        };
+    }
+
+    /// Process the vdf task
+    /// returns `true` if the current VDF task polled to completion and we should be run again
+    #[instrument(skip_all, fields(pending = self.vdf_pending_queue.len()))]
+    pub(crate) async fn process_completed_vdf(&mut self) -> bool {
+        // get the VDF task we should poll, or early return if there's nothing to process
+        let mut task = match self.get_or_create_vdf_task() {
+            Some(task) => task,
+            None => return false, // Nothing to do
         };
 
         // process the provided task
@@ -316,50 +366,15 @@ impl ActiveValidations {
         // we still poll cancelling tasks to ensure they stop correctly
         let poll_res = poll_immediate(&mut task.fut).await;
 
-        let has_completed = poll_res.is_some();
-
         if let Some(result) = poll_res {
-            match result {
-                VdfValidationResult::Valid => {
-                    // remove task from the vdf_pending queue
-                    let (hash, task) = self.vdf_pending_queue.remove(&task.block_hash).unwrap_or_else(|| panic!("Expected processing task for {} to have an entry in the vdf_pending queue",
-                        &task.block_hash));
-                    // do NOT send anything to the block tree
-
-                    debug!(
-                        "Processed VDF task for block {}, spawning concurrent validation task",
-                        &hash
-                    );
-
-                    // add to active concurrent validations (this also adds to the concurrent queue)
-                    self.push_concurrent_fut(
-                        task.0.block.clone(),
-                        task.0.execute_concurrent().boxed(),
-                    )
-                }
-                VdfValidationResult::Invalid(err) => {
-                    // remove task from the vdf_pending queue
-                    let (invalid_hash, invalid_item) =
-                        self.vdf_pending_queue.remove(&task.block_hash).expect(
-                            "Expected processing task to have an entry in the vdf_pending queue",
-                        );
-                    error!(block_hash = %invalid_hash, "Error validating VDF - {}", &err);
-                    // notify the block tree
-                    invalid_item
-                        .0
-                        .send_validation_result(ValidationResult::Invalid);
-                }
-                VdfValidationResult::Cancelled => {
-                    debug!("VDF task {} was cancelled", &task.block_hash);
-                    // do nothing, leave the task in the pending queue
-                }
-            }
+            // handle the result of the VDF validation task
+            self.handle_vdf_validation_result(&task, result);
+            true
         } else {
-            self.vdf_task = Some(task)
+            // task hasn't completed
+            self.vdf_task = Some(task);
+            false
         }
-
-        // return `true` if this resolved to `Some` (future completed)
-        has_completed
     }
 
     /// Reevaluate priorities for all active validations after a reorg
