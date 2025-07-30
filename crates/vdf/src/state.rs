@@ -1,5 +1,5 @@
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
-use eyre::eyre;
+use eyre::{bail, eyre};
 use irys_database::block_header_by_hash;
 use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
@@ -11,7 +11,7 @@ use nodit::{interval::ii, InclusiveInterval as _, Interval};
 use rayon::prelude::*;
 use reth_db::Database as _;
 use sha2::{Digest as _, Sha256};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -190,7 +190,7 @@ impl VdfStateReadonly {
     /// Instead, we should check that the `desired_step_number` is a reasonable number of steps
     /// to wait for. This should be ensured before calling this function
     pub async fn wait_for_step(&self, desired_step_number: u64) {
-        debug!("Waiting for step {}", desired_step_number);
+        debug!("Waiting for step {}", &desired_step_number);
         let retries_per_second = 20;
         loop {
             if self.read().global_step >= desired_step_number {
@@ -281,6 +281,14 @@ fn calc_capacity(config: &Config) -> usize {
     capacity.try_into().expect("expected u64 to cast to u32")
 }
 
+#[repr(u8)]
+#[derive(Debug, Copy, Clone)]
+pub enum CancelEnum {
+    Continue = 0,
+    InvalidStep = 1,
+    Cancelled = 2,
+}
+
 /// Validate the steps from the `nonce_info` to see if they are valid.
 /// Verifies each step in parallel across as many cores as are available.
 pub fn vdf_steps_are_valid(
@@ -288,6 +296,8 @@ pub fn vdf_steps_are_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
     vdf_steps_guard: &VdfStateReadonly,
+    cancel: Arc<AtomicU8>, // fun fact: AtomicBool is the same thing as AtomicU8 (UnsafeCell around a u8)
+                           // but we use AtomicU8 to signal *why* we need to stop (cancellation vs actual error)
 ) -> eyre::Result<()> {
     let reset_seed = vdf_info.seed;
     info!(
@@ -325,21 +335,29 @@ pub fn vdf_steps_are_valid(
     // Calculate the step number of the first step in the blocks sequence
     let start_step_number: u64 = vdf_info.global_step_number - vdf_info.steps.len() as u64;
 
-    // Atomic flag to signal all threads to stop
-    let should_stop = AtomicBool::new(false);
     let last_step_checkpoints = Arc::new(RwLock::new(None::<H256List>));
 
+    if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+        bail!("Cancelled");
+    }
     // We must calculate the checkpoint iterations for each step sequentially
     // because we only have the first and last checkpoint of each step, but we
     // can calculate each of the steps in parallel
     // Limit threads number to avoid overloading the system using configuration limit
     pool.install(|| {
         (0..steps.len() - 1).into_par_iter().try_for_each(|i| {
-            // Check if another thread found a mismatch
-            if should_stop.load(Ordering::Relaxed) {
-                return Err(eyre::eyre!(
+            // Check for a cancel reason
+            match cancel.load(Ordering::Relaxed) {
+                x if x == CancelEnum::Continue as u8 => {}
+                x if x == CancelEnum::InvalidStep as u8 => {
+                    return Err(eyre::eyre!(
                     "One of the previous threads found a mismatch, stopping further calculations"
                 ));
+                }
+                x if x == CancelEnum::Cancelled as u8 => {
+                    bail!("Cancelled");
+                }
+                _ => {}
             }
 
             let mut hasher = Sha256::new();
@@ -372,7 +390,7 @@ pub fn vdf_steps_are_valid(
 
             // Compare immediately and signal others to stop if mismatch
             if computed_step != vdf_info.steps[i] {
-                should_stop.store(true, Ordering::Relaxed);
+                cancel.store(CancelEnum::InvalidStep as u8, Ordering::Relaxed);
                 return Err(eyre::eyre!(
                     "VDF step {} is invalid! Expected: {:?}, got: {:?}",
                     start_step_number + i as u64,

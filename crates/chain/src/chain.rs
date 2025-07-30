@@ -1695,7 +1695,7 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash, 1);
+        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
         let stake_tx = signer.sign_commitment(stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
@@ -1730,7 +1730,6 @@ async fn stake_and_pledge(
         let pledge_tx = CommitmentTransaction::new_pledge(
             &config.consensus,
             latest_block_hash,
-            1,
             mempool_pledge_provider.as_ref(),
             address,
         )
