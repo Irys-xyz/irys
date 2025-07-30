@@ -71,8 +71,10 @@ pub async fn post_commitment_tx(
                     .body(format!("Internal service error: {:?}", err)))
             }
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                    .body(format!("Commitment validation error: {:?}", commitment_validation_error)))
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
+                    "Commitment validation error: {:?}",
+                    commitment_validation_error
+                )))
             }
         };
     }
