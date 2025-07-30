@@ -170,7 +170,7 @@ where
                 .execute_transaction_with_commit_condition(tx, on_result_f);
         };
 
-        let shadow_tx = ShadowTransaction::decode_prefixed(&mut &tx_envelope_input_buf[..])
+        let shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..])
             .map_err(|e| create_internal_error(&format!("failed to decode shadow tx: {e}")))?;
 
         tracing::trace!(tx_hash = %tx.tx().hash(), "executing shadow transaction");

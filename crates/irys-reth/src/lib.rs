@@ -358,7 +358,7 @@ where
 
         tracing::trace!("shadow txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
         // Even though we reject shadow txs from the pool, attempt to decode to verify structure
-        let _ = ShadowTransaction::decode_prefixed(&mut &input[..]);
+        let _ = ShadowTransaction::decode(&mut &input[..]);
         TransactionValidationOutcome::Invalid(
             transaction,
             reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(

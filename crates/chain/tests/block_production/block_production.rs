@@ -348,16 +348,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // We expect 3 receipts: storage tx, evm tx, and block reward
     assert_eq!(block_txs.len(), 3);
     // Assert block reward (should be the first receipt)
-    let block_reward_systx =
-        ShadowTransaction::decode_prefixed(&mut block_txs[0].input().as_ref()).unwrap();
+    let block_reward_systx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(matches!(
         block_reward_systx.as_v1().unwrap(),
         TransactionPacket::BlockReward(_)
     ));
 
     // Assert storage tx is included in the receipts (should be the second receipt)
-    let storage_tx_systx =
-        ShadowTransaction::decode_prefixed(&mut block_txs[1].input().as_ref()).unwrap();
+    let storage_tx_systx = ShadowTransaction::decode(&mut block_txs[1].input().as_ref()).unwrap();
     assert!(matches!(
         storage_tx_systx.as_v1().unwrap(),
         TransactionPacket::StorageFees(_)
@@ -487,7 +485,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward shadow transaction
-    let shadow_tx = ShadowTransaction::decode_prefixed(&mut block_txs[0].input().as_ref()).unwrap();
+    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
             shadow_tx.as_v1().unwrap(),
@@ -567,7 +565,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     );
 
     // Verify it's a block reward shadow transaction
-    let shadow_tx = ShadowTransaction::decode_prefixed(&mut block_txs[0].input().as_ref()).unwrap();
+    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
             shadow_tx.as_v1().unwrap(),
@@ -914,7 +912,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // First transaction should be block reward
-    let block_reward_tx = ShadowTransaction::decode_prefixed(&mut block_txs1[0].input().as_ref())
+    let block_reward_tx = ShadowTransaction::decode(&mut block_txs1[0].input().as_ref())
         .expect("First transaction should be decodable as shadow transaction");
     assert!(
         matches!(
@@ -925,7 +923,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
 
     // Second transaction should be stake
-    let stake_shadow_tx = ShadowTransaction::decode_prefixed(&mut block_txs1[1].input().as_ref())
+    let stake_shadow_tx = ShadowTransaction::decode(&mut block_txs1[1].input().as_ref())
         .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
@@ -941,7 +939,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     }
 
     // Third transaction should be pledge
-    let pledge_shadow_tx = ShadowTransaction::decode_prefixed(&mut block_txs1[2].input().as_ref())
+    let pledge_shadow_tx = ShadowTransaction::decode(&mut block_txs1[2].input().as_ref())
         .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());

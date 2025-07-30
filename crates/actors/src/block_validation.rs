@@ -528,7 +528,7 @@ pub async fn shadow_transactions_are_valid(
                     expect_shadow_txs = false;
                     return Ok(None);
                 };
-                let shadow_tx = ShadowTransaction::decode_prefixed(&mut &input[..])
+                let shadow_tx = ShadowTransaction::decode(&mut &input[..])
                     .map_err(|e| eyre::eyre!("failed to decode shadow tx: {e}"))?;
                 let tx_signer = tx.into_signed().recover_signer()?;
 

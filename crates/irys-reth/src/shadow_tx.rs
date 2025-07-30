@@ -144,7 +144,7 @@ impl ShadowTransaction {
         clippy::indexing_slicing,
         reason = "prefix length checked before slicing"
     )]
-    pub fn decode_prefixed(buf: &mut &[u8]) -> borsh::io::Result<Self> {
+    pub fn decode(buf: &mut &[u8]) -> borsh::io::Result<Self> {
         if buf.len() < IRYS_SHADOW_EXEC.len() || &buf[..IRYS_SHADOW_EXEC.len()] != IRYS_SHADOW_EXEC
         {
             return Err(borsh::io::Error::new(
@@ -513,7 +513,7 @@ mod tests {
         }));
         let mut buf = Vec::from(IRYS_SHADOW_EXEC.as_slice());
         tx.serialize(&mut buf).unwrap();
-        let decoded = ShadowTransaction::decode_prefixed(&mut &buf[..]).unwrap();
+        let decoded = ShadowTransaction::decode(&mut &buf[..]).unwrap();
         assert_eq!(decoded, tx, "decoding mismatch");
     }
 }
