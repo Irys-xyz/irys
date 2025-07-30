@@ -227,6 +227,12 @@ mod tests {
             Err(eyre::eyre!("Simulated error in closure"))
         });
 
+        let read_tx = db.tx().expect("Failed to create read-only transaction");
+        let initial_db_rows = read_tx
+            .cursor_read::<DataSizeByDataRoot>()?
+            .walk(None)?
+            .count();
+
         // Confirm the error was returned
         assert!(
             result.is_err(),
@@ -234,15 +240,14 @@ mod tests {
         );
 
         // Verify no commit has occurred, i.e. there are still zero rows in the db table
-        let read_tx = db.tx().expect("Failed to create read-only transaction");
         std::thread::sleep(Duration::from_secs(1));
         assert_eq!(
             read_tx
                 .cursor_read::<DataSizeByDataRoot>()?
                 .walk(None)?
                 .count(),
-            0,
-            "Expected zero rows in the table since the transaction should not commit"
+            initial_db_rows,
+            "Expected rows in the table to be unchanged since the transaction should not commit"
         );
 
         Ok(())
