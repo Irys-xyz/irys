@@ -13,10 +13,8 @@ use alloy_primitives::keccak256;
 use alloy_primitives::Address;
 use alloy_primitives::FixedBytes;
 use alloy_primitives::U256;
-use alloy_rlp::Decodable;
-use alloy_rlp::Encodable;
-use alloy_rlp::{RlpDecodable, RlpEncodable};
-use bytes;
+use borsh::{BorshDeserialize, BorshSerialize};
+use std::io::{Read, Write};
 use std::sync::LazyLock;
 
 /// Version constants for ShadowTransaction
@@ -24,6 +22,17 @@ pub const SHADOW_TX_VERSION_V1: u8 = 1;
 
 /// Current version of ShadowTransaction
 pub const CURRENT_SHADOW_TX_VERSION: u8 = SHADOW_TX_VERSION_V1;
+
+/// Prefix used to identify encoded shadow transactions in a regular
+/// transaction's input field.
+pub const IRYS_SHADOW_EXEC: &[u8; 16] = b"irys-shadow-exec";
+
+/// Address that all shadow transactions must target.
+///
+/// This ensures shadow transactions cannot be executed accidentally by regular
+/// EVM tooling.
+pub static SHADOW_TX_DESTINATION_ADDR: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_shadow_tx_processor")));
 
 /// A versioned shadow transaction, valid for a single block, encoding a protocol-level action.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -128,6 +137,24 @@ impl ShadowTransaction {
             Self::V1 { packet, .. } => packet.topic(),
         }
     }
+
+    /// Decode a shadow transaction from a buffer that contains the
+    /// [`IRYS_SHADOW_EXEC`] prefix followed by the borsh-encoded transaction.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "prefix length checked before slicing"
+    )]
+    pub fn decode(buf: &mut &[u8]) -> borsh::io::Result<Self> {
+        if buf.len() < IRYS_SHADOW_EXEC.len() || &buf[..IRYS_SHADOW_EXEC.len()] != IRYS_SHADOW_EXEC
+        {
+            return Err(borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "Missing shadow tx prefix",
+            ));
+        }
+        *buf = &buf[IRYS_SHADOW_EXEC.len()..];
+        <Self as BorshDeserialize>::deserialize_reader(buf)
+    }
 }
 
 impl TransactionPacket {
@@ -158,190 +185,119 @@ pub const UNPLEDGE_ID: u8 = 0x06;
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
 pub const EITHER_DECREMENT_ID: u8 = 0x02;
 
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "length calculation is safe for small values"
-)]
-impl Encodable for ShadowTransaction {
-    fn length(&self) -> usize {
-        1 + // version byte
-        match self {
-            Self::V1 { packet } => packet.length()
-        }
-    }
-
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
+impl BorshSerialize for ShadowTransaction {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         match self {
             Self::V1 { packet } => {
-                out.put_u8(SHADOW_TX_VERSION_V1);
-                packet.encode(out);
+                writer.write_all(&[SHADOW_TX_VERSION_V1])?;
+                packet.serialize(writer)
             }
         }
     }
 }
 
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "length calculation is safe for small values"
-)]
-impl Encodable for TransactionPacket {
-    fn length(&self) -> usize {
-        1 + match self {
-            Self::Unstake(bi) | Self::Unpledge(bi) => bi.length(),
-            Self::BlockReward(br) => br.length(),
-            Self::Stake(bd) | Self::StorageFees(bd) | Self::Pledge(bd) => bd.length(),
-        }
-    }
-
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        match self {
-            Self::Unstake(inner) => {
-                out.put_u8(UNSTAKE_ID);
-                inner.encode(out);
-            }
-            Self::BlockReward(inner) => {
-                out.put_u8(BLOCK_REWARD_ID);
-                inner.encode(out);
-            }
-            Self::Stake(inner) => {
-                out.put_u8(STAKE_ID);
-                inner.encode(out);
-            }
-            Self::StorageFees(inner) => {
-                out.put_u8(STORAGE_FEES_ID);
-                inner.encode(out);
-            }
-            Self::Pledge(inner) => {
-                out.put_u8(PLEDGE_ID);
-                inner.encode(out);
-            }
-            Self::Unpledge(inner) => {
-                out.put_u8(UNPLEDGE_ID);
-                inner.encode(out);
-            }
-        }
-    }
-}
-
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "length calculation is safe for small values"
-)]
-impl Encodable for EitherIncrementOrDecrement {
-    fn length(&self) -> usize {
-        1 + match self {
-            Self::BalanceIncrement(bi) => bi.length(),
-            Self::BalanceDecrement(bd) => bd.length(),
-        }
-    }
-
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        match self {
-            Self::BalanceIncrement(inner) => {
-                out.put_u8(EITHER_INCREMENT_ID);
-                inner.encode(out);
-            }
-            Self::BalanceDecrement(inner) => {
-                out.put_u8(EITHER_DECREMENT_ID);
-                inner.encode(out);
-            }
-        }
-    }
-}
-
-#[expect(
-    clippy::indexing_slicing,
-    reason = "buffer bounds are checked before indexing"
-)]
-impl Decodable for ShadowTransaction {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::InputTooShort);
-        }
-        let version = buf[0];
-        *buf = &buf[1..]; // advance past the version byte
-
-        match version {
+impl BorshDeserialize for ShadowTransaction {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut version = [0_u8; 1];
+        reader.read_exact(&mut version)?;
+        match version[0] {
             SHADOW_TX_VERSION_V1 => {
-                let packet = TransactionPacket::decode(buf)?;
+                let packet = TransactionPacket::deserialize_reader(reader)?;
                 Ok(Self::V1 { packet })
             }
-            _ => Err(alloy_rlp::Error::Custom(
+            _ => Err(borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
                 "Unknown shadow transaction version",
             )),
         }
     }
 }
 
-#[expect(
-    clippy::indexing_slicing,
-    reason = "buffer bounds are checked before indexing"
-)]
-impl Decodable for TransactionPacket {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::InputTooShort);
-        }
-        let disc = buf[0];
-        *buf = &buf[1..]; // advance past the discriminant byte
-
-        match disc {
-            UNSTAKE_ID => {
-                let inner = EitherIncrementOrDecrement::decode(buf)?;
-                Ok(Self::Unstake(inner))
+impl BorshSerialize for TransactionPacket {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        match self {
+            Self::Unstake(inner) => {
+                writer.write_all(&[UNSTAKE_ID])?;
+                inner.serialize(writer)
             }
-            BLOCK_REWARD_ID => {
-                let inner = BlockRewardIncrement::decode(buf)?;
-                Ok(Self::BlockReward(inner))
+            Self::BlockReward(inner) => {
+                writer.write_all(&[BLOCK_REWARD_ID])?;
+                inner.serialize(writer)
             }
-            STAKE_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(Self::Stake(inner))
+            Self::Stake(inner) => {
+                writer.write_all(&[STAKE_ID])?;
+                inner.serialize(writer)
             }
-            STORAGE_FEES_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(Self::StorageFees(inner))
+            Self::StorageFees(inner) => {
+                writer.write_all(&[STORAGE_FEES_ID])?;
+                inner.serialize(writer)
             }
-            PLEDGE_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(Self::Pledge(inner))
+            Self::Pledge(inner) => {
+                writer.write_all(&[PLEDGE_ID])?;
+                inner.serialize(writer)
             }
-            UNPLEDGE_ID => {
-                let inner = EitherIncrementOrDecrement::decode(buf)?;
-                Ok(Self::Unpledge(inner))
+            Self::Unpledge(inner) => {
+                writer.write_all(&[UNPLEDGE_ID])?;
+                inner.serialize(writer)
             }
-            _ => Err(alloy_rlp::Error::Custom(
-                "Unknown shadow transaction discriminant",
-            )),
         }
     }
 }
 
-#[expect(
-    clippy::indexing_slicing,
-    reason = "buffer bounds are checked before indexing"
-)]
-impl Decodable for EitherIncrementOrDecrement {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::InputTooShort);
-        }
-        let disc = buf[0];
-        *buf = &buf[1..]; // advance past the discriminant byte
+impl BorshDeserialize for TransactionPacket {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut disc = [0_u8; 1];
+        reader.read_exact(&mut disc)?;
+        Ok(match disc[0] {
+            UNSTAKE_ID => Self::Unstake(EitherIncrementOrDecrement::deserialize_reader(reader)?),
+            BLOCK_REWARD_ID => Self::BlockReward(BlockRewardIncrement::deserialize_reader(reader)?),
+            STAKE_ID => Self::Stake(BalanceDecrement::deserialize_reader(reader)?),
+            STORAGE_FEES_ID => Self::StorageFees(BalanceDecrement::deserialize_reader(reader)?),
+            PLEDGE_ID => Self::Pledge(BalanceDecrement::deserialize_reader(reader)?),
+            UNPLEDGE_ID => Self::Unpledge(EitherIncrementOrDecrement::deserialize_reader(reader)?),
+            _ => {
+                return Err(borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    "Unknown shadow tx discriminant",
+                ))
+            }
+        })
+    }
+}
 
-        match disc {
+impl BorshSerialize for EitherIncrementOrDecrement {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        match self {
+            Self::BalanceIncrement(inner) => {
+                writer.write_all(&[EITHER_INCREMENT_ID])?;
+                inner.serialize(writer)
+            }
+            Self::BalanceDecrement(inner) => {
+                writer.write_all(&[EITHER_DECREMENT_ID])?;
+                inner.serialize(writer)
+            }
+        }
+    }
+}
+
+impl BorshDeserialize for EitherIncrementOrDecrement {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut disc = [0_u8; 1];
+        reader.read_exact(&mut disc)?;
+        Ok(match disc[0] {
             EITHER_INCREMENT_ID => {
-                let inner = BalanceIncrement::decode(buf)?;
-                Ok(Self::BalanceIncrement(inner))
+                Self::BalanceIncrement(BalanceIncrement::deserialize_reader(reader)?)
             }
             EITHER_DECREMENT_ID => {
-                let inner = BalanceDecrement::decode(buf)?;
-                Ok(Self::BalanceDecrement(inner))
+                Self::BalanceDecrement(BalanceDecrement::deserialize_reader(reader)?)
             }
-            _ => Err(alloy_rlp::Error::Custom(
-                "Unknown EitherIncrementOrDecrement discriminant",
-            )),
-        }
+            _ => {
+                return Err(borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    "Unknown EitherIncrementOrDecrement discriminant",
+                ))
+            }
+        })
     }
 }
 
@@ -376,8 +332,7 @@ impl Default for TransactionPacket {
     PartialOrd,
     Ord,
     Default,
-    RlpEncodable,
-    RlpDecodable,
+    // manual Borsh impls below
     arbitrary::Arbitrary,
 )]
 pub struct BalanceDecrement {
@@ -387,6 +342,34 @@ pub struct BalanceDecrement {
     pub target: Address,
     /// Reference to the consensus layer transaction that resulted in this shadow tx.
     pub irys_ref: FixedBytes<32>,
+}
+
+impl BorshSerialize for BalanceDecrement {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.amount.to_be_bytes::<32>())?;
+        writer.write_all(self.target.as_slice())?;
+        writer.write_all(self.irys_ref.as_slice())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for BalanceDecrement {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut amount_buf = [0_u8; 32];
+        reader.read_exact(&mut amount_buf)?;
+        let amount = U256::from_be_bytes(amount_buf);
+        let mut addr = [0_u8; 20];
+        reader.read_exact(&mut addr)?;
+        let target = Address::from_slice(&addr);
+        let mut ref_buf = [0_u8; 32];
+        reader.read_exact(&mut ref_buf)?;
+        let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
+        Ok(Self {
+            amount,
+            target,
+            irys_ref,
+        })
+    }
 }
 
 /// Balance increment: used for unstake shadow txs.
@@ -400,8 +383,7 @@ pub struct BalanceDecrement {
     PartialOrd,
     Ord,
     Default,
-    RlpEncodable,
-    RlpDecodable,
+    // manual Borsh impls below
     arbitrary::Arbitrary,
 )]
 pub struct BalanceIncrement {
@@ -411,6 +393,34 @@ pub struct BalanceIncrement {
     pub target: Address,
     /// Reference to the consensus layer transaction that resulted in this shadow tx.
     pub irys_ref: FixedBytes<32>,
+}
+
+impl BorshSerialize for BalanceIncrement {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.amount.to_be_bytes::<32>())?;
+        writer.write_all(self.target.as_slice())?;
+        writer.write_all(self.irys_ref.as_slice())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for BalanceIncrement {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut amount_buf = [0_u8; 32];
+        reader.read_exact(&mut amount_buf)?;
+        let amount = U256::from_be_bytes(amount_buf);
+        let mut addr = [0_u8; 20];
+        reader.read_exact(&mut addr)?;
+        let target = Address::from_slice(&addr);
+        let mut ref_buf = [0_u8; 32];
+        reader.read_exact(&mut ref_buf)?;
+        let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
+        Ok(Self {
+            amount,
+            target,
+            irys_ref,
+        })
+    }
 }
 
 /// Block reward increment: used for block reward shadow txs (no irys_ref needed).
@@ -425,11 +435,85 @@ pub struct BalanceIncrement {
     PartialOrd,
     Ord,
     Default,
-    RlpEncodable,
-    RlpDecodable,
+    // manual Borsh impls below
     arbitrary::Arbitrary,
 )]
 pub struct BlockRewardIncrement {
     /// Amount to increment to the beneficiary account.
     pub amount: U256,
+}
+
+impl BorshSerialize for BlockRewardIncrement {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.amount.to_be_bytes::<32>())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for BlockRewardIncrement {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut amount_buf = [0_u8; 32];
+        reader.read_exact(&mut amount_buf)?;
+        let amount = U256::from_be_bytes(amount_buf);
+        Ok(Self { amount })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use revm_primitives::hex_literal::hex;
+
+    /// Serialize and deserialize a `BlockReward` packet to ensure
+    /// the borsh encoding stays stable.
+    #[test]
+    fn block_reward_roundtrip() {
+        let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+            amount: U256::from(123_u64),
+        }));
+        let mut buf = Vec::new();
+        tx.serialize(&mut buf).unwrap();
+        let expected = hex!(
+            "01" "02"
+            "000000000000000000000000000000000000000000000000000000000000007b"
+        );
+        assert_eq!(buf, expected);
+        let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, tx);
+    }
+
+    /// Check that `Stake` packets roundtrip correctly through borsh
+    /// serialization and deserialization.
+    #[test]
+    fn stake_roundtrip() {
+        let tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
+            amount: U256::from(123456789_u64),
+            target: Address::repeat_byte(0x22),
+            irys_ref: FixedBytes::<32>::from_slice(&[0xaa; 32]),
+        }));
+        let mut buf = Vec::new();
+        tx.serialize(&mut buf).unwrap();
+        let expected = hex!(
+            "01" "03"
+            "00000000000000000000000000000000000000000000000000000000075bcd15"
+            "2222222222222222222222222222222222222222"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(buf, expected, "encoding mismatch");
+        let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, tx, "decoding mismatch");
+    }
+
+    /// Verify that a shadow transaction prefixed with `IRYS_SHADOW_EXEC`
+    /// can be decoded via `decode_prefixed`.
+    #[test]
+    fn decode_prefixed_roundtrip() {
+        let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+            amount: U256::from(1_u64),
+        }));
+        let mut buf = Vec::from(IRYS_SHADOW_EXEC.as_slice());
+        tx.serialize(&mut buf).unwrap();
+        let decoded = ShadowTransaction::decode(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, tx, "decoding mismatch");
+    }
 }
