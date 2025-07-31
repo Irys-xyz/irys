@@ -24,7 +24,7 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
     }
 
     cc.flag("-fPIC");
-    cc.flag("-Ofast");
+    cc.flag("-O3 -ffast-math");
     cc.flag("-g0");
     cc.flag("-march=native");
     cc.file(c_src.join("capacity_single.c"));
