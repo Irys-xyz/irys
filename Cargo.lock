@@ -5143,6 +5143,7 @@ dependencies = [
  "eyre",
  "modular-bitfield",
  "reth-codecs",
+ "rstest",
  "ruint",
  "serde",
  "test-fuzz",

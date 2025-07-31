@@ -821,7 +821,7 @@ pub async fn commitment_txs_are_valid(
 
     // Sort using PrioritizedCommitment to get expected order
     let mut expected_order = stake_and_pledge_txs.clone();
-    expected_order.sort_by_key(|tx| PrioritizedCommitment(tx));
+    expected_order.sort_by_key(|tx| PrioritizedCommitment(*tx));
 
     // Compare actual order vs expected order
     for (idx, pair) in stake_and_pledge_txs

@@ -14,7 +14,7 @@ use tracing::debug;
 
 use crate::{
     create_ema_snapshot_from_chain_history, BlockIndexReadGuard, BlockTreeReadGuard,
-    CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
+    CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot, PrioritizedCommitment,
 };
 
 #[derive(Debug, Clone)]
@@ -1342,6 +1342,9 @@ fn load_commitment_transactions(
             txs.push(header);
         }
     }
+
+    txs.sort_by(|a, b| PrioritizedCommitment(a).cmp(&PrioritizedCommitment(b)));
+
     Ok(txs)
 }
 

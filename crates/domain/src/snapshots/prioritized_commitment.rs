@@ -1,5 +1,6 @@
 use irys_primitives::CommitmentType;
 use irys_types::{CommitmentTransaction, IrysTransactionCommon as _};
+use std::borrow::Borrow;
 
 /// Wrapper for sorting commitments by priority
 ///
@@ -8,15 +9,17 @@ use irys_types::{CommitmentTransaction, IrysTransactionCommon as _};
 /// 2. Pledge commitments (sorted by pledge_count_before_executing ascending, then by fee descending)
 /// 3. Other commitment types (sorted by fee)
 #[derive(Debug)]
-pub struct PrioritizedCommitment<'a>(pub &'a CommitmentTransaction);
+pub struct PrioritizedCommitment<T: Borrow<CommitmentTransaction>>(pub T);
 
-impl Ord for PrioritizedCommitment<'_> {
+impl<T: Borrow<CommitmentTransaction>> Ord for PrioritizedCommitment<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let this = self.0.borrow();
+        let other = other.0.borrow();
         // First, compare by commitment type (Stake > Pledge/Unpledge)
-        match (&self.0.commitment_type, &other.0.commitment_type) {
+        match (&this.commitment_type, &other.commitment_type) {
             (CommitmentType::Stake, CommitmentType::Stake) => {
                 // Both are stakes, sort by fee (higher first)
-                other.0.user_fee().cmp(&self.0.user_fee())
+                other.user_fee().cmp(&this.user_fee())
             }
             (CommitmentType::Stake, _) => std::cmp::Ordering::Less, // Stake comes first
             (_, CommitmentType::Stake) => std::cmp::Ordering::Greater, // Stake comes first
@@ -32,28 +35,28 @@ impl Ord for PrioritizedCommitment<'_> {
                 match count_a.cmp(count_b) {
                     std::cmp::Ordering::Equal => {
                         // Same count, sort by fee (higher first)
-                        other.0.user_fee().cmp(&self.0.user_fee())
+                        other.user_fee().cmp(&this.user_fee())
                     }
                     ordering => ordering,
                 }
             }
             // Handle other cases (Unpledge, Unstake) - sort by fee
-            _ => other.0.user_fee().cmp(&self.0.user_fee()),
+            _ => other.user_fee().cmp(&this.user_fee()),
         }
     }
 }
 
-impl PartialOrd for PrioritizedCommitment<'_> {
+impl<T: Borrow<CommitmentTransaction>> PartialOrd for PrioritizedCommitment<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Eq for PrioritizedCommitment<'_> {}
+impl<T: Borrow<CommitmentTransaction>> Eq for PrioritizedCommitment<T> {}
 
-impl PartialEq for PrioritizedCommitment<'_> {
+impl<T: Borrow<CommitmentTransaction>> PartialEq for PrioritizedCommitment<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.0.id == other.0.id
+        self.0.borrow().id == other.0.borrow().id
     }
 }
 
@@ -177,20 +180,15 @@ mod tests {
         );
         let unstake = create_test_commitment("unstake", CommitmentType::Unstake, 75);
 
-        let commitments_data = vec![
-            &pledge_5,
-            &stake_low,
-            &pledge_2_high,
-            &stake_high,
-            &pledge_2_low,
-            &pledge_10,
-            &unstake,
+        let mut commitments = vec![
+            PrioritizedCommitment(&pledge_5),
+            PrioritizedCommitment(&stake_low),
+            PrioritizedCommitment(&pledge_2_high),
+            PrioritizedCommitment(&stake_high),
+            PrioritizedCommitment(&pledge_2_low),
+            PrioritizedCommitment(&pledge_10),
+            PrioritizedCommitment(&unstake),
         ];
-
-        let mut commitments: Vec<_> = commitments_data
-            .iter()
-            .map(|c| PrioritizedCommitment(c))
-            .collect();
 
         commitments.sort();
 
@@ -204,13 +202,13 @@ mod tests {
         // 6. pledge_10 (Pledge count=10, fee=300)
         // 7. unstake (Other type, fee=75)
 
-        assert_eq!(commitments[0].0.id, stake_high.id);
-        assert_eq!(commitments[1].0.id, stake_low.id);
-        assert_eq!(commitments[2].0.id, pledge_2_high.id);
-        assert_eq!(commitments[3].0.id, pledge_2_low.id);
-        assert_eq!(commitments[4].0.id, pledge_5.id);
-        assert_eq!(commitments[5].0.id, pledge_10.id);
-        assert_eq!(commitments[6].0.id, unstake.id);
+        assert_eq!(commitments[0].0.borrow().id, stake_high.id);
+        assert_eq!(commitments[1].0.borrow().id, stake_low.id);
+        assert_eq!(commitments[2].0.borrow().id, pledge_2_high.id);
+        assert_eq!(commitments[3].0.borrow().id, pledge_2_low.id);
+        assert_eq!(commitments[4].0.borrow().id, pledge_5.id);
+        assert_eq!(commitments[5].0.borrow().id, pledge_10.id);
+        assert_eq!(commitments[6].0.borrow().id, unstake.id);
     }
 
     #[test]
@@ -223,5 +221,67 @@ mod tests {
         let ref2 = PrioritizedCommitment(&commitment2);
 
         assert_eq!(ref1, ref2);
+    }
+
+    #[test]
+    fn test_ownership_and_borrowing() {
+        // Test that PrioritizedCommitment works with both owned and borrowed values
+        let owned_commitment = create_test_commitment("owned", CommitmentType::Stake, 100);
+        let borrowed_commitment = create_test_commitment("borrowed", CommitmentType::Stake, 50);
+
+        // Test 1: Vector of borrowed references (most common use case)
+        let mut borrowed_vec: Vec<PrioritizedCommitment<&CommitmentTransaction>> = vec![
+            PrioritizedCommitment(&borrowed_commitment),
+            PrioritizedCommitment(&owned_commitment),
+        ];
+        borrowed_vec.sort();
+        assert_eq!(borrowed_vec[0].0.borrow().fee, 100); // Higher fee first
+        assert_eq!(borrowed_vec[1].0.borrow().fee, 50);
+
+        // Test 2: Vector of owned values
+        let commitment1 = create_test_commitment("c1", CommitmentType::Stake, 75);
+        let commitment2 = create_test_commitment("c2", CommitmentType::Stake, 150);
+        let mut owned_vec: Vec<PrioritizedCommitment<CommitmentTransaction>> = vec![
+            PrioritizedCommitment(commitment1),
+            PrioritizedCommitment(commitment2),
+        ];
+        owned_vec.sort();
+        assert_eq!(owned_vec[0].0.borrow().fee, 150);
+        assert_eq!(owned_vec[1].0.borrow().fee, 75);
+
+        // Test 3: Box<CommitmentTransaction> (heap-allocated ownership)
+        let boxed1 = Box::new(create_test_commitment("boxed1", CommitmentType::Stake, 25));
+        let boxed2 = Box::new(create_test_commitment("boxed2", CommitmentType::Stake, 125));
+        let mut boxed_vec: Vec<PrioritizedCommitment<Box<CommitmentTransaction>>> =
+            vec![PrioritizedCommitment(boxed1), PrioritizedCommitment(boxed2)];
+        boxed_vec.sort();
+        let boxed_ref: &CommitmentTransaction = boxed_vec[0].0.borrow();
+        assert_eq!(boxed_ref.fee, 125);
+        let boxed_ref: &CommitmentTransaction = boxed_vec[1].0.borrow();
+        assert_eq!(boxed_ref.fee, 25);
+
+        // Test 4: Arc<CommitmentTransaction> (shared ownership)
+        use std::sync::Arc;
+        let arc1 = Arc::new(create_test_commitment("arc1", CommitmentType::Stake, 200));
+        let arc2 = Arc::new(create_test_commitment("arc2", CommitmentType::Stake, 10));
+        let mut arc_vec: Vec<PrioritizedCommitment<Arc<CommitmentTransaction>>> = vec![
+            PrioritizedCommitment(arc1.clone()),
+            PrioritizedCommitment(arc2.clone()),
+        ];
+        arc_vec.sort();
+        let arc_ref: &CommitmentTransaction = arc_vec[0].0.borrow();
+        assert_eq!(arc_ref.fee, 200);
+        let arc_ref: &CommitmentTransaction = arc_vec[1].0.borrow();
+        assert_eq!(arc_ref.fee, 10);
+
+        // Test 5: Demonstrate that the same Arc can be used in multiple places
+        let shared_commitment =
+            Arc::new(create_test_commitment("shared", CommitmentType::Stake, 80));
+        let prioritized1 = PrioritizedCommitment(shared_commitment.clone());
+        let prioritized2 = PrioritizedCommitment(shared_commitment.clone());
+        // Both wrappers point to the same commitment
+        let ref1: &CommitmentTransaction = prioritized1.0.borrow();
+        let ref2: &CommitmentTransaction = prioritized2.0.borrow();
+        assert_eq!(ref1.id, ref2.id);
     }
 }

@@ -192,9 +192,11 @@ impl CommitmentSnapshot {
                 // Validate pledge count matches actual number of existing pledges
                 let current_pledge_count = miner_commitments.pledges.len() as u64;
                 if *pledge_count_before_executing != current_pledge_count {
-                    debug!(
+                    tracing::error!(
                         "Invalid pledge count for {}: expected {}, but miner has {} pledges",
-                        commitment_tx.id, pledge_count_before_executing, current_pledge_count
+                        commitment_tx.id,
+                        pledge_count_before_executing,
+                        current_pledge_count
                     );
                     return CommitmentSnapshotStatus::InvalidPledgeCount;
                 }
