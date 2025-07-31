@@ -394,6 +394,14 @@ mod tests {
         assert_eq!(*block_index.get_item(1).unwrap(), block_items[1]);
         assert_eq!(*block_index.get_item(2).unwrap(), block_items[2]);
 
+        // check an invalid byte offset causes get_block_bounds to return an error
+        let invalid_block_bounds = block_index.get_block_bounds(DataLedger::Publish, 300);
+        assert!(
+            invalid_block_bounds.is_err(),
+            "expected invalid block bound to generate an error"
+        );
+
+        // check valid block bound
         let block_bounds = block_index
             .get_block_bounds(DataLedger::Publish, 150)
             .expect("expected valid block bounds");
