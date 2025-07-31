@@ -178,7 +178,7 @@ impl BlockIndex {
         };
 
         let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset)?;
-        let previous_item = self.get_item(block_height - 1).ok_or_else(|| {
+        let previous_item = self.get_item(block_height.saturating_sub(1)).ok_or_else(|| {
             eyre::eyre!(format!("No previous block at height {}", block_height - 1))
         })?;
 
