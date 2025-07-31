@@ -514,10 +514,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             }
 
                             // Add commitment and validate it's accepted
-                            let is_staked_in_current_epoch =
-                                epoch_snapshot.is_staked(commitment_tx.signer);
                             let add_status = parent_commitment_snapshot
-                                .add_commitment(commitment_tx, is_staked_in_current_epoch);
+                                .add_commitment(commitment_tx, &epoch_snapshot);
                             if add_status != CommitmentSnapshotStatus::Accepted {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     "Commitment tx is invalid".to_string(),

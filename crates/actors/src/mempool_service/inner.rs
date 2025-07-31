@@ -363,13 +363,9 @@ impl Inner {
             }
             // simulation check
             {
-                let is_staked = self
-                    .block_tree_read_guard
-                    .read()
-                    .canonical_epoch_snapshot()
-                    .is_staked(tx.signer);
+                let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
 
-                let simulation = simulation_commitment_snapshot.add_commitment(&tx, is_staked);
+                let simulation = simulation_commitment_snapshot.add_commitment(tx, &epoch_snapshot);
 
                 // skip commitments that would not be accepted
                 if simulation != CommitmentSnapshotStatus::Accepted {

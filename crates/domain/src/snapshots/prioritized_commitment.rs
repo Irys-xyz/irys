@@ -180,7 +180,7 @@ mod tests {
         );
         let unstake = create_test_commitment("unstake", CommitmentType::Unstake, 75);
 
-        let mut commitments = vec![
+        let mut commitments = [
             PrioritizedCommitment(&pledge_5),
             PrioritizedCommitment(&stake_low),
             PrioritizedCommitment(&pledge_2_high),
@@ -246,8 +246,8 @@ mod tests {
             PrioritizedCommitment(commitment2),
         ];
         owned_vec.sort();
-        assert_eq!(owned_vec[0].0.borrow().fee, 150);
-        assert_eq!(owned_vec[1].0.borrow().fee, 75);
+        assert_eq!(owned_vec[0].0.fee, 150);
+        assert_eq!(owned_vec[1].0.fee, 75);
 
         // Test 3: Box<CommitmentTransaction> (heap-allocated ownership)
         let boxed1 = Box::new(create_test_commitment("boxed1", CommitmentType::Stake, 25));
@@ -264,10 +264,8 @@ mod tests {
         use std::sync::Arc;
         let arc1 = Arc::new(create_test_commitment("arc1", CommitmentType::Stake, 200));
         let arc2 = Arc::new(create_test_commitment("arc2", CommitmentType::Stake, 10));
-        let mut arc_vec: Vec<PrioritizedCommitment<Arc<CommitmentTransaction>>> = vec![
-            PrioritizedCommitment(arc1.clone()),
-            PrioritizedCommitment(arc2.clone()),
-        ];
+        let mut arc_vec: Vec<PrioritizedCommitment<Arc<CommitmentTransaction>>> =
+            vec![PrioritizedCommitment(arc1), PrioritizedCommitment(arc2)];
         arc_vec.sort();
         let arc_ref: &CommitmentTransaction = arc_vec[0].0.borrow();
         assert_eq!(arc_ref.fee, 200);
@@ -278,7 +276,7 @@ mod tests {
         let shared_commitment =
             Arc::new(create_test_commitment("shared", CommitmentType::Stake, 80));
         let prioritized1 = PrioritizedCommitment(shared_commitment.clone());
-        let prioritized2 = PrioritizedCommitment(shared_commitment.clone());
+        let prioritized2 = PrioritizedCommitment(shared_commitment);
         // Both wrappers point to the same commitment
         let ref1: &CommitmentTransaction = prioritized1.0.borrow();
         let ref2: &CommitmentTransaction = prioritized2.0.borrow();

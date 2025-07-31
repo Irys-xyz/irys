@@ -275,9 +275,7 @@ impl reth_codecs::Compact for CommitmentType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_rlp::{Decodable, Encodable};
     use bytes::BytesMut;
-    use reth_codecs::Compact;
     use rstest::rstest;
 
     #[rstest]
@@ -326,7 +324,7 @@ mod tests {
 
     #[rstest]
     #[case::empty_buffer(&[])]
-    #[case::invalid_discriminant(&[99u8])]
+    #[case::invalid_discriminant(&[99_u8])]
     #[case::pledge_buffer_too_short(&[COMMITMENT_TYPE_PLEDGE])]
     fn test_commitment_type_rlp_decode_errors(#[case] buf: &[u8]) {
         let mut slice = buf;
@@ -343,7 +341,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unknown commitment type discriminant: 99")]
     fn test_commitment_type_compact_decode_invalid_type() {
-        let invalid_buf = vec![99u8];
+        let invalid_buf = vec![99_u8];
         CommitmentType::from_compact(&invalid_buf, invalid_buf.len());
     }
 
@@ -356,7 +354,7 @@ mod tests {
 
     #[rstest]
     #[case::stake(CommitmentType::Stake, 1)]
-    #[case::pledge(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 1 + 100u64.length())]
+    #[case::pledge(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 1 + 100_u64.length())]
     fn test_commitment_type_rlp_length(
         #[case] commitment_type: CommitmentType,
         #[case] expected_length: usize,

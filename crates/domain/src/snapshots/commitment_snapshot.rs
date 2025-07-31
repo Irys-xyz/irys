@@ -3,6 +3,8 @@ use irys_types::{Address, CommitmentTransaction};
 use std::collections::BTreeMap;
 use tracing::debug;
 
+use super::EpochSnapshot;
+
 #[derive(Debug, PartialEq)]
 pub enum CommitmentSnapshotStatus {
     Accepted,           // The commitment is valid and was added to the snapshot
@@ -29,7 +31,7 @@ impl CommitmentSnapshot {
 
         if let Some(commitment_txs) = commitment_txs {
             for commitment_tx in commitment_txs {
-                let _status = snapshot.add_commitment(&commitment_tx, false);
+                let _status = snapshot.add_commitment(&commitment_tx, &EpochSnapshot::default());
             }
         }
 
@@ -113,7 +115,7 @@ impl CommitmentSnapshot {
                     }
                 }
             }
-            _ => unreachable!(), // We already handled unsupported types
+            _ => CommitmentSnapshotStatus::Unsupported,
         };
 
         debug!("CommitmentStatus is {:?}", status);
@@ -124,8 +126,15 @@ impl CommitmentSnapshot {
     pub fn add_commitment(
         &mut self,
         commitment_tx: &CommitmentTransaction,
-        is_staked_in_current_epoch: bool,
+        epoch_snapshot: &EpochSnapshot,
     ) -> CommitmentSnapshotStatus {
+        let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
+        let pledges_in_epoch = epoch_snapshot
+            .commitment_state
+            .pledge_commitments
+            .get(&commitment_tx.signer)
+            .map(std::vec::Vec::len)
+            .unwrap_or_default();
         debug!("add_commitment() called for {}", commitment_tx.id);
         let signer = &commitment_tx.signer;
         let tx_type = &commitment_tx.commitment_type;
@@ -190,7 +199,11 @@ impl CommitmentSnapshot {
                 }
 
                 // Validate pledge count matches actual number of existing pledges
-                let current_pledge_count = miner_commitments.pledges.len() as u64;
+                let current_pledge_count = miner_commitments
+                    .pledges
+                    .len()
+                    .saturating_add(pledges_in_epoch)
+                    as u64;
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
                         "Invalid pledge count for {}: expected {}, but miner has {} pledges",
@@ -231,7 +244,7 @@ impl CommitmentSnapshot {
         // Sort using PrioritizedCommitment wrapper
         let mut prioritized: Vec<_> = all_commitments
             .iter()
-            .map(|tx| super::PrioritizedCommitment(tx))
+            .map(super::PrioritizedCommitment)
             .collect();
 
         prioritized.sort();
@@ -243,7 +256,9 @@ impl CommitmentSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use super::super::epoch_snapshot::commitment_state::CommitmentStateEntry;
     use super::*;
+    use irys_primitives::CommitmentStatus;
     use irys_types::{IrysSignature, H256, U256};
 
     fn create_test_commitment(
@@ -273,7 +288,7 @@ mod tests {
 
         // Add stake first
         let stake = create_test_commitment(signer, CommitmentType::Stake);
-        let status = snapshot.add_commitment(&stake, false);
+        let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Add first pledge with count 0
@@ -283,7 +298,7 @@ mod tests {
                 pledge_count_before_executing: 0,
             },
         );
-        let status = snapshot.add_commitment(&pledge1, false);
+        let status = snapshot.add_commitment(&pledge1, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Add second pledge with count 1
@@ -293,7 +308,7 @@ mod tests {
                 pledge_count_before_executing: 1,
             },
         );
-        let status = snapshot.add_commitment(&pledge2, false);
+        let status = snapshot.add_commitment(&pledge2, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Verify the miner has 2 pledges
@@ -307,7 +322,7 @@ mod tests {
 
         // Add stake first
         let stake = create_test_commitment(signer, CommitmentType::Stake);
-        let status = snapshot.add_commitment(&stake, false);
+        let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Try to add pledge with wrong count (should be 0, but using 1)
@@ -317,7 +332,7 @@ mod tests {
                 pledge_count_before_executing: 1,
             },
         );
-        let status = snapshot.add_commitment(&pledge_wrong_count, false);
+        let status = snapshot.add_commitment(&pledge_wrong_count, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::InvalidPledgeCount);
 
         // Verify no pledges were added
@@ -336,7 +351,7 @@ mod tests {
                 pledge_count_before_executing: 0,
             },
         );
-        let status = snapshot.add_commitment(&pledge, false);
+        let status = snapshot.add_commitment(&pledge, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
     }
 
@@ -352,7 +367,19 @@ mod tests {
                 pledge_count_before_executing: 0,
             },
         );
-        let status = snapshot.add_commitment(&pledge, true);
+        // Create an epoch snapshot with the signer already staked
+        let mut epoch_snapshot = EpochSnapshot::default();
+        epoch_snapshot.commitment_state.stake_commitments.insert(
+            signer,
+            CommitmentStateEntry {
+                id: H256::random(),
+                commitment_status: CommitmentStatus::Active,
+                partition_hash: None,
+                signer,
+                amount: 1000,
+            },
+        );
+        let status = snapshot.add_commitment(&pledge, &epoch_snapshot);
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Add second pledge with correct count
@@ -362,7 +389,8 @@ mod tests {
                 pledge_count_before_executing: 1,
             },
         );
-        let status = snapshot.add_commitment(&pledge2, true);
+        // Don't modify the epoch snapshot - the first pledge is already in the local commitment snapshot
+        let status = snapshot.add_commitment(&pledge2, &epoch_snapshot);
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
     }
 
@@ -373,12 +401,12 @@ mod tests {
 
         // Add stake
         let stake = create_test_commitment(signer, CommitmentType::Stake);
-        let status = snapshot.add_commitment(&stake, false);
+        let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Try to add another stake (should be accepted but not added)
         let stake2 = create_test_commitment(signer, CommitmentType::Stake);
-        let status = snapshot.add_commitment(&stake2, false);
+        let status = snapshot.add_commitment(&stake2, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Verify only one stake exists
@@ -392,7 +420,7 @@ mod tests {
 
         // Add stake
         let stake = create_test_commitment(signer, CommitmentType::Stake);
-        snapshot.add_commitment(&stake, false);
+        snapshot.add_commitment(&stake, &EpochSnapshot::default());
 
         // Add pledge
         let pledge = create_test_commitment(
@@ -402,11 +430,11 @@ mod tests {
             },
         );
         let pledge_id = pledge.id;
-        let status = snapshot.add_commitment(&pledge, false);
+        let status = snapshot.add_commitment(&pledge, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Try to add the same pledge again (should be accepted but not duplicated)
-        let status = snapshot.add_commitment(&pledge, false);
+        let status = snapshot.add_commitment(&pledge, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Verify only one pledge exists
@@ -421,7 +449,7 @@ mod tests {
 
         // Try to add unstake
         let unstake = create_test_commitment(signer, CommitmentType::Unstake);
-        let status = snapshot.add_commitment(&unstake, false);
+        let status = snapshot.add_commitment(&unstake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
 
         // Try to add unpledge
@@ -431,7 +459,7 @@ mod tests {
                 pledge_count_before_executing: 0,
             },
         );
-        let status = snapshot.add_commitment(&unpledge, false);
+        let status = snapshot.add_commitment(&unpledge, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
     }
 
@@ -447,11 +475,11 @@ mod tests {
         // Add stakes with different fees
         let mut stake1 = create_test_commitment(signer1, CommitmentType::Stake);
         stake1.fee = 100;
-        snapshot.add_commitment(&stake1, false);
+        snapshot.add_commitment(&stake1, &EpochSnapshot::default());
 
         let mut stake2 = create_test_commitment(signer2, CommitmentType::Stake);
         stake2.fee = 200;
-        snapshot.add_commitment(&stake2, false);
+        snapshot.add_commitment(&stake2, &EpochSnapshot::default());
 
         // Add pledges with different counts and fees
         let mut pledge1_count0 = create_test_commitment(
@@ -461,7 +489,7 @@ mod tests {
             },
         );
         pledge1_count0.fee = 50;
-        snapshot.add_commitment(&pledge1_count0, false);
+        snapshot.add_commitment(&pledge1_count0, &EpochSnapshot::default());
 
         let mut pledge2_count0 = create_test_commitment(
             signer2,
@@ -470,12 +498,12 @@ mod tests {
             },
         );
         pledge2_count0.fee = 150;
-        snapshot.add_commitment(&pledge2_count0, false);
+        snapshot.add_commitment(&pledge2_count0, &EpochSnapshot::default());
 
         // Add another stake after some pledges
         let mut stake3 = create_test_commitment(signer3, CommitmentType::Stake);
         stake3.fee = 50;
-        snapshot.add_commitment(&stake3, false);
+        snapshot.add_commitment(&stake3, &EpochSnapshot::default());
 
         // Add pledge with higher count
         let mut pledge1_count1 = create_test_commitment(
@@ -485,7 +513,7 @@ mod tests {
             },
         );
         pledge1_count1.fee = 300;
-        snapshot.add_commitment(&pledge1_count1, false);
+        snapshot.add_commitment(&pledge1_count1, &EpochSnapshot::default());
 
         // Get commitments and verify order
         let commitments = snapshot.get_epoch_commitments();
