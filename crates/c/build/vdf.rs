@@ -8,6 +8,7 @@ pub(crate) fn build_vdf(c_src: &Path, _ssl_inc_dir: &Path) {
     cc.cpp(true);
 
     cc.flag("-O3");
+    cc.flag("-ffast-math");
     // TODO: enable below for debug
     // cc.flag("-O0 -g")
     cc.flag("-finline-functions");
@@ -29,7 +30,6 @@ pub(crate) fn build_vdf(c_src: &Path, _ssl_inc_dir: &Path) {
 
     cc.flag("-fPIC");
     cc.flag("-std=c++17");
-    cc.flag("-Ofast");
     cc.flag("-g0");
     cc.flag("-march=native");
     cc.file(c_src.join("vdf.cpp")).compile("vdf");
