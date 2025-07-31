@@ -1632,9 +1632,10 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 }
 
 #[test_log::test(actix_web::test)]
-/// post invalid commitment txs where tx id has been tampered with
+/// send (staked) invalid pledge commitment txs where tx id has been tampered with
+/// try with and without pending anchor
 /// expect invalid txs to fail when sent directly to the mempool
-async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -1675,10 +1676,10 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     genesis_node.ingest_commitment_tx(stake_tx.clone()).await?;
 
     //
-    // Test case 2: pledge commitment txs
+    // Test case 2: staked pledge commitment txs
     //
 
-    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used to check mempool ingress
     let pledge_tx = new_pledge_tx(
         &H256::zero(),
         &signer,
@@ -1714,6 +1715,49 @@ async fn commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()
     genesis_node
         .wait_for_mempool_commitment_txs(tx_ids.clone(), seconds_to_wait)
         .await?;
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+/// send (unstaked) invalid pledge commitment txs where tx id has been tampered with
+/// expect invalid txs to fail when sent directly to the mempool
+async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+    let mut genesis_config = NodeConfig::testing();
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    //
+    // Test case 1: invalid pledge commitment txs
+    //
+
+    let mut pledge_tx_invalid = new_pledge_tx(
+        &H256::zero(), // use genesis block for anchor
+        &signer,
+        &genesis_config.consensus_config(),
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+    )
+    .await;
+    let mut bytes = pledge_tx_invalid.id.to_fixed_bytes();
+    bytes[1] ^= 0x01; // flip second bit i.e. tamper with it
+    pledge_tx_invalid.id = H256::from(bytes);
+    // check an invalid id on a pledge
+    let res = genesis_node
+        .ingest_commitment_tx(pledge_tx_invalid.clone())
+        .await
+        .expect_err("expected failure but got success");
+    assert!(
+        matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
+        "Expected InvalidSignature for pledge with invalid id, got: {:?}",
+        res
+    );
 
     genesis_node.stop().await;
 
