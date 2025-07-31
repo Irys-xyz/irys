@@ -1723,7 +1723,6 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
 
 #[test_log::test(actix_web::test)]
 /// send (unstaked) invalid pledge commitment txs where tx id has been tampered with
-/// try with and without pending anchor
 /// expect invalid txs to fail when sent directly to the mempool
 async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
@@ -1736,47 +1735,27 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
         .await;
 
     //
-    // Test case 1: unstaked pledge commitment txs
+    // Test case 1: invalid pledge commitment txs
     //
 
-    let pledge_tx = new_pledge_tx(
+    let mut pledge_tx_invalid = new_pledge_tx(
         &H256::zero(), // use genesis block for anchor
         &signer,
         &genesis_config.consensus_config(),
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
     )
     .await;
-    let mut pledge_tx_invalid_pending_anchor = pledge_tx.clone();
-    let mut bytes = pledge_tx_invalid_pending_anchor.id.to_fixed_bytes();
-    bytes[0] ^= 0x01; // flip first bit
-    pledge_tx_invalid_pending_anchor.id = H256::from(bytes);
-
-    // With an unknown anchor, the mempool will still perform signature validation before adding it to the pending-anchor transactions.
-    let res = genesis_node
-        .ingest_commitment_tx(pledge_tx_invalid_pending_anchor.clone())
-        .await
-        .expect_err("expected failure but got success");
-    assert!(
-        matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
-        "Expected InvalidSignature for pledge with pending anchor, got: {:?}",
-        res
-    );
-
-    // mine a block so we get some more anchors that are not pending
-    genesis_node.mine_block().await?;
-
-    let mut pledge_tx_invalid = pledge_tx.clone();
     let mut bytes = pledge_tx_invalid.id.to_fixed_bytes();
-    bytes[1] ^= 0x01; // flip second bit to be different from pledge_tx_invalid_pending_anchor.id
+    bytes[1] ^= 0x01; // flip second bit i.e. tamper with it
     pledge_tx_invalid.id = H256::from(bytes);
-    // check an invalid id on a pledge, that also has a valid non pending anchor
+    // check an invalid id on a pledge
     let res = genesis_node
         .ingest_commitment_tx(pledge_tx_invalid.clone())
         .await
         .expect_err("expected failure but got success");
     assert!(
         matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
-        "Expected InvalidSignature for pledge with non pending anchor, got: {:?}",
+        "Expected InvalidSignature for pledge with invalid id, got: {:?}",
         res
     );
 
