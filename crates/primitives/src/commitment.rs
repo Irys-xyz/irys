@@ -112,23 +112,6 @@ pub enum CommitmentType {
     Unstake,
 }
 
-impl CommitmentType {
-    pub fn is_stake(&self) -> bool {
-        matches!(self, &Self::Stake)
-    }
-    pub fn is_pledge(&self) -> bool {
-        matches!(self, &Self::Pledge { .. })
-    }
-}
-
-// TODO: custom de/serialize (or just make it a u8 field lol) impl so we can use the commitment type id integer
-
-#[derive(thiserror::Error, Debug)]
-pub enum CommitmentTypeDecodeError {
-    #[error("unknown reserved Commitment type: {0}")]
-    UnknownCommitmentType(u8),
-}
-
 impl Encodable for CommitmentType {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
@@ -207,14 +190,14 @@ impl reth_codecs::Compact for CommitmentType {
                 pledge_count_before_executing,
             } => {
                 buf.put_u8(COMMITMENT_TYPE_PLEDGE);
-                buf.put_u64(*pledge_count_before_executing);
+                buf.put_u64_le(*pledge_count_before_executing);
                 TYPE_DISCRIMINANT_SIZE + U64_SIZE
             }
             Self::Unpledge {
                 pledge_count_before_executing,
             } => {
                 buf.put_u8(COMMITMENT_TYPE_UNPLEDGE);
-                buf.put_u64(*pledge_count_before_executing);
+                buf.put_u64_le(*pledge_count_before_executing);
                 TYPE_DISCRIMINANT_SIZE + U64_SIZE
             }
             Self::Unstake => {
@@ -286,5 +269,96 @@ impl reth_codecs::Compact for CommitmentType {
                 type_id
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::stake(CommitmentType::Stake)]
+    #[case::pledge_zero(CommitmentType::Pledge { pledge_count_before_executing: 0 })]
+    #[case::pledge_one(CommitmentType::Pledge { pledge_count_before_executing: 1 })]
+    #[case::pledge_hundred(CommitmentType::Pledge { pledge_count_before_executing: 100 })]
+    #[case::pledge_max(CommitmentType::Pledge { pledge_count_before_executing: u64::MAX })]
+    fn test_commitment_type_rlp_roundtrip(#[case] original: CommitmentType) {
+        // Encode
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        // Decode
+        let mut slice = buf.as_ref();
+        let decoded = CommitmentType::decode(&mut slice).unwrap();
+
+        assert_eq!(original, decoded);
+        assert!(slice.is_empty(), "Buffer should be fully consumed");
+    }
+
+    #[rstest]
+    #[case::stake(CommitmentType::Stake, 1, COMMITMENT_TYPE_STAKE)]
+    #[case::pledge_zero(CommitmentType::Pledge { pledge_count_before_executing: 0 }, 9, COMMITMENT_TYPE_PLEDGE)]
+    #[case::pledge_one(CommitmentType::Pledge { pledge_count_before_executing: 1 }, 9, COMMITMENT_TYPE_PLEDGE)]
+    #[case::pledge_hundred(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 9, COMMITMENT_TYPE_PLEDGE)]
+    #[case::pledge_max(CommitmentType::Pledge { pledge_count_before_executing: u64::MAX }, 9, COMMITMENT_TYPE_PLEDGE)]
+    fn test_commitment_type_compact_roundtrip(
+        #[case] original: CommitmentType,
+        #[case] expected_len: usize,
+        #[case] expected_discriminant: u8,
+    ) {
+        // Encode
+        let mut buf = Vec::new();
+        let encoded_len = original.to_compact(&mut buf);
+        assert_eq!(encoded_len, expected_len);
+        assert_eq!(buf.len(), expected_len);
+        assert_eq!(buf[0], expected_discriminant);
+
+        // Decode
+        let (decoded, remaining) = CommitmentType::from_compact(&buf, buf.len());
+
+        assert_eq!(original, decoded);
+        assert!(remaining.is_empty(), "Buffer should be fully consumed");
+    }
+
+    #[rstest]
+    #[case::empty_buffer(&[])]
+    #[case::invalid_discriminant(&[99_u8])]
+    #[case::pledge_buffer_too_short(&[COMMITMENT_TYPE_PLEDGE])]
+    fn test_commitment_type_rlp_decode_errors(#[case] buf: &[u8]) {
+        let mut slice = buf;
+        assert!(CommitmentType::decode(&mut slice).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer too short, expected at least 1 byte")]
+    fn test_commitment_type_compact_decode_empty_buffer() {
+        let empty_buf = vec![];
+        CommitmentType::from_compact(&empty_buf, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown commitment type discriminant: 99")]
+    fn test_commitment_type_compact_decode_invalid_type() {
+        let invalid_buf = vec![99_u8];
+        CommitmentType::from_compact(&invalid_buf, invalid_buf.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer too short for Pledge variant")]
+    fn test_commitment_type_compact_decode_pledge_buffer_too_short() {
+        let short_buf = vec![COMMITMENT_TYPE_PLEDGE, 1, 2, 3]; // Only 4 bytes, need 9
+        CommitmentType::from_compact(&short_buf, short_buf.len());
+    }
+
+    #[rstest]
+    #[case::stake(CommitmentType::Stake, 1)]
+    #[case::pledge(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 1 + 100_u64.length())]
+    fn test_commitment_type_rlp_length(
+        #[case] commitment_type: CommitmentType,
+        #[case] expected_length: usize,
+    ) {
+        assert_eq!(commitment_type.length(), expected_length);
     }
 }

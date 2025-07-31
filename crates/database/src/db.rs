@@ -139,10 +139,9 @@ impl IrysDatabaseExt for DatabaseEnv {
     {
         let tx = self.tx_mut()?;
 
-        let res = f(&tx);
+        let res = f(&tx)?;
         tx.commit()?;
-
-        res
+        Ok(res)
     }
 
     /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
@@ -153,10 +152,9 @@ impl IrysDatabaseExt for DatabaseEnv {
     {
         let tx = self.tx()?;
 
-        let res = f(&tx);
+        let res = f(&tx)?;
         tx.commit()?;
-
-        res
+        Ok(res)
     }
 }
 
@@ -201,5 +199,56 @@ impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
                 None => None,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::submodule::{create_or_open_submodule_db, tables::DataSizeByDataRoot};
+    use eyre::WrapErr as _;
+    use irys_testing_utils::temporary_directory;
+    use irys_types::H256;
+    use reth_db::transaction::DbTxMut as _;
+
+    #[test]
+    fn update_eyre_no_commit_on_error() -> eyre::Result<()> {
+        //create instance of DatabaseEnv with a test database
+        let temp_dir = temporary_directory(None, false);
+        let db = create_or_open_submodule_db(temp_dir)
+            .wrap_err("Failed to open test DB")
+            .unwrap();
+
+        // The closure intentionally returns an error, which should cause an early return in update_eyre, before the db commit inside update_eyre can happen
+        let result: Result<(), _> = db.update_eyre(|tx| {
+            // Insert row in the DataSizeByDataRoot table (table is not important for this test)
+            tx.put::<DataSizeByDataRoot>(H256::zero(), 1234_u64)?;
+            // Force an error
+            Err(eyre::eyre!("Simulated error in closure"))
+        });
+
+        let read_tx = db.tx().expect("Failed to create read-only transaction");
+        let initial_db_rows = read_tx
+            .cursor_read::<DataSizeByDataRoot>()?
+            .walk(None)?
+            .count();
+
+        // Confirm the error was returned
+        assert!(
+            result.is_err(),
+            "Expected an error from update_eyre closure"
+        );
+
+        // Verify no commit has occurred, i.e. there are still initial_db_rows rows in the db table
+        assert_eq!(
+            read_tx
+                .cursor_read::<DataSizeByDataRoot>()?
+                .walk(None)?
+                .count(),
+            initial_db_rows,
+            "Expected rows in the table to be unchanged since the transaction should not commit"
+        );
+
+        Ok(())
     }
 }

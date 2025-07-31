@@ -1,4 +1,5 @@
 use irys_chain::{utils::load_config, IrysNode};
+use irys_testing_utils::setup_panic_hook;
 use tracing::info;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -9,7 +10,7 @@ use tracing_subscriber::{
 async fn main() -> eyre::Result<()> {
     // init logging
     init_tracing().expect("initializing tracing should work");
-    color_eyre::install().expect("color eyre could not be installed");
+    setup_panic_hook().expect("custom panic hook installation to succeed");
 
     // load the config
     let config = load_config()?;
