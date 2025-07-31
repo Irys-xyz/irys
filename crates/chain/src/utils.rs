@@ -1,13 +1,17 @@
 use irys_types::{NodeConfig, NodeMode};
 use std::path::PathBuf;
+use tracing::debug;
 
 pub fn load_config() -> eyre::Result<NodeConfig> {
     // load the config
     let config_path = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
+        .expect("file path to be valid")
+        .canonicalize()
         .expect("file path to be valid");
 
+    debug!("Loading config from {:?}", &config_path);
     let mut config = match std::fs::read_to_string(&config_path)
         .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
     {
