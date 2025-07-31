@@ -190,7 +190,7 @@ impl SyncState {
         let target = Arc::clone(&self.sync_target_height);
         let highest_processed_block = Arc::clone(&self.highest_processed_block);
         tokio::spawn(async move {
-            let progress_timeout = Duration::from_millis(60_000);
+            let progress_timeout = Duration::from_secs(60);
             let mut last_made_progress = Instant::now();
             let mut prev_hpb = 0;
             loop {
