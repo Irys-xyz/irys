@@ -187,7 +187,7 @@ impl BlockIndex {
         let ledger_index = usize::try_from(ledger)?;
         block_bounds.start_chunk_offset = previous_item.ledgers[ledger_index].max_chunk_offset;
         block_bounds.end_chunk_offset = found_item.ledgers[ledger_index].max_chunk_offset;
-        block_bounds.tx_root = found_item.ledgers[usize::try_from(ledger_index)?].tx_root;
+        block_bounds.tx_root = found_item.ledgers[ledger_index].tx_root;
         block_bounds.height = block_height as u128;
 
         Ok(block_bounds)
