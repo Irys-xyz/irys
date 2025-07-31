@@ -167,22 +167,27 @@ impl BlockIndex {
 
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
-    pub fn get_block_bounds(&self, ledger: DataLedger, chunk_offset: u64) -> BlockBounds {
+    pub fn get_block_bounds(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: u64,
+    ) -> eyre::Result<BlockBounds> {
         let mut block_bounds = BlockBounds {
             ledger,
             ..Default::default()
         };
 
-        let result = self.get_block_index_item(ledger, chunk_offset);
-        if let Ok((block_height, found_item)) = result {
-            let previous_item = self.get_item(block_height - 1).unwrap();
-            block_bounds.start_chunk_offset =
-                previous_item.ledgers[ledger as usize].max_chunk_offset;
-            block_bounds.end_chunk_offset = found_item.ledgers[ledger as usize].max_chunk_offset;
-            block_bounds.tx_root = found_item.ledgers[ledger as usize].tx_root;
-            block_bounds.height = block_height as u128;
-        }
-        block_bounds
+        let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset)?;
+        let previous_item = self.get_item(block_height - 1).ok_or_else(|| {
+            eyre::eyre!(format!("No previous block at height {}", block_height - 1))
+        })?;
+
+        block_bounds.start_chunk_offset = previous_item.ledgers[ledger as usize].max_chunk_offset;
+        block_bounds.end_chunk_offset = found_item.ledgers[ledger as usize].max_chunk_offset;
+        block_bounds.tx_root = found_item.ledgers[ledger as usize].tx_root;
+        block_bounds.height = block_height as u128;
+
+        Ok(block_bounds)
     }
 
     pub fn get_block_index_item(
@@ -190,6 +195,17 @@ impl BlockIndex {
         ledger: DataLedger,
         chunk_offset: u64,
     ) -> Result<(u64, &BlockIndexItem)> {
+        if let Some(last_item) = self.items.last() {
+            let last_max = last_item.ledgers[ledger as usize].max_chunk_offset;
+            if chunk_offset >= last_max {
+                return Err(eyre::eyre!(
+                    "chunk_offset {} beyond last block's max_chunk_offset {}",
+                    chunk_offset,
+                    last_max
+                ));
+            }
+        }
+
         let result = self.items.binary_search_by(|item| {
             if chunk_offset < item.ledgers[ledger as usize].max_chunk_offset {
                 std::cmp::Ordering::Greater
