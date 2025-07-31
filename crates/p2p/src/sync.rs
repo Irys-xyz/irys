@@ -204,8 +204,10 @@ impl SyncState {
                 // If this function never resolves, no new blocks can arrive over gossip in that case.
 
                 if hpb + 1 >= target {
-                    break; // synchronised
-                } else if made_progress && last_made_progress.elapsed() > progress_timeout {
+                    // synchronised
+                    break;
+                } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
+                    // didn't make any progress in the last `progress_timeout` duration
                     warn!(
                         "Did not make sync process from {} in {}ms",
                         &hpb,
