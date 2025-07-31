@@ -5263,6 +5263,7 @@ dependencies = [
 name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "color-eyre",
  "tempfile",
  "tracing",
