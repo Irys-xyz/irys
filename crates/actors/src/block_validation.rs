@@ -1079,7 +1079,7 @@ mod tests {
         let bb = block_index_guard
             .read()
             .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
-            .unwrap();
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
@@ -1321,7 +1321,7 @@ mod tests {
         let bb = block_index_guard
             .read()
             .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
-            .unwrap();
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
