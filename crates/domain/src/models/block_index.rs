@@ -394,7 +394,9 @@ mod tests {
         assert_eq!(*block_index.get_item(1).unwrap(), block_items[1]);
         assert_eq!(*block_index.get_item(2).unwrap(), block_items[2]);
 
-        let block_bounds = block_index.get_block_bounds(DataLedger::Publish, 150);
+        let block_bounds = block_index
+            .get_block_bounds(DataLedger::Publish, 150)
+            .unwrap();
         assert_eq!(
             block_bounds,
             BlockBounds {
@@ -406,7 +408,9 @@ mod tests {
             }
         );
 
-        let block_bounds = block_index.get_block_bounds(DataLedger::Submit, 1000);
+        let block_bounds = block_index
+            .get_block_bounds(DataLedger::Submit, 1000)
+            .unwrap();
         assert_eq!(
             block_bounds,
             BlockBounds {
