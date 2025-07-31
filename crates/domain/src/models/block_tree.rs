@@ -14,7 +14,7 @@ use tracing::debug;
 
 use crate::{
     create_ema_snapshot_from_chain_history, BlockIndexReadGuard, BlockTreeReadGuard,
-    CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
+    CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot, PrioritizedCommitment,
 };
 
 #[derive(Debug, Clone)]
@@ -325,8 +325,7 @@ impl BlockTree {
                 // Mid-epoch blocks: accumulate new commitment transactions into the existing
                 // commitment snapshot without triggering epoch state transitions
                 for commitment_tx in &commitment_txs {
-                    let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
-                    commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
+                    commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
                 }
 
                 epoch_snapshot
@@ -1244,11 +1243,8 @@ pub fn build_current_commitment_snapshot_from_index(
                         .unwrap()
                         .expect("commitment transactions to be in database");
 
-                    let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
-
                     // Apply them to the commitment snapshot
-                    let _status =
-                        snapshot.add_commitment(&commitment_tx, is_staked_in_current_epoch);
+                    let _status = snapshot.add_commitment(&commitment_tx, &epoch_snapshot);
                 }
             }
         }
@@ -1294,8 +1290,7 @@ pub fn create_commitment_snapshot_for_block(
 
     let mut new_commitment_snapshot = (**prev_commitment_snapshot).clone();
     for commitment_tx in commitment_txs {
-        let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
-        new_commitment_snapshot.add_commitment(commitment_tx, is_staked_in_current_epoch);
+        new_commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
     }
     Arc::new(new_commitment_snapshot)
 }
@@ -1342,6 +1337,9 @@ fn load_commitment_transactions(
             txs.push(header);
         }
     }
+
+    txs.sort_by(|a, b| PrioritizedCommitment(a).cmp(&PrioritizedCommitment(b)));
+
     Ok(txs)
 }
 

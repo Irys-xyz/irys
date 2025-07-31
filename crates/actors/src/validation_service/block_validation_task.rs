@@ -18,7 +18,8 @@
 
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
-    is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
+    commitment_txs_are_valid, is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid,
+    shadow_transactions_are_valid,
 };
 use crate::validation_service::active_validations::BlockPriorityMeta;
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
@@ -297,17 +298,46 @@ impl BlockValidationTask {
             is_seed_data_valid(&self.block, previous_block, vdf_reset_frequency)
         };
 
-        // Wait for all three tasks to complete
-        let (recall_result, poa_result, shadow_tx_result, seeds_validation_result) =
-            tokio::join!(recall_task, poa_task, shadow_tx_task, seeds_validation_task);
+        // Commitment transaction ordering validation
+        let commitment_ordering_task = async move {
+            commitment_txs_are_valid(
+                config,
+                service_senders,
+                block,
+                &self.service_inner.db,
+                &self.block_tree_guard,
+            )
+            .instrument(tracing::info_span!("commitment_ordering_validation", block_hash = %self.priority.block.block_hash, block_height = %self.priority.block.height))
+            .await
+            .inspect_err(|err| tracing::error!(?err, "commitment ordering validation failed"))
+            .map(|()| ValidationResult::Valid)
+            .unwrap_or(ValidationResult::Invalid)
+        };
+
+        // Wait for all validation tasks to complete
+        let (
+            recall_result,
+            poa_result,
+            shadow_tx_result,
+            seeds_validation_result,
+            commitment_ordering_result,
+        ) = tokio::join!(
+            recall_task,
+            poa_task,
+            shadow_tx_task,
+            seeds_validation_task,
+            commitment_ordering_task
+        );
 
         match (
             recall_result,
             poa_result,
             shadow_tx_result,
             seeds_validation_result,
+            commitment_ordering_result,
         ) {
             (
+                ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
