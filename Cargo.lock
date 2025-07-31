@@ -4913,7 +4913,6 @@ dependencies = [
  "assert_matches",
  "awc",
  "base58",
- "color-eyre",
  "core_affinity",
  "eyre",
  "futures",
@@ -5264,6 +5263,7 @@ dependencies = [
 name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "color-eyre",
  "tempfile",
  "tracing",
