@@ -396,7 +396,7 @@ mod tests {
 
         let block_bounds = block_index
             .get_block_bounds(DataLedger::Publish, 150)
-            .unwrap();
+            .expect("expected valid block bounds");
         assert_eq!(
             block_bounds,
             BlockBounds {
@@ -410,7 +410,7 @@ mod tests {
 
         let block_bounds = block_index
             .get_block_bounds(DataLedger::Submit, 1000)
-            .unwrap();
+            .expect("expected valid block bounds");
         assert_eq!(
             block_bounds,
             BlockBounds {
