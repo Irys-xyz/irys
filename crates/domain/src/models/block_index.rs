@@ -178,9 +178,11 @@ impl BlockIndex {
         };
 
         let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset)?;
-        let previous_item = self.get_item(block_height.saturating_sub(1)).ok_or_else(|| {
-            eyre::eyre!(format!("No previous block at height {}", block_height - 1))
-        })?;
+        let previous_item = self
+            .get_item(block_height.saturating_sub(1))
+            .ok_or_else(|| {
+                eyre::eyre!(format!("No previous block at height {}", block_height - 1))
+            })?;
 
         block_bounds.start_chunk_offset = previous_item.ledgers[ledger as usize].max_chunk_offset;
         block_bounds.end_chunk_offset = found_item.ledgers[ledger as usize].max_chunk_offset;
