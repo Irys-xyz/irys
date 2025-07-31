@@ -30,6 +30,7 @@ lru.workspace = true
 async-trait = "0.1"
 reth.workspace = true
 alloy-core.workspace = true
+moka.workspace = true
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
