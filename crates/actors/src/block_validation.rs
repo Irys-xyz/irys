@@ -34,8 +34,14 @@ use openssl::sha;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_ethereum_primitives::Block;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tracing::{debug, error, info};
+
+/// Maximum allowed clock drift for block timestamps in seconds
+const MAX_TIMESTAMP_DRIFT_SECS: u64 = 30;
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -70,6 +76,9 @@ pub async fn prevalidate_block(
         ?block.height,
         "prev_output_is_valid",
     );
+
+    // Check block timestamp drift
+    timestamp_is_valid(block.timestamp, previous_block.timestamp)?;
 
     // Check the difficulty
     difficulty_is_valid(
@@ -163,6 +172,39 @@ pub fn prev_output_is_valid(
             &previous_block.vdf_limiter_info.output
         ))
     }
+}
+
+pub fn timestamp_is_valid(current: u128, previous: u128) -> eyre::Result<()> {
+    if current < previous {
+        return Err(eyre::eyre!(
+            "block timestamp {} is older than previous block {}",
+            current,
+            previous
+        ));
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| eyre::eyre!("system time error: {e}"))?
+        .as_millis();
+
+    let max_future = now_ms + (MAX_TIMESTAMP_DRIFT_SECS as u128 * 1000);
+    let max_past = now_ms.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS as u128 * 1000);
+
+    if current > max_future {
+        return Err(eyre::eyre!(
+            "block timestamp {} too far in the future (now {now_ms})",
+            current
+        ));
+    }
+
+    if current < max_past {
+        return Err(eyre::eyre!(
+            "block timestamp {} too far in the past (now {now_ms})",
+            current
+        ));
+    }
+    Ok(())
 }
 
 /// Validates if a block's difficulty matches the expected difficulty calculated
