@@ -330,7 +330,7 @@ macro_rules! ledger_chunk_offset_ii {
 #[macro_export]
 macro_rules! ledger_chunk_offset_ie {
     ($start:expr, $end:expr) => {
-        ii(
+        ie(
             LedgerChunkOffset::from($start),
             LedgerChunkOffset::from($end),
         )
@@ -657,5 +657,31 @@ mod tests {
             splits[2],
             PartitionChunkRange(partition_chunk_offset_ii!(7, 7))
         );
+    }
+
+    #[test]
+    // test macro ledger_chunk_offset_ie
+    fn ledger_chunk_offset_ie_builds_inclusive_exclusive_range() {
+        let interval: Interval<LedgerChunkOffset> = ledger_chunk_offset_ie!(0_u64, 10_u64);
+        let expected = ie(
+            LedgerChunkOffset::from(0_u64),
+            LedgerChunkOffset::from(10_u64),
+        );
+        assert_eq!(interval, expected);
+        assert!(interval.contains_point(LedgerChunkOffset::from(0_u64)));
+        assert!(!interval.contains_point(LedgerChunkOffset::from(10_u64)));
+    }
+
+    #[test]
+    // test macro ledger_chunk_offset_ii
+    fn ledger_chunk_offset_ii_builds_inclusive_inclusive_range() {
+        let interval: Interval<LedgerChunkOffset> = ledger_chunk_offset_ii!(0_u64, 10_u64);
+        let expected = ii(
+            LedgerChunkOffset::from(0_u64),
+            LedgerChunkOffset::from(10_u64),
+        );
+        assert_eq!(interval, expected);
+        assert!(interval.contains_point(LedgerChunkOffset::from(0_u64)));
+        assert!(interval.contains_point(LedgerChunkOffset::from(10_u64)));
     }
 }
