@@ -1529,7 +1529,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let future_ts = now_ms + (MAX_TIMESTAMP_DRIFT_SECS + 1_000); // MAX DRIFT + 1 seconds in the future
+        let future_ts = now_ms + MAX_TIMESTAMP_DRIFT_SECS + 1_000; // MAX DRIFT + 1 seconds in the future
         let previous_ts = now_ms - 10_000;
         let result = timestamp_is_valid(future_ts, previous_ts);
         // Expect an error due to block timestamp being too far in the future
@@ -1546,7 +1546,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let past_ts = now_ms - (MAX_TIMESTAMP_DRIFT_SECS + 1_000); // MAX DRIFT + 1 seconds in the past
+        let past_ts = now_ms - MAX_TIMESTAMP_DRIFT_SECS - 1_000; // MAX DRIFT + 1 seconds in the past
         let previous_ts = now_ms - 60_000;
         let result = timestamp_is_valid(past_ts, previous_ts);
         // Expect an error due to block timestamp being too far in the past
