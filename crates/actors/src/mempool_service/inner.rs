@@ -215,13 +215,7 @@ impl Inner {
         })
     }
 
-    #[instrument(
-        skip(self),
-        fields(
-            parent_block_id = ?parent_evm_block_id,
-        ),
-        err
-    )]
+    #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
         &self,
         parent_evm_block_id: Option<BlockId>,
@@ -280,10 +274,6 @@ impl Inner {
                 debug!(
                     signer = ?signer,
                     balance = ?balance,
-                    current_spent = ?current_spent,
-                    required_fee = ?fee,
-                    total_required = ?(current_spent + fee),
-                    deficit = ?(current_spent + fee - balance),
                     "Transaction funding check failed"
                 );
                 unfunded_address.insert(signer);
@@ -499,11 +489,13 @@ impl Inner {
         let total_fee_collected: U256 = submit_tx
             .iter()
             .map(irys_types::IrysTransactionCommon::user_fee)
-            .fold(U256::zero(), |acc, fee| acc + fee)
-            + commitment_tx
-                .iter()
-                .map(irys_types::IrysTransactionCommon::total_cost)
-                .fold(U256::zero(), |acc, fee| acc + fee);
+            .fold(U256::zero(), |acc, fee| acc.saturating_add(fee))
+            .saturating_add(
+                commitment_tx
+                    .iter()
+                    .map(irys_types::IrysTransactionCommon::total_cost)
+                    .fold(U256::zero(), |acc, fee| acc.saturating_add(fee)),
+            );
 
         info!(
             commitment_txs = commitment_tx.len(),
