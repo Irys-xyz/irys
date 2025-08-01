@@ -257,6 +257,7 @@ mod tests {
     fn create_test_commitment(
         signer: Address,
         commitment_type: CommitmentType,
+        value: U256,
     ) -> CommitmentTransaction {
         let mut tx = CommitmentTransaction {
             id: H256::zero(),
@@ -264,7 +265,7 @@ mod tests {
             signer,
             signature: IrysSignature::default(),
             fee: 100,
-            value: U256::from(1000),
+            value,
             commitment_type,
             version: 1,
             chain_id: 1,
@@ -280,7 +281,7 @@ mod tests {
         let signer = Address::random();
 
         // Add stake first
-        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
@@ -290,6 +291,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 0,
             },
+            U256::from(1000),
         );
         let status = snapshot.add_commitment(&pledge1, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
@@ -300,6 +302,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 1,
             },
+            U256::from(1000),
         );
         let status = snapshot.add_commitment(&pledge2, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
@@ -314,7 +317,7 @@ mod tests {
         let signer = Address::random();
 
         // Add stake first
-        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
@@ -324,6 +327,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 1,
             },
+            U256::from(1000),
         );
         let status = snapshot.add_commitment(&pledge_wrong_count, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::InvalidPledgeCount);
@@ -343,6 +347,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 0,
             },
+            U256::from(1000),
         );
         let status = snapshot.add_commitment(&pledge, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
@@ -359,6 +364,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 0,
             },
+            U256::from(1000),
         );
         // Create an epoch snapshot with the signer already staked
         let mut epoch_snapshot = EpochSnapshot::default();
@@ -369,7 +375,7 @@ mod tests {
                 commitment_status: CommitmentStatus::Active,
                 partition_hash: None,
                 signer,
-                amount: 1000,
+                amount: U256::from(1000),
             },
         );
         let status = snapshot.add_commitment(&pledge, &epoch_snapshot);
@@ -381,6 +387,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 1,
             },
+            U256::from(1000),
         );
         // Don't modify the epoch snapshot - the first pledge is already in the local commitment snapshot
         let status = snapshot.add_commitment(&pledge2, &epoch_snapshot);
@@ -393,12 +400,12 @@ mod tests {
         let signer = Address::random();
 
         // Add stake
-        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Try to add another stake (should be accepted but not added)
-        let stake2 = create_test_commitment(signer, CommitmentType::Stake);
+        let stake2 = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake2, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
@@ -412,7 +419,7 @@ mod tests {
         let signer = Address::random();
 
         // Add stake
-        let stake = create_test_commitment(signer, CommitmentType::Stake);
+        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
         snapshot.add_commitment(&stake, &EpochSnapshot::default());
 
         // Add pledge
@@ -421,6 +428,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 0,
             },
+            U256::from(1000),
         );
         let pledge_id = pledge.id;
         let status = snapshot.add_commitment(&pledge, &EpochSnapshot::default());
@@ -441,7 +449,7 @@ mod tests {
         let signer = Address::random();
 
         // Try to add unstake
-        let unstake = create_test_commitment(signer, CommitmentType::Unstake);
+        let unstake = create_test_commitment(signer, CommitmentType::Unstake, U256::from(1000));
         let status = snapshot.add_commitment(&unstake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
 
@@ -451,6 +459,7 @@ mod tests {
             CommitmentType::Unpledge {
                 pledge_count_before_executing: 0,
             },
+            U256::from(1000),
         );
         let status = snapshot.add_commitment(&unpledge, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
@@ -466,11 +475,11 @@ mod tests {
         let signer3 = Address::random();
 
         // Add stakes with different fees
-        let mut stake1 = create_test_commitment(signer1, CommitmentType::Stake);
+        let mut stake1 = create_test_commitment(signer1, CommitmentType::Stake, U256::from(1000));
         stake1.fee = 100;
         snapshot.add_commitment(&stake1, &EpochSnapshot::default());
 
-        let mut stake2 = create_test_commitment(signer2, CommitmentType::Stake);
+        let mut stake2 = create_test_commitment(signer2, CommitmentType::Stake, U256::from(1000));
         stake2.fee = 200;
         snapshot.add_commitment(&stake2, &EpochSnapshot::default());
 
@@ -480,6 +489,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 0,
             },
+            U256::from(1000),
         );
         pledge1_count0.fee = 50;
         snapshot.add_commitment(&pledge1_count0, &EpochSnapshot::default());
@@ -489,12 +499,13 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 0,
             },
+            U256::from(1000),
         );
         pledge2_count0.fee = 150;
         snapshot.add_commitment(&pledge2_count0, &EpochSnapshot::default());
 
         // Add another stake after some pledges
-        let mut stake3 = create_test_commitment(signer3, CommitmentType::Stake);
+        let mut stake3 = create_test_commitment(signer3, CommitmentType::Stake, U256::from(1000));
         stake3.fee = 50;
         snapshot.add_commitment(&stake3, &EpochSnapshot::default());
 
@@ -504,6 +515,7 @@ mod tests {
             CommitmentType::Pledge {
                 pledge_count_before_executing: 1,
             },
+            U256::from(1000),
         );
         pledge1_count1.fee = 300;
         snapshot.add_commitment(&pledge1_count1, &EpochSnapshot::default());
@@ -522,5 +534,77 @@ mod tests {
         assert_eq!(commitments[3].id, pledge2_count0.id); // Pledge count 0, fee 150
         assert_eq!(commitments[4].id, pledge1_count0.id); // Pledge count 0, fee 50
         assert_eq!(commitments[5].id, pledge1_count1.id); // Pledge count 1, fee 300
+    }
+
+    #[test]
+    fn test_stake_commitment_amount_tracking() {
+        let mut snapshot = CommitmentSnapshot::default();
+        
+        // Create and add stakes with different amounts
+        let test_cases = vec![
+            (Address::random(), U256::from(10_000_000_000_000_000_000_000u128)), // 10k tokens
+            (Address::random(), U256::from(50_000_000_000_000_000_000_000u128)), // 50k tokens
+            (Address::random(), U256::from(20_000_000_000_000_000_000_000u128)), // 20k tokens
+        ];
+        
+        for (signer, amount) in &test_cases {
+            let stake = create_test_commitment(*signer, CommitmentType::Stake, *amount);
+            snapshot.add_commitment(&stake, &EpochSnapshot::default());
+        }
+        
+        // Verify all amounts are correctly stored
+        for (signer, expected_amount) in &test_cases {
+            assert_eq!(
+                snapshot.commitments[signer].stake.as_ref().unwrap().value,
+                *expected_amount
+            );
+        }
+    }
+
+    #[test]
+    fn test_pledge_commitment_amount_tracking() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = Address::random();
+
+        // Add stake first
+        let stake_amount = U256::from(20_000_000_000_000_000_000_000u128); // 20k tokens
+        snapshot.add_commitment(
+            &create_test_commitment(signer, CommitmentType::Stake, stake_amount),
+            &EpochSnapshot::default(),
+        );
+
+        // Add pledges with different amounts
+        let pledge_amounts = vec![
+            U256::from(1_000_000_000_000_000_000_000u128),  // 1k tokens
+            U256::from(2_500_000_000_000_000_000_000u128),  // 2.5k tokens
+            U256::from(5_000_000_000_000_000_000_000u128),  // 5k tokens
+            U256::from(10_000_000_000_000_000_000_000u128), // 10k tokens
+        ];
+
+        for (i, &amount) in pledge_amounts.iter().enumerate() {
+            snapshot.add_commitment(
+                &create_test_commitment(
+                    signer,
+                    CommitmentType::Pledge {
+                        pledge_count_before_executing: i as u64,
+                    },
+                    amount,
+                ),
+                &EpochSnapshot::default(),
+            );
+        }
+
+        // Verify stake amount
+        assert_eq!(
+            snapshot.commitments[&signer].stake.as_ref().unwrap().value,
+            stake_amount
+        );
+
+        // Verify pledge amounts
+        let pledges = &snapshot.commitments[&signer].pledges;
+        assert_eq!(pledges.len(), pledge_amounts.len());
+        for (pledge, &expected) in pledges.iter().zip(&pledge_amounts) {
+            assert_eq!(pledge.value, expected);
+        }
     }
 }
