@@ -1521,4 +1521,52 @@ mod tests {
 
         assert!(poa_valid.is_err(), "PoA should be invalid");
     }
+
+    #[test]
+    /// unit test for unacceptable block clock drift into future
+    fn test_timestamp_is_valid_future() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let future_ts = now_ms + 31_000; // 31 seconds in the future
+        let previous_ts = now_ms - 10_000;
+        let result = timestamp_is_valid(future_ts, previous_ts);
+        // Expect an error due to block timestamp being too far in the future
+        assert!(
+            result.is_err(),
+            "Expected an error for future timestamp drift"
+        );
+    }
+
+    #[test]
+    /// unit test for unacceptable block clock drift into past
+    fn test_timestamp_is_valid_past() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let past_ts = now_ms - 31_000; // 31 seconds in the past
+        let previous_ts = now_ms - 60_000;
+        let result = timestamp_is_valid(past_ts, previous_ts);
+        // Expect an error due to block timestamp being too far in the past
+        assert!(
+            result.is_err(),
+            "Expected an error for past timestamp drift"
+        );
+    }
+
+    #[test]
+    /// unit test for acceptable block clock drift
+    fn test_timestamp_is_valid_ok() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let valid_ts = now_ms;
+        let previous_ts = now_ms - 10_000; // 10 seconds older
+        let result = timestamp_is_valid(valid_ts, previous_ts);
+        // Within the drift window
+        assert!(result.is_ok(), "Expected no error for valid timestamp");
+    }
 }
