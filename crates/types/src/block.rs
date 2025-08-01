@@ -662,6 +662,17 @@ impl From<DataLedger> for u32 {
     }
 }
 
+impl TryFrom<DataLedger> for usize {
+    type Error = eyre::Report;
+
+    fn try_from(value: DataLedger) -> Result<Self, Self::Error> {
+        match value {
+            DataLedger::Publish => Ok(0),
+            DataLedger::Submit => Ok(1),
+        }
+    }
+}
+
 impl TryFrom<u32> for DataLedger {
     type Error = eyre::Report;
 
