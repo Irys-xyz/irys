@@ -41,7 +41,7 @@ use std::{
 use tracing::{debug, error, info};
 
 /// Maximum allowed clock drift for block timestamps in seconds
-const MAX_TIMESTAMP_DRIFT_SECS: u64 = 30;
+const MAX_TIMESTAMP_DRIFT_SECS: u128 = 15;
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -188,8 +188,8 @@ pub fn timestamp_is_valid(current: u128, previous: u128) -> eyre::Result<()> {
         .map_err(|e| eyre::eyre!("system time error: {e}"))?
         .as_millis();
 
-    let max_future = now_ms + (MAX_TIMESTAMP_DRIFT_SECS as u128 * 1000);
-    let max_past = now_ms.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS as u128 * 1000);
+    let max_future = now_ms + (MAX_TIMESTAMP_DRIFT_SECS * 1000);
+    let max_past = now_ms.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 1000);
 
     if current > max_future {
         return Err(eyre::eyre!(
@@ -1529,7 +1529,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let future_ts = now_ms + 31_000; // 31 seconds in the future
+        let future_ts = now_ms + (MAX_TIMESTAMP_DRIFT_SECS + 1_000); // MAX DRIFT + 1 seconds in the future
         let previous_ts = now_ms - 10_000;
         let result = timestamp_is_valid(future_ts, previous_ts);
         // Expect an error due to block timestamp being too far in the future
@@ -1546,7 +1546,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let past_ts = now_ms - 31_000; // 31 seconds in the past
+        let past_ts = now_ms - (MAX_TIMESTAMP_DRIFT_SECS + 1_000); // MAX DRIFT + 1 seconds in the past
         let previous_ts = now_ms - 60_000;
         let result = timestamp_is_valid(past_ts, previous_ts);
         // Expect an error due to block timestamp being too far in the past
