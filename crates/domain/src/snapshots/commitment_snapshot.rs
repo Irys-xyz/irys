@@ -193,7 +193,7 @@ impl CommitmentSnapshot {
                     .iter()
                     .find(|t| t.id == commitment_tx.id);
 
-                if let Some(existing) = existing {
+                if let Some(_existing) = existing {
                     return CommitmentSnapshotStatus::Accepted;
                 }
 
@@ -543,15 +543,15 @@ mod tests {
         let test_cases = vec![
             (
                 Address::random(),
-                U256::from(10_000_000_000_000_000_000_000u128),
+                U256::from(10_000_000_000_000_000_000_000_u128),
             ), // 10k tokens
             (
                 Address::random(),
-                U256::from(50_000_000_000_000_000_000_000u128),
+                U256::from(50_000_000_000_000_000_000_000_u128),
             ), // 50k tokens
             (
                 Address::random(),
-                U256::from(20_000_000_000_000_000_000_000u128),
+                U256::from(20_000_000_000_000_000_000_000_u128),
             ), // 20k tokens
         ];
 
@@ -575,7 +575,7 @@ mod tests {
         let signer = Address::random();
 
         // Add stake first
-        let stake_amount = U256::from(20_000_000_000_000_000_000_000u128); // 20k tokens
+        let stake_amount = U256::from(20_000_000_000_000_000_000_000_u128); // 20k tokens
         snapshot.add_commitment(
             &create_test_commitment(signer, CommitmentType::Stake, stake_amount),
             &EpochSnapshot::default(),
@@ -583,10 +583,10 @@ mod tests {
 
         // Add pledges with different amounts
         let pledge_amounts = vec![
-            U256::from(1_000_000_000_000_000_000_000u128), // 1k tokens
-            U256::from(2_500_000_000_000_000_000_000u128), // 2.5k tokens
-            U256::from(5_000_000_000_000_000_000_000u128), // 5k tokens
-            U256::from(10_000_000_000_000_000_000_000u128), // 10k tokens
+            U256::from(1_000_000_000_000_000_000_000_u128), // 1k tokens
+            U256::from(2_500_000_000_000_000_000_000_u128), // 2.5k tokens
+            U256::from(5_000_000_000_000_000_000_000_u128), // 5k tokens
+            U256::from(10_000_000_000_000_000_000_000_u128), // 10k tokens
         ];
 
         for (i, &amount) in pledge_amounts.iter().enumerate() {

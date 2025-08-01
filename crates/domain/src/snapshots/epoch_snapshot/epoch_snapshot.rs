@@ -946,10 +946,9 @@ mod tests {
     use super::*;
     use crate::{CommitmentState, PartitionAssignments};
     use irys_database::data_ledger::Ledgers;
-    use irys_primitives::CommitmentType;
+
     use irys_types::{
-        Address, CommitmentTransaction, Config, ConsensusConfig, ConsensusOptions, DataLedger,
-        IrysBlockHeader, IrysSignature, NodeConfig, H256, U256,
+        Config, ConsensusConfig, ConsensusOptions, DataLedger, IrysBlockHeader, NodeConfig,
     };
 
     /// Validate that `calculate_additional_slots` allocates new slots when the
@@ -1011,27 +1010,5 @@ mod tests {
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
         }
-    }
-
-    // Helper function to create test commitment transactions
-    fn create_test_commitment(
-        signer: Address,
-        commitment_type: CommitmentType,
-        value: U256,
-    ) -> CommitmentTransaction {
-        let mut tx = CommitmentTransaction {
-            id: H256::zero(),
-            anchor: H256::zero(),
-            signer,
-            signature: IrysSignature::default(),
-            fee: 100,
-            value,
-            commitment_type,
-            version: 1,
-            chain_id: 1,
-        };
-        // Generate a proper ID for the transaction
-        tx.id = H256::random();
-        tx
     }
 }

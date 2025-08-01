@@ -2,7 +2,7 @@ use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
-use eyre::{eyre, OptionExt};
+use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
@@ -417,11 +417,11 @@ impl Inner {
         drop(mempool_state_guard);
 
         // Log commitment selection summary
-        if commitment_tx.len() > 0 {
+        if !commitment_tx.is_empty() {
             let commitment_summary =
                 commitment_tx
                     .iter()
-                    .fold((0usize, 0usize), |(stakes, pledges), tx| {
+                    .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
                         match tx.commitment_type {
                             CommitmentType::Stake => (stakes + 1, pledges),
                             CommitmentType::Pledge { .. } => (stakes, pledges + 1),
@@ -498,11 +498,11 @@ impl Inner {
         // Calculate total fees and log final summary
         let total_fee_collected: U256 = submit_tx
             .iter()
-            .map(|tx| tx.user_fee())
+            .map(irys_types::IrysTransactionCommon::user_fee)
             .fold(U256::zero(), |acc, fee| acc + fee)
             + commitment_tx
                 .iter()
-                .map(|tx| tx.total_cost())
+                .map(irys_types::IrysTransactionCommon::total_cost)
                 .fold(U256::zero(), |acc, fee| acc + fee);
 
         info!(
