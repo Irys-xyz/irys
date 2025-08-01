@@ -228,6 +228,7 @@ impl From<Interval<u32>> for PartitionChunkRange {
     Div,
     From,
     Into,
+    Hash,
 )]
 pub struct LedgerChunkOffset(u64);
 
