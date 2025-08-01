@@ -103,6 +103,14 @@ pub async fn prevalidate_block(
         "solution_hash_is_valid",
     );
 
+    // Check the previous solution hash references the parent correctly
+    previous_solution_hash_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "previous_solution_hash_is_valid",
+    );
+
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
 
@@ -262,6 +270,22 @@ pub fn solution_hash_is_valid(
             &previous_block.diff,
             &solution_diff,
             &previous_block.diff.abs_diff(solution_diff)
+        ))
+    }
+}
+
+/// Checks if the `previous_solution_hash` equals the previous block's `solution_hash`
+pub fn previous_solution_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    if block.previous_solution_hash == previous_block.solution_hash {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid previous_solution_hash - expected {} got {}",
+            previous_block.solution_hash,
+            block.previous_solution_hash
         ))
     }
 }
