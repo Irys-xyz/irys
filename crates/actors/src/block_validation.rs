@@ -40,8 +40,8 @@ use std::{
 };
 use tracing::{debug, error, info};
 
-/// Maximum allowed clock drift for block timestamps in seconds
-const MAX_TIMESTAMP_DRIFT_SECS: u128 = 15;
+/// Maximum allowed clock drift for block timestamps in milliseconds
+const MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS: u128 = 15_000;
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -174,12 +174,16 @@ pub fn prev_output_is_valid(
     }
 }
 
-pub fn timestamp_is_valid(current: u128, previous: u128) -> eyre::Result<()> {
-    if current < previous {
+// compares block timestamp against parent block
+// errors if the block has a lower timstamp than the parent block
+// compares timestamps of block against current system time
+// errors on drift more than MAX_TIMESTAMP_DRIFT_SECS into future
+pub fn timestamp_is_valid(current: u128, parent: u128) -> eyre::Result<()> {
+    if current < parent {
         return Err(eyre::eyre!(
-            "block timestamp {} is older than previous block {}",
+            "block timestamp {} is older than parent block {}",
             current,
-            previous
+            parent
         ));
     }
 
@@ -188,8 +192,7 @@ pub fn timestamp_is_valid(current: u128, previous: u128) -> eyre::Result<()> {
         .map_err(|e| eyre::eyre!("system time error: {e}"))?
         .as_millis();
 
-    let max_future = now_ms + (MAX_TIMESTAMP_DRIFT_SECS * 1000);
-    let max_past = now_ms.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 1000);
+    let max_future = now_ms + MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS;
 
     if current > max_future {
         return Err(eyre::eyre!(
@@ -198,12 +201,6 @@ pub fn timestamp_is_valid(current: u128, previous: u128) -> eyre::Result<()> {
         ));
     }
 
-    if current < max_past {
-        return Err(eyre::eyre!(
-            "block timestamp {} too far in the past (now {now_ms})",
-            current
-        ));
-    }
     Ok(())
 }
 
@@ -1523,15 +1520,32 @@ mod tests {
     }
 
     #[test]
-    /// unit test for unacceptable block clock drift into future
+    /// unit test for acceptable block clock drift into future
     fn test_timestamp_is_valid_future() {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let future_ts = now_ms + MAX_TIMESTAMP_DRIFT_SECS + 1_000; // MAX DRIFT + 1 seconds in the future
+        let future_ts = now_ms + MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS - 1_000; // MAX DRIFT - 1 seconds in the future
         let previous_ts = now_ms - 10_000;
         let result = timestamp_is_valid(future_ts, previous_ts);
+        // Expect an error due to block timestamp being too far in the future
+        assert!(
+            result.is_ok(),
+            "Expected acceptable for future timestamp drift"
+        );
+    }
+
+    #[test]
+    /// unit test for unacceptable block clock drift into future
+    fn test_timestamp_is_invalid_future() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let block_ts = now_ms + MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS + 1_000; // MAX DRIFT + 1 seconds in the future
+        let previous_ts = now_ms - 10_000;
+        let result = timestamp_is_valid(block_ts, previous_ts);
         // Expect an error due to block timestamp being too far in the future
         assert!(
             result.is_err(),
@@ -1540,33 +1554,19 @@ mod tests {
     }
 
     #[test]
-    /// unit test for unacceptable block clock drift into past
+    /// unit test for block clock drift into past
     fn test_timestamp_is_valid_past() {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let past_ts = now_ms - MAX_TIMESTAMP_DRIFT_SECS - 1_000; // MAX DRIFT + 1 seconds in the past
+        let block_ts = now_ms - MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS - 1_000; // MAX DRIFT + 1 seconds in the past
         let previous_ts = now_ms - 60_000;
-        let result = timestamp_is_valid(past_ts, previous_ts);
-        // Expect an error due to block timestamp being too far in the past
+        let result = timestamp_is_valid(block_ts, previous_ts);
+        // Expect an no error when block timestamp being too far in the past
         assert!(
-            result.is_err(),
-            "Expected an error for past timestamp drift"
+            result.is_ok(),
+            "Expected no error due to past timestamp drift"
         );
-    }
-
-    #[test]
-    /// unit test for acceptable block clock drift
-    fn test_timestamp_is_valid_ok() {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let valid_ts = now_ms;
-        let previous_ts = now_ms - 10_000; // 10 seconds older
-        let result = timestamp_is_valid(valid_ts, previous_ts);
-        // Within the drift window
-        assert!(result.is_ok(), "Expected no error for valid timestamp");
     }
 }
