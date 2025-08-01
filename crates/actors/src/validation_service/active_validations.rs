@@ -206,7 +206,7 @@ impl ActiveValidations {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.concurrent_is_empty() && self.vdf_pending_queue.is_empty()
+        self.concurrent_is_empty() && self.vdf_pending_queue.is_empty() && self.vdf_task.is_none()
     }
 
     /// Process completed concurrent validations and remove them from the active set
