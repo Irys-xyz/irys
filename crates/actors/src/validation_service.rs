@@ -208,8 +208,11 @@ impl ValidationService {
                 _ = validation_timer.tick(), if !active_validations.is_empty()   => {
 
                     // Poll the VDF task & Process any completed validations (non-blocking)
-                    let tasks_completed = active_validations.process_completed_vdf().await || active_validations.process_completed_concurrent().await;
-                    if tasks_completed {
+                    let vdf_tasks_completed =  active_validations.process_completed_vdf().await;
+
+                    let tasks_completed = active_validations.process_completed_concurrent().await;
+
+                    if vdf_tasks_completed || tasks_completed {
                         // we may have unblocked one or more blocks from sending the validation message
                         validation_timer.reset();
                     }
